@@ -47,6 +47,8 @@ const IHPC_FULL = {
   goalItems: [{ id: 'g-bbbbbb', problemId: 'p-bbbbbb', statement: 'Stay out of hospital', measure: 'Daily weight', baseline: '181 lb', target: '178 lb', targetDate: '2027-01-01', priority: 'high', patientStated: true }],
   interventions: [{ id: 'i-bbbbbb', goalIds: ['g-bbbbbb'], description: 'Furosemide review', responsible: 'gfc_clinician', frequency: 'each_visit', type: 'medication' }],
   medicationManagement: { managedBy: 'family', adherenceConcerns: 'Skips the evening dose', pharmacy: 'Kroger Acworth' },
+  outsideCare: { externalTeam: [{ name: 'Dr. Patel', role: 'Cardiology', organization: 'Wellstar' }], communityServices: [] },
+  visitFrequency: '2x/month',
   escalation: { callGfcWhen: ['Weight up 3 lb overnight'], call911When: ['Chest pain'], callOrder: ['GFC on-call', 'Angela'], afterHours: 'GFC on-call line' },
   review: { cadence: '90_days', nextReviewDate: '2027-01-01' }
 };
@@ -71,12 +73,15 @@ test('a clinical plan also needs prognosis, outcome, measures, an intervention a
   assert.deepEqual(noTarget.missing, ['goalMeasures']);
   assert.deepEqual(build({ ...IHPC_FULL, interventions: [] }, 'IHPC').missing, ['interventions']);
   assert.deepEqual(build({ ...IHPC_FULL, medicationManagement: {} }, 'IHPC').missing, ['medicationManagement']);
+  // All eight sections are required for a medical patient (owner review).
+  assert.deepEqual(build({ ...IHPC_FULL, outsideCare: {} }, 'IHPC').missing, ['outsideCare']);
+  assert.deepEqual(build({ ...IHPC_FULL, visitFrequency: '' }, 'IHPC').missing, ['visitFrequency']);
   // IHPC-only has no caregiver schedule to require.
   assert.ok(!fmt.REQUIREMENTS.IHPC.includes('eachVisit'));
 });
 
 test('BOTH needs the clinical blocks AND the home care schedule', () => {
-  const r = build(IHPC_FULL, 'BOTH');
+  const r = build({ ...IHPC_FULL, visitFrequency: '' }, 'BOTH');
   assert.deepEqual(r.missing, ['eachVisit', 'visitFrequency']);
   assert.ok(build({ ...IHPC_FULL, eachVisit: ['Weight before breakfast'], visitFrequency: '5x/week' }, 'BOTH').plan);
 });
@@ -179,17 +184,35 @@ test('an unknown option falls back rather than being stored', () => {
 
 // ---- 5. Caregiver scope advice ---------------------------------------------
 test('medication work assigned to a caregiver is flagged, and saving still goes ahead', () => {
+  // BOTH: the only line with a caregiver task list AND interventions and
+  // medication management.
   const r = build({
-    ...PHC_FULL,
+    ...IHPC_FULL, visitFrequency: '3x/week',
     eachVisit: ['Fill the weekly pill organizer', 'Check blood pressure'],
     interventions: [{ description: 'Give evening dose', responsible: 'gfc_caregiver', type: 'medication', frequency: 'daily' }],
     medicationManagement: { managedBy: 'caregiver' }
-  }, 'PHC');
+  }, 'BOTH');
   assert.ok(r.plan, 'advice never refuses the save');
   const where = r.warnings.map(w => w.where);
   assert.ok(where.includes('Each visit') && where.includes('Intervention') && where.includes('Medications'));
-  assert.ok(r.warnings.some(w => /reminders only/.test(w.warning)));
-  assert.ok(r.warnings.some(w => /signed off/.test(w.warning)), 'a measurement needs a sign-off');
+  assert.ok(r.warnings.some(w => /pill organizer/.test(w.warning) && /counsel/.test(w.warning)), 'filling an organizer is a scope question');
+  assert.ok(r.warnings.some(w => /No caregiver is assigned yet/.test(w.warning) && /vital signs/.test(w.warning)), 'with nobody assigned, it says what the sign-off is');
+});
+
+// Point 2 of the owner review: check the task against the caregivers who are
+// actually assigned, and their verified sign-offs.
+test('the scope advice names the assigned caregivers who cannot record a task', () => {
+  const plan = { eachVisit: ['Check blood pressure', 'Blood sugar before lunch'], interventions: [], medicationManagement: {} };
+  const pca = { name: 'Paula PCA', level: 'pca', competencies: [] };
+  const signedOff = { name: 'Cara CNA', level: 'cna', competencies: ['vital_signs', 'blood_glucose'] };
+  const lpn = { name: 'Lena LPN', level: 'lpn', competencies: [] };
+  const w = fmt.scopeWarnings(plan, [pca, signedOff, lpn]);
+  const bp = w.filter(x => x.text === 'Check blood pressure');
+  assert.equal(bp.length, 1);
+  assert.match(bp[0].warning, /^Paula PCA has no verified vital signs sign-off/, 'an LPN records vitals under their licence; a signed-off CNA can too');
+  const sugar = w.find(x => x.text === 'Blood sugar before lunch');
+  assert.match(sugar.warning, /Paula PCA, Lena LPN have no verified blood glucose sign-off/);
+  assert.deepEqual(fmt.scopeWarnings(plan, [signedOff]), [], 'nothing to say when every assigned caregiver can record it');
 });
 
 test('the same work assigned to a clinician raises nothing', () => {
@@ -252,7 +275,9 @@ test('the save passes the client’s service line, so the right fields are requi
   const start = SERVER.indexOf("app.post('/api/clinical/patients/:clientId/care-plan',");
   const route = SERVER.slice(start, start + 2500);
   const call = route.slice(route.indexOf('buildCarePlanVersion('), route.indexOf('if (built.error)'));
-  assert.ok(call.includes("{ serviceLine: client.serviceLine || 'PHC' }"), call);
+  assert.ok(call.includes("{ serviceLine: client.serviceLine || 'PHC', caregivers }"), call);
+  // The caregivers passed in are the client's assigned ones, with verified sign-offs only.
+  assert.ok(route.includes('caregiverRepo.isAssignedToCaregiver(u, client)') && route.includes('caregiverRepo.verifiedCompetencies(u)'));
 });
 
 test('a home care plan waiting on a second signature still reaches the inbox', () => {
@@ -295,4 +320,46 @@ test('the requirements check stands on its own, not only behind the builder', ()
     medicationManagement: {}, escalation: { callGfcWhen: [] }, review: {} };
   assert.deepEqual(fmt.missingRequirements(empty, 'PHC'), ['problems', 'goals', 'eachVisit', 'visitFrequency', 'escalation', 'review']);
   assert.deepEqual(fmt.missingRequirements(empty, null), ['problems', 'goals']);
+});
+
+// ---- 9. The sections change with the service line (owner, 2026-10-14) ----
+test('a home care plan has no prognosis, goal measures, interventions or medication block', () => {
+  const S = fmt.sectionsFor('PHC');
+  assert.deepEqual([S.problemDetail, S.goalMeasures, S.interventions, S.medicationManagement], [false, false, false, false]);
+  assert.deepEqual([S.problems, S.goals, S.eachVisit, S.schedule, S.escalation, S.review, S.outsideCare], [true, true, true, true, true, true, true]);
+  // What the form does not show is not stored either, even if it is posted.
+  const { plan } = build({
+    ...PHC_FULL,
+    problemItems: [{ id: 'p-aaaaaa', text: 'Fall risk', prognosis: 'Guarded', expectedOutcome: 'Fewer falls' }],
+    goalItems: [{ id: 'g-aaaaaa', statement: 'No falls', measure: 'Falls', target: '0' }],
+    interventions: [{ description: 'PT referral', responsible: 'gfc_clinician', type: 'referral', frequency: 'one_time' }],
+    medicationManagement: { managedBy: 'family', pharmacy: 'Kroger' }
+  }, 'PHC');
+  assert.equal(plan.problemItems[0].prognosis, '');
+  assert.equal(plan.goalItems[0].measure, '');
+  assert.deepEqual(plan.interventions, []);
+  assert.equal(plan.medicationManagement.managedBy, null);
+});
+
+test('a clinical-only plan has no caregiver task list; BOTH has every section', () => {
+  assert.equal(fmt.sectionsFor('IHPC').eachVisit, false);
+  assert.equal(fmt.sectionsFor('IHPC').medicationManagement, true);
+  assert.ok(Object.values(fmt.sectionsFor('BOTH')).every(Boolean));
+  const { plan } = build({ ...IHPC_FULL, eachVisit: ['Bath'] }, 'IHPC');
+  assert.deepEqual(plan.eachVisit, []);
+});
+
+test('the sections table is served, so the page restates none', () => {
+  assert.deepEqual(fmt.vocabulary().sections, fmt.SECTIONS_BY_LINE);
+});
+
+// Point 4 of the owner review: the plan's "when to call" rules feed the
+// caregiver's existing escalation flow, never a second call list.
+test('the plan’s signs appear inside the caregiver’s Flag a concern flow and route through it', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
+  const flow = html.slice(html.indexOf('const FlagConcern = '), html.indexOf('// VISIT LOG'));
+  assert.ok(flow.includes('sel.carePlan && sel.carePlan.escalation'), 'reads the selected client’s plan');
+  assert.ok(/setType\('safety_urgent'\); setDescription\(t\)/.test(flow), 'a 911 sign files as urgent safety');
+  assert.ok(/setType\('clinical'\); setDescription\(t\)/.test(flow), 'a call-GFC sign goes to the clinician');
+  assert.ok(flow.includes("api('/api/caregiver/escalations'"), 'and it sends through the one escalation route');
 });

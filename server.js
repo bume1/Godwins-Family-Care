@@ -53,6 +53,7 @@ const { createSessionStore } = require('./sessionStore'); // server-side session
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');
 const carePlanFormat = require('./carePlanFormat');
+const carePlanCatalog = require('./carePlanCatalog');
 const apptTypes = require('./appointmentTypes');
 const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (social work, 2026-10-11)  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
@@ -9609,6 +9610,10 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
       structured: carePlanFormat.structuredView(client.carePlan || null),
       derived: carePlanFormat.derivedFromClient(client),
       vocabulary: carePlanFormat.vocabulary(),
+      // Standard interventions, pick-lists, pathway templates and the new-plan
+      // defaults, so the form picks rather than types.
+      catalog: carePlanCatalog.catalog(),
+      newPlanDefaults: carePlanCatalog.newPlanDefaults(practiceToday()),
       // Whether THIS viewer can supply the co-signature a pending plan waits
       // on, for this client's service line (an RN can complete a home care
       // plan, never a clinical patient's). Same question the co-sign route asks.
@@ -9639,8 +9644,13 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     if (sig.length > 600 * 1024) return res.status(413).json({ error: 'Signature image is too large' });
 
     const at = new Date().toISOString();
+    // The caregivers assigned to this client, with only the sign-offs that
+    // count today, so the scope advice names who can and cannot record a task.
+    const caregivers = users
+      .filter(u => caregiverRepo.isCaregiver(u) && u.accountStatus !== 'inactive' && caregiverRepo.isAssignedToCaregiver(u, client))
+      .map(u => ({ name: u.name || u.email, level: caregiverRepo.normalizeLevel(u.licenseLevel), competencies: caregiverRepo.verifiedCompetencies(u) }));
     const built = clinicalRepo.buildCarePlanVersion(client.carePlan, req.body || {}, { name: req.user.name, id: req.user.id, at },
-      { serviceLine: client.serviceLine || 'PHC' });
+      { serviceLine: client.serviceLine || 'PHC', caregivers });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code, missing: built.missing || undefined, missingLabels: built.missingLabels || undefined });
     const plan = built.plan;
     const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
