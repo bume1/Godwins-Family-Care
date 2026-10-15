@@ -36,10 +36,16 @@ const links = require('../appLinks');   // where each person actually goes
 const msg = require('../messagingRepository');
 const caregiverRepo = require('../caregiverRepository');
 const nf = require('../public/note-format.js');   // the message formatting: plain text for escalations and previews
+const quoSms = require('../quoSms');   // Care Team messages by text (owner, 2026-10-15)
 
 module.exports = function createMessagingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
     upload, uploadLimiter, googledrive, detectFileType, contentDisposition } = deps;
+  // Texting: the Quo client is injectable so a probe never reaches Quo.
+  const smsClient = deps.smsClient || quoSms.createClient();
+  const appBase = async () => {
+    try { return String((deps.getAppBaseUrl ? await deps.getAppBaseUrl() : '') || '').replace(/\/+$/, ''); } catch (_) { return ''; }
+  };
   // The STAFF message notice goes through the shared notifier, so "how much may
   // this email say" is answered once, by `transportAllowsDetail()`, rather than
   // restated here. A getter because the notifier is built further down
@@ -192,6 +198,8 @@ module.exports = function createMessagingRoutes(deps) {
     // the office record (`m.edits`), never on the screen.
     edited: !!m.edited_at,
     editedAt: m.edited_at || null,
+    // 'sms' when the words arrived or left as a text on the office line.
+    via: m.via || null,
     mine: false
   });
 
@@ -860,9 +868,288 @@ module.exports = function createMessagingRoutes(deps) {
   }
 
   // ==========================================================================
+  // Care Team messages by text, on the office line through Quo (owner,
+  // 2026-10-15: "I want the messages bi directional").
+  //
+  //   Out: a Care Team message goes to the patient and POA as a text, to each
+  //        person who turned texts on. 9pm to 8am Eastern it waits for 8am.
+  //   In:  a text from the patient's number or a POA's number lands in that
+  //        patient's Care Team thread as them.
+  //   Quo app: a reply typed in the Quo app on the office line is recorded in
+  //        the thread too, as "GFC office (by text)".
+  //
+  // `sms_outbox` holds every text the app sends (waiting, sent, failed);
+  // `sms_events` holds one row per webhook handled, by Quo message id, so a
+  // retried webhook is never recorded twice. Neither copies the words twice:
+  // the outbox keeps the text it sends, the thread keeps the message.
+  // ==========================================================================
+  const SMS_MAX_ATTEMPTS = 5;
+
+  async function textMessageTo(u, thread, message) {
+    if (!quoSms.textsOn(u)) return null;
+    const client = await clientById(thread.client_id);
+    const to = quoSms.phoneForUser(u, client);
+    if (!to) return null;
+    const base = await appBase();
+    const content = quoSms.outgoingText({
+      senderName: message.display_name,
+      body: message.body,
+      format: message.body_format,
+      attachmentCount: (message.attachments || []).length,
+      portalUrl: `${base}${links.PATHS.PORTAL_MESSAGES}`,
+      first: !(u.smsOptIn && u.smsOptIn.firstTextAt)
+    });
+    const row = {
+      id: uuidv4(), to, user_id: u.id, client_id: thread.client_id, thread_id: thread.id, message_id: message.id,
+      content, status: 'waiting', send_after: quoSms.quietUntil() || nowIso(), attempts: 0,
+      quo_message_id: null, error: null, created_at: nowIso(), sent_at: null
+    };
+    const box = await readRows('sms_outbox');
+    box.push(row);
+    await db.set('sms_outbox', box);
+    if (row.send_after <= nowIso()) await sendOutboxRow(row.id);
+    return row.id;
+  }
+
+  async function sendOutboxRow(id) {
+    const box = await readRows('sms_outbox');
+    const row = box.find(r => r && r.id === id);
+    if (!row || (row.status !== 'waiting' && row.status !== 'retry')) return null;
+    // Re-read the person: a STOP or a turned-off switch since this was queued
+    // means it never goes.
+    const u = (await getUsers()).find(x => x && x.id === row.user_id);
+    if (!quoSms.textsOn(u)) {
+      row.status = 'cancelled'; row.error = 'Texts were turned off before this went.';
+      await db.set('sms_outbox', box);
+      return row;
+    }
+    if (!quoSms.status().sending) {
+      row.status = 'failed'; row.error = 'Texting is not set up (QUO_API_KEY).';
+      await db.set('sms_outbox', box);
+      return row;
+    }
+    row.attempts += 1;
+    try {
+      const sent = await smsClient.sendText({ to: row.to, content: row.content });
+      row.status = 'sent'; row.sent_at = nowIso(); row.quo_message_id = sent.id || null; row.error = null;
+    } catch (e) {
+      row.error = String(e.message || e).slice(0, 300);
+      row.status = row.attempts >= SMS_MAX_ATTEMPTS ? 'failed' : 'retry';
+      row.send_after = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      console.error('[SMS] send failed:', row.error);
+    }
+    await db.set('sms_outbox', box);
+    if (row.status === 'sent' && u && !(u.smsOptIn && u.smsOptIn.firstTextAt)) {
+      const users = await getUsers();
+      const fresh = users.find(x => x && x.id === u.id);
+      if (fresh) {
+        fresh.smsOptIn = { ...(fresh.smsOptIn || {}), firstTextAt: row.sent_at };
+        await db.set('users', users);
+        if (typeof deps.invalidateUsersCache === 'function') deps.invalidateUsersCache();
+      }
+    }
+    await logActivity(null, 'system', row.status === 'sent' ? 'sms_sent' : 'sms_send_failed', 'message', row.message_id,
+      { threadId: row.thread_id, clientId: row.client_id, userId: row.user_id, attempts: row.attempts });
+    return row;
+  }
+
+  // Run every minute from server.js: texts held for quiet hours, and retries.
+  async function drainSmsOutbox() {
+    const now = nowIso();
+    const due = (await readRows('sms_outbox')).filter(r => r && (r.status === 'waiting' || r.status === 'retry') && r.send_after <= now);
+    for (const r of due) {
+      try { await sendOutboxRow(r.id); } catch (e) { console.error('[SMS] drain failed:', e.message); }
+    }
+    return due.length;
+  }
+
+  // The patient's most recent Care Team thread this person can read and answer.
+  async function careTeamThreadFor(user, client, isPoa) {
+    const threads = (await readRows('message_threads'))
+      .filter(t => t && t.channel === 'care_team' && t.client_id === client.id)
+      .filter(t => user
+        ? (msg.threadVisibility(user, t, { client, isPoa }).visible && msg.canPostToThread(user, t, { client, isPoa }).allowed)
+        : true)
+      .sort((a, b) => String(b.last_message_at || '').localeCompare(String(a.last_message_at || '')));
+    return threads[0] || null;
+  }
+
+  // A new Care Team thread when the patient has none: the patient, their POA
+  // and the whole care team, as the composer does when nobody is unticked.
+  async function newCareTeamThread({ user, client, isPoa, sender, startedByName, at }) {
+    const users = await getUsers();
+    if (user) {
+      const availability = msg.channelAvailability('care_team', { user, client, users, isPoa });
+      if (!availability.available) return { refused: availability.code };
+    }
+    const audience = msg.audienceFor('care_team', { user, client, users, isPoa }) || [];
+    const thread = {
+      id: uuidv4(), channel: 'care_team', client_id: client.id, client_name: client.name,
+      subject: 'Care Team',
+      participant_ids: [...new Set([...(user ? [user.id] : []), client.id, ...audience.map(m => m.id)])],
+      audience_chosen: false,
+      started_by: user ? user.id : null,
+      started_by_name: startedByName || (sender && sender.displayName) || 'GFC office',
+      started_by_role: sender ? sender.fromRole : msg.ROLE.ADMIN,
+      status: 'open', response_status: null, escalation_event_id: null,
+      created_at: at, last_message_at: at, last_message_preview: '',
+      started_by_text: true
+    };
+    const threads = await readRows('message_threads');
+    threads.push(thread);
+    await db.set('message_threads', threads);
+    return { thread };
+  }
+
+  async function appendTextMessage(thread, message) {
+    const all = await readRows('messages');
+    all.push(message);
+    await db.set('messages', all);
+    const threads = await readRows('message_threads');
+    const t = threads.find(x => x && x.id === thread.id);
+    if (t) {
+      t.last_message_at = message.sent_at;
+      t.last_message_preview = msg.previewOf(message.body, 'plain', []);
+      if (message.from_user_id && !t.participant_ids.includes(message.from_user_id)) t.participant_ids.push(message.from_user_id);
+      await db.set('message_threads', threads);
+    }
+    return t || thread;
+  }
+
+  const textBody = (ev) => {
+    const words = String(ev.body || '').trim().slice(0, msg.MAX_BODY || 4000);
+    const pics = ev.mediaCount > 0
+      ? (ev.mediaCount === 1 ? '[A picture was sent by text. It is in the office line\'s Quo inbox.]' : `[${ev.mediaCount} pictures were sent by text. They are in the office line's Quo inbox.]`)
+      : '';
+    return [words, pics].filter(Boolean).join('\n');
+  };
+
+  // Which patient a number belongs to. One patient, or nothing: a number two
+  // patients share is never guessed between.
+  function resolveTexter(phone, users) {
+    const hits = quoSms.matchPhone(phone, users);
+    if (!hits.length) return { outcome: 'unknown_number' };
+    const clientIds = [...new Set(hits.map(h => h.client.id))];
+    if (clientIds.length > 1) return { outcome: 'ambiguous_number' };
+    // Patient and POA on one number: it is the patient's phone.
+    return { hit: hits.find(h => !h.isPoa) || hits[0] };
+  }
+
+  async function handleQuoEvent(evt) {
+    const ev = quoSms.readEvent(evt);
+    if (!ev || !ev.id) return { outcome: 'ignored' };
+    if (ev.officePhone !== quoSms.fromNumber()) return { outcome: 'other_line' };
+
+    const events = await readRows('sms_events');
+    const key = `${ev.direction}:${ev.id}`;
+    if (events.some(e => e && e.key === key)) return { outcome: 'duplicate' };
+    const record = async (outcome, extra = {}) => {
+      const list = await readRows('sms_events');
+      list.push({ id: uuidv4(), key, quo_message_id: ev.id, direction: ev.direction, outcome, at: nowIso(), ...extra });
+      await db.set('sms_events', list);
+      return { outcome, ...extra };
+    };
+
+    const users = await getUsers();
+    if (ev.direction === 'incoming') {
+      const kw = quoSms.keyword(ev.body);
+      if (kw === 'stop' || kw === 'start') {
+        const hits = quoSms.matchPhone(ev.patientPhone, users);
+        let changed = 0;
+        for (const h of hits) {
+          const u = users.find(x => x.id === h.user.id);
+          if (!u) continue;
+          if (kw === 'stop') { u.smsOptIn = { ...(u.smsOptIn || {}), enabled: false, stoppedAt: nowIso(), changedBy: 'text STOP' }; changed++; }
+          // START turns texts back on only for someone who had turned them on
+          // themselves before; it never opts in a number on its own.
+          else if (u.smsOptIn && u.smsOptIn.optedInAt) { u.smsOptIn = { ...u.smsOptIn, enabled: true, stoppedAt: null, changedBy: 'text START' }; changed++; }
+        }
+        if (changed) {
+          await db.set('users', users);
+          if (typeof deps.invalidateUsersCache === 'function') deps.invalidateUsersCache();
+          for (const h of hits) {
+            await logActivity(h.user.id, h.user.name || 'texter', kw === 'stop' ? 'sms_opted_out' : 'sms_opted_in', 'user', h.user.id, { by: 'text', clientId: h.client.id });
+          }
+        }
+        return record(kw === 'stop' ? 'opted_out' : 'opted_in', { changed });
+      }
+      const who = resolveTexter(ev.patientPhone, users);
+      if (!who.hit) return record(who.outcome);
+      const { user, client, isPoa } = who.hit;
+      const sender = msg.senderIdentity(user, { client, isPoa });
+      let thread = await careTeamThreadFor(user, client, isPoa);
+      if (!thread) {
+        const made = await newCareTeamThread({ user, client, isPoa, sender, at: ev.at });
+        if (made.refused) return record('no_care_team', { clientId: client.id });
+        thread = made.thread;
+      }
+      const message = {
+        id: uuidv4(), thread_id: thread.id, client_id: client.id, channel: 'care_team',
+        from_user_id: sender.fromUserId, from_role: sender.fromRole, from_name: sender.fromName,
+        display_name: sender.displayName, acting_for: sender.actingFor,
+        body: textBody(ev), body_format: 'plain', attachments: [],
+        sent_at: ev.at, read_by: [user.id], via: 'sms', quo_message_id: ev.id
+      };
+      const saved = await appendTextMessage(thread, message);
+      await logActivity(user.id, sender.fromName, 'message_sent', 'message', message.id,
+        { threadId: thread.id, channel: 'care_team', clientId: client.id, role: sender.fromRole, actingFor: sender.actingFor, via: 'sms' });
+      await notifyThread(saved, message, user.id);
+      return record('recorded', { clientId: client.id, threadId: thread.id, messageId: message.id });
+    }
+
+    // Outgoing: one of our own sends, or a reply typed in the Quo app.
+    const box = await readRows('sms_outbox');
+    const tenMin = Date.now() - 10 * 60 * 1000;
+    const ours = box.some(r => r && ((r.quo_message_id && r.quo_message_id === ev.id) ||
+      (r.to === ev.patientPhone && r.content.trim() === ev.body.trim() && Date.parse(r.sent_at || r.created_at) >= tenMin)));
+    if (ours) return record('own_send');
+    const who = resolveTexter(ev.patientPhone, users);
+    if (!who.hit) return record(who.outcome);
+    const { user, client, isPoa } = who.hit;
+    let thread = await careTeamThreadFor(user, client, isPoa);
+    if (!thread) {
+      const made = await newCareTeamThread({ user: null, client, isPoa, sender: null, startedByName: 'GFC office (by text)', at: ev.at });
+      thread = made.thread;
+    }
+    const message = {
+      id: uuidv4(), thread_id: thread.id, client_id: client.id, channel: 'care_team',
+      from_user_id: null, from_role: msg.ROLE.ADMIN, from_name: 'GFC office',
+      display_name: `GFC office (by text to ${user.name || 'the patient'})`, acting_for: null,
+      body: textBody(ev), body_format: 'plain', attachments: [],
+      sent_at: ev.at, read_by: [], via: 'sms', quo_message_id: ev.id, quo_user_id: ev.quoUserId
+    };
+    const saved = await appendTextMessage(thread, message);
+    await logActivity(null, 'GFC office (Quo)', 'message_sent', 'message', message.id,
+      { threadId: thread.id, channel: 'care_team', clientId: client.id, via: 'sms', quoUserId: ev.quoUserId });
+    await notifyThread(saved, message, null, { skipClientSide: true });
+    return record('recorded_office_text', { clientId: client.id, threadId: thread.id, messageId: message.id });
+  }
+
+  // Quo's webhook. The raw body is kept by express.raw() in server.js, because
+  // the signature is over the exact bytes Quo sent. Anything unsigned or badly
+  // signed is refused and nothing is read from it. Quo is answered 200 for
+  // anything it signed, even an event we do not use, so it does not retry.
+  router.post('/api/webhooks/quo', async (req, res) => {
+    try {
+      const secret = process.env.QUO_WEBHOOK_SECRET;
+      const header = req.headers['openphone-signature'] || req.headers['quo-signature'];
+      const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}));
+      if (!secret) return res.status(503).json({ error: 'Texting is not set up.', code: 'SMS_NOT_CONFIGURED' });
+      if (!quoSms.verifySignature(raw, header, secret)) return res.status(401).json({ error: 'bad signature' });
+      let evt;
+      try { evt = JSON.parse(raw.toString('utf8')); } catch (_) { return res.status(400).json({ error: 'bad body' }); }
+      const result = await handleQuoEvent(evt);
+      res.json({ received: true, outcome: result.outcome });
+    } catch (error) {
+      console.error('[SMS] webhook error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
   // Notification — the EXISTING queue, never a second one
   // ==========================================================================
-  async function notifyThread(thread, message, senderId) {
+  async function notifyThread(thread, message, senderId, opts = {}) {
     const users = await getUsers();
     const label = msg.threadTitle(thread);
     const channel = msg.channelById(thread.channel);
@@ -902,7 +1189,17 @@ module.exports = function createMessagingRoutes(deps) {
       // is not news to break by email, and the portal is one click away.
       const fromStaff = ![msg.ROLE.CLIENT, msg.ROLE.FAMILY, 'POA'].includes(message.from_role);
       const clientSide = u.role === ROLES.CLIENT || u.role === ROLES.FAMILY;
+      // A text typed in the Quo app already reached the patient; it is only
+      // being recorded, so the patient side is not told again.
+      if (clientSide && opts.skipClientSide) continue;
       if (clientSide) {
+        // Care Team only: the message itself, by text, to a patient or POA who
+        // turned texts on (owner, 2026-10-15). Best-effort: a texting failure
+        // never fails the send, and the email below still goes.
+        if (thread.channel === 'care_team') {
+          try { await textMessageTo(u, thread, message); }
+          catch (e) { console.error('[SMS] could not queue a text:', e.message); }
+        }
         await queueNotification('message_received', u.id, u.email, u.name,
           {
             subject: fromStaff ? 'A new message from your care team' : 'A new message in your conversation',
@@ -1023,5 +1320,7 @@ module.exports = function createMessagingRoutes(deps) {
     }
   });
 
+  // For server.js (the every-minute outbox sweep) and the probes.
+  router.sms = { drainSmsOutbox, handleQuoEvent, sendOutboxRow };
   return router;
 };

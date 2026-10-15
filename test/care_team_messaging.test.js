@@ -496,7 +496,8 @@ test('the routes: attachments are typed BEFORE storage, stored privately, and th
   // validated before stored, stored before the row is written, row written before anybody is told
   const create = code.slice(code.indexOf("router.post('/api/messaging/threads'"), code.indexOf("router.post('/api/messaging/threads/:id/messages'"));
   assert.ok(create.indexOf('msg.validateMessage(') < create.indexOf('storeAttachments(') && create.indexOf('storeAttachments(') < create.indexOf("db.set('messages'") && create.indexOf("db.set('messages'") < create.indexOf('notifyThread('));
-  const mount = serverSrc.slice(serverSrc.indexOf('app.use(messagingRoutes({'), serverSrc.indexOf('}));', serverSrc.indexOf('app.use(messagingRoutes({')));
+  const mount = serverSrc.slice(serverSrc.indexOf('= messagingRoutes({'), serverSrc.indexOf('});', serverSrc.indexOf('= messagingRoutes({')));
+  assert.ok(mount.length > 50, 'the mount was found');
   for (const dep of ['upload', 'uploadLimiter', 'googledrive', 'detectFileType', 'contentDisposition']) assert.match(mount, new RegExp(`\\b${dep}\\b`), `server.js passes ${dep}`);
   assert.match(mount, /detectFileType: \(buf\) => detectFileType\(buf\)/, 'a closure: the const is defined later in the file');
   assert.match(fs.readFileSync(path.join(root, 'googledrive.js'), 'utf8'), /'GFC Message Attachments'/);
