@@ -48,8 +48,10 @@ const CLINICAL_ROLE_LABELS = Object.freeze({
   rn: 'Registered Nurse',
   lcsw: 'LCSW (clinical social worker)',
   lmsw: 'LMSW (case manager / counselor)',
-  readOnly: 'Read-only (unlicensed staff)',
-  coordinator: 'Care Coordinator (unlicensed, prepares notes for a clinician to sign)'
+  // Owner, 2026-10-14: the labels say what the role IS, not whether it is
+  // licensed. What each role may do is the capability matrix below, unchanged.
+  readOnly: 'Read-only',
+  coordinator: 'Care Coordinator'
 });
 
 // ---- The capability matrix ----------------------------------------------
