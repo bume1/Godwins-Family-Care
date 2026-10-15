@@ -16,7 +16,7 @@ transport-aware detail rule rather than growing a second copy of any of them:
 | Notice | Goes to | When |
 |---|---|---|
 | `clinical_task_assigned` | the assignee | somebody else hands them a to-do, and on a later reassignment |
-| `clinical_task_due` | the assignee | 9am Eastern on the due date |
+| `clinical_task_due` | the assignee | **at the to-do's own due time**; 9am Eastern when it has none |
 | `clinical_task_overdue` | the assignee | 9am Eastern each day it stays open past the date |
 | `clinical_task_completed` | the **author** | somebody else marks it done |
 
@@ -42,6 +42,34 @@ transport-aware detail rule rather than growing a second copy of any of them:
   restart, a changed scan interval or three scans in one morning, and the next
   calendar day is a new key rather than a swallowed duplicate. Proven live by
   running the scanner three times and getting one email.
+- **A TO-DO CARRIES A TIME, AND THE EMAIL GOES OUT AT IT** (owner, 2026-10-15:
+  *"task email needs to be sent during the exact time the task is due.. 9 am et
+  is default when no time added"*). `dueTime` is `HH:MM` in Georgia — the
+  practice clock, like every other time this app shows, with no zone
+  travelling with it. A to-do with no time keeps the 9am default, so nothing
+  already written changes and no migration was needed.
+- **THE SWEEP HAS ITS OWN ONE-MINUTE TICK, and that REVERSES the "rides the
+  existing scanner, no second timer" call made on 2026-10-14.** The reason
+  changed under it: the notification scanner runs every **30 minutes**, which
+  was invisible when every to-do went out at 9am and is a broken promise the
+  moment a to-do names its own hour — a 2pm to-do emailed at 2:29 is not "at
+  the time it is due". The tick is one collection read plus the cached users
+  read, which is why it is affordable every minute where the full scan is not.
+  **Exactly one caller**, build-enforced: the scanner no longer runs it.
+- **THE OVERDUE CHASE IS THE NEXT MORNING, NOT A RE-RUN OF YESTERDAY'S CLOCK.**
+  A to-do due at 2pm yesterday is chased at 9am today, not at 2pm today: its
+  time has already passed, and somebody planning their day wants it at the
+  start of the day. The due notice follows the to-do's clock; the overdue
+  chase follows the morning.
+- **A DUE TIME HANGS OFF A DUE DATE**, judged on the row **as it lands** rather
+  than on the fields that arrived — so setting a time on an already-dated
+  to-do works, while a time on an undated one is refused by name
+  (`TASK_DUE_TIME_WITHOUT_DATE`) instead of being stored as a reminder that can
+  never fire. Clearing the date clears the time.
+- **A WALL-CLOCK TIME IS FORMATTED FROM ITS OWN DIGITS, never through a
+  `Date`** — in the email and on the page alike. It carries no date and no
+  zone, so running it through `Date` renders an invention; the same rule
+  `fmtClock` already sets for availability windows.
 - **SWEPT, NOT SCHEDULED — the opposite of the visit reminders, and the
   difference is the data.** A visit reminder is written at booking time because
   nothing may read OpenEMR's calendar in the background (per-clinician OAuth,
@@ -78,7 +106,8 @@ transport-aware detail rule rather than growing a second copy of any of them:
 
 ## Verification
 
-- `test/clinical_task_notices.test.js`, 20 tests; **25 of 25 mutations caught.**
+- `test/clinical_task_notices.test.js`, **30 tests; 42 of 42 mutations caught**
+  across the two passes (25 for the notices, 17 for the due time).
   Four survived the first pass and are recorded honestly: two were **behavioural
   no-ops** (the sweep's `status !== 'open'` guard, which `bucketFor` already
   answers, and the midday-UTC date read, which the formatter's explicit
@@ -94,10 +123,14 @@ transport-aware detail rule rather than growing a second copy of any of them:
   line) and `clinical_workspace_412`'s landing-view guard (which asserted the
   old single-case hash expression). Both rules are unchanged and both repointed
   guards were mutation-checked to confirm they still bite.
-- `scripts/verify_task_notices.js`: **24/24 through the real HTTP routes**,
-  reading the queued notification back — including three scans in one day
-  producing one email, a closed to-do dropping out of the sweep, and nobody
-  outside the assignee and the author receiving anything.
+- `scripts/verify_task_notices.js` through the real HTTP routes, reading the
+  queued notification back — a to-do due later today sending nothing even well
+  past 9am, one whose time has just passed sending on the next tick with the
+  time in the words, a second tick sending nothing more, a closed to-do
+  dropping out, and nobody outside the assignee and the author receiving
+  anything. **It waits for the real one-minute tick rather than poking a
+  route**, which is why it takes minutes: that the timer fires is the thing
+  being proven, and an on-demand trigger would not prove it.
 - All eight messages (four notices × both transports) were **rendered and read**,
   which is the only way every email defect in this repo has ever been found.
 - Full suite **2491, 0 failing** (1 skipped, pre-existing). The page compiles;
@@ -119,3 +152,10 @@ other half, and it has still never been run.
   the assignee is. Say if they should be copied.
 - Nothing is sent for a **cancelled** to-do. The author is told when one is
   finished, not when the assignee cancels it with a reason.
+- **A to-do due at 9am still sits under Today all day on screen**, not under
+  Overdue at 9:01. The time drives the email; the on-screen buckets stay
+  date-only, so nothing moves column mid-morning under someone's cursor. Say
+  if the columns should follow the clock too.
+- **The tick is a minute.** A to-do due at 2:00 is emailed between 2:00 and
+  2:01. If that needs to be tighter the constant is `TASK_SWEEP_INTERVAL_MS`,
+  at the cost of a read per tick.

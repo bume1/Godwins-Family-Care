@@ -1641,11 +1641,6 @@ const scanAndQueueNotifications = async () => {
     // owner controls.
     await sendDueVisitReminders();
 
-    // ── The to-do reminders due today (2026-10-14) ───────────────────────
-    // Same reasoning: it rides the scanner that already runs rather than a
-    // second timer of its own.
-    await sendDueTaskReminders();
-
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
@@ -1665,10 +1660,18 @@ const scanAndQueueNotifications = async () => {
 // time would chase the old date. The sweep re-derives from the to-do as it
 // stands right now.
 //
-// ONE A DAY IS HELD BY THE KEY, NOT BY THE CADENCE. The scanner runs every few
-// minutes; `clinicalTasks.remindersDue` sends nothing before 9am Eastern, and
-// every scan after it re-derives the same rows, whose `<task>:<kind>:<date>`
-// dedupe key the queue then drops. A restart mid-morning cannot double-send.
+// ONE A DAY IS HELD BY THE KEY, NOT BY THE CADENCE. `remindersDue` sends
+// nothing before a to-do's own minute, and every tick after it re-derives the
+// same row, whose `<task>:<kind>:<date>` dedupe key the queue then drops. A
+// restart mid-morning cannot double-send.
+//
+// IT HAS ITS OWN MINUTE TICK RATHER THAN RIDING THE NOTIFICATION SCANNER, and
+// that reverses the call made on 2026-10-14 for a reason that changed under
+// it: the scanner runs every 30 minutes, which was invisible when every to-do
+// went out at 9am and is a broken promise now that a to-do carries a time
+// (owner, 2026-10-15). A 2pm to-do emailed at 2:29 is not "at the time it is
+// due". The tick is one collection read and the cached users read, which is
+// why it is affordable every minute where the full scan is not.
 //
 // Judged on GEORGIA'S date and hour, never the container's: UTC is already
 // tomorrow for four hours of every evening, so a to-do due today would turn
@@ -1676,14 +1679,15 @@ const scanAndQueueNotifications = async () => {
 //
 // Wrapped in its own try/catch so a to-do problem never takes the rest of the
 // scan down with it.
+const TASK_SWEEP_INTERVAL_MS = 60 * 1000;
+
 const sendDueTaskReminders = async () => {
   try {
     const parts = practiceTime.zonedParts(new Date());
     const today = (parts && parts.isoDate) || null;
-    const hourEt = parts ? parts.hour : null;
     if (!today) return;
     const tasks = (await db.get('clinical_tasks')) || [];
-    const due = clinicalTasks.remindersDue({ tasks, today, hourEt });
+    const due = clinicalTasks.remindersDue({ tasks, today, minutesOfDay: parts.minutesOfDay });
     if (!due.length) return;
 
     const users = await getUsers();
@@ -28251,6 +28255,11 @@ app.listen(PORT, () => {
   // Start notification queue processor (Feature 1)
   const queueInterval = config.NOTIFICATION_CHECK_INTERVAL_MINUTES * 60 * 1000;
   setInterval(processNotificationQueue, queueInterval);
+
+  // The to-do reminders tick every minute so a to-do with a time of its own is
+  // emailed AT that time rather than up to a notification-scan away from it.
+  setInterval(sendDueTaskReminders, TASK_SWEEP_INTERVAL_MS).unref?.();
+  console.log(`🗒️  To-do reminder sweep started (every ${TASK_SWEEP_INTERVAL_MS / 1000}s; each to-do at its own time, ${clinicalTasks.TASK_EMAIL_SEND_HOUR_ET}:00 ET default)`);
   console.log(`📧 Notification queue processor started (every ${config.NOTIFICATION_CHECK_INTERVAL_MINUTES}m)`);
 
   // Start notification trigger scanner (Feature 2)

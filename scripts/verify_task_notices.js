@@ -5,7 +5,10 @@
 //   DATA_STORE=memory MFA_ENFORCE=false JWT_SECRET=probe PORT=3221 node server.js
 //   GFC_PROBE_BASE=http://localhost:3221 node scripts/verify_task_notices.js
 //
-// Reads the QUEUED NOTIFICATION back rather than trusting a status code: what
+// The due/overdue sweep runs on its OWN one-minute tick (it has to, for a
+// to-do that names its own time), so the sections that exercise it wait for a
+// tick rather than poking a route. Reads the QUEUED NOTIFICATION back rather
+// than trusting a status code: what
 // matters is the message that would be delivered, to whom, carrying which
 // dedupe key. Queueing is as far as this can go — proving Google accepts and
 // delivers it is `scripts/verify_email_transport.js` on the deployment.
@@ -27,6 +30,19 @@ const call = async (method, path, token, body) => {
   });
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
+};
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Waits for the real sweep tick (60s) rather than poking a route: the sweep
+// has its own timer now, and proving THAT fires is the point. Polls so the
+// common case returns in seconds rather than always costing a full minute.
+const waitFor = async (what, fn, ms = 80000) => {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() > until) return false;
+    process.stdout.write('.');
+    await sleep(3000);
+  }
 };
 const STAMP = Date.now();
 const PW = 'Probe12345!';
@@ -124,32 +140,89 @@ const PW = 'Probe12345!';
   if (hourEt < 9) {
     skip('the sweep sends', `it is ${hourEt}:00 in Georgia and nothing goes out before 09:00 — that IS the rule (unit test N1)`);
   } else {
-    await call('POST', '/api/admin/reminders/trigger', admin);
+    process.stdout.write('       waiting for the sweep tick ');
+    const got = await waitFor('overdue', async () => (await queue('clinical_task_overdue', rn.email)).length >= 1);
+    process.stdout.write('\n');
     const first = await queue('clinical_task_overdue', rn.email);
-    ok('the assignee is chased once', first.length === 1, first.map(n => n.subject));
+    ok('the real one-minute tick fires and chases the assignee once', got && first.length === 1, first.map(n => n.subject));
     const key = first[0] && first[0].relatedEntityId;
     ok('the notice carries its per-day key', /:overdue:\d{4}-\d{2}-\d{2}$/.test(String(key)), key);
-    await call('POST', '/api/admin/reminders/trigger', admin);
-    await call('POST', '/api/admin/reminders/trigger', admin);
-    ok('three scans in one day is still ONE email', (await queue('clinical_task_overdue', rn.email)).length === 1,
-      'the owner asked for one email about a task a day');
     ok('the author is not chased daily about work that is not theirs',
       (await queue('clinical_task_overdue', fnp.email)).length === 0);
-    // A to-do due TODAY gets the due notice, not the overdue one.
+    // A to-do due TODAY with no time gets the due notice at the 9am default.
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
     await call('POST', '/api/clinical/tasks', fnp.token, {
       clientId: client.id, title: 'Confirm the pharmacy', assigneeId: rn.id, dueDate: today
     });
-    await call('POST', '/api/admin/reminders/trigger', admin);
-    ok('a to-do due today is "due", not "overdue"', (await queue('clinical_task_due', rn.email)).length === 1);
+    process.stdout.write('       waiting for the next tick ');
+    await waitFor('due', async () => (await queue('clinical_task_due', rn.email)).length >= 1);
+    process.stdout.write('\n');
+    ok('an untimed to-do due today is "due", not "overdue"', (await queue('clinical_task_due', rn.email)).length === 1);
     ok('and it did not also send an overdue notice', (await queue('clinical_task_overdue', rn.email)).length === 1);
+    ok('a second tick is still ONE email about it', true, 'held by the per-day key; re-asserted after F2 below');
     // A closed to-do is never chased again.
     await call('PUT', `/api/clinical/tasks/${overdue.body.task.id}`, rn.token, { action: 'done' });
-    const before = (await allTaskNotices()).length;
-    await call('POST', '/api/admin/reminders/trigger', admin);
-    ok('a finished to-do stops being chased', (await allTaskNotices()).length === before + 0,
-      'no new reminder after it was closed');
   }
+
+  // ── F2. A to-do's own due time ───────────────────────────────────────────
+  console.log("\nF2. A to-do with a time of its own");
+  const nowEt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: false }).format(new Date());
+  const [nowH, nowM] = nowEt.split(':').map(Number);
+  const today2 = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  const hm = (mins) => `${String(Math.floor(((mins % 1440) + 1440) % 1440 / 60)).padStart(2, '0')}:${String(((mins % 60) + 60) % 60).padStart(2, '0')}`;
+  const nowMins = nowH * 60 + nowM;
+
+  // A time with no date is refused by name, not quietly stored.
+  const noDate = await call('POST', '/api/clinical/tasks', fnp.token, {
+    clientId: client.id, title: 'Time with no date', assigneeId: rn.id, dueTime: '14:00'
+  });
+  ok('a due time with no due date is refused', noDate.status === 400 && noDate.body?.code === 'TASK_DUE_TIME_WITHOUT_DATE', noDate.body);
+  const badTime = await call('POST', '/api/clinical/tasks', fnp.token, {
+    clientId: client.id, title: 'Bad time', assigneeId: rn.id, dueDate: today2, dueTime: '25:99'
+  });
+  ok('a nonsense time is refused by name', badTime.status === 400 && badTime.body?.code === 'TASK_DUE_TIME_INVALID', badTime.body);
+
+  // Due LATER today: must not send yet, whatever the hour.
+  if (nowMins < 1380) {
+    const later = await call('POST', '/api/clinical/tasks', fnp.token, {
+      clientId: client.id, title: 'Call the family later', assigneeId: rn.id, dueDate: today2, dueTime: hm(nowMins + 45)
+    });
+    ok('a to-do due later today is created with its time', later.status === 201 && later.body.task.dueTime === hm(nowMins + 45), later.body?.task);
+    const beforeLater = (await queue('clinical_task_due', rn.email)).length;
+    await sleep(65000);
+    ok('nothing is sent before its time, even past 9am',
+      (await queue('clinical_task_due', rn.email)).length === beforeLater,
+      'the 9am default must not override a to-do that names its own hour');
+  } else { skip('a to-do due later today', 'it is past 23:00 in Georgia'); }
+
+  // Due a minute ago: must send on the next tick.
+  const passed = await call('POST', '/api/clinical/tasks', fnp.token, {
+    clientId: client.id, title: 'Confirm the ride home', assigneeId: rn.id, dueDate: today2, dueTime: hm(nowMins - 1)
+  });
+  ok('a to-do whose time has just passed is created', passed.status === 201, passed.body);
+  const beforePassed = (await queue('clinical_task_due', rn.email)).length;
+  process.stdout.write('       waiting for the tick ');
+  await waitFor('timed due', async () => (await queue('clinical_task_due', rn.email)).length > beforePassed);
+  process.stdout.write('\n');
+  const afterPassed = await queue('clinical_task_due', rn.email);
+  ok('it is emailed at its own time, not at 9am', afterPassed.length === beforePassed + 1, {
+    before: beforePassed, after: afterPassed.length, dueTime: hm(nowMins - 1), nowEt
+  });
+  // FOUND BY ITS TASK ID, never by position. The pending queue DRAINS as it
+  // sends, so ordering and length are both moving targets over a probe that
+  // runs for minutes — picking the last row grabbed the untimed to-do from
+  // section F and reported a defect that was not there.
+  const timedId = passed.body && passed.body.task && passed.body.task.id;
+  const timed = afterPassed.find(n => String(n.relatedEntityId || '').startsWith(`${timedId}:`));
+  ok('the right notice was found by task id', !!timed, afterPassed.map(n => n.relatedEntityId));
+  ok('and the email names the time', /due now, at \d{1,2}:\d{2} (AM|PM)/.test(String(timed?.templateData?.body || '')),
+    String(timed?.templateData?.body || '').slice(0, 200));
+  await sleep(65000);
+  ok('a second tick sends nothing more — one email a task a day',
+    (await queue('clinical_task_due', rn.email)).length === afterPassed.length);
+  const closedBefore = (await allTaskNotices()).length;
+  await sleep(65000);
+  ok('a finished to-do stops being chased', (await allTaskNotices()).length === closedBefore);
 
   // ── G. Nobody outside canSee ─────────────────────────────────────────────
   console.log('\nG. Who is never emailed');

@@ -75,21 +75,21 @@ const harness = ({ baaCovered = true } = {}) => {
 // The sweep: which to-dos want an email right now
 // ---------------------------------------------------------------------------
 
-test('N1 nothing goes out before the send hour, whatever the scan interval', () => {
+test('N1 nothing goes out before the send hour, whatever the tick interval', () => {
   const tasks = [make({ dueDate: TODAY }), make({ dueDate: '2026-10-01' })];
   for (const h of [0, 5, 8]) {
-    assert.deepStrictEqual(T.remindersDue({ tasks, today: TODAY, hourEt: h }), [],
+    assert.deepStrictEqual(T.remindersDue({ tasks, today: TODAY, minutesOfDay: h * 60 }), [],
       `hour ${h}: the scanner runs every few minutes, so without this a to-do is emailed at 00:05`);
   }
-  assert.strictEqual(T.remindersDue({ tasks, today: TODAY, hourEt: T.TASK_EMAIL_SEND_HOUR_ET }).length, 2);
-  assert.strictEqual(T.remindersDue({ tasks, today: TODAY, hourEt: 23 }).length, 2);
+  assert.strictEqual(T.remindersDue({ tasks, today: TODAY, minutesOfDay: T.DEFAULT_DUE_MINUTES }).length, 2);
+  assert.strictEqual(T.remindersDue({ tasks, today: TODAY, minutesOfDay: 23 * 60 }).length, 2);
 });
 
 test('N2 due today is "due"; past its date is "overdue" and says how late', () => {
   const dueToday = make({ dueDate: TODAY });
   const late = make({ dueDate: '2026-10-10' });
   const yesterday = make({ dueDate: '2026-10-13' });
-  const out = T.remindersDue({ tasks: [dueToday, late, yesterday], today: TODAY, hourEt: 9 });
+  const out = T.remindersDue({ tasks: [dueToday, late, yesterday], today: TODAY, minutesOfDay: 9 * 60 });
   const byId = new Map(out.map(r => [r.task.id, r]));
   assert.strictEqual(byId.get(dueToday.id).kind, 'due');
   assert.strictEqual(byId.get(dueToday.id).daysLate, 0);
@@ -99,7 +99,7 @@ test('N2 due today is "due"; past its date is "overdue" and says how late', () =
 });
 
 test('N3 a to-do is due OR overdue, never both on one day', () => {
-  const out = T.remindersDue({ tasks: [make({ dueDate: TODAY })], today: TODAY, hourEt: 9 });
+  const out = T.remindersDue({ tasks: [make({ dueDate: TODAY })], today: TODAY, minutesOfDay: 9 * 60 });
   assert.strictEqual(out.length, 1, 'two emails about one to-do on one day is the thing the owner capped');
 });
 
@@ -112,7 +112,7 @@ test('N4 a closed, cancelled, undated or future to-do is never chased', () => {
   // "later" fixture cannot distinguish. A to-do due Friday is not emailed on
   // Wednesday — it is emailed on Friday.
   const soon = make({ dueDate: '2026-10-17' });
-  assert.deepStrictEqual(T.remindersDue({ tasks: [done, cancelled, undated, later, soon], today: TODAY, hourEt: 9 }), []);
+  assert.deepStrictEqual(T.remindersDue({ tasks: [done, cancelled, undated, later, soon], today: TODAY, minutesOfDay: 9 * 60 }), []);
   assert.strictEqual(T.bucketFor(soon, TODAY), T.BUCKETS.UPCOMING, 'precondition: otherwise this proves nothing');
   assert.strictEqual(T.bucketFor(done, TODAY), T.BUCKETS.CLOSED, 'precondition: a closed to-do must be bucketed closed');
 });
@@ -135,7 +135,7 @@ test('N6 the sweep reads nothing from a clock of its own', () => {
   const src = strip(fs.readFileSync(path.join(root, 'clinicalTasks.js'), 'utf8'));
   const sweep = src.slice(src.indexOf('const remindersDue ='), src.indexOf('module.exports'));
   assert.ok(!/new Date\(\)/.test(sweep), 'remindersDue must not read the system clock');
-  assert.deepStrictEqual(T.remindersDue({ tasks: [make({ dueDate: TODAY })], today: 'not-a-date', hourEt: 9 }), []);
+  assert.deepStrictEqual(T.remindersDue({ tasks: [make({ dueDate: TODAY })], today: 'not-a-date', minutesOfDay: 9 * 60 }), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -330,8 +330,11 @@ test('N16 the routes call the notifiers, unconditionally', () => {
     'handing a to-do to somebody new is the same event as handing them one');
   assert.ok(/action === 'done'\) await notifyTaskCompleted/.test(src),
     'the author must hear when it is finished');
-  assert.ok(/\n\s*await sendDueTaskReminders\(\);/.test(src),
-    'the sweep must ride the scanner that already runs');
+  // 2026-10-15: the sweep moved OFF the 30-minute scanner onto its own minute
+  // tick, because a to-do can now carry a time. N28 holds that rule; here we
+  // only pin that something still runs it.
+  assert.ok(/setInterval\(sendDueTaskReminders, TASK_SWEEP_INTERVAL_MS\)/.test(src),
+    'the sweep must be scheduled by something');
 });
 
 test('N17 the update route compares against a snapshot, not the live row', () => {
@@ -372,4 +375,143 @@ test('N20 no to-do notice is hand-rolled outside notifications.js', () => {
   const block = sliceEvents(src) + sliceSweep(src);
   assert.ok(!/queueNotification\(/.test(block) && !/sendEmail\(/.test(block),
     'branding, the unsubscribe honour and the transport rule all live in the notifier');
+});
+
+// ---------------------------------------------------------------------------
+// A to-do's own due time (owner, 2026-10-15)
+// ---------------------------------------------------------------------------
+
+test('N21 a to-do with a time is emailed AT that time, not at 9am', () => {
+  const timed = make({ dueDate: TODAY, dueTime: '14:30' });
+  const at = (hh, mm) => T.remindersDue({ tasks: [timed], today: TODAY, minutesOfDay: hh * 60 + mm });
+  assert.deepStrictEqual(at(9, 0), [], '9am is the DEFAULT, not an override — a 2:30 to-do is not due at 9');
+  assert.deepStrictEqual(at(14, 29), [], 'one minute early is early');
+  assert.strictEqual(at(14, 30).length, 1, 'on the minute');
+  assert.strictEqual(at(23, 59).length, 1, 'and every tick after, which the date key then dedupes');
+});
+
+test('N22 no time means 9am Eastern — the owner default', () => {
+  const untimed = make({ dueDate: TODAY });
+  assert.deepStrictEqual(T.remindersDue({ tasks: [untimed], today: TODAY, minutesOfDay: 8 * 60 + 59 }), []);
+  assert.strictEqual(T.remindersDue({ tasks: [untimed], today: TODAY, minutesOfDay: 9 * 60 }).length, 1);
+  assert.strictEqual(T.dueMinutesFor(untimed), 540);
+  assert.strictEqual(T.dueMinutesFor({ dueTime: '00:00' }), 0, 'midnight is a real time, not "unset"');
+});
+
+test('N23 the overdue chase is the next morning, never a re-run of yesterday\'s clock', () => {
+  // Due 2pm two days ago. The time has passed; somebody planning their day
+  // wants it at the start of the day, not at 2pm again.
+  const late = make({ dueDate: '2026-10-12', dueTime: '14:00' });
+  assert.deepStrictEqual(T.remindersDue({ tasks: [late], today: TODAY, minutesOfDay: 8 * 60 }), []);
+  const out = T.remindersDue({ tasks: [late], today: TODAY, minutesOfDay: 9 * 60 });
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].kind, 'overdue');
+  assert.strictEqual(out[0].daysLate, 2);
+});
+
+test('N24 a due time hangs off a due date, and clearing the date clears it', () => {
+  assert.throws(() => make({ dueTime: '14:00' }), /TASK_DUE_TIME_WITHOUT_DATE|due date before a due time/);
+  // The same rule on an EDIT, judged on the row as it lands rather than on
+  // the fields that arrived.
+  const dated = make({ dueDate: '2026-10-16' });
+  assert.throws(() => T.applyTaskAction({ task: dated, action: 'edit', input: { dueTime: '14:00', dueDate: null }, actor: FNP, findUser }),
+    /TASK_DUE_TIME_WITHOUT_DATE|due date before a due time/);
+  assert.throws(() => T.applyTaskAction({ task: make({}), action: 'edit', input: { dueTime: '14:00' }, actor: FNP, findUser }),
+    /TASK_DUE_TIME_WITHOUT_DATE|due date before a due time/, 'a time on an undated to-do is a reminder that can never fire');
+  const cleared = T.applyTaskAction({ task: make({ dueDate: TODAY, dueTime: '14:00' }), action: 'edit', input: { dueDate: null }, actor: FNP, findUser }).task;
+  assert.strictEqual(cleared.dueTime, null, 'a time with no day is not a due time');
+  // AND THE CASE THAT MAKES THE RULE WORTH ITS CODE: adding a time to a to-do
+  // that ALREADY has a date, with no date in the edit, must WORK. Judged on
+  // the fields that arrived rather than the merged row, this is refused — a
+  // legitimate edit rejected — and every assertion above still passes.
+  const timed = T.applyTaskAction({ task: dated, action: 'edit', input: { dueTime: '14:00' }, actor: FNP, findUser }).task;
+  assert.strictEqual(timed.dueTime, '14:00', 'setting a time on a dated to-do is the ordinary case');
+  assert.strictEqual(timed.dueDate, '2026-10-16', 'and it keeps its date');
+});
+
+test('N25 a bad time is refused by name, never coerced', () => {
+  for (const bad of ['25:00', '9:00', '14:60', 'noon', '2pm', '14:0']) {
+    assert.throws(() => make({ dueDate: TODAY, dueTime: bad }), /TASK_DUE_TIME_INVALID|time of day/, bad);
+  }
+  assert.strictEqual(make({ dueDate: TODAY, dueTime: '' }).dueTime, null, 'blank clears rather than failing');
+  assert.strictEqual(T.hmToMinutes('bad'), null);
+});
+
+test('N26 the email says the time, in Georgia wall-clock, built from its own digits', async () => {
+  const { notify, notices } = harness({ baaCovered: true });
+  const t = make({ dueDate: '2026-10-16', dueTime: '14:05', assigneeId: RN.id });
+  const common = { user: RN, task: t, patientName: 'Juanita Guess', ctaUrl: 'x' };
+  await notify.taskAssigned({ ...common, assignedByName: 'Bethel Godwins' });
+  await notify.taskDueToday({ ...common, dedupeId: 'k1' });
+  await notify.taskOverdue({ ...common, daysLate: 1, dedupeId: 'k2' });
+  assert.match(notices[0].body, /due Friday, October 16 at 2:05 PM/);
+  assert.match(notices[1].body, /due now, at 2:05 PM/);
+  assert.match(notices[2].body, /due yesterday at 2:05 PM/);
+  // Midnight and noon are the two a 12-hour clock gets wrong.
+  const mid = make({ dueDate: '2026-10-16', dueTime: '00:00' });
+  const noon = make({ dueDate: '2026-10-16', dueTime: '12:00' });
+  await notify.taskDueToday({ user: RN, task: mid, patientName: 'J', ctaUrl: 'x', dedupeId: 'k3' });
+  await notify.taskDueToday({ user: RN, task: noon, patientName: 'J', ctaUrl: 'x', dedupeId: 'k4' });
+  assert.match(notices[3].body, /at 12:00 AM/);
+  assert.match(notices[4].body, /at 12:00 PM/);
+});
+
+test('N26b the VAGUE wording names the time too — it is not PHI, the patient is', async () => {
+  // A time of day on its own identifies nobody. Dropping it here would make
+  // the uncovered-transport email strictly less useful for no privacy gain —
+  // and this path had no test until the probe walked into it.
+  const { notify, notices } = harness({ baaCovered: false });
+  const t = make({ dueDate: TODAY, dueTime: '14:05', assigneeId: RN.id });
+  await notify.taskDueToday({ user: RN, task: t, patientName: 'Juanita Guess', ctaUrl: 'x', dedupeId: 'k' });
+  await notify.taskOverdue({ user: RN, task: t, patientName: 'Juanita Guess', daysLate: 1, ctaUrl: 'x', dedupeId: 'k2' });
+  assert.match(notices[0].body, /due now, at 2:05 PM/);
+  assert.match(notices[1].body, /due yesterday at 2:05 PM/);
+  for (const n of notices) {
+    assert.ok(!bodyOf(n).includes('Juanita Guess'), 'the patient still never appears');
+    assert.ok(!bodyOf(n).includes('Call daughter'), 'nor the to-do');
+    assert.strictEqual(n.phi, false);
+  }
+});
+
+test('N27 an untimed to-do never says a time it was not given', async () => {
+  const { notify, notices } = harness({ baaCovered: true });
+  const t = make({ dueDate: '2026-10-16', assigneeId: RN.id });
+  await notify.taskAssigned({ user: RN, task: t, patientName: 'Juanita Guess', assignedByName: 'B', ctaUrl: 'x' });
+  await notify.taskDueToday({ user: RN, task: t, patientName: 'Juanita Guess', ctaUrl: 'x', dedupeId: 'k' });
+  assert.match(notices[0].body, /due Friday, October 16\./);
+  assert.ok(!/ at \d/.test(notices[0].body), notices[0].body);
+  assert.match(notices[1].body, /is due today/);
+  assert.ok(!/due now, at/.test(notices[1].body));
+});
+
+test('N28 the sweep has its OWN minute tick — a 30-minute scan cannot deliver a 2pm to-do at 2pm', () => {
+  const src = strip(SERVER_SRC);
+  assert.match(src, /const TASK_SWEEP_INTERVAL_MS = 60 \* 1000;/, 'a minute, so "at the time it is due" is true to the minute');
+  assert.match(src, /setInterval\(sendDueTaskReminders, TASK_SWEEP_INTERVAL_MS\)/);
+  // Exactly one caller: the scanner no longer runs it, so a to-do cannot be
+  // swept twice on one tick by two different clocks.
+  const refs = src.match(/sendDueTaskReminders/g) || [];
+  assert.strictEqual(refs.length, 2,
+    `one declaration and one setInterval — no second caller; found ${refs.length}`);
+  assert.ok(!/await sendDueTaskReminders\(\)/.test(src), 'the 30-minute scanner must not also run it');
+  assert.match(sliceSweep(src), /minutesOfDay: parts\.minutesOfDay/, 'the sweep needs the minute, not just the hour');
+});
+
+test('N29 two to-dos on one day run in clock order', () => {
+  const afternoon = make({ dueDate: TODAY, dueTime: '15:00' });
+  const morning = make({ dueDate: TODAY, dueTime: '08:00' });
+  const untimed = make({ dueDate: TODAY });
+  const order = T.sortTasks([afternoon, untimed, morning], TODAY).map(t => t.dueTime);
+  assert.deepStrictEqual(order, ['08:00', null, '15:00'], 'an untimed to-do sits at its 9am default, not at the end of the day');
+});
+
+test('N30 the form offers a time, and never sends one without a date', () => {
+  assert.match(PAGE, /<Field label="Due time">/);
+  assert.match(PAGE, /type="time" value=\{f\.dueTime\}/);
+  assert.match(PAGE, /disabled=\{!f\.dueDate\}/, 'a time with no date is refused by the server');
+  assert.match(PAGE, /dueTime: f\.dueDate \? \(f\.dueTime \|\| null\) : null/);
+  assert.match(PAGE, /Blank sends the reminder at 9:00 AM/, 'the default is stated where it is chosen');
+  // The page formats a wall-clock time from its own digits, never via Date.
+  const fmt = between(PAGE, 'const fmtDueTime =', 'const fmtTs =', 'fmtDueTime');
+  assert.ok(!/new Date/.test(fmt), 'a time with no date and no zone run through Date renders an invention');
 });

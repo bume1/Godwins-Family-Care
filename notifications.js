@@ -898,13 +898,30 @@ function createNotifier(deps) {
       : d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
   };
 
+  // A due TIME in words. Formatted from its own digits rather than through a
+  // Date, which is the rule `fmtClock` already sets: a wall-clock time carries
+  // no date and no zone, so running it through `Date` renders an invention.
+  const timeLine = (hm) => {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(hm || ''))) return null;
+    const h = Number(String(hm).slice(0, 2)), m = String(hm).slice(3, 5);
+    return `${((h + 11) % 12) + 1}:${m} ${h < 12 ? 'AM' : 'PM'}`;
+  };
+
+  // "Friday, October 16 at 2:00 PM", or just the day when no time was given.
+  const dueWhen = (task) => {
+    const day = dueLine(task && task.dueDate);
+    if (!day) return null;
+    const at = timeLine(task && task.dueTime);
+    return at ? `${day} at ${at}` : day;
+  };
+
   // ---- 1. Somebody handed you a to-do --------------------------------------
   // Sent to the ASSIGNEE, and only when somebody else assigned it: an email
   // telling you about the to-do you just wrote for yourself is noise.
   async function taskAssigned({ user, task, patientName, assignedByName, ctaUrl, actorId }) {
     try {
       const who = assignedByName || 'Someone';
-      const due = dueLine(task && task.dueDate);
+      const due = dueWhen(task);
       return {
         notified: await taskNotice({
           type: 'clinical_task_assigned', user, task, patientName, ctaUrl, actorId,
@@ -931,17 +948,19 @@ function createNotifier(deps) {
   // ---- 2. A to-do is due today ---------------------------------------------
   async function taskDueToday({ user, task, patientName, ctaUrl, dedupeId }) {
     try {
+      const at = timeLine(task && task.dueTime);
       return {
         notified: await taskNotice({
           type: 'clinical_task_due', user, task, patientName, ctaUrl, dedupeId,
           subjectDetail: 'To-do due today', subjectVague: 'You have a to-do due today',
           headline: 'A to-do is due today',
           detailParagraphs: (name) => [
-            `Your to-do for ${name} is due today: "${task.title}".`,
+            at ? `Your to-do for ${name} is due now, at ${at}: "${task.title}".`
+               : `Your to-do for ${name} is due today: "${task.title}".`,
             'Open the workspace to mark it done, or move the date if it needs longer.'
           ],
           vagueParagraphs: [
-            'One of your to-dos is due today.',
+            at ? `One of your to-dos is due now, at ${at}.` : 'One of your to-dos is due today.',
             'Open the workspace to see it. For privacy we do not name the patient or the to-do in email.'
           ]
         }),
@@ -959,7 +978,8 @@ function createNotifier(deps) {
   async function taskOverdue({ user, task, patientName, daysLate, ctaUrl, dedupeId }) {
     try {
       const n = Number(daysLate) > 0 ? Number(daysLate) : 1;
-      const late = n === 1 ? 'yesterday' : `${n} days ago`;
+      const at = timeLine(task && task.dueTime);
+      const late = `${n === 1 ? 'yesterday' : `${n} days ago`}${at ? ` at ${at}` : ''}`;
       return {
         notified: await taskNotice({
           type: 'clinical_task_overdue', user, task, patientName, ctaUrl, dedupeId,
