@@ -79,7 +79,7 @@ test('a role is offered only the channels it may open', () => {
   assert.deepStrictEqual(ids(u('cm-1')), ['behavioral_escalation', 'care_team', 'care_update', 'support']);
 });
 
-test('OWNER RULE: admin opens every channel, and a lab-era manager counts as admin', () => {
+test('OWNER RULE: admin opens every channel; a manager opens Support only (2026-10-15)', () => {
   // "admin / manager should be able to message anyone." There is no distinct
   // GFC manager role — `isManager` is a lab-era flag that collapses to admin
   // everywhere else in the app, so it collapses here too rather than inventing
@@ -87,8 +87,10 @@ test('OWNER RULE: admin opens every channel, and a lab-era manager counts as adm
   const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
   const live = msg.CHANNEL_IDS.filter(id => !msg.CHANNELS[id].retired).sort();
   assert.deepStrictEqual(ids(u('admin-1')), live, 'every live channel, none of the retired ones');
+  // Owner, 2026-10-15: "only admin can see every type." A manager is the
+  // office for Support and starts nothing else.
   const manager = { id: 'mgr-1', name: 'Ops Manager', role: 'user', isManager: true };
-  assert.deepStrictEqual(ids(manager), live);
+  assert.deepStrictEqual(ids(manager), ['support']);
 });
 
 test('OWNER RULE: a staff member who can SEE a thread can ANSWER it', () => {
@@ -753,7 +755,7 @@ test('a channel describes the OTHER person, never the viewer as somebody else', 
   assert.doesNotMatch(m.blurbFor('family_portal', m.ROLE.CAREGIVER), /your relative/);
 
   assert.match(m.blurbFor('care_team', m.ROLE.CASE_MANAGER), /whole care team/);
-  assert.match(m.blurbFor('direct_care', m.ROLE.CLIENT), /the office/, 'Direct says the office is on it');
+  assert.match(m.blurbFor('direct_care', m.ROLE.CLIENT), /office can see it/, 'Direct says the office can see it');
 });
 
 test('every channel resolves a blurb for every role that can be in it', () => {

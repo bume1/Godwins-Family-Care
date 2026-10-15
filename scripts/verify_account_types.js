@@ -77,9 +77,9 @@ const tileIds = (u) => (u.hubTiles || []).map(t => t.id).join(',');
   for (const [k, u] of Object.entries({ mgr, mgrNone, coord, prov, rn, lcsw, lmsw })) L[k] = await login(u.email, PW);
   for (const k of ['prov', 'rn', 'lcsw', 'lmsw']) ok(`${k} lands on /clinical`, L[k].user && L[k].user.landing === '/clinical', L[k].user && L[k].user.landing);
   for (const k of ['mgr', 'mgrNone', 'coord']) ok(`${k} lands on the hub`, L[k].user && L[k].user.landing === null, L[k].user);
-  ok('coordinator sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.coord.user) === 'clinical,privateHomeCare,enrollment,billing', L.coord.user.hubTiles);
-  ok('manager (View only) sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.mgr.user) === 'clinical,privateHomeCare,enrollment,billing', L.mgr.user.hubTiles);
-  ok('manager (No access) still sees Private Home Care, Enrollment and Billing', tileIds(L.mgrNone.user) === 'privateHomeCare,enrollment,billing', L.mgrNone.user.hubTiles);
+  ok('coordinator sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.coord.user) === 'clinical,privateHomeCare,enrollment,billing,messages', L.coord.user.hubTiles);
+  ok('manager (View only) sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.mgr.user) === 'clinical,privateHomeCare,enrollment,billing,messages', L.mgr.user.hubTiles);
+  ok('manager (No access) still sees Private Home Care, Enrollment and Billing', tileIds(L.mgrNone.user) === 'privateHomeCare,enrollment,billing,messages', L.mgrNone.user.hubTiles);
   const phc = L.mgr.user.hubTiles.find(t => t.id === 'privateHomeCare');
   ok('  which opens to Caregiver Management and Caregiver Scheduling',
     phc && phc.children.map(c => c.path).join(',') === '/caregivers,/scheduling', phc);
@@ -118,6 +118,12 @@ const tileIds = (u) => (u.hubTiles || []).map(t => t.id).join(',');
   for (const k of ['prov', 'lmsw']) {
     ok(`${k}: may not approve or change the rate`, (await call('PUT', `/api/gfc/admin/enrollment/${client.id}/rate`, t(k), { hourlyRate: 31, dailyMinimumHours: 4 })).status === 403);
     ok(`${k}: no Billing module`, (await call('GET', '/api/gfc/admin/billing-statements', t(k))).status === 403);
+  }
+  const msgPage = await fetch(BASE + '/messages');
+  ok('the /messages page serves', msgPage.status === 200 && /<title>Godwins Family Care — Messages<\/title>/.test(await msgPage.text()));
+  for (const k of ['mgrNone', 'coord']) {
+    const ch = await call('GET', '/api/messaging/channels', t(k));
+    ok(`${k}: Messages opens, and Support is theirs to start`, ch.status === 200 && ch.body.channels.some(c => c.id === 'support' && c.available), ch.body);
   }
   const page = await fetch(BASE + '/billing');
   ok('the /billing page serves', page.status === 200 && /<title>Godwins Family Care — Billing<\/title>/.test(await page.text()));

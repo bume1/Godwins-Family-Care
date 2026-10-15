@@ -431,16 +431,17 @@
       '</div></div>';
   }
 
-  // CARE TEAM: who it goes to (owner, 2026-10-15). The list is the server's
-  // (channel.recipients); everyone starts ticked and the sender unticks anyone
-  // it should not reach. The patient and their POA are always on it.
+  // WHO IT GOES TO (owner, 2026-10-15): Care Team, and Support started by the
+  // office. The list is the server's (channel.recipients); everyone starts
+  // ticked and the sender unticks anyone it should not reach, the patient
+  // included.
   function recipientsOf(c) { return Array.isArray(c && c.recipients) ? c.recipients : null; }
   function renderRecipients(state, c) {
     var list = recipientsOf(c);
     if (!list) return '';
-    if (!list.length) return '<div class="mnote"><b>Who gets this</b>Nobody else is on this patient\'s care team yet. The patient (and their POA) will get it.</div>';
+    if (!list.length) return '<div class="mnote"><b>Who gets this</b>There is nobody to send this to yet.</div>';
     return '<label>Send to</label>' +
-      '<div class="mmu" style="margin-bottom:6px">The patient and their POA always get it. Untick anyone on the care team who should not.</div>' +
+      '<div class="mmu" style="margin-bottom:6px">Everyone ticked gets it. Untick anyone who should not.</div>' +
       '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">' +
       list.map(function (m) {
         var on = !state.recipients || state.recipients.indexOf(m.id) !== -1;
@@ -650,7 +651,7 @@
       var ch = state.channels.filter(function (x) { return x.id === state.composeChannel; })[0] || {};
       var list = recipientsOf(ch);
       var picked = list ? (state.recipients || list.map(function (m) { return m.id; })) : null;
-      if (list && list.length && !picked.length) { captureDraft(state, root); state.error = 'Choose at least one person from the care team.'; render(state); return; }
+      if (list && list.length && !picked.length) { captureDraft(state, root); state.error = 'Choose at least one person to send this to.'; render(state); return; }
       send.disabled = true;
       go(postMessage(state, '/api/messaging/threads',
         { channel: state.composeChannel, clientId: state.scopeClientId || undefined, body: d.body, format: d.format,

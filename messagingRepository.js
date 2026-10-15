@@ -32,6 +32,10 @@ const ROLE = Object.freeze({
   CAREGIVER: 'vendor',            // repo role `vendor` IS Caregiver (v2 §4 repurpose)
   CLINICAL: 'clinical',           // a user with hasClinicalAccess, not a role string
   CASE_MANAGER: 'caseManager',
+  // A manager or care coordinator (accountTypes.js). The office side, but NOT
+  // admin (owner, 2026-10-15): "only admin can see every type. Managers can
+  // only see the support messages really and admin broadcasts."
+  MANAGER: 'manager',
   ADMIN: 'admin'
 });
 
@@ -41,11 +45,8 @@ const ROLE = Object.freeze({
 function actorRole(user) {
   if (!user) return null;
   if (user.role === 'admin') return ROLE.ADMIN;
-  // A manager or care coordinator (accountTypes.js, owner 2026-10-15) runs the
-  // office side and messages as the office. Before this a manager had no
-  // messaging role at all ("This account has no messaging role"). Who reads
-  // and starts what is the next pass; this keeps them from being locked out.
-  if (user.isManager) return ROLE.ADMIN;
+  // A manager or care coordinator is the office side, but not admin.
+  if (user.isManager) return ROLE.MANAGER;
   if (user.role === 'caseManager') return ROLE.CASE_MANAGER;
   if (user.hasClinicalAccess) return ROLE.CLINICAL;
   if (user.role === 'vendor') return ROLE.CAREGIVER;
@@ -56,7 +57,7 @@ function actorRole(user) {
 
 const ROLE_LABELS = Object.freeze({
   client: 'Client', family: 'Family', vendor: 'Caregiver',
-  clinical: 'Clinician', caseManager: 'Case manager', admin: 'Admin'
+  clinical: 'Clinician', caseManager: 'Case manager', manager: 'Office', admin: 'Admin'
 });
 
 // ---- The channel matrix ----------------------------------------------------
@@ -92,28 +93,39 @@ const ROLE_LABELS = Object.freeze({
 // threads already on them stay readable and answerable, because deleting a
 // conversation somebody had is not a cleanup.
 const CHANNELS = Object.freeze({
+  // Admin sees every Direct thread and can join it, but is NOT on it, so is
+  // never emailed about one (owner, 2026-10-15).
   direct_care: {
     id: 'direct_care', label: 'Direct',
-    participants: [ROLE.CLIENT, ROLE.CAREGIVER, ROLE.ADMIN],
+    participants: [ROLE.CLIENT, ROLE.CAREGIVER],
     initiators: [ROLE.CLIENT, ROLE.CAREGIVER, ROLE.ADMIN],
     requiresAssignedCaregiver: true,
-    blurb: 'You, the caregiver working with you, and the office.',
+    blurb: 'You and the caregiver working with you. The office can see it.',
     blurbByRole: {
-      [ROLE.CAREGIVER]: 'You, the client you are working with, and the office.',
-      [ROLE.ADMIN]: 'The client, the caregiver working with them, and the office.'
+      [ROLE.CAREGIVER]: 'You and the client you are working with. The office can see it.',
+      [ROLE.ADMIN]: 'The client and the caregiver working with them.'
     }
   },
+  // SUPPORT IS THE LINE TO THE OFFICE (owner, 2026-10-15): any team member to
+  // admin and managers, and the office back to any of them. Who is on it
+  // depends on who starts it (supportAudienceFor / the route):
+  //   client or family  → the client, their family, and the office;
+  //   a team member     → that team member and the office ONLY (never the
+  //                       client or family — "support needs to be for that");
+  //   admin or manager  → whoever they choose: the client side and/or the
+  //                       care team.
   support: {
     id: 'support', label: 'Support',
-    participants: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN],
-    // Any team member may start one (owner, 2026-10-15), and whoever starts it
-    // is on it. A caregiver's questions for the office come here now.
-    initiators: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
+    participants: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN, ROLE.MANAGER],
+    initiators: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN, ROLE.MANAGER, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
+    officeChoosesRecipients: true,
     blurb: 'Scheduling, billing and anything else for the office.',
     blurbByRole: {
-      [ROLE.CAREGIVER]: 'The office, about this client. The client and their family are on it too.',
-      [ROLE.CLINICAL]: 'The office, about this client. The client and their family are on it too.',
-      [ROLE.CASE_MANAGER]: 'The office, about this client. The client and their family are on it too.'
+      [ROLE.CAREGIVER]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
+      [ROLE.CLINICAL]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
+      [ROLE.CASE_MANAGER]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
+      [ROLE.MANAGER]: 'The office, to whoever you choose: the client, their family or their care team.',
+      [ROLE.ADMIN]: 'The office, to whoever you choose: the client, their family or their care team.'
     }
   },
   clinical_escalation: {
@@ -167,9 +179,9 @@ const CHANNELS = Object.freeze({
   // the assigned clinicians, case managers / social workers and care
   // coordinators, plus the client's designated POA. Not Clinical Escalation:
   // that is a CONCERN and tracks whether anyone has responded.
-  // Caregivers are on it too, and whoever starts one CHOOSES which care team
-  // members it goes to (owner, 2026-10-15). The patient and their POA are
-  // always on it: it is their conversation.
+  // Caregivers are on it too, and whoever starts one CHOOSES who it goes to
+  // (owner, 2026-10-15), the patient and their POA included: "care team should
+  // be able to leave the patient off if needed".
   care_team: {
     id: 'care_team', label: 'Care Team',
     participants: [ROLE.CLIENT, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
@@ -179,9 +191,9 @@ const CHANNELS = Object.freeze({
     requiresAssignedClinician: true,
     blurb: 'You and your care team. Send questions and documents here. To raise a concern, use Clinical Escalation. Not for emergencies: call 911.',
     blurbByRole: {
-      [ROLE.CLINICAL]: "The patient, their POA if they have one, and whichever of the patient's care team you choose. Secure messages with attachments.",
-      [ROLE.CASE_MANAGER]: "The patient, their POA if they have one, and whichever of the patient's whole care team you choose. Secure messages with attachments.",
-      [ROLE.CAREGIVER]: "The patient, their POA if they have one, and whichever of the patient's care team you choose.",
+      [ROLE.CLINICAL]: "Whoever you choose: the patient, their POA, and the patient's care team. Secure messages with attachments.",
+      [ROLE.CASE_MANAGER]: "Whoever you choose: the patient, their POA, and the patient's whole care team. Secure messages with attachments.",
+      [ROLE.CAREGIVER]: "Whoever you choose: the patient, their POA, and the patient's care team.",
       [ROLE.ADMIN]: 'The patient and their care team.'
     }
   },
@@ -268,9 +280,14 @@ const MATRIX_ROWS = Object.freeze([
 // it. ADMIN is the unrestricted one; the lab-era `isManager` flag has no GFC
 // role of its own and collapses here, which is what "admin / manager" means in
 // the owner's instruction.
-const STAFF_ROLES = Object.freeze([ROLE.ADMIN, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER]);
+const STAFF_ROLES = Object.freeze([ROLE.ADMIN, ROLE.MANAGER, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER]);
 const isStaffRole = (role) => STAFF_ROLES.includes(role);
-const isUnrestricted = (user) => actorRole(user) === ROLE.ADMIN || !!(user && user.isManager);
+// ONLY admin sees, joins and starts every type (owner, 2026-10-15). A manager
+// is the office for Support and reads Admin Broadcasts, and nothing more unless
+// they are on a thread.
+const isUnrestricted = (user) => actorRole(user) === ROLE.ADMIN;
+// The office: admins and managers. Support is the team's line to it.
+const isOffice = (user) => { const r = actorRole(user); return r === ROLE.ADMIN || r === ROLE.MANAGER; };
 
 const channelById = (id) => CHANNELS[String(id || '')] || null;
 
@@ -288,9 +305,15 @@ const effectiveRole = (user, isPoa) => {
 // Every role a person acts as, for checking a channel's lists. A POA is
 // client-equivalent AND still a family member, so they keep the family
 // channels they already had and gain the client ones.
-const rolesFor = (user, isPoa) => {
+// A care coordinator on THIS client's care team also acts as part of the
+// clinical team for that client (owner, 2026-10-15: coordinators make care
+// updates and see clinical escalations), so they hold the case-manager slot's
+// channels there. A manager not on the client's care team holds none of them.
+const rolesFor = (user, isPoa, client) => {
   const role = actorRole(user);
-  return (role === ROLE.FAMILY && isPoa) ? [ROLE.CLIENT, ROLE.FAMILY] : [role];
+  if (role === ROLE.FAMILY && isPoa) return [ROLE.CLIENT, ROLE.FAMILY];
+  if (role === ROLE.MANAGER && client && user && caseManagerIds(client).includes(String(user.id))) return [ROLE.MANAGER, ROLE.CASE_MANAGER];
+  return [role];
 };
 const anyRole = (list, roles) => roles.some(r => list.includes(r));
 
@@ -350,6 +373,28 @@ function careTeamMembers(client, users) {
   return out;
 }
 
+// WHO A SENDER MAY CHOOSE, for a conversation whose sender chooses (owner,
+// 2026-10-15). `null` means this sender does not choose here: the channel's
+// own people are used.
+//   Care Team — anyone on it: the patient, their POA, and the care team.
+//   Support   — only when the OFFICE starts it: the patient, their family,
+//               and the care team.
+// Never the sender. The composer shows this list and the route checks the
+// choice against it, so the two cannot disagree.
+function audienceFor(channelId, { user, client, users, isPoa = false } = {}) {
+  const ch = CHANNELS[channelId];
+  if (!ch || !client) return null;
+  const office = isOffice(user);
+  if (!ch.choosesRecipients && !(ch.officeChoosesRecipients && office)) return null;
+  const list = Array.isArray(users) ? users : [];
+  const active = (u) => u && (u.accountStatus || 'active') !== 'inactive';
+  const family = list.filter(u => active(u) && u.role === 'family' && u.familyOfClientId === client.id);
+  const side = [{ id: client.id, name: client.name || 'Patient', what: 'Patient' }]
+    .concat(family.filter(u => ch.choosesRecipients ? !!u.familyIsPoa : true)
+      .map(u => ({ id: u.id, name: u.name || u.email || 'Family', what: u.familyIsPoa ? 'POA' : 'Family' })));
+  return side.concat(careTeamMembers(client, users)).filter(m => !user || m.id !== user.id);
+}
+
 // Is a caregiver actively assigned to this client? The client↔caregiver channel
 // turns on and off with this, and the brief is explicit that when it is off the
 // channel is DISABLED WITH A REASON, never hidden: a family member who cannot
@@ -381,6 +426,8 @@ function clientInScope(user, client, { caregiverAssigned = false } = {}) {
   if (!user || !client) return false;
   if (isUnrestricted(user)) return true;
   const role = actorRole(user);
+  // The office answers Support about any client.
+  if (role === ROLE.MANAGER) return true;
   // A licensed social worker set up as a clinician account (LMSW/LCSW) can be
   // the client's case manager too (owner, 2026-10-14: Courtney could not see
   // Juanita). Either slot puts the client in scope.
@@ -407,12 +454,16 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 
   // Admin starts anything (owner rule 2026-09-13: "admin / manager should be
   // able to message anyone"). Every other role is held to the matrix.
-  if (!isUnrestricted(user) && !anyRole(channel.initiators, rolesFor(user, isPoa))) {
+  if (!isUnrestricted(user) && !anyRole(channel.initiators, rolesFor(user, isPoa, client))) {
     return {
       available: false, code: 'CHANNEL_NOT_YOURS',
       reason: `${ROLE_LABELS[role]}s do not start ${channel.label} messages.`
     };
   }
+  // SUPPORT NEEDS NO CLIENT for a team member (owner, 2026-10-15: every
+  // caregiver can reach the office, assigned to a client or not). A timesheet
+  // or a schedule question is not about one patient.
+  if (!client && channelId === 'support' && isStaffRole(role)) return { available: true, code: null, reason: null };
   if (!client) {
     return { available: false, code: 'NO_CLIENT', reason: 'This channel is about a specific client, and none is selected.' };
   }
@@ -465,7 +516,7 @@ function channelsFor({ user, client, users, isPoa = false }) {
   const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
     .filter(id => !CHANNELS[id].retired)
-    .filter(id => isUnrestricted(user) || anyRole(CHANNELS[id].initiators, rolesFor(user, isPoa)))
+    .filter(id => isUnrestricted(user) || anyRole(CHANNELS[id].initiators, rolesFor(user, isPoa, client)))
     .map(id => {
       const a = channelAvailability(id, { user, client, users, isPoa });
       return {
@@ -475,9 +526,7 @@ function channelsFor({ user, client, users, isPoa = false }) {
         withPatient: withPatient(id),
         // Who the starter may send a Care Team message to, never including
         // themselves (owner, 2026-10-15).
-        ...(CHANNELS[id].choosesRecipients && client
-          ? { recipients: careTeamMembers(client, users).filter(m => !user || m.id !== user.id) }
-          : {})
+        ...(() => { const r = audienceFor(id, { user, client, users, isPoa }); return r ? { recipients: r } : {}; })()
       };
     });
 }
@@ -531,6 +580,16 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
   if (!channel) return deny('UNKNOWN_CHANNEL', 'That conversation has no readable channel.');
 
   if (role === ROLE.ADMIN) return { visible: true, code: null, reason: null };
+
+  // A manager or care coordinator: every Support thread and every Admin
+  // Broadcast (the office's own channels), and otherwise only what they are on
+  // — a coordinator is put on their patients' clinical threads by the care
+  // team (owner, 2026-10-15).
+  if (role === ROLE.MANAGER) {
+    if (thread.channel === 'support' || thread.channel === 'admin_direct') return { visible: true, code: null, reason: null };
+    if (isParty(thread, user.id)) return { visible: true, code: null, reason: null };
+    return deny('OFFICE_SCOPE', 'Managers see Support and Admin Broadcasts, and anything they are on.');
+  }
 
   if (role === ROLE.CASE_MANAGER) {
     // Owner rule 2026-09-13: "from case manager permission down, would be
@@ -587,6 +646,11 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     if (!clientChannels.includes(thread.channel)) {
       return deny('THREAD_NOT_YOURS', 'That conversation is between staff.');
     }
+    // A message its sender sent to chosen people (a team member's Support
+    // thread, a Care Team message without the patient) is read only by them.
+    if (thread.audience_chosen && !isParty(thread, user.id)) {
+      return deny('NOT_ON_THIS_MESSAGE', 'That conversation is between staff.');
+    }
     return { visible: true, code: null, reason: null };
   }
 
@@ -602,7 +666,7 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     if (!familyChannels.includes(thread.channel)) {
       return deny('FAMILY_SCOPE', 'Family messaging covers the caregiver and the office.');
     }
-    if (!isParty(thread, user.id) && thread.channel !== 'care_update') {
+    if (!isParty(thread, user.id) && (thread.channel !== 'care_update' || thread.audience_chosen)) {
       return deny('THREAD_NOT_YOURS', 'That conversation is not one of yours.');
     }
     return { visible: true, code: null, reason: null };
@@ -622,7 +686,7 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   const channel = channelById(thread.channel);
   if (!channel) return { allowed: false, code: 'UNKNOWN_CHANNEL', reason: 'That conversation has no channel.' };
 
-  if (channel.oneWay && !anyRole(channel.initiators, rolesFor(user, isPoa)) && !isUnrestricted(user)) {
+  if (channel.oneWay && !anyRole(channel.initiators, rolesFor(user, isPoa, client)) && !isUnrestricted(user)) {
     return {
       allowed: false, code: 'CHANNEL_READ_ONLY',
       reason: `A ${channel.label} is an update, not a conversation. Reply through Support and the office will route it.`
@@ -637,7 +701,7 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   // "Admins do not post in Direct" — a conversation they were accountable for
   // and locked out of. The participant list still governs everyone else, which
   // is what keeps family out of a clinical thread.
-  if (!isStaffRole(role) && !anyRole(channel.participants, rolesFor(user, isPoa))) {
+  if (!isStaffRole(role) && !anyRole(channel.participants, rolesFor(user, isPoa, client))) {
     return { allowed: false, code: 'NOT_A_PARTICIPANT', reason: `${ROLE_LABELS[role]}s do not post in ${channel.label}.` };
   }
   if (thread.status === 'closed') {
@@ -761,7 +825,7 @@ module.exports = {
   ROLE, ROLE_LABELS, actorRole,
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
-  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, careTeamMembers, hasActiveCaregiver,
+  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, careTeamMembers, audienceFor, isOffice, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor, withPatient,
   isParty, ownClientId, threadVisibility, canPostToThread, canDeleteThread,
   senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,

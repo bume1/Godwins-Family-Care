@@ -94,10 +94,10 @@ test('only the Super Admin sees the Admin Hub, the Service Portal and the Client
   }
 });
 
-test('a coordinator sees Clinical, Private Home Care, Enrollment and Billing; a manager sees Clinical only when granted', () => {
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing'],
+test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing', 'messages'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
@@ -280,8 +280,8 @@ test('the user form has no lab-era checkboxes and no role list of its own', () =
   assert.ok(!/<option value="(admin|user|manager|coordinator|caseManager|vendor|client|family)">/.test(form), 'types are served, not listed');
 });
 
-test('a manager or coordinator messages as the office rather than having no messaging role', () => {
-  assert.equal(messaging.actorRole({ role: 'user', isManager: true }), messaging.ROLE.ADMIN);
-  assert.equal(messaging.actorRole({ ...at.fieldsFor('coordinator') }), messaging.ROLE.ADMIN);
+test('a manager or coordinator messages as the office (not as admin) rather than having no messaging role', () => {
+  assert.equal(messaging.actorRole({ role: 'user', isManager: true }), messaging.ROLE.MANAGER);
+  assert.equal(messaging.actorRole({ ...at.fieldsFor('coordinator') }), messaging.ROLE.MANAGER);
   assert.equal(messaging.actorRole({ ...at.fieldsFor('lmsw') }), messaging.ROLE.CASE_MANAGER);
 });

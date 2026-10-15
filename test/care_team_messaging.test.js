@@ -703,42 +703,99 @@ test('the component draws Edit only from the server answer and marks edited mess
 
 test('2026-10-15: the matrix as stated — who is on each conversation and who starts it', () => {
   const ch = (id) => msg.channelById(id);
-  assert.deepEqual([...ch('direct_care').participants].sort(), ['admin', 'client', 'vendor'], 'Direct: client, caregiver, admin');
+  assert.deepEqual([...ch('direct_care').participants].sort(), ['client', 'vendor'], 'Direct: client and caregiver; admin sees it but is not on it');
   assert.deepEqual([...ch('direct_care').initiators].sort(), ['admin', 'client', 'vendor']);
-  assert.deepEqual([...ch('support').participants].sort(), ['admin', 'client', 'family']);
-  assert.deepEqual([...ch('support').initiators].sort(), ['admin', 'caseManager', 'client', 'clinical', 'family', 'vendor'], 'any team member starts Support');
+  assert.deepEqual([...ch('support').participants].sort(), ['admin', 'client', 'family', 'manager']);
+  assert.deepEqual([...ch('support').initiators].sort(), ['admin', 'caseManager', 'client', 'clinical', 'family', 'manager', 'vendor'], 'any team member starts Support, and the office back');
   assert.ok(ch('clinical_escalation').participants.includes('caseManager'), 'the whole clinical team is on a clinical escalation');
-  assert.deepEqual([...ch('care_update').initiators].sort(), ['caseManager', 'clinical'], 'case managers and coordinators make care updates');
+  assert.deepEqual([...ch('care_update').initiators].sort(), ['caseManager', 'clinical'], 'case managers (and coordinators on the care team) make care updates');
   assert.ok(ch('care_team').participants.includes('vendor') && ch('care_team').initiators.includes('vendor'), 'caregivers are on the care team');
   assert.deepEqual(ch('clinical_oversight').initiators, ['clinical'], 'clinical oversight is clinician-only');
   assert.equal(ch('operations').retired, true);
   assert.equal(ch('care_coordination').retired, true);
 });
 
-test('2026-10-15: Direct puts the office on the thread', async () => {
+test('2026-10-15: only admin sees every type; a manager sees Support, Admin Broadcasts and what they are on', () => {
+  const users = USERS();
+  const client = users.find(u => u.id === 'client-1');
+  const mgr = { id: 'mgr-1', name: 'Mona Manager', role: 'user', isManager: true, clinicalRole: 'readOnly' };
+  const sees = (u, channel, party = []) => msg.threadVisibility(u, { id: 't', channel, client_id: 'client-1', participant_ids: party }, { client }).visible;
+  for (const ch of ['support', 'admin_direct']) assert.equal(sees(mgr, ch), true, `a manager sees ${ch}`);
+  for (const ch of ['direct_care', 'clinical_escalation', 'care_team', 'care_update', 'behavioral_escalation', 'clinical_oversight', 'family_portal']) {
+    assert.equal(sees(mgr, ch), false, `a manager does not see ${ch}`);
+    assert.equal(sees(users.find(u => u.id === 'admin-1'), ch), true, `admin sees ${ch}`);
+  }
+  assert.equal(sees(mgr, 'clinical_escalation', ['mgr-1']), true, 'a coordinator put on a thread by the care team reads it');
+  assert.deepEqual(msg.channelsFor({ user: mgr, client, users }).map(c => c.id), ['support'], 'a manager starts Support only');
+  // A care coordinator on THIS patient's care team holds the clinical team's channels there.
+  const cc = { id: 'cc-1', name: 'Cora', role: 'user', isManager: true, clinicalRole: 'coordinator' };
+  const withCc = { ...client, careTeam: { ...client.careTeam, careCoordinators: ['cc-1'] } };
+  const ccIds = msg.channelsFor({ user: cc, client: withCc, users }).map(c => c.id).sort();
+  assert.deepEqual(ccIds, ['behavioral_escalation', 'care_team', 'care_update', 'support']);
+  assert.deepEqual(msg.channelsFor({ user: cc, client, users }).map(c => c.id), ['support'], 'not on the care team, only Support');
+});
+
+test('2026-10-15: admin sees Direct threads but is not on them and is not emailed', async () => {
   const h = await boot();
   try {
     const r = await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'direct_care', clientId: 'client-1', body: 'See you Tuesday' } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
-    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'cg-1', 'client-1']);
+    const t = rows(h, 'message_threads')[0];
+    assert.deepEqual([...t.participant_ids].sort(), ['cg-1', 'client-1']);
+    assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'admin sees it');
+    await h.call('admin-1', 'POST', `/api/messaging/threads/${t.id}/messages`, { json: { body: 'Office here' } });
+    h.notices.length = 0;
+    await h.call('cg-1', 'POST', `/api/messaging/threads/${t.id}/messages`, { json: { body: 'Thanks' } });
+    assert.ok(!h.notices.some(n => n.email === 'admin@test.local'), 'admin is not emailed about Direct, even after joining');
+    assert.ok(h.notices.some(n => n.email === 'c1@test.local'), 'the client is');
   } finally { h.close(); }
 });
 
-test('2026-10-15: a caregiver starts Support (Operations is gone) and the client side is on it', async () => {
+test('2026-10-15: a team member\'s Support goes to the office only (Operations is gone)', async () => {
   const h = await boot();
   try {
+    const users = h.store.get('users');
+    users.push({ id: 'mgr-1', name: 'Mona Manager', email: 'mgr@test.local', role: 'user', isManager: true, clinicalRole: 'readOnly' });
+    h.store.set('users', users);
     const ops = await h.call('cg-1', 'POST', '/api/messaging/threads', { json: { channel: 'operations', clientId: 'client-1', body: 'timesheet' } });
     assert.equal(ops.status, 403);
     assert.equal(ops.data.code, 'CHANNEL_RETIRED');
     const r = await h.call('cg-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'Running 10 minutes late' } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
-    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'cg-1', 'client-1', 'fam-1', 'poa-1']);
-    const read = await h.call('cg-1', 'GET', `/api/messaging/threads/${rows(h, 'message_threads')[0].id}`);
-    assert.equal(read.status, 200, 'the caregiver reads the thread they started');
-    for (const who of ['fnp-1', 'cm-1']) {
-      const s = await h.call(who, 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'For the office' } });
-      assert.equal(s.status, 200, `${who} starts Support`);
-    }
+    const t = rows(h, 'message_threads')[0];
+    assert.deepEqual([...t.participant_ids].sort(), ['admin-1', 'cg-1', 'mgr-1'], 'the caregiver and the office, never the client or family');
+    for (const who of ['cg-1', 'admin-1', 'mgr-1']) assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 200, `${who} reads it`);
+    for (const who of ['client-1', 'fam-1', 'poa-1', 'fnp-1', 'cm-1']) assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 403, `${who} does not`);
+    const emailed = h.notices.filter(n => n.type === 'message_received').map(n => n.email).sort();
+    assert.deepEqual(emailed, ['admin@test.local', 'mgr@test.local'], 'Support emails the office');
+  } finally { h.close(); }
+});
+
+test('2026-10-15: the office starts Support to whoever it chooses', async () => {
+  const h = await boot();
+  try {
+    const users = h.store.get('users');
+    users.push({ id: 'mgr-1', name: 'Mona Manager', email: 'mgr@test.local', role: 'user', isManager: true, clinicalRole: 'readOnly' });
+    h.store.set('users', users);
+    const ch = (await h.call('mgr-1', 'GET', '/api/messaging/channels?clientId=client-1')).data.channels.find(c => c.id === 'support');
+    assert.deepEqual(ch.recipients.map(m => m.id), ['client-1', 'fam-1', 'poa-1', 'fnp-1', 'cm-1', 'cg-1'], 'the patient side and the care team');
+    const r = await h.call('mgr-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'Your new schedule', recipientIds: ['cg-1'] } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const t = rows(h, 'message_threads')[0];
+    assert.deepEqual([...t.participant_ids].sort(), ['admin-1', 'cg-1', 'mgr-1']);
+    assert.equal((await h.call('client-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 403, 'the client was not chosen');
+    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200);
+  } finally { h.close(); }
+});
+
+test('2026-10-15: a client\'s Support still reaches the client side and the office', async () => {
+  const h = await boot();
+  try {
+    const users = h.store.get('users');
+    users.push({ id: 'mgr-1', name: 'Mona Manager', email: 'mgr@test.local', role: 'user', isManager: true });
+    h.store.set('users', users);
+    await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'Billing question' } });
+    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'client-1', 'fam-1', 'mgr-1', 'poa-1']);
   } finally { h.close(); }
 });
 
@@ -753,11 +810,15 @@ test('2026-10-15: a clinical escalation reaches the whole clinical team, coordin
     h.store.set('users', users);
     const r = await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'clinical_escalation', clientId: 'client-1', body: 'New dizziness' } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
-    const ids = rows(h, 'message_threads')[0].participant_ids;
-    for (const id of ['client-1', 'fnp-1', 'cm-1', 'cm-2', 'cc-1']) assert.ok(ids.includes(id), `${id} is on the escalation`);
-    assert.ok(!ids.includes('cg-1'), 'a caregiver is not');
+    const t = rows(h, 'message_threads')[0];
+    for (const id of ['client-1', 'fnp-1', 'cm-1', 'cm-2', 'cc-1']) assert.ok(t.participant_ids.includes(id), `${id} is on the escalation`);
+    assert.ok(!t.participant_ids.includes('cg-1'), 'a caregiver is not');
+    assert.equal((await h.call('cc-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'the coordinator reads it');
     const emailed = h.notices.filter(n => n.type === 'message_received').map(n => n.email);
     for (const e of ['fnp@test.local', 'cm@test.local', 'cm2@test.local', 'cc@test.local']) assert.ok(emailed.includes(e), `${e} is told`);
+    // A coordinator on the care team makes a Care Update.
+    const cu = await h.call('cc-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Home health starts Monday' } });
+    assert.equal(cu.status, 200, JSON.stringify(cu.data));
   } finally { h.close(); }
 });
 
@@ -771,19 +832,20 @@ test('2026-10-15: a case manager makes a Care Update', async () => {
   } finally { h.close(); }
 });
 
-test('2026-10-15: Care Team offers the care team to choose from, caregivers included, never the sender', () => {
+test('2026-10-15: Care Team offers the patient, their POA and the care team to choose from, never the sender', () => {
   const users = USERS();
   const client = users.find(u => u.id === 'client-1');
   const fnp = users.find(u => u.id === 'fnp-1');
   const ct = msg.channelsFor({ user: fnp, client, users }).find(c => c.id === 'care_team');
-  assert.deepEqual(ct.recipients.map(m => [m.id, m.what]), [['cm-1', 'Case manager'], ['cg-1', 'Caregiver']]);
+  assert.deepEqual(ct.recipients.map(m => [m.id, m.what]), [['client-1', 'Patient'], ['poa-1', 'POA'], ['cm-1', 'Case manager'], ['cg-1', 'Caregiver']]);
+  assert.ok(!ct.recipients.some(m => m.id === 'fam-1'), 'non-POA family is never on a Care Team message');
   const cg = users.find(u => u.id === 'cg-1');
   const forCg = msg.channelsFor({ user: cg, client, users }).find(c => c.id === 'care_team');
   assert.ok(forCg && forCg.available, 'a caregiver starts a Care Team message');
-  assert.deepEqual(forCg.recipients.map(m => m.id), ['fnp-1', 'cm-1']);
+  assert.deepEqual(forCg.recipients.map(m => m.id), ['client-1', 'poa-1', 'fnp-1', 'cm-1']);
 });
 
-test('2026-10-15: the sender chooses who on the care team gets it; anyone left off cannot read it', async () => {
+test('2026-10-15: the sender chooses who gets a Care Team message, the patient included; anyone left off cannot read it', async () => {
   const h = await boot();
   try {
     const bad = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'x', recipientIds: ['fnp-2'] } });
@@ -797,25 +859,66 @@ test('2026-10-15: the sender chooses who on the care team gets it; anyone left o
     const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Please check her feet today', recipientIds: ['cg-1'] } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
     const t = rows(h, 'message_threads')[0];
-    assert.deepEqual([...t.participant_ids].sort(), ['cg-1', 'client-1', 'fnp-1', 'poa-1'], 'the sender, the chosen caregiver, the patient and their POA');
+    assert.deepEqual([...t.participant_ids].sort(), ['cg-1', 'fnp-1'], 'the patient left off, as the sender chose');
     assert.equal(t.audience_chosen, true);
     assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'the chosen caregiver reads it');
-    const cm = await h.call('cm-1', 'GET', `/api/messaging/threads/${t.id}`);
-    assert.equal(cm.status, 403, 'the case manager left off does not, though they are on the care team');
-    assert.equal(cm.data.code, 'NOT_ON_THIS_MESSAGE');
+    for (const who of ['cm-1', 'client-1', 'poa-1']) {
+      const x = await h.call(who, 'GET', `/api/messaging/threads/${t.id}`);
+      assert.equal(x.status, 403, `${who}, left off, does not`);
+    }
     assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'admin sees every conversation');
-    assert.ok(!h.notices.some(n => n.email === 'cm@test.local'), 'and the case manager is not emailed');
+    for (const e of ['cm@test.local', 'c1@test.local', 'poa@test.local']) assert.ok(!h.notices.some(n => n.email === e), `${e} is not emailed`);
 
-    // Choosing everybody is the same as the whole care team: no restriction.
-    await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'All hands', recipientIds: ['cg-1', 'cm-1'] } });
+    // Choosing everybody is the same as the whole list: no restriction.
+    await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'All hands', recipientIds: ['client-1', 'poa-1', 'cg-1', 'cm-1'] } });
     assert.equal(rows(h, 'message_threads')[1].audience_chosen, false);
   } finally { h.close(); }
 });
 
-test('2026-10-15: the composer shows the served care team as a checklist and sends the choice', () => {
+test('2026-10-15: the composer shows the served list as a checklist and sends the choice', () => {
   const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
-  assert.match(comp, /data-recipient="' \+ esc\(m\.id\) \+ '"/, 'one checkbox per served care team member');
+  assert.match(comp, /data-recipient="' \+ esc\(m\.id\) \+ '"/, 'one checkbox per served person');
   assert.match(comp, /recipientIds: list && list\.length \? JSON\.stringify\(picked\) : undefined/, 'the choice is sent with the message');
-  assert.match(comp, /Choose at least one person from the care team\./, 'an empty choice is stopped before sending');
-  assert.ok(!/careTeam\.|assignedFNPs/.test(comp), 'the page builds no care team of its own; the list is the server\'s');
+  assert.match(comp, /Choose at least one person to send this to\./, 'an empty choice is stopped before sending');
+  assert.ok(!/careTeam\.|assignedFNPs/.test(comp), 'the page builds no list of its own; it is the server\'s');
+});
+
+test('2026-10-15: every caregiver reaches the office through Support, assigned to a client or not', async () => {
+  const h = await boot();
+  try {
+    const users = h.store.get('users');
+    users.push({ id: 'cg-9', name: 'New Caregiver', email: 'cg9@test.local', role: 'vendor', licenseLevel: 'pca' });   // no client yet
+    users.push({ id: 'mgr-1', name: 'Mona Manager', email: 'mgr@test.local', role: 'user', isManager: true });
+    h.store.set('users', users);
+    const ch = (await h.call('cg-9', 'GET', '/api/messaging/channels')).data.channels.find(c => c.id === 'support');
+    assert.ok(ch && ch.available, 'Support is offered with no client chosen');
+    const r = await h.call('cg-9', 'POST', '/api/messaging/threads', { json: { channel: 'support', body: 'Where do I send my timesheet?' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const t = rows(h, 'message_threads')[0];
+    assert.equal(t.client_id, null, 'about no patient');
+    assert.deepEqual([...t.participant_ids].sort(), ['admin-1', 'cg-9', 'mgr-1']);
+    for (const who of ['cg-9', 'admin-1', 'mgr-1']) assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 200, `${who} reads it`);
+    for (const who of ['cg-1', 'fnp-1', 'cm-1', 'client-1']) assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 403, `${who} does not`);
+    const back = await h.call('mgr-1', 'POST', `/api/messaging/threads/${t.id}/messages`, { json: { body: 'Upload it in the app under Documents.' } });
+    assert.equal(back.status, 200, 'the office answers');
+    // A patient-facing channel still needs a client.
+    const direct = await h.call('cg-9', 'POST', '/api/messaging/threads', { json: { channel: 'behavioral_escalation', body: 'x' } });
+    assert.equal(direct.status, 403);
+    assert.equal(direct.data.code, 'NO_CLIENT');
+  } finally { h.close(); }
+});
+
+test('2026-10-15: family and a POA reach the office through Support too', async () => {
+  const h = await boot();
+  try {
+    for (const who of ['fam-1', 'poa-1']) {
+      const ch = (await h.call(who, 'GET', '/api/messaging/channels')).data.channels.find(c => c.id === 'support');
+      assert.ok(ch && ch.available, `${who} is offered Support`);
+      const r = await h.call(who, 'POST', '/api/messaging/threads', { json: { channel: 'support', body: `From ${who}` } });
+      assert.equal(r.status, 200, JSON.stringify(r.data));
+      const t = rows(h, 'message_threads').find(x => x.started_by === who);
+      assert.ok(t.participant_ids.includes('admin-1') && t.participant_ids.includes(who), `${who} and the office are on it`);
+      assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200);
+    }
+  } finally { h.close(); }
 });

@@ -139,6 +139,9 @@ module.exports = function createMessagingRoutes(deps) {
     if (wants.includes(msg.ROLE.ADMIN)) {
       users.filter(u => u.role === ROLES.ADMIN).forEach(u => add(u.id));
     }
+    if (wants.includes(msg.ROLE.MANAGER)) {
+      users.filter(u => u.isManager === true && (u.accountStatus || 'active') !== 'inactive').forEach(u => add(u.id));
+    }
     // A POA is client-equivalent, so on a channel that names the client they are
     // on it too — otherwise they could read it and never be told it existed.
     if (channel && channel.includesPoa && client) poaIdsFor(users, client).forEach(add);
@@ -256,7 +259,7 @@ module.exports = function createMessagingRoutes(deps) {
     try {
       for (const f of list) {
         const name = nameForMime(cleanName(f.originalname), f.__mime);
-        const up = await googledrive.uploadMessageAttachmentFile(client.name || 'Client', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
+        const up = await googledrive.uploadMessageAttachmentFile((client && client.name) || 'Office', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
         stored.push({ id: uuidv4(), name, mime: f.__mime, size: f.buffer.length, drive_file_id: up.fileId });
       }
     } catch (e) {
@@ -516,23 +519,33 @@ module.exports = function createMessagingRoutes(deps) {
         return res.status(403).json({ error: availability.reason, code: availability.code });
       }
 
-      // CARE TEAM: the starter chooses who on the care team it goes to (owner,
-      // 2026-10-15). Checked against the same list the composer shows, before
-      // anything is stored. Sent without a choice (an older page), it goes to
-      // the whole care team, as it did before.
+      // WHO IT GOES TO (owner, 2026-10-15). On Care Team the sender chooses
+      // from the patient, their POA and the care team; on Support the OFFICE
+      // chooses from the patient side and the care team. The list is the one
+      // the composer showed (msg.audienceFor); the choice is checked against it
+      // before anything is stored. Sent without a choice (an older page), it
+      // goes to everyone on the list.
       let chosen = null;
-      if (channel.choosesRecipients && body.recipientIds !== undefined && body.recipientIds !== '') {
+      const audience = msg.audienceFor(channelId, { user: req.user, client, users, isPoa });
+      if (audience) {
         let ids = body.recipientIds;
+        if (ids === undefined || ids === '') ids = audience.map(m => m.id);
         if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (e) { ids = null; } }
         if (!Array.isArray(ids)) return res.status(400).json({ error: 'recipientIds must be a list.', code: 'RECIPIENTS_INVALID' });
-        const team = msg.careTeamMembers(client, users).filter(m => m.id !== req.user.id);
-        const allowed = new Set(team.map(m => String(m.id)));
+        const allowed = new Set(audience.map(m => String(m.id)));
         const wanted = [...new Set(ids.map(String))];
-        const stray = wanted.filter(id => !allowed.has(id));
-        if (stray.length) return res.status(400).json({ error: 'Only people on this patient\'s care team can be chosen.', code: 'RECIPIENT_NOT_ON_CARE_TEAM' });
-        if (!wanted.length) return res.status(400).json({ error: 'Choose at least one person from the care team.', code: 'RECIPIENTS_REQUIRED' });
-        chosen = { ids: wanted, partial: wanted.length < team.length };
+        if (wanted.some(id => !allowed.has(id))) {
+          return res.status(400).json({ error: 'Only people on this patient\'s care team, the patient and their family can be chosen.', code: 'RECIPIENT_NOT_ON_CARE_TEAM' });
+        }
+        if (!wanted.length) return res.status(400).json({ error: 'Choose at least one person to send this to.', code: 'RECIPIENTS_REQUIRED' });
+        chosen = { ids: wanted, partial: channelId === 'support' || wanted.length < audience.length };
       }
+      // A team member's Support message goes to the office ONLY: never the
+      // client or their family (owner, 2026-10-15).
+      const staffToOffice = channelId === 'support' && !chosen &&
+        ![msg.ROLE.CLIENT, msg.ROLE.FAMILY].includes(msg.actorRole(req.user));
+      const officeIds = users.filter(u => u && (u.accountStatus || 'active') !== 'inactive' &&
+        (u.role === ROLES.ADMIN || u.isManager === true)).map(u => u.id);
 
       const files = req.files || [];
       const { valid, errors, clean } = msg.validateMessage(body, { attachmentCount: files.length });
@@ -551,15 +564,18 @@ module.exports = function createMessagingRoutes(deps) {
       const thread = {
         id: threadId,
         channel: channelId,
-        client_id: client.id,
-        client_name: client.name,
+        client_id: client ? client.id : null,          // null: a team member's Support with no patient
+        client_name: client ? client.name : null,
         subject: String(body.subject || channel.label).trim().slice(0, 140),
         participant_ids: chosen
-          ? [...new Set([req.user.id, client.id, ...poaIdsFor(users, client), ...chosen.ids])]
-          : await participantsFor(channelId, { user: req.user, client }),
-        // True when the starter left someone on the care team off: then only
-        // the people on it read it (messagingRepository.threadVisibility).
-        audience_chosen: !!(chosen && chosen.partial),
+          ? [...new Set([req.user.id, ...chosen.ids, ...(channelId === 'support' ? officeIds : [])])]
+          : staffToOffice
+            ? [...new Set([req.user.id, ...officeIds])]
+            : await participantsFor(channelId, { user: req.user, client }),
+        // True when the sender's choice decides who reads it: then only the
+        // people on it do, whatever their scope (threadVisibility). Admin still
+        // sees everything.
+        audience_chosen: !!((chosen && chosen.partial) || staffToOffice),
         started_by: req.user.id,
         started_by_name: sender.displayName,
         started_by_role: sender.fromRole,
@@ -583,7 +599,7 @@ module.exports = function createMessagingRoutes(deps) {
       const message = {
         id: uuidv4(),
         thread_id: threadId,
-        client_id: client.id,
+        client_id: client ? client.id : null,
         channel: channelId,
         from_user_id: sender.fromUserId,
         from_role: sender.fromRole,
@@ -614,7 +630,7 @@ module.exports = function createMessagingRoutes(deps) {
       written = true;
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_started', 'message_thread', threadId,
-        { channel: channelId, clientId: client.id, role: sender.fromRole, actingFor: sender.actingFor });
+        { channel: channelId, clientId: client ? client.id : null, role: sender.fromRole, actingFor: sender.actingFor });
 
       await notifyThread(thread, message, req.user.id);
 
@@ -846,7 +862,7 @@ module.exports = function createMessagingRoutes(deps) {
     const recipients = new Set(thread.participant_ids || []);
     // A POA designated AFTER the thread began, or a clinician's own POA
     // recipients, are read fresh: the participant list on the row is a snapshot.
-    if (channel && channel.includesPoa) {
+    if (channel && channel.includesPoa && !thread.audience_chosen) {
       const client = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
       if (client) poaIdsFor(users, client).forEach(id => recipients.add(id));
     }
@@ -854,6 +870,8 @@ module.exports = function createMessagingRoutes(deps) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
       if (!u || !u.email) continue;
+      // Admin sees Direct threads but is not emailed about them (owner, 2026-10-15).
+      if (thread.channel === 'direct_care' && u.role === ROLES.ADMIN) continue;
       // A family member who is no longer the client's designated POA was on the
       // row when it began; the gate that hides the thread from them must also
       // stop the email.

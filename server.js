@@ -27787,6 +27787,13 @@ app.get('/scheduling', (req, res) => {
   res.sendFile(__dirname + '/public/scheduling.html');
 });
 
+// Messages for managers and care coordinators (owner, 2026-10-15): the Admin
+// Hub's inbox is the Super Admin's, so the office reads Support and Admin
+// Broadcasts here. Shell is public; /api/messaging decides what comes back.
+app.get('/messages', (req, res) => {
+  res.sendFile(__dirname + '/public/messages.html');
+});
+
 // The Billing module (owner, 2026-10-15): claims waiting to be submitted and
 // patient statements in one place, for the Super Admin, managers and care
 // coordinators. Shell is public; every route it calls is requireBilling.

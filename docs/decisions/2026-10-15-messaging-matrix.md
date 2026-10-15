@@ -40,3 +40,20 @@ Admin sees, joins and starts every type. A manager and a care coordinator messag
 1. **Admin is on every Direct and Support thread, so every admin is emailed on every message there.** With one admin that is you. Say if Direct should only be visible to admin rather than emailing.
 2. **A caregiver's Support message reaches the client and their family**, because Support's people are client, family and admin. If a caregiver needs a private line to the office about a client, that is a different conversation type.
 3. **Should a Care Team sender be able to leave the patient off?** Today the patient and POA are always on it.
+
+## Revised the same day (owner, 2026-10-15)
+
+"Support from admin... any team member to admin and managers and then vice versa. Only admin can see every type. Managers can only see the support messages really and admin broadcasts. Admin should see direct threads without being emailed, support can receive email. Care team should be able to leave the patient off if needed." Then: "client and family / POA can also send messages to the office via support. Ensure this is the case across the board for caregivers."
+
+- **Managers are their own messaging role (`ROLE.MANAGER`), not admin.** `isUnrestricted` is admin only. A manager sees every Support thread and every Admin Broadcast, and otherwise only threads they are on. They start Support only. A care coordinator on a patient's care team also holds the clinical team's channels for that patient (`rolesFor` adds the case-manager slot), so they still see clinical escalations and make care updates there.
+- **Support is the line to the office (admins and managers).**
+  - A client, family member or POA starts it: the client side and the office are on it.
+  - A team member starts it: **that team member and the office only**, never the client or family. Marked `audience_chosen`, so clinicians and case managers in scope do not see it either.
+  - The office starts it: they choose who from the patient, their family and the care team (`audienceFor`).
+  - **No client needed for a team member** (`client_id: null`), so a caregiver with no assigned client reaches the office. Every patient-facing channel still needs a client (`NO_CLIENT`).
+- **Direct:** admin is no longer a participant. Admin sees every Direct thread and can reply, but is never emailed about one, even after joining.
+- **Care Team:** the patient and POA are now choices like everyone else and can be left off. A message without them is unreadable to them (`NOT_ON_THIS_MESSAGE`), and a POA is not added fresh to a chosen-audience thread.
+- **Messages page for managers and coordinators** (`/messages`, hub tile, `appLinks.messagesFor`), since the Admin Hub inbox is admin-only.
+- **Verified:** 9 more route tests, 9 of 9 deliberate breaks caught, the same-day tests rewritten to the revised rules; full suite 2525, 0 failing; `verify_messaging.js` 95/95; `verify_account_types.js` 59/59; the Messages page rendered in Chromium as a manager.
+
+Open: nothing new. The earlier items about admin emails, caregiver Support and leaving the patient off Care Team are answered above.

@@ -201,15 +201,18 @@ function hubTilesFor(u) {
   // because both cover home care as well as medical visits.
   const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
   const billingTile = { id: 'billing', name: 'Billing', path: '/billing' };
+  // Managers and coordinators read Support and Admin Broadcasts here; the
+  // Super Admin's inbox is in the Admin Hub.
+  const messages = { id: 'messages', name: 'Messages', path: '/messages' };
   if (type === TYPES.ADMIN) {
     tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile);
+    tiles.push(clinical, phc, enrollment, billingTile, messages);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile);
+    tiles.push(phc, enrollment, billingTile, messages);
   }
   return tiles;
 }
