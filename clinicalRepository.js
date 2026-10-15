@@ -30,7 +30,9 @@ const sanitizeStringArray = (v, maxLen = 300, maxItems = 40) =>
 const buildCarePlanVersion = (existingPlan, input, author, options = {}) => {
   if (!input || typeof input !== 'object') throw new Error('Care plan payload is required');
   const who = { name: (author && author.name) || null, id: (author && author.id) || null, at: (author && author.at) || new Date().toISOString() };
-  const blocks = carePlanFormat.buildStructuredBlocks(existingPlan, input, who);
+  // A service line decides which sections the plan has; with none, all.
+  const sections = options.serviceLine ? carePlanFormat.sectionsFor(options.serviceLine) : null;
+  const blocks = carePlanFormat.buildStructuredBlocks(existingPlan, input, who, sections || undefined);
   // The plain lists every older reader uses, derived from the structured items.
   const problems = blocks.problemItems.map(p => p.text);
   const goals = blocks.goalItems.map(g => g.statement);
@@ -45,7 +47,7 @@ const buildCarePlanVersion = (existingPlan, input, author, options = {}) => {
     version,
     problems,
     goals,
-    eachVisit: sanitizeStringArray(input.eachVisit ?? input.tasks),
+    eachVisit: sections && !sections.eachVisit ? [] : sanitizeStringArray(input.eachVisit ?? input.tasks),
     visitFrequency: String(input.visitFrequency || '').slice(0, 120),
     visitDays: sanitizeStringArray(input.visitDays, 12, 7),
     visitTimes: String(input.visitTimes || '').slice(0, 120),
@@ -68,7 +70,7 @@ const buildCarePlanVersion = (existingPlan, input, author, options = {}) => {
     const labels = missing.map(k => carePlanFormat.REQUIREMENT_LABELS[k]);
     return { error: `This care plan still needs ${labels.join('; ')}.`, code: 'CARE_PLAN_INCOMPLETE', missing, missingLabels: labels };
   }
-  return { plan, warnings: carePlanFormat.scopeWarnings(plan) };
+  return { plan, warnings: carePlanFormat.scopeWarnings(plan, options.caregivers || []) };
 };
 
 // ---- Clinical enrollment sequence (v2 §6) ----

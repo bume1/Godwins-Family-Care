@@ -64,9 +64,31 @@ const REVIEW_CADENCE_LABELS = Object.freeze({
 // comprehensive care plan elements). BOTH is the union.
 const REQUIREMENTS = Object.freeze({
   PHC: Object.freeze(['problems', 'goals', 'eachVisit', 'visitFrequency', 'escalation', 'review']),
-  IHPC: Object.freeze(['problems', 'goals', 'problemDetail', 'goalMeasures', 'interventions', 'medicationManagement', 'escalation', 'review']),
-  BOTH: Object.freeze(['problems', 'goals', 'problemDetail', 'goalMeasures', 'interventions', 'medicationManagement', 'eachVisit', 'visitFrequency', 'escalation', 'review'])
+  // A medical patient's plan requires every section it has (owner review,
+  // 2026-10-14: "a medical patient's plan would require all eight blocks").
+  // IHPC-only has no caregiver task list, so its schedule block is the visit
+  // frequency alone.
+  IHPC: Object.freeze(['problems', 'goals', 'problemDetail', 'goalMeasures', 'interventions', 'medicationManagement', 'outsideCare', 'visitFrequency', 'escalation', 'review']),
+  BOTH: Object.freeze(['problems', 'goals', 'problemDetail', 'goalMeasures', 'interventions', 'medicationManagement', 'outsideCare', 'eachVisit', 'visitFrequency', 'escalation', 'review'])
 });
+// Which sections a plan HAS, by service line (owner, 2026-10-14: the format
+// changes with the service). A home care plan is a service plan: problems and
+// goals in plain words, the caregiver's tasks and schedule, when to call, and
+// review. A clinical patient's adds prognosis, measured goals, interventions
+// and medication management, and drops the caregiver task list. BOTH has
+// everything. The form, the view and the save all read this one table; a
+// section a line does not have is not stored for it.
+const ALL_SECTIONS = Object.freeze({
+  problems: true, problemDetail: true, goals: true, goalMeasures: true, interventions: true,
+  medicationManagement: true, outsideCare: true, eachVisit: true, schedule: true, escalation: true, review: true
+});
+const SECTIONS_BY_LINE = Object.freeze({
+  PHC: Object.freeze({ ...ALL_SECTIONS, problemDetail: false, goalMeasures: false, interventions: false, medicationManagement: false }),
+  IHPC: Object.freeze({ ...ALL_SECTIONS, eachVisit: false }),
+  BOTH: ALL_SECTIONS
+});
+const sectionsFor = (serviceLine) => SECTIONS_BY_LINE[lineKey(serviceLine)] || ALL_SECTIONS;
+
 const REQUIREMENT_LABELS = Object.freeze({
   problems: 'at least one problem',
   goals: 'at least one goal',
@@ -74,6 +96,7 @@ const REQUIREMENT_LABELS = Object.freeze({
   goalMeasures: 'a measure and a target for every goal',
   interventions: 'at least one intervention',
   medicationManagement: 'who manages the medications day to day',
+  outsideCare: 'at least one outside provider or community service',
   eachVisit: 'at least one task for each visit',
   visitFrequency: 'a visit frequency',
   escalation: 'at least one "call GFC when" sign',
@@ -233,6 +256,7 @@ const missingRequirements = (plan, serviceLine) => {
     else if (key === 'goalMeasures') ok = plan.goalItems.every(g => g.measure && g.target);
     else if (key === 'interventions') ok = plan.interventions.length > 0;
     else if (key === 'medicationManagement') ok = !!plan.medicationManagement.managedBy;
+    else if (key === 'outsideCare') ok = !!(plan.outsideCare && (plan.outsideCare.externalTeam.length || plan.outsideCare.communityServices.length));
     else if (key === 'eachVisit') ok = plan.eachVisit.length > 0;
     else if (key === 'visitFrequency') ok = !!plan.visitFrequency;
     else if (key === 'escalation') ok = plan.escalation.callGfcWhen.length > 0;
@@ -246,52 +270,86 @@ const missingRequirements = (plan, serviceLine) => {
 // whether a particular caregiver can do the task depends on their licence and
 // their sign-offs, which the visit log decides per caregiver. Below LPN a
 // caregiver gives medication REMINDERS, and measurements need a sign-off.
-const CAREGIVER_SCOPE_WORDS = [
-  [/\b(administer|give|inject|insulin|injection|fill(ing)? (the )?(pill|med)|pill organi[sz]er|draw up)\b/i,
-    'Below LPN a caregiver gives medication reminders only. Filling organizers or giving medication needs a licensed person.'],
-  [/\b(blood pressure|\bbp\b|vitals?|weigh(t|ing)?|glucose|blood sugar|pulse|oxygen|o2 sat)\b/i,
-    'Measurements only appear on a caregiver’s visit log once they are signed off for that task.'],
-  [/\b(wound|dressing|catheter|trach|suction|ostomy|tube feed)\b/i,
-    'This is a skilled task. A caregiver records it only with a sign-off, and it goes to a clinician for review.']
+// Each rule names the visit-log sign-off (caregiverRepository COMPETENCIES)
+// the task needs. `lpnByLicence` marks tasks an LPN records under their own
+// licence (the visit log's byLicense). When the client has caregivers
+// assigned, the warning names the ones who cannot record the task; with
+// none assigned, it says what whoever is assigned will need.
+const CAREGIVER_SCOPE_RULES = [
+  { re: /\b(fill(ing)? (the )?(pill|med)|pill organi[sz]er|set ?up (the )?(pills|meds))\b/i, competency: null,
+    why: 'Filling a pill organizer is not a caregiver task in the app at any level, and whether an aide may do it is a Georgia scope question for counsel. Below LPN a caregiver gives medication reminders.' },
+  { re: /\b(administer|give (the )?(med|dose|pill)|insulin|injection|inject|draw up)\b/i, competency: 'med_administration', label: 'medication administration' },
+  { re: /\b(blood pressure|bp|vitals?|weigh(t|ing)?|pulse|oxygen sat|o2 sat|temperature)\b/i, competency: 'vital_signs', label: 'vital signs', lpnByLicence: true },
+  { re: /\b(glucose|blood sugar|finger ?stick)\b/i, competency: 'blood_glucose', label: 'blood glucose' },
+  { re: /\b(wound|dressing)\b/i, competency: 'wound_care', label: 'wound care' },
+  { re: /\bcatheter\b/i, competency: 'catheter', label: 'catheter care' },
+  { re: /\btrach/i, competency: 'trach', label: 'tracheostomy care' },
+  { re: /\bsuction/i, competency: 'suctioning', label: 'suctioning' },
+  { re: /\bostomy\b/i, competency: 'ostomy', label: 'ostomy care' },
+  { re: /\b(tube feed|g-?tube|peg)\b/i, competency: 'g_tube', label: 'feeding tube care' }
 ];
-const scopeWarnings = (plan) => {
+const canRecord = (cg, rule) => {
+  if (!rule.competency) return false;
+  if (rule.lpnByLicence && cg.level === 'lpn') return true;
+  return !!(cg.competencies && (cg.competencies.has ? cg.competencies.has(rule.competency) : cg.competencies.includes(rule.competency)));
+};
+// `caregivers`: the client's assigned caregivers as
+// { name, level, competencies } (the route reads them with
+// caregiverRepository.verifiedCompetencies, so an unverified or expired
+// sign-off does not count). Advice only, never a refusal.
+const scopeWarnings = (plan, caregivers = []) => {
   const warnings = [];
   const seen = new Set();
+  const add = (where, text, warning) => {
+    const key = `${where}|${text}|${warning}`;
+    if (!seen.has(key)) { seen.add(key); warnings.push({ where, text, warning }); }
+  };
   const check = (text, where) => {
-    for (const [re, why] of CAREGIVER_SCOPE_WORDS) {
-      if (re.test(text) && !seen.has(`${where}|${why}`)) {
-        seen.add(`${where}|${why}`);
-        warnings.push({ where, text, warning: why });
+    for (const rule of CAREGIVER_SCOPE_RULES) {
+      if (!rule.re.test(text)) continue;
+      if (!rule.competency) { add(where, text, rule.why); continue; }
+      if (!caregivers.length) {
+        add(where, text, `No caregiver is assigned yet. Whoever is assigned needs a verified ${rule.label} sign-off${rule.lpnByLicence ? ' (or to be an LPN)' : ''} to record this on the visit log.`);
+        continue;
+      }
+      const cannot = caregivers.filter(cg => !canRecord(cg, rule));
+      if (cannot.length) {
+        add(where, text, `${cannot.map(c => c.name || 'A caregiver').join(', ')} ${cannot.length === 1 ? 'has' : 'have'} no verified ${rule.label} sign-off, so the visit log will not let them record this. Add the sign-off on their user record or move the task.`);
       }
     }
   };
   for (const t of plan.eachVisit || []) check(t, 'Each visit');
   for (const i of plan.interventions || []) {
-    if (i.responsible === 'gfc_caregiver') check(i.description, 'Intervention');
-    if (i.responsible === 'gfc_caregiver' && (i.type === 'medication' || i.type === 'clinical') && !seen.has(`type|${i.id}`)) {
-      seen.add(`type|${i.id}`);
-      warnings.push({ where: 'Intervention', text: i.description, warning: `A ${INTERVENTION_TYPE_LABELS[i.type].toLowerCase()} intervention is assigned to a caregiver. Check it is within their licence.` });
+    if (i.responsible !== 'gfc_caregiver') continue;
+    check(i.description, 'Intervention');
+    if (i.type === 'medication' || i.type === 'clinical') {
+      add('Intervention', i.description, `A ${INTERVENTION_TYPE_LABELS[i.type].toLowerCase()} intervention is assigned to a caregiver. Below LPN a caregiver gives medication reminders and records only what they are signed off for.`);
     }
   }
   if (plan.medicationManagement && plan.medicationManagement.managedBy === 'caregiver') {
-    warnings.push({ where: 'Medications', text: 'Managed by caregiver', warning: 'A caregiver below LPN can remind, not manage or administer. Say who fills the organizer.' });
+    add('Medications', 'Managed by caregiver', 'A caregiver below LPN can remind, not manage or administer. Say who fills the organizer.');
   }
   return warnings;
 };
 
 // Build the structured blocks of a new version. `previousPlan` supplies goal
 // status to carry forward.
-const buildStructuredBlocks = (previousPlan, input, author) => {
-  const problemItems = normalizeProblems(input);
+// `sections` (from sectionsFor) drops what the client's service line does not
+// have, so a home care plan never stores a prognosis or a medication block a
+// screen did not show. Without it, nothing is dropped.
+const buildStructuredBlocks = (previousPlan, input, author, sections = ALL_SECTIONS) => {
+  const problemItems = normalizeProblems(input)
+    .map(p => (sections.problemDetail ? p : { ...p, prognosis: '', expectedOutcome: '' }));
   const problemIds = new Set(problemItems.map(p => p.id));
   const previousGoals = previousPlan && Array.isArray(previousPlan.goalItems) ? previousPlan.goalItems : [];
-  const goalItems = normalizeGoals(input, problemIds, previousGoals, author);
+  const goalItems = normalizeGoals(input, problemIds, previousGoals, author)
+    .map(g => (sections.goalMeasures ? g : { ...g, measure: '', baseline: '', target: '' }));
   const goalIds = new Set(goalItems.map(g => g.id));
   return {
     problemItems,
     goalItems,
-    interventions: normalizeInterventions(input, goalIds),
-    medicationManagement: normalizeMedicationManagement(input),
+    interventions: sections.interventions ? normalizeInterventions(input, goalIds) : [],
+    medicationManagement: sections.medicationManagement ? normalizeMedicationManagement(input) : { managedBy: null, adherenceConcerns: '', pharmacy: '' },
     outsideCare: normalizeOutsideCare(input),
     escalation: normalizeEscalation(input),
     review: normalizeReview(input)
@@ -472,13 +530,14 @@ const vocabulary = () => ({
   medManagedBy: MED_MANAGED_BY.map(v => ({ value: v, label: MED_MANAGED_BY_LABELS[v] })),
   serviceStatuses: SERVICE_STATUSES.map(v => ({ value: v, label: v[0].toUpperCase() + v.slice(1) })),
   reviewCadences: REVIEW_CADENCES.map(v => ({ value: v, label: REVIEW_CADENCE_LABELS[v] })),
-  requirements: Object.fromEntries(Object.entries(REQUIREMENTS).map(([k, v]) => [k, v.map(key => ({ key, label: REQUIREMENT_LABELS[key] }))]))
+  requirements: Object.fromEntries(Object.entries(REQUIREMENTS).map(([k, v]) => [k, v.map(key => ({ key, label: REQUIREMENT_LABELS[key] }))])),
+  sections: SECTIONS_BY_LINE
 });
 
 module.exports = {
   GOAL_STATUSES, GOAL_STATUS_LABELS, PRIORITIES, RESPONSIBLE, RESPONSIBLE_LABELS, FREQUENCIES, FREQUENCY_LABELS,
   INTERVENTION_TYPES, INTERVENTION_TYPE_LABELS, MED_MANAGED_BY, MED_MANAGED_BY_LABELS, SERVICE_STATUSES,
-  REVIEW_CADENCES, REVIEW_CADENCE_LABELS, REQUIREMENTS, REQUIREMENT_LABELS,
+  REVIEW_CADENCES, REVIEW_CADENCE_LABELS, REQUIREMENTS, REQUIREMENT_LABELS, SECTIONS_BY_LINE, sectionsFor,
   buildStructuredBlocks, missingRequirements, scopeWarnings, structuredView, applyGoalStatus,
   derivedFromClient, vocabulary, patientProjection, caregiverProjection, isPlanActive, patientVisiblePlan
 };

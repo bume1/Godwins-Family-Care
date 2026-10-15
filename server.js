@@ -9549,8 +9549,13 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     if (sig.length > 600 * 1024) return res.status(413).json({ error: 'Signature image is too large' });
 
     const at = new Date().toISOString();
+    // The caregivers assigned to this client, with only the sign-offs that
+    // count today, so the scope advice names who can and cannot record a task.
+    const caregivers = users
+      .filter(u => caregiverRepo.isCaregiver(u) && u.accountStatus !== 'inactive' && caregiverRepo.isAssignedToCaregiver(u, client))
+      .map(u => ({ name: u.name || u.email, level: caregiverRepo.normalizeLevel(u.licenseLevel), competencies: caregiverRepo.verifiedCompetencies(u) }));
     const built = clinicalRepo.buildCarePlanVersion(client.carePlan, req.body || {}, { name: req.user.name, id: req.user.id, at },
-      { serviceLine: client.serviceLine || 'PHC' });
+      { serviceLine: client.serviceLine || 'PHC', caregivers });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code, missing: built.missing || undefined, missingLabels: built.missingLabels || undefined });
     const plan = built.plan;
     const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
