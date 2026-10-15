@@ -50,11 +50,11 @@ test('access is described from the client\'s sharing settings; a POA reads as fu
   assert.match(F.accessSummary({}, { carePlan: true, appointments: true, visitSummaries: 'summary' }), /^Can see care plan, appointments, visit dates · messages$/);
 });
 
-test('build guard: only the patient or a POA invites, only an ADMIN decides, and approving never makes a POA', () => {
+test('build guard: only the patient or a POA invites, an admin, manager or coordinator decides, and approving never makes a POA', () => {
   const invite = between(server, "app.post('/api/gfc/family/invites', ", "app.post('/api/gfc/family/invites/:inviteId/cancel'");
   assert.match(invite, /if \(req\.user\.role !== config\.ROLES\.CLIENT && !acting\.isPoa\)/);
   const decideRoute = between(server, "app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', ", "app.get('/api/gfc/admin/enrollment/:clientId', ");
-  assert.match(server, /family-invites\/:inviteId\/decide', authenticateToken, requireAdmin, /);
+  assert.match(server, /family-invites\/:inviteId\/decide', authenticateToken, requireEnrollmentManager, /);
   assert.match(decideRoute, /familyIsPoa: false,/);
   assert.ok(!/familyIsPoa:\s*(!!)?row\.saysPoa/.test(decideRoute), 'what the patient said is never copied into familyIsPoa');
   // invites are scoped to the client in the URL / the session

@@ -88,16 +88,78 @@ test('the Super Admin, a manager and a care coordinator land on the hub', () => 
 const ids = (u) => at.hubTilesFor(u).map(t => t.id);
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
-  assert.deepEqual(ids(at.fieldsFor('admin')), ['admin', 'clinical', 'privateHomeCare', 'service', 'clientPortalAdmin']);
+  assert.deepEqual(ids(at.fieldsFor('admin')), ['admin', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
 });
 
-test('a coordinator sees Clinical Workspace and Private Home Care; a manager sees Clinical Workspace only when granted', () => {
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare']);
+test('a coordinator sees Clinical, Private Home Care, Enrollment and Billing; a manager sees Clinical only when granted', () => {
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing'],
+    'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
+    assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
+  }
+  const tile = (id) => at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === id);
+  assert.equal(tile('enrollment').path, '/admin/enrollment');
+  assert.equal(tile('billing').path, '/billing');
+});
+
+// ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
+
+const ENROLLMENT_WRITES = [
+  "'/api/gfc/admin/signups/:id/decide'", "'/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide'",
+  "'/api/gfc/admin/enrollment/:clientId/service-line'", "'/api/gfc/admin/enrollment/:clientId/documents/request'",
+  "'/api/gfc/admin/enrollment/:clientId/documents/remind'", "'/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review'",
+  "'/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver'", "'/api/gfc/admin/enrollment/:clientId/documents/upload-link'",
+  "'/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke'", "'/api/gfc/admin/enrollment/:clientId/review'",
+  "'/api/gfc/admin/enrollment/:clientId/follow-up'", "'/api/gfc/admin/enrollment/:clientId/approve'",
+  "'/api/gfc/admin/enrollment/offline'", "'/api/gfc/admin/enrollment/:clientId/rate'",
+  "'/api/gfc/admin/enrollment/:clientId/consent/:type/offline'", "'/api/clinical/patients/:clientId/facility'"
+];
+
+test('every enrollment workflow write is open to a manager and a coordinator, and to nobody else new', () => {
+  for (const p of ENROLLMENT_WRITES) {
+    assert.match(serverSrc, new RegExp(`app\\.(post|put)\\(${p.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}, authenticateToken, requireEnrollmentManager`), p);
+  }
+  // canManageEnrollment is the one predicate requireEnrollmentManager calls; run it.
+  assert.match(serverSrc, /const requireEnrollmentManager = \(req, res, next\) => \{\s*if \(canManageEnrollment\(req\.user\)\) return next\(\);/);
+  const i = serverSrc.indexOf('const canManageEnrollment = ');
+  const pred = new Function('config', `${serverSrc.slice(i, serverSrc.indexOf(';', i) + 1)} return canManageEnrollment;`)(require('../config'));
+  const can = (u) => pred(u);
+  assert.equal(can({ role: 'admin' }), true);
+  assert.equal(can(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), true);
+  assert.equal(can(at.fieldsFor('coordinator')), true);
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) assert.equal(can(at.fieldsFor(t)), false, t);
+  assert.equal(can({ ...at.fieldsFor('manager'), accountStatus: 'inactive' }), false, 'a deactivated manager is refused');
+});
+
+test('a manager and a coordinator can correct the enrollment submission too', () => {
+  assert.match(serverSrc, /const canEditEnrollment = \(user\) => !!user &&\s*\(user\.role === config\.ROLES\.ADMIN \|\| canManageEnrollment\(user\)/);
+});
+
+test('the enrollment page offers the workflow buttons to managers and coordinators', () => {
+  const page = fs.readFileSync(path.join(root, 'public', 'admin-enrollment.html'), 'utf8');
+  assert.match(page, /const canManageRole = \(user\) => !!user && \(user\.role === 'admin' \|\| user\.isManager === true\);/);
+  assert.match(page, /const canEdit = canManageRole\(user\);/);
+  assert.ok(!/isAdmin=\{isAdminRole\(user\)\}/.test(page), 'documents and family invites follow the same rule');
+});
+
+test('the Billing module is its own page on its own route, behind the billing gate', () => {
+  assert.match(serverSrc, /app\.get\('\/billing', \(req, res\) => \{\s*res\.sendFile\(__dirname \+ '\/public\/billing\.html'\);/);
+  const i = serverSrc.indexOf("app.get('/api/gfc/admin/billing-statements', authenticateToken, requireBilling");
+  assert.ok(i > 0, 'the statement list is behind requireBilling');
+  assert.ok(i < serverSrc.indexOf("app.get('/api/gfc/admin/billing/:clientId'"), 'and registered before the per-client route');
+  const page = fs.readFileSync(path.join(root, 'public', 'billing.html'), 'utf8');
+  for (const route of ['/api/clinical/encounters/queue?state=awaiting_billing', '/api/gfc/admin/billing-statements',
+    '/billing-submit', '/api/gfc/admin/billing/invoices/']) assert.ok(page.includes(route), route);
+  assert.match(page, /submit\(r, \{ attest: true \}\)/, 'Submit carries the same attestation the visit card asks for');
+  const pred = require('../clinicalRoles').canSubmitBilling;
+  assert.equal(pred({ ...at.fieldsFor('coordinator') }), true);
+  assert.equal(pred({ ...at.fieldsFor('manager', { managerClinicalAccess: 'none' }) }), true);
+  assert.equal(pred({ ...at.fieldsFor('provider') }), false);
 });
 
 test('Private Home Care opens to Caregiver Management and Caregiver Scheduling', () => {

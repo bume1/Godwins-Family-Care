@@ -320,6 +320,8 @@
         privateHomeCare: { icon: Icons.service, color: 'from-teal-500 to-teal-700', description: 'Caregiver management and caregiver scheduling' },
         service: { icon: Icons.service, color: 'from-success-500 to-success-600', description: 'Submit and track service reports for field operations' },
         clientPortalAdmin: { icon: Icons.clientPortal, color: 'from-warning-500 to-warning-600', description: 'Manage client portal content, settings, and communications' },
+        enrollment: { icon: Icons.clientPortal, color: 'from-primary-500 to-teal-600', description: 'Intake, consents, documents, approvals and patient accounts' },
+        billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600', description: 'Claims waiting on billing, patient statements, copays and home care hours' },
         caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
         caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' }
       };
@@ -330,10 +332,12 @@
       const fallbackTiles = () => {
         const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PHC_CHILDREN };
         const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
-        if (isAdmin) return [{ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc,
+        const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
+        const billing = { id: 'billing', name: 'Billing', path: '/billing' };
+        if (isAdmin) return [{ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billing,
           { id: 'service', name: 'Service Portal', path: '/service-portal' },
           { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
-        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc];
+        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing];
         return [];
       };
       const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();

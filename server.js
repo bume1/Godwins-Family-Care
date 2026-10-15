@@ -2569,6 +2569,19 @@ function buildServiceReportFromTicket(ticket, assignedToId, assignedToName, serv
 }
 
 // Super Admin access - full system access (role === 'admin')
+// WHO RUNS A PATIENT'S ACCOUNT (owner, 2026-10-15): the Super Admin, a
+// manager and a care coordinator ("coordinators and managers need to be able to
+// view and edit enrollment"). Approving enrollment, the service line, the
+// documents, the rate, paper signatures, sign-ups, family invites and the
+// patient's facility. Coordinators carry the manager flag (accountTypes.js),
+// so one predicate covers both.
+const canManageEnrollment = (u) => !!u && u.accountStatus !== 'inactive' &&
+  (u.role === config.ROLES.ADMIN || u.isManager === true);
+const requireEnrollmentManager = (req, res, next) => {
+  if (canManageEnrollment(req.user)) return next();
+  return res.status(403).json({ error: 'An admin, a manager or a care coordinator makes this change.', code: 'ENROLLMENT_MANAGER_ONLY' });
+};
+
 const requireAdmin = (req, res, next) => {
   if (req.user.role !== config.ROLES.ADMIN) {
     return res.status(403).json({ error: 'Super Admin access required' });
@@ -15064,6 +15077,29 @@ app.post('/api/gfc/billing/invoices/:id/pay', authenticateToken, requireEnrolled
 });
 
 // ---- The office's side ----
+// The Billing module's statement list (owner, 2026-10-15: billing is its own
+// module on the hub, not only inside the clinical workspace, "because it
+// affects both"). Every statement across every client, newest first, plus the
+// client list the "new statement" picker needs. A separate path rather than
+// /billing/statements, which the /billing/:clientId route below would catch.
+app.get('/api/gfc/admin/billing-statements', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const clients = (await getUsers()).filter(u => u && u.role === config.ROLES.CLIENT && u.accountStatus !== 'inactive');
+    const nameOf = new Map(clients.map(c => [c.id, c.name]));
+    res.json({
+      invoices: (await readInvoices())
+        .map(r => ({ ...r, clientName: nameOf.get(r.clientId) || null }))
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      clients: clients.map(c => ({ id: c.id, name: c.name, serviceLine: c.serviceLine || null, rateSet: !!(c.rateAgreement && c.rateAgreement.hourlyRate) }))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name))),
+      stripe: billing.stripeStatus()
+    });
+  } catch (error) {
+    console.error('Billing statements read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/gfc/admin/billing/:clientId', authenticateToken, requireBilling, async (req, res) => {
   try {
     const client = (await getUsers()).find(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -16317,7 +16353,7 @@ app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requir
 // the assignment is stored app-side as a pointer, the same way
 // client.openEmrPatientId is. The POS itself always comes from OpenEMR's
 // facility record, never from here.
-app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -16513,7 +16549,7 @@ app.get('/api/clinical/patients/:clientId/record-extras', authenticateToken, req
 // goes out as a home visit.
 //
 // The vocabulary is SERVED, never restated in a page.
-app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -17946,7 +17982,7 @@ const requireEnrollmentStaff = (req, res, next) => {
 // `provider` there, and a CASE MANAGER resolves to `readOnly` and stays a
 // reader — the 4.3 scoped-read rule this must not regress.
 const canEditEnrollment = (user) => !!user &&
-  (user.role === config.ROLES.ADMIN || patientRead.canClinicalWrite(user));
+  (user.role === config.ROLES.ADMIN || canManageEnrollment(user) || patientRead.canClinicalWrite(user));
 // Filing a scanned document into a client's file (2026-10-14): the editors,
 // plus a care coordinator, whose job includes keeping the chart's paperwork in
 // order. Editing the enrollment submission itself stays with the editors.
@@ -18303,7 +18339,7 @@ app.get('/api/gfc/admin/signups', authenticateToken, requireEnrollmentStaff, asy
   }
 });
 
-app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { action, clientId, reason } = req.body || {};
     const rows = (await db.get('signup_requests')) || [];
@@ -18403,7 +18439,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/family-invites', authenticateToken,
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const decision = req.body && req.body.decision;
     if (decision !== 'approved' && decision !== 'declined') return res.status(400).json({ error: 'decision must be approved or declined', code: 'INVITE_BAD_DECISION' });
@@ -18479,7 +18515,7 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
 // nobody finds out by accident — and it is already what the intake save calls.
 // This route is the staff-facing door onto the same function, which is the only
 // way the two paths cannot drift.
-app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20084,7 +20120,7 @@ app.post('/api/admin/ai/test', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20138,7 +20174,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
 // POST /api/gfc/admin/enrollment/:clientId/documents/remind — chase what is open.
 // Every reminder is stamped on the request, so "we asked three times" is a fact
 // on the record rather than a recollection.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20174,7 +20210,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
 // or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
 // an insurance card goes back on the client's checklist with the reason on it
 // instead of sitting in a folder marked received.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const decision = String((req.body || {}).decision || '').toLowerCase();
     if (!['accepted', 'rejected'].includes(decision)) {
@@ -20483,7 +20519,7 @@ const moveDocumentToCaregiverHandler = async (req, res) => {
 // Whose record a document truly belongs to IS still an office triage
 // decision, so move-to-caregiver stays admin-only, on the enrollment screen
 // only (owner's explicit ask) — automatic filing never applies to it.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireAdmin, moveDocumentToCaregiverHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireEnrollmentManager, moveDocumentToCaregiverHandler);
 
 // GET …/enrollment/meta/caregivers — who can receive a moved document. Under
 // `meta/`, not a bare `/enrollment/caregivers`: a single path segment there
@@ -20684,7 +20720,7 @@ app.post('/api/gfc/documents/upload-link/revoke', authenticateToken, requireClie
 // document). Generating an unauthenticated access channel into a client's
 // file is that kind of decision, not a correction, so it does not widen to
 // the clinician editor gate the way a field correction does.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20714,7 +20750,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authentica
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20846,7 +20882,7 @@ app.post('/api/gfc/upload/:token', async (req, res) => {
 });
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
-app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20868,7 +20904,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requir
 
 // POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
 // body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
-app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { items } = req.body || {};
     if (!Array.isArray(items) || !items.length) {
@@ -20921,7 +20957,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
 // until the gaps actually close. An override that left no trace would be
 // indistinguishable from a complete file a week later, which is the whole
 // failure it is meant to avoid.
-app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20993,7 +21029,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
 // only, Scope B2). Multipart: `files` (paper-packet scans) + `payload` (JSON of
 // the structured entry + consent checklist). Creates a client with
 // source=legacy_offline and enrollmentStatus=intake_complete.
-app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, uploadLimiter, upload.array('files', 20), async (req, res) => {
+app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireEnrollmentManager, uploadLimiter, upload.array('files', 20), async (req, res) => {
   try {
     let payload = {};
     try { payload = req.body && req.body.payload ? JSON.parse(req.body.payload) : (req.body || {}); }
@@ -21562,7 +21598,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
 // table. Until it exists neither consent is presentable, by design: a client
 // signing a financial agreement with no price in it is the defect, not the
 // blocked signature.
-app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const b = req.body || {};
     const built = buildRateAgreement(b, req.user);
@@ -21654,7 +21690,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf', authentic
 // The scan is the evidence and it is REQUIRED. A paper consent recorded with no
 // document behind it is the same provenance-free record Scope E1 found, just
 // entered by a different hand.
-app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireAdmin, uploadLimiter, upload.single('file'), async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireEnrollmentManager, uploadLimiter, upload.single('file'), async (req, res) => {
   try {
     const type = req.params.type;
     const users = await getUsers();
@@ -27739,6 +27775,13 @@ app.get('/clinical', (req, res) => {
 // route it calls enforces the admin-only filters.
 app.get('/scheduling', (req, res) => {
   res.sendFile(__dirname + '/public/scheduling.html');
+});
+
+// The Billing module (owner, 2026-10-15): claims waiting to be submitted and
+// patient statements in one place, for the Super Admin, managers and care
+// coordinators. Shell is public; every route it calls is requireBilling.
+app.get('/billing', (req, res) => {
+  res.sendFile(__dirname + '/public/billing.html');
 });
 
 // Admin hub login endpoint (same as regular admin login)

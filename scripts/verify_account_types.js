@@ -41,7 +41,7 @@ const tileIds = (u) => (u.hubTiles || []).map(t => t.id).join(',');
   console.log('\n--- 1. the Super Admin ---');
   ok('admin lands on the hub', adminLogin.user.landing === null, adminLogin.user.landing);
   ok('  with Admin Hub, Clinical, Private Home Care, Service Portal, Client Portal Admin',
-    tileIds(adminLogin.user) === 'admin,clinical,privateHomeCare,service,clientPortalAdmin', adminLogin.user.hubTiles);
+    tileIds(adminLogin.user) === 'admin,clinical,privateHomeCare,enrollment,billing,service,clientPortalAdmin', adminLogin.user.hubTiles);
 
   console.log('\n--- 2. each type stores exactly what it decides ---');
   const mgr = await make(admin, 'Mona Manager', 'manager');
@@ -77,9 +77,9 @@ const tileIds = (u) => (u.hubTiles || []).map(t => t.id).join(',');
   for (const [k, u] of Object.entries({ mgr, mgrNone, coord, prov, rn, lcsw, lmsw })) L[k] = await login(u.email, PW);
   for (const k of ['prov', 'rn', 'lcsw', 'lmsw']) ok(`${k} lands on /clinical`, L[k].user && L[k].user.landing === '/clinical', L[k].user && L[k].user.landing);
   for (const k of ['mgr', 'mgrNone', 'coord']) ok(`${k} lands on the hub`, L[k].user && L[k].user.landing === null, L[k].user);
-  ok('coordinator sees Clinical Workspace and Private Home Care', tileIds(L.coord.user) === 'clinical,privateHomeCare', L.coord.user.hubTiles);
-  ok('manager (View only) sees Clinical Workspace and Private Home Care', tileIds(L.mgr.user) === 'clinical,privateHomeCare', L.mgr.user.hubTiles);
-  ok('manager (No access) sees Private Home Care only', tileIds(L.mgrNone.user) === 'privateHomeCare', L.mgrNone.user.hubTiles);
+  ok('coordinator sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.coord.user) === 'clinical,privateHomeCare,enrollment,billing', L.coord.user.hubTiles);
+  ok('manager (View only) sees Clinical, Private Home Care, Enrollment and Billing', tileIds(L.mgr.user) === 'clinical,privateHomeCare,enrollment,billing', L.mgr.user.hubTiles);
+  ok('manager (No access) still sees Private Home Care, Enrollment and Billing', tileIds(L.mgrNone.user) === 'privateHomeCare,enrollment,billing', L.mgrNone.user.hubTiles);
   const phc = L.mgr.user.hubTiles.find(t => t.id === 'privateHomeCare');
   ok('  which opens to Caregiver Management and Caregiver Scheduling',
     phc && phc.children.map(c => c.path).join(',') === '/caregivers,/scheduling', phc);
@@ -99,6 +99,28 @@ const tileIds = (u) => (u.hubTiles || []).map(t => t.id).join(',');
   ok('coordinator: writes and edits charts, holds no licence', coordAccess.canDocument && !coordAccess.canWrite, coordAccess);
   const provAccess = await st('prov');
   ok('provider: full clinical write', provAccess.canWrite, provAccess);
+
+  console.log('\n--- 4b. enrollment and billing are theirs too (owner, 2026-10-15) ---');
+  const client = await make(admin, 'Clara Client', 'client', { practiceName: `Clara Client (TEST DATA) ${STAMP}` });
+  ok('a probe client exists', !!client.id, client.body);
+  for (const k of ['mgrNone', 'coord']) {
+    const rate = await call('PUT', `/api/gfc/admin/enrollment/${client.id}/rate`, t(k), { hourlyRate: 30, dailyMinimumHours: 4 });
+    ok(`${k}: sets the client's agreed rate`, rate.status === 200, rate.body);
+    const review = await call('POST', `/api/gfc/admin/enrollment/${client.id}/review`, t(k), {});
+    ok(`${k}: marks the enrollment reviewed`, review.status === 200, review.body);
+    const det = await call('GET', `/api/gfc/admin/enrollment/${client.id}`, t(k));
+    ok(`${k}: may correct the submission`, det.status === 200 && det.body.client && det.body.client.canEdit === true, det.body && det.body.client && det.body.client.canEdit);
+    const stm = await call('GET', '/api/gfc/admin/billing-statements', t(k));
+    ok(`${k}: opens the Billing module's statements`, stm.status === 200 && Array.isArray(stm.body.invoices) && stm.body.clients.some(c => c.id === client.id), stm.status);
+    const cp = await call('PUT', `/api/gfc/admin/billing/${client.id}/copay`, t(k), { copay: '15.00' });
+    ok(`${k}: sets a copay`, cp.status === 200, cp.body);
+  }
+  for (const k of ['prov', 'lmsw']) {
+    ok(`${k}: may not approve or change the rate`, (await call('PUT', `/api/gfc/admin/enrollment/${client.id}/rate`, t(k), { hourlyRate: 31, dailyMinimumHours: 4 })).status === 403);
+    ok(`${k}: no Billing module`, (await call('GET', '/api/gfc/admin/billing-statements', t(k))).status === 403);
+  }
+  const page = await fetch(BASE + '/billing');
+  ok('the /billing page serves', page.status === 200 && /<title>Godwins Family Care — Billing<\/title>/.test(await page.text()));
 
   console.log('\n--- 5. changing an account ---');
   const up = await call('PUT', `/api/users/${mgr.id}`, admin, { accountType: 'manager', managerClinicalAccess: 'edit' });

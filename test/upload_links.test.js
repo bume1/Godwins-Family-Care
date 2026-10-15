@@ -172,11 +172,11 @@ test('the public routes carry no authenticateToken — that is the whole point o
   assert.match(SERVER, /app\.post\('\/api\/gfc\/upload\/:token',\s*async \(req, res\) => \{/);
 });
 
-test('the two management doors gate correctly: the client on their own record, staff admin-only', () => {
+test('the two management doors gate correctly: the client on their own record, staff who run enrollment', () => {
   assert.match(SERVER, /app\.post\('\/api\/gfc\/documents\/upload-link',\s*authenticateToken,\s*requireClientForIntake/);
   assert.match(SERVER, /app\.post\('\/api\/gfc\/documents\/upload-link\/revoke',\s*authenticateToken,\s*requireClientForIntake/);
-  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload-link',\s*authenticateToken,\s*requireAdmin/);
-  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload-link\/revoke',\s*authenticateToken,\s*requireAdmin/);
+  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload-link',\s*authenticateToken,\s*requireEnrollmentManager/);
+  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload-link\/revoke',\s*authenticateToken,\s*requireEnrollmentManager/);
 });
 
 test('there is no read route behind a bare token — upload only, never a list or a file read', () => {

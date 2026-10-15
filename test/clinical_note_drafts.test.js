@@ -232,7 +232,7 @@ test('the facility assignment route is actually called from a page', () => {
   assert.ok(clinicalPage.includes('<PlaceOfServiceCard'), 'the chart must still show where this patient is seen');
 });
 
-test('the facility picker is admin-only on screen, matching the route', () => {
+test('the facility picker is shown only to those the route admits (admin, manager, coordinator)', () => {
   const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
   const body = card.slice(0, card.indexOf('const DetailView = ('));
   // COUNTED, not merely present. The card has two write controls — the
@@ -250,7 +250,9 @@ test('the facility picker is admin-only on screen, matching the route', () => {
     'every write control must sit behind its own admin gate — a non-admin must see the state, not a control the server would 403');
   assert.ok(body.includes('Read-only'), 'a reader who may not write must be told which of the two states they are in');
   const route = server.slice(server.indexOf("app.put('/api/clinical/patients/:clientId/facility'"));
-  assert.ok(route.slice(0, 200).includes('requireAdmin'), 'the route itself must stay admin-only');
+  // Owner, 2026-10-15: managers and care coordinators run patient accounts, so
+  // the facility assignment is theirs as well as the Super Admin's. Never a clinician's.
+  assert.ok(route.slice(0, 200).includes('requireEnrollmentManager'), 'the route is the enrollment-manager gate');
   // The chart carries no write at all now, so there is nothing there to gate.
   const chartCard = clinicalPage.slice(clinicalPage.indexOf('const PlaceOfServiceCard = ('));
   assert.ok(!/method:\s*'PUT'/.test(chartCard.slice(0, chartCard.indexOf('const SummaryTab = ('))),

@@ -31,9 +31,19 @@ Owner, 2026-10-15: "before we even choose who gets what message, let us get our 
 - `scripts/verify_account_types.js`: **40/40 through the real routes** on a booted app. Each type stores what it should; a body that also sends `role: 'admin'`, `isManager` and all three checkboxes cannot smuggle any of them in; landings and hub tiles per type; managers and coordinators refused the Admin Hub API but open scheduling and caregiver management; View only reads but edits nothing; a manager granted chart editing can then document; the only Super Admin cannot be demoted.
 - The hub rendered in headless Chromium as a manager: Clinical Workspace + Private Home Care, and Private Home Care opens to the two blocks. No page errors.
 
+## Follow-up the same day: Enrollment and Billing are their own modules
+
+Owner, 2026-10-15: "coordinators and managers need to be able to view and edit enrollment. Make enrollment and billing modules of their own accessible from the hub space, too (so not just clinical, because it affects both)."
+
+- **`requireEnrollmentManager` (admin, manager, care coordinator; `canManageEnrollment`) now gates every enrollment workflow write** that was Super Admin only: approve, mark reviewed, follow-up, service line, document request/remind/accept/reject, upload links, move to caregiver, offline onboarding, rate, paper signature, sign-up and family-invite decisions, and the patient's facility and usual location. `canEditEnrollment` (correcting the submission) includes them too. Clinicians keep what they had: they correct a submission but make none of those decisions.
+- **Enrollment tile** on the hub opens `/admin/enrollment`. The page's buttons follow the same rule (`canManageRole`).
+- **Billing is a new page, `/billing`**, with its own hub tile: **Claims** (signed visits waiting on billing, oldest first, with Submit carrying the same attestation as the visit's Billing card, No charge with a reason, and Open in Clinical for code edits), **Statements** (every patient statement across clients, filtered by status, with send, record payment and void), and **Copay & Home Care** (pick a client, set a copay, preview and create a home care statement). It reuses the existing billing routes; one new read, `GET /api/gfc/admin/billing-statements`, registered before the per-client route it would otherwise collide with. `/clinical#queue` now opens the coding queue.
+- Hub tiles: Super Admin adds Enrollment and Billing; a coordinator sees Clinical, Private Home Care, Enrollment, Billing; a manager the same, with Clinical only when not set to No access.
+- **Verified:** 4 more tests in `test/account_types.test.js` (25 total), 7 more deliberate breakages each caught; 14 existing tests that asserted "admin only" on these exact routes repointed to the new gate, with their names changed to say so; full suite 2496, 0 failing; live probe 56/56 (a no-access manager and a coordinator set a rate, mark reviewed, correct a submission, open statements and set a copay; a provider and an LMSW are refused all of it); hub and Billing page rendered in Chromium as a coordinator with no page errors.
+
 ## Open for the owner
 
-1. **Patient account management for managers.** The enrollment write actions (approve, service line, documents, rate, paper signature) are still Super Admin only. Managers can read enrollment but not change it. Say if managers (and coordinators) should get those.
-2. **Billing lives inside the Clinical Workspace**, so a manager set to No access cannot bill from the screen. The server still lets billing read the note it codes.
+1. **A manager set to No access can bill from the Billing page**, but changing a visit's codes or place of service still happens on the visit in the Clinical Workspace, which needs at least View only.
+2. **Claims read OpenEMR with the biller's own sign-in.** A manager without an OpenEMR account sees only what the app holds, and the page says so.
 3. **Anyone flagged "needs an account type"** after the first boot: open each one on User Management, choose the type and save.
 4. **Messaging is the next pass.** Today managers and coordinators message as the office, LMSW / Case Managers start Behavioral Escalation and Care Coordination only, and clinicians start their four.

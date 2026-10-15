@@ -197,15 +197,19 @@ function hubTilesFor(u) {
   const tiles = [];
   const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
   const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PRIVATE_HOME_CARE };
+  // Enrollment and Billing are modules of their own (owner, 2026-10-15),
+  // because both cover home care as well as medical visits.
+  const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
+  const billingTile = { id: 'billing', name: 'Billing', path: '/billing' };
   if (type === TYPES.ADMIN) {
-    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc,
+    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc);
+    tiles.push(clinical, phc, enrollment, billingTile);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc);
+    tiles.push(phc, enrollment, billingTile);
   }
   return tiles;
 }

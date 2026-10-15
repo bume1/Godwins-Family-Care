@@ -711,7 +711,9 @@ test('My Day has an End visit button once a visit is in progress', () => {
 test('My Day is the default landing view', () => {
   // 2026-10-12: `/clinical#inbox` (the referral email) opens the inbox; every
   // other arrival still opens on the day.
-  assert.match(pageCode, /useState\(\(\) => \(String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\) === 'inbox' \? 'inbox' : 'myday'\)\)/,
+  // 2026-10-15: `/clinical#queue` (the Billing module's "Open in Clinical")
+  // opens the coding queue.
+  assert.match(pageCode, /const h = String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\); return h === 'inbox' \|\| h === 'queue' \? h : 'myday';/,
     'the workspace must open on the day, not on a patient list');
   assert.match(pageCode, /<MyDayView/);
 });
@@ -1536,16 +1538,16 @@ test('F: the visit descriptor is STAMPED on the billing record at creation', () 
   assert.deepEqual(none.visit, { appointmentType: null, modality: null, location: null });
 });
 
-test('F build-enforced: the USUAL LOCATION is an admin write on enrollment; what a visit IS is chosen on the note', () => {
+test('F build-enforced: the USUAL LOCATION is an account-management write on enrollment; what a visit IS is chosen on the note', () => {
   const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
   // The patient's usual location is a billing default, so it keeps the admin
   // gate the facility assignment has.
   assert.match(server,
-    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireAdmin,/,
-    'the usual-location write must be admin-only');
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireEnrollmentManager,/,
+    'the usual-location write is admin, manager or coordinator (owner, 2026-10-15), never a clinician');
   assert.match(server,
-    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireAdmin,/,
-    'the facility assignment must stay admin-only');
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireEnrollmentManager,/,
+    'the facility assignment is admin, manager or coordinator, never a clinician');
   assert.match(server,
     /app\.get\('\/api\/clinical\/patients\/:clientId\/place-of-service',\s*authenticateToken,\s*requireClinicalRead,/,
     'the read stays on the clinical READ gate');
