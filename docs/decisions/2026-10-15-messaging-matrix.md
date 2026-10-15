@@ -57,3 +57,12 @@ Admin sees, joins and starts every type. A manager and a care coordinator messag
 - **Verified:** 9 more route tests, 9 of 9 deliberate breaks caught, the same-day tests rewritten to the revised rules; full suite 2525, 0 failing; `verify_messaging.js` 95/95; `verify_account_types.js` 59/59; the Messages page rendered in Chromium as a manager.
 
 Open: nothing new. The earlier items about admin emails, caregiver Support and leaving the patient off Care Team are answered above.
+
+## Support is one-to-one (owner, 2026-10-15, third pass)
+
+"For support, it should be one to one. When a clinician submits a support message to the office, no other team member but the admin / managers see it. Same for coordinator. or Caregiver. or Patient. Team members should still have option to choose a client if it is a client related support issue, otherwise, they can still send a support message."
+
+- **Every Support thread is one person and the office (admins and managers).** A patient's goes to the office only (not their family or POA); a family member's or POA's is theirs alone with the office; a team member's likewise. Every Support thread is `audience_chosen`, so nobody else reads it, whatever their scope. Managers read all Support; admin reads everything.
+- **A team member may tag a client** ("About a client (optional)" on the composer). Tagging files it under that client and adds nobody.
+- **The office writes to ONE person** (`singleRecipient`, a radio list; more than one is refused `SUPPORT_ONE_RECIPIENT`). With a client chosen the list is the patient, their family and the care team; with none, every team member who is not the office. An older page that sends no choice goes to the patient it is about.
+- **Verified:** the Support route tests rewritten (patient, family, POA, clinician-with-client, office one-to-one, office with no client), 5 of 5 deliberate breaks caught; full suite 2526, 0 failing; `verify_messaging.js` 95/95; the composer rendered in Chromium as a manager (radio list) and a clinician (optional client, no recipient list).

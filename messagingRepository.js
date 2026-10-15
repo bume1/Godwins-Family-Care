@@ -106,14 +106,17 @@ const CHANNELS = Object.freeze({
       [ROLE.ADMIN]: 'The client and the caregiver working with them.'
     }
   },
-  // SUPPORT IS THE LINE TO THE OFFICE (owner, 2026-10-15): any team member to
-  // admin and managers, and the office back to any of them. Who is on it
-  // depends on who starts it (supportAudienceFor / the route):
-  //   client or family  → the client, their family, and the office;
-  //   a team member     → that team member and the office ONLY (never the
-  //                       client or family — "support needs to be for that");
-  //   admin or manager  → whoever they choose: the client side and/or the
-  //                       care team.
+  // SUPPORT IS ONE-TO-ONE WITH THE OFFICE (owner, 2026-10-15): "when a
+  // clinician submits a support message to the office, no other team member but
+  // the admin / managers see it. Same for coordinator. or Caregiver. or
+  // Patient." Every Support thread is ONE person and the office (admins and
+  // managers), whoever starts it:
+  //   anyone but the office → that person and the office; a team member may
+  //                           tag a client if it is about one, which adds
+  //                           nobody;
+  //   admin or manager      → the ONE person they pick (singleRecipient).
+  // Every Support thread is marked audience_chosen, so only the people on it
+  // read it (managers read all Support, admin reads everything).
   support: {
     id: 'support', label: 'Support',
     participants: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN, ROLE.MANAGER],
@@ -121,11 +124,13 @@ const CHANNELS = Object.freeze({
     officeChoosesRecipients: true,
     blurb: 'Scheduling, billing and anything else for the office.',
     blurbByRole: {
-      [ROLE.CAREGIVER]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
-      [ROLE.CLINICAL]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
-      [ROLE.CASE_MANAGER]: 'You and the office (admins and managers), about this client. The client and family do not see it.',
-      [ROLE.MANAGER]: 'The office, to whoever you choose: the client, their family or their care team.',
-      [ROLE.ADMIN]: 'The office, to whoever you choose: the client, their family or their care team.'
+      [ROLE.CLIENT]: 'You and the office (admins and managers). Nobody else sees it.',
+      [ROLE.FAMILY]: 'You and the office (admins and managers). Nobody else sees it.',
+      [ROLE.CAREGIVER]: 'You and the office (admins and managers). Nobody else sees it. Choose a client if it is about one.',
+      [ROLE.CLINICAL]: 'You and the office (admins and managers). Nobody else sees it. Choose a client if it is about one.',
+      [ROLE.CASE_MANAGER]: 'You and the office (admins and managers). Nobody else sees it. Choose a client if it is about one.',
+      [ROLE.MANAGER]: 'The office and one person you choose. Nobody else sees it.',
+      [ROLE.ADMIN]: 'The office and one person you choose. Nobody else sees it.'
     }
   },
   clinical_escalation: {
@@ -383,11 +388,21 @@ function careTeamMembers(client, users) {
 // choice against it, so the two cannot disagree.
 function audienceFor(channelId, { user, client, users, isPoa = false } = {}) {
   const ch = CHANNELS[channelId];
-  if (!ch || !client) return null;
+  if (!ch) return null;
   const office = isOffice(user);
   if (!ch.choosesRecipients && !(ch.officeChoosesRecipients && office)) return null;
   const list = Array.isArray(users) ? users : [];
   const active = (u) => u && (u.accountStatus || 'active') !== 'inactive';
+  // The office writing to someone with no client chosen: any team member who
+  // is not the office (clinicians, case managers, caregivers).
+  if (!client) {
+    if (!ch.officeChoosesRecipients) return null;
+    const what = (u) => u.role === 'caseManager' ? 'Case manager' : u.role === 'vendor' ? 'Caregiver' : 'Clinician';
+    return list.filter(u => active(u) && u.id !== (user && user.id) && !u.isManager && u.role !== 'admin' &&
+      (u.role === 'caseManager' || (u.role === 'vendor' && u.licenseLevel) || (u.role === 'user' && (u.clinicalRole || u.hasClinicalAccess) && u.clinicalRole !== 'readOnly')))
+      .map(u => ({ id: u.id, name: u.name || u.email || 'Team member', what: what(u) }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
   const family = list.filter(u => active(u) && u.role === 'family' && u.familyOfClientId === client.id);
   const side = [{ id: client.id, name: client.name || 'Patient', what: 'Patient' }]
     .concat(family.filter(u => ch.choosesRecipients ? !!u.familyIsPoa : true)
@@ -526,7 +541,9 @@ function channelsFor({ user, client, users, isPoa = false }) {
         withPatient: withPatient(id),
         // Who the starter may send a Care Team message to, never including
         // themselves (owner, 2026-10-15).
-        ...(() => { const r = audienceFor(id, { user, client, users, isPoa }); return r ? { recipients: r } : {}; })()
+        ...(() => { const r = audienceFor(id, { user, client, users, isPoa }); return r ? { recipients: r } : {}; })(),
+        // Support from the office goes to ONE person (owner, 2026-10-15).
+        singleRecipient: id === 'support' && isOffice(user)
       };
     });
 }

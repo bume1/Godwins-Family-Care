@@ -529,7 +529,10 @@ module.exports = function createMessagingRoutes(deps) {
       const audience = msg.audienceFor(channelId, { user: req.user, client, users, isPoa });
       if (audience) {
         let ids = body.recipientIds;
-        if (ids === undefined || ids === '') ids = audience.map(m => m.id);
+        // No choice sent (an older page): everyone on the list, except Support
+        // from the office, which is one-to-one and so goes to the patient it is
+        // about, or must be chosen.
+        if (ids === undefined || ids === '') ids = channelId === 'support' ? (client ? [client.id] : []) : audience.map(m => m.id);
         if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (e) { ids = null; } }
         if (!Array.isArray(ids)) return res.status(400).json({ error: 'recipientIds must be a list.', code: 'RECIPIENTS_INVALID' });
         const allowed = new Set(audience.map(m => String(m.id)));
@@ -538,12 +541,16 @@ module.exports = function createMessagingRoutes(deps) {
           return res.status(400).json({ error: 'Only people on this patient\'s care team, the patient and their family can be chosen.', code: 'RECIPIENT_NOT_ON_CARE_TEAM' });
         }
         if (!wanted.length) return res.status(400).json({ error: 'Choose at least one person to send this to.', code: 'RECIPIENTS_REQUIRED' });
+        // Support from the office is one-to-one: ONE person (owner, 2026-10-15).
+        if (channelId === 'support' && wanted.length !== 1) {
+          return res.status(400).json({ error: 'A Support message goes to one person. Choose one.', code: 'SUPPORT_ONE_RECIPIENT' });
+        }
         chosen = { ids: wanted, partial: channelId === 'support' || wanted.length < audience.length };
       }
-      // A team member's Support message goes to the office ONLY: never the
-      // client or their family (owner, 2026-10-15).
-      const staffToOffice = channelId === 'support' && !chosen &&
-        ![msg.ROLE.CLIENT, msg.ROLE.FAMILY].includes(msg.actorRole(req.user));
+      // SUPPORT IS ONE-TO-ONE WITH THE OFFICE (owner, 2026-10-15): anyone who
+      // is not the office — a patient, a family member or POA, any team member —
+      // and the office (admins and managers). Nobody else is on it.
+      const staffToOffice = channelId === 'support' && !chosen;
       const officeIds = users.filter(u => u && (u.accountStatus || 'active') !== 'inactive' &&
         (u.role === ROLES.ADMIN || u.isManager === true)).map(u => u.id);
 

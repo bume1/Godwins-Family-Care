@@ -788,14 +788,39 @@ test('2026-10-15: the office starts Support to whoever it chooses', async () => 
   } finally { h.close(); }
 });
 
-test('2026-10-15: a client\'s Support still reaches the client side and the office', async () => {
+test('2026-10-15: Support is one-to-one — a patient\'s goes to the office only, not their family', async () => {
   const h = await boot();
   try {
     const users = h.store.get('users');
     users.push({ id: 'mgr-1', name: 'Mona Manager', email: 'mgr@test.local', role: 'user', isManager: true });
     h.store.set('users', users);
     await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'Billing question' } });
-    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'client-1', 'fam-1', 'mgr-1', 'poa-1']);
+    const t = rows(h, 'message_threads')[0];
+    assert.deepEqual([...t.participant_ids].sort(), ['admin-1', 'client-1', 'mgr-1']);
+    assert.equal(t.audience_chosen, true);
+    for (const who of ['fam-1', 'poa-1', 'fnp-1', 'cm-1', 'cg-1']) {
+      assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 403, `${who} does not see the patient's Support`);
+    }
+    // A clinician's Support tagged with a client is still one-to-one.
+    await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'About her referral' } });
+    const t2 = rows(h, 'message_threads')[1];
+    assert.equal(t2.client_id, 'client-1', 'filed under the client it is about');
+    assert.deepEqual([...t2.participant_ids].sort(), ['admin-1', 'fnp-1', 'mgr-1']);
+    for (const who of ['cm-1', 'cg-1', 'client-1', 'poa-1']) {
+      assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t2.id}`)).status, 403, `${who} does not see the clinician's Support`);
+    }
+    // The office writes to ONE person.
+    const two = await h.call('mgr-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'x', recipientIds: ['cg-1', 'fnp-1'] } });
+    assert.equal(two.status, 400);
+    assert.equal(two.data.code, 'SUPPORT_ONE_RECIPIENT');
+    // With no client, the office chooses from the team.
+    const ch = (await h.call('mgr-1', 'GET', '/api/messaging/channels')).data.channels.find(c => c.id === 'support');
+    assert.equal(ch.singleRecipient, true);
+    for (const id of ['fnp-1', 'cm-1', 'cg-1']) assert.ok(ch.recipients.some(m => m.id === id), `${id} can be written to`);
+    assert.ok(!ch.recipients.some(m => m.id === 'admin-1' || m.id === 'client-1'), 'the office and patients are not on the no-client list');
+    const toCg = await h.call('mgr-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', body: 'Can you cover Friday?', recipientIds: ['cg-1'] } });
+    assert.equal(toCg.status, 200, JSON.stringify(toCg.data));
+    assert.deepEqual([...rows(h, 'message_threads')[2].participant_ids].sort(), ['admin-1', 'cg-1', 'mgr-1']);
   } finally { h.close(); }
 });
 
@@ -917,8 +942,17 @@ test('2026-10-15: family and a POA reach the office through Support too', async 
       const r = await h.call(who, 'POST', '/api/messaging/threads', { json: { channel: 'support', body: `From ${who}` } });
       assert.equal(r.status, 200, JSON.stringify(r.data));
       const t = rows(h, 'message_threads').find(x => x.started_by === who);
-      assert.ok(t.participant_ids.includes('admin-1') && t.participant_ids.includes(who), `${who} and the office are on it`);
+      assert.deepEqual([...t.participant_ids].sort(), ['admin-1', who].sort(), `${who} and the office, nobody else`);
       assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200);
     }
   } finally { h.close(); }
+});
+
+test('2026-10-15: the composer offers a team member an optional client on Support, and the office a single choice', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  const fn = comp.slice(comp.indexOf('function renderComposeClient'), comp.indexOf('function recipientsOf'));
+  assert.match(fn, /if \(c\.id !== 'support' \|\|/, 'the client choice is offered on Support only');
+  assert.match(fn, /Not about a client/, 'and "not about a client" is a real choice');
+  assert.match(comp, /var one = !!c\.singleRecipient;/);
+  assert.match(comp, /'<input type="' \+ \(one \? 'radio' : 'checkbox'\) \+ '"/, 'one person means a radio list');
 });
