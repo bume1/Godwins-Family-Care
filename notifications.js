@@ -845,6 +845,194 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- Clinical to-dos, 2026-10-14 -----------------------------------------
+  //
+  // Owner: "email every time a task is assigned, due, overdue (one email about
+  // task a day) and then marked completed." Until now a to-do was written to
+  // the record and nothing was sent: the assignee found out by opening the
+  // workspace, and the person who wrote it had no way to know it had landed.
+  //
+  // WHO MAY BE TOLD IS THE `canSee` RULE AND NOTHING WIDER (owner, 2026-10-13:
+  // a to-do is seen only by the person it is assigned to and the person who
+  // wrote it). So these four notices only ever address one of those two, and a
+  // notice is never copied to admin or to the rest of the team. Emailing
+  // someone a to-do they cannot open in the app would hand out by push what
+  // the read gate refuses.
+  //
+  // A TO-DO'S TITLE IS PHI. It is free text a clinician wrote about a named
+  // patient's healthcare — the to-do's own history already refuses to store
+  // it for that reason. So the detailed wording names the patient and the
+  // title, is marked { phi: true }, and is sent only when the live transport
+  // is inside the BAA; otherwise the notice says a to-do is waiting and
+  // nothing else.
+  //
+  // THE TITLE STAYS OUT OF THE SUBJECT LINE even when detail is allowed. A
+  // subject is what shows on a lock screen and in a notification preview, so
+  // it carries at most the patient's name, which is the precedent the staff
+  // message notice set; what the to-do actually says waits inside.
+  const taskNotice = async ({
+    type, user, task, patientName, subjectDetail, subjectVague,
+    headline, detailParagraphs, vagueParagraphs, ctaUrl, ctaLabel, dedupeId, actorId
+  }) => {
+    const detail = transportAllowsDetail();
+    const named = !!(detail && patientName);
+    return await send({
+      type, user,
+      subject: named ? `${subjectDetail} — ${patientName}` : subjectVague,
+      headline,
+      paragraphs: named ? detailParagraphs(patientName) : vagueParagraphs,
+      ctaUrl, ctaLabel: ctaLabel || 'Open to-dos',
+      // The dedupe id is the task for an event and `<task>:<kind>:<date>` for
+      // a reminder, which is what holds the daily sweep to one email a day.
+      relatedEntityId: dedupeId || (task && task.id), relatedEntityType: 'clinical_task',
+      actorId, phi: named
+    }) ? 1 : 0;
+  };
+
+  // A due date in words. Bare calendar dates are read at midday UTC: parsed as
+  // UTC midnight a date renders as the evening before in Georgia.
+  const dueLine = (ymd) => {
+    if (!ymd) return null;
+    const d = new Date(`${ymd}T12:00:00Z`);
+    return Number.isNaN(d.getTime()) ? null
+      : d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  };
+
+  // A due TIME in words. Formatted from its own digits rather than through a
+  // Date, which is the rule `fmtClock` already sets: a wall-clock time carries
+  // no date and no zone, so running it through `Date` renders an invention.
+  const timeLine = (hm) => {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(hm || ''))) return null;
+    const h = Number(String(hm).slice(0, 2)), m = String(hm).slice(3, 5);
+    return `${((h + 11) % 12) + 1}:${m} ${h < 12 ? 'AM' : 'PM'}`;
+  };
+
+  // "Friday, October 16 at 2:00 PM", or just the day when no time was given.
+  const dueWhen = (task) => {
+    const day = dueLine(task && task.dueDate);
+    if (!day) return null;
+    const at = timeLine(task && task.dueTime);
+    return at ? `${day} at ${at}` : day;
+  };
+
+  // ---- 1. Somebody handed you a to-do --------------------------------------
+  // Sent to the ASSIGNEE, and only when somebody else assigned it: an email
+  // telling you about the to-do you just wrote for yourself is noise.
+  async function taskAssigned({ user, task, patientName, assignedByName, ctaUrl, actorId }) {
+    try {
+      const who = assignedByName || 'Someone';
+      const due = dueWhen(task);
+      return {
+        notified: await taskNotice({
+          type: 'clinical_task_assigned', user, task, patientName, ctaUrl, actorId,
+          subjectDetail: 'New to-do', subjectVague: 'A to-do was assigned to you',
+          headline: 'A to-do was assigned to you',
+          detailParagraphs: (name) => [
+            `${who} assigned you a to-do for ${name}: "${task.title}".`,
+            due ? `It is due ${due}.` : 'It has no due date.',
+            'Open the workspace to see it in full, or to mark it done.'
+          ],
+          vagueParagraphs: [
+            'Someone assigned you a to-do for a patient.',
+            'Open the workspace to read it. For privacy we do not name the patient or the to-do in email.'
+          ]
+        }),
+        detailed: transportAllowsDetail()
+      };
+    } catch (e) {
+      console.error('[TASK] assigned notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 2. A to-do is due today ---------------------------------------------
+  async function taskDueToday({ user, task, patientName, ctaUrl, dedupeId }) {
+    try {
+      const at = timeLine(task && task.dueTime);
+      return {
+        notified: await taskNotice({
+          type: 'clinical_task_due', user, task, patientName, ctaUrl, dedupeId,
+          subjectDetail: 'To-do due today', subjectVague: 'You have a to-do due today',
+          headline: 'A to-do is due today',
+          detailParagraphs: (name) => [
+            at ? `Your to-do for ${name} is due now, at ${at}: "${task.title}".`
+               : `Your to-do for ${name} is due today: "${task.title}".`,
+            'Open the workspace to mark it done, or move the date if it needs longer.'
+          ],
+          vagueParagraphs: [
+            at ? `One of your to-dos is due now, at ${at}.` : 'One of your to-dos is due today.',
+            'Open the workspace to see it. For privacy we do not name the patient or the to-do in email.'
+          ]
+        }),
+        detailed: transportAllowsDetail()
+      };
+    } catch (e) {
+      console.error('[TASK] due notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 3. A to-do is overdue -----------------------------------------------
+  // Sent once a day for as long as it stays open, which is the point: the
+  // to-do nobody has answered is the one most likely to have been forgotten.
+  async function taskOverdue({ user, task, patientName, daysLate, ctaUrl, dedupeId }) {
+    try {
+      const n = Number(daysLate) > 0 ? Number(daysLate) : 1;
+      const at = timeLine(task && task.dueTime);
+      const late = `${n === 1 ? 'yesterday' : `${n} days ago`}${at ? ` at ${at}` : ''}`;
+      return {
+        notified: await taskNotice({
+          type: 'clinical_task_overdue', user, task, patientName, ctaUrl, dedupeId,
+          subjectDetail: 'To-do overdue', subjectVague: 'You have an overdue to-do',
+          headline: 'A to-do is overdue',
+          detailParagraphs: (name) => [
+            `Your to-do for ${name} was due ${late}: "${task.title}".`,
+            'Open the workspace to mark it done, move the date, or cancel it with a reason.'
+          ],
+          vagueParagraphs: [
+            `One of your to-dos was due ${late} and is still open.`,
+            'Open the workspace to see it. For privacy we do not name the patient or the to-do in email.'
+          ]
+        }),
+        detailed: transportAllowsDetail()
+      };
+    } catch (e) {
+      console.error('[TASK] overdue notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 4. A to-do you handed out is finished -------------------------------
+  // Sent to the AUTHOR, and only when somebody else finished it. The author is
+  // the person waiting on it; the assignee just ticked the box and does not
+  // need telling what they themselves did.
+  async function taskCompleted({ user, task, patientName, completedByName, ctaUrl, actorId }) {
+    try {
+      const who = completedByName || 'Someone';
+      const note = task && task.completionNote ? task.completionNote : null;
+      return {
+        notified: await taskNotice({
+          type: 'clinical_task_completed', user, task, patientName, ctaUrl, actorId,
+          subjectDetail: 'To-do finished', subjectVague: 'A to-do you assigned is finished',
+          headline: 'A to-do you assigned is finished',
+          detailParagraphs: (name) => [
+            `${who} marked your to-do for ${name} done: "${task.title}".`,
+            ...(note ? [`They added: "${note}"`] : []),
+            'Open the workspace to see it.'
+          ],
+          vagueParagraphs: [
+            'A to-do you assigned to somebody has been marked done.',
+            'Open the workspace to see it. For privacy we do not name the patient or the to-do in email.'
+          ]
+        }),
+        detailed: transportAllowsDetail()
+      };
+    } catch (e) {
+      console.error('[TASK] completed notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
     // private home care
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
@@ -856,7 +1044,9 @@ function createNotifier(deps) {
     // caregiver visits (PHCP)
     caregiverVisitConfirmed, caregiverVisitMoved,
     // messaging
-    staffMessageWaiting
+    staffMessageWaiting,
+    // clinical to-dos
+    taskAssigned, taskDueToday, taskOverdue, taskCompleted
   };
 }
 

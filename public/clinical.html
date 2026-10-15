@@ -484,6 +484,13 @@
     const fmtDate = (iso) => iso
       ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(iso)) ? `${iso}T12:00:00Z` : iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
       : '—';
+    // A due time is a wall-clock string with no date and no zone. Formatted
+    // from its own digits: running it through `Date` renders an invention.
+    const fmtDueTime = (hm) => {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(hm || ''))) return '';
+      const h = Number(String(hm).slice(0, 2)), m = String(hm).slice(3, 5);
+      return `${((h + 11) % 12) + 1}:${m} ${h < 12 ? 'AM' : 'PM'}`;
+    };
     const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
     const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
 
@@ -2437,6 +2444,7 @@
         title: (initial && initial.title) || '',
         detail: (initial && initial.detail) || '',
         dueDate: (initial && initial.dueDate) || '',
+        dueTime: (initial && initial.dueTime) || '',
         priority: (initial && initial.priority) || 'routine',
         category: (initial && initial.category) || 'other',
         assigneeId: (initial && initial.assigneeId) || ''
@@ -2455,7 +2463,10 @@
         e.preventDefault();
         setBusy(true); setErr('');
         try {
-          const body = { title: f.title, detail: f.detail, dueDate: f.dueDate || null, priority: f.priority, category: f.category };
+          // A time with no date is refused by the server, so the form does not
+          // send one: clearing the date clears the time here too.
+          const body = { title: f.title, detail: f.detail, dueDate: f.dueDate || null,
+            dueTime: f.dueDate ? (f.dueTime || null) : null, priority: f.priority, category: f.category };
           if (f.assigneeId) body.assigneeId = f.assigneeId;
           const r = initial
             ? await api.updateTask(initial.id, { action: 'edit', ...body })
@@ -2481,8 +2492,12 @@
             <input className="inp" value={f.title} onChange={set('title')} maxLength={200} required
               placeholder="e.g. Call daughter about PT schedule" />
           </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <Field label="Due date"><input className="inp" type="date" value={f.dueDate} onChange={set('dueDate')} /></Field>
+            <Field label="Due time">
+              <input className="inp" type="time" value={f.dueTime} onChange={set('dueTime')} disabled={!f.dueDate} />
+              <div className="text-[11px] text-stone-500 mt-1">{f.dueDate ? 'Blank sends the reminder at 9:00 AM' : 'Pick a date first'}</div>
+            </Field>
             <Field label="Priority">
               <select className="inp" value={f.priority} onChange={set('priority')}>
                 {((meta && meta.priorities) || ['routine', 'soon', 'urgent']).map(p => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
@@ -2541,7 +2556,7 @@
               <div className={`text-[14px] font-semibold ${t.status === 'open' ? 'text-primary' : 'text-stone-400 line-through'}`}>{t.title}</div>
               <div className="text-[12.5px] text-stone-500 flex flex-wrap gap-x-2">
                 {showPatient && <button type="button" className="underline decoration-dotted" onClick={() => onOpenChart && onOpenChart(t.clientId)}>{t.patientName || 'Patient'}</button>}
-                {t.dueDate && <span className={t.bucket === 'overdue' ? 'text-red-600 font-semibold' : ''}>Due {fmtDate(t.dueDate)}</span>}
+                {t.dueDate && <span className={t.bucket === 'overdue' ? 'text-red-600 font-semibold' : ''}>Due {fmtDate(t.dueDate)}{t.dueTime ? ` at ${fmtDueTime(t.dueTime)}` : ''}</span>}
                 {cat && <span>{cat.label}</span>}
                 {who && <span>{who}</span>}
               </div>
@@ -9315,7 +9330,16 @@
       // day starts.
       // `/clinical#inbox` is where the referral email points (appLinks), so the
       // fragment is read ONCE, at mount. Anything else lands on My Day.
-      const [view, setView] = useState(() => { const h = String(window.location.hash || '').replace(/^#/, ''); return h === 'inbox' || h === 'queue' ? h : 'myday'; }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      // THE FRAGMENT PICKS THE VIEW, and it is read against NAV_VIEWS rather
+      // than a list of its own: `#inbox` was the only one that worked, so the
+      // to-do emails' `#queues` would have landed on My Day. An UNKNOWN
+      // fragment still falls back to My Day — a link must never render a tab
+      // that does not exist. Read once, at mount: a later hash change is the
+      // person navigating, and yanking the tab out from under them is worse.
+      const [view, setView] = useState(() => {
+        const h = String(window.location.hash || '').replace(/^#/, '');
+        return NAV_VIEWS.some(v => v.key === h) ? h : 'myday';
+      }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
