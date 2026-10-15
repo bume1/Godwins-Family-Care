@@ -277,7 +277,7 @@ test('every /api/clinical route is registered with the matching guard (GET → r
       // the one order door a case manager holds (destination fields only).
       // 2026-10-14: note and calendar routes carry requireClinicalDocumenter —
       // licensed clinicians plus care coordinators, never a read-only case manager.
-      assert.match(l, /requireClinicalWrite|requireClinicalDocumenter|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor|requireTaskManager/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireClinicalDocumenter|requireAdmin|requireEnrollmentManager|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor|requireTaskManager/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }
@@ -439,7 +439,7 @@ test('4.12: the rest-of-the-record read is clinician-only, and nothing new is pa
     assert.ok(line, `route ${route} must exist`);
     assert.ok(!line.includes('/api/gfc'), `${route} must not be patient-facing`);
     assert.match(line, /\/api\/clinical\//, `${route} must live under the clinical prefix`);
-    assert.match(line, /requireClinical(Read|Write)|requireAdmin/, `${route} must be gated`);
+    assert.match(line, /requireClinical(Read|Write)|requireAdmin|requireEnrollmentManager/, `${route} must be gated`);
   }
   // And the client portal page asks for none of it.
   const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');

@@ -129,12 +129,18 @@ module.exports = function createMessagingRoutes(deps) {
     if (wants.includes(msg.ROLE.CLIENT) && client) add(client.id);
     if (wants.includes(msg.ROLE.CAREGIVER)) msg.assignedCaregiverIds(client).forEach(add);
     if (wants.includes(msg.ROLE.CLINICAL)) msg.assignedClinicianIds(client).forEach(add);
-    if (wants.includes(msg.ROLE.CASE_MANAGER)) add(msg.assignedCaseManagerId(client));
+    // Every case manager on the care team: the assigned one, supporting case
+    // managers and care coordinators (owner, 2026-10-15: "the entire clinical
+    // team for that patient").
+    if (wants.includes(msg.ROLE.CASE_MANAGER)) msg.caseManagerIds(client).forEach(add);
     if (wants.includes(msg.ROLE.FAMILY) && client) {
       users.filter(u => u.role === ROLES.FAMILY && u.familyOfClientId === client.id).forEach(u => add(u.id));
     }
     if (wants.includes(msg.ROLE.ADMIN)) {
       users.filter(u => u.role === ROLES.ADMIN).forEach(u => add(u.id));
+    }
+    if (wants.includes(msg.ROLE.MANAGER)) {
+      users.filter(u => u.isManager === true && (u.accountStatus || 'active') !== 'inactive').forEach(u => add(u.id));
     }
     // A POA is client-equivalent, so on a channel that names the client they are
     // on it too — otherwise they could read it and never be told it existed.
@@ -253,7 +259,7 @@ module.exports = function createMessagingRoutes(deps) {
     try {
       for (const f of list) {
         const name = nameForMime(cleanName(f.originalname), f.__mime);
-        const up = await googledrive.uploadMessageAttachmentFile(client.name || 'Client', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
+        const up = await googledrive.uploadMessageAttachmentFile((client && client.name) || 'Office', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
         stored.push({ id: uuidv4(), name, mime: f.__mime, size: f.buffer.length, drive_file_id: up.fileId });
       }
     } catch (e) {
@@ -513,6 +519,41 @@ module.exports = function createMessagingRoutes(deps) {
         return res.status(403).json({ error: availability.reason, code: availability.code });
       }
 
+      // WHO IT GOES TO (owner, 2026-10-15). On Care Team the sender chooses
+      // from the patient, their POA and the care team; on Support the OFFICE
+      // chooses from the patient side and the care team. The list is the one
+      // the composer showed (msg.audienceFor); the choice is checked against it
+      // before anything is stored. Sent without a choice (an older page), it
+      // goes to everyone on the list.
+      let chosen = null;
+      const audience = msg.audienceFor(channelId, { user: req.user, client, users, isPoa });
+      if (audience) {
+        let ids = body.recipientIds;
+        // No choice sent (an older page): everyone on the list, except Support
+        // from the office, which is one-to-one and so goes to the patient it is
+        // about, or must be chosen.
+        if (ids === undefined || ids === '') ids = channelId === 'support' ? (client ? [client.id] : []) : audience.map(m => m.id);
+        if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (e) { ids = null; } }
+        if (!Array.isArray(ids)) return res.status(400).json({ error: 'recipientIds must be a list.', code: 'RECIPIENTS_INVALID' });
+        const allowed = new Set(audience.map(m => String(m.id)));
+        const wanted = [...new Set(ids.map(String))];
+        if (wanted.some(id => !allowed.has(id))) {
+          return res.status(400).json({ error: 'Only people on this patient\'s care team, the patient and their family can be chosen.', code: 'RECIPIENT_NOT_ON_CARE_TEAM' });
+        }
+        if (!wanted.length) return res.status(400).json({ error: 'Choose at least one person to send this to.', code: 'RECIPIENTS_REQUIRED' });
+        // Support from the office is one-to-one: ONE person (owner, 2026-10-15).
+        if (channelId === 'support' && wanted.length !== 1) {
+          return res.status(400).json({ error: 'A Support message goes to one person. Choose one.', code: 'SUPPORT_ONE_RECIPIENT' });
+        }
+        chosen = { ids: wanted, partial: channelId === 'support' || wanted.length < audience.length };
+      }
+      // SUPPORT IS ONE-TO-ONE WITH THE OFFICE (owner, 2026-10-15): anyone who
+      // is not the office — a patient, a family member or POA, any team member —
+      // and the office (admins and managers). Nobody else is on it.
+      const staffToOffice = channelId === 'support' && !chosen;
+      const officeIds = users.filter(u => u && (u.accountStatus || 'active') !== 'inactive' &&
+        (u.role === ROLES.ADMIN || u.isManager === true)).map(u => u.id);
+
       const files = req.files || [];
       const { valid, errors, clean } = msg.validateMessage(body, { attachmentCount: files.length });
       if (!valid) return res.status(400).json({ error: errors[0].message, code: errors[0].code, errors });
@@ -530,10 +571,18 @@ module.exports = function createMessagingRoutes(deps) {
       const thread = {
         id: threadId,
         channel: channelId,
-        client_id: client.id,
-        client_name: client.name,
+        client_id: client ? client.id : null,          // null: a team member's Support with no patient
+        client_name: client ? client.name : null,
         subject: String(body.subject || channel.label).trim().slice(0, 140),
-        participant_ids: await participantsFor(channelId, { user: req.user, client }),
+        participant_ids: chosen
+          ? [...new Set([req.user.id, ...chosen.ids, ...(channelId === 'support' ? officeIds : [])])]
+          : staffToOffice
+            ? [...new Set([req.user.id, ...officeIds])]
+            : await participantsFor(channelId, { user: req.user, client }),
+        // True when the sender's choice decides who reads it: then only the
+        // people on it do, whatever their scope (threadVisibility). Admin still
+        // sees everything.
+        audience_chosen: !!((chosen && chosen.partial) || staffToOffice),
         started_by: req.user.id,
         started_by_name: sender.displayName,
         started_by_role: sender.fromRole,
@@ -557,7 +606,7 @@ module.exports = function createMessagingRoutes(deps) {
       const message = {
         id: uuidv4(),
         thread_id: threadId,
-        client_id: client.id,
+        client_id: client ? client.id : null,
         channel: channelId,
         from_user_id: sender.fromUserId,
         from_role: sender.fromRole,
@@ -588,7 +637,7 @@ module.exports = function createMessagingRoutes(deps) {
       written = true;
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_started', 'message_thread', threadId,
-        { channel: channelId, clientId: client.id, role: sender.fromRole, actingFor: sender.actingFor });
+        { channel: channelId, clientId: client ? client.id : null, role: sender.fromRole, actingFor: sender.actingFor });
 
       await notifyThread(thread, message, req.user.id);
 
@@ -820,7 +869,7 @@ module.exports = function createMessagingRoutes(deps) {
     const recipients = new Set(thread.participant_ids || []);
     // A POA designated AFTER the thread began, or a clinician's own POA
     // recipients, are read fresh: the participant list on the row is a snapshot.
-    if (channel && channel.includesPoa) {
+    if (channel && channel.includesPoa && !thread.audience_chosen) {
       const client = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
       if (client) poaIdsFor(users, client).forEach(id => recipients.add(id));
     }
@@ -828,6 +877,8 @@ module.exports = function createMessagingRoutes(deps) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
       if (!u || !u.email) continue;
+      // Admin sees Direct threads but is not emailed about them (owner, 2026-10-15).
+      if (thread.channel === 'direct_care' && u.role === ROLES.ADMIN) continue;
       // A family member who is no longer the client's designated POA was on the
       // row when it began; the gate that hides the thread from them must also
       // stop the email.

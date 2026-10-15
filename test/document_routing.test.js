@@ -125,8 +125,8 @@ test('neither edited page still calls a file-to-emr endpoint or renders a File t
   }
 });
 
-test('move-to-caregiver is admin-only, on the enrollment screen only — the owner\'s explicit ask, and it is a separate decision automatic filing never touches', () => {
-  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/:docId\/move-to-caregiver',\s*authenticateToken,\s*requireAdmin,\s*moveDocumentToCaregiverHandler\)/);
+test('move-to-caregiver is for those who run enrollment (admin, manager, coordinator), on the enrollment screen only — the owner\'s explicit ask, and it is a separate decision automatic filing never touches', () => {
+  assert.match(SERVER, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/:docId\/move-to-caregiver',\s*authenticateToken,\s*requireEnrollmentManager,\s*moveDocumentToCaregiverHandler\)/);
   assert.ok(!/\/api\/clinical\/patients\/:clientId\/documents\/:docId\/move-to-caregiver/.test(SERVER),
     'move-to-caregiver must not gain a second door from the clinical chart');
 });

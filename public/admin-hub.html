@@ -124,8 +124,8 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
-          // Verify user has admin hub access (super admins, managers, or users with hasAdminHubAccess)
-          if (result.user && result.user.role !== 'admin' && !result.user.isManager && !result.user.hasAdminHubAccess) {
+          // The Admin Hub is the Super Admin's alone (owner, 2026-10-15).
+          if (result.user && result.user.role !== 'admin') {
             return { error: 'Access denied. Admin Hub access required.' };
           }
           return result;
@@ -1753,9 +1753,12 @@
 
       const defaultFormData = {
         name: '', email: '', password: '', phone: '', role: 'user',
-        isManager: false, // Manager flag - limited admin access (no inbox/user management)
-        hasServicePortalAccess: false, hasAdminHubAccess: false,
-        hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        isManager: false,
+        // THE ONE ACCOUNT TYPE (owner, 2026-10-15). It sets role, isManager and
+        // clinicalRole; the form never sets those three on its own. Empty until
+        // an admin chooses one, so a new account is never a guess.
+        accountType: '', managerClinicalAccess: '',
+        hasImplementationsAccess: false,
         practiceName: '', isNewClient: false, existingPortalSlug: '',
         logo: '', hubspotCompanyId: '', hubspotDealId: '', hubspotContactId: '',
         assignedProjects: [], projectAccessLevels: {}, assignedClients: [],
@@ -1791,6 +1794,11 @@
       const [competencies, setCompetencies] = useState([]);
       // Session 4.8 — served, not hardcoded (see api.getClinicalRoles).
       const [clinicalRoleCatalog, setClinicalRoleCatalog] = useState([]);
+      // Account types and the manager's clinical access levels, served by
+      // GET /api/admin/clinical-roles (accountTypes.js) — never listed here.
+      const [accountTypeCatalog, setAccountTypeCatalog] = useState([]);
+      const [managerAccessCatalog, setManagerAccessCatalog] = useState([]);
+      const [defaultManagerAccess, setDefaultManagerAccess] = useState('view');
       // Account recovery: OpenEMR connection status for whoever is being
       // edited. Fetched on demand when the form opens — like competencies,
       // it lives outside formData because it is not a field the save
@@ -1802,6 +1810,26 @@
 
       const selectedClinicalRole = clinicalRoleCatalog.find(r => r.value === formData.clinicalRole) || null;
       const pendingRoleReview = users.filter(u => u.clinicalRoleAutoAssigned && u.clinicalRole);
+      // Accounts the account-type migration could not place (owner, 2026-10-15).
+      const pendingTypeReview = users.filter(u => u.accountTypeNeedsReview);
+      const accountTypeLabel = (u) => {
+        const t = accountTypeCatalog.find(x => x.value === u.accountType);
+        return t ? t.label : 'Choose a type';
+      };
+      // Choosing a type sets the fields it decides, from the SERVED mapping.
+      const chooseAccountType = (value) => {
+        const t = accountTypeCatalog.find(x => x.value === value);
+        if (!t) { setFormData({ ...formData, accountType: '' }); return; }
+        const access = value === 'manager' ? (formData.managerClinicalAccess || defaultManagerAccess) : '';
+        const lvl = managerAccessCatalog.find(a => a.value === access);
+        const clinicalRole = value === 'manager' ? ((lvl && lvl.clinicalRole) || '') : (t.fields.clinicalRole || '');
+        setFormData({ ...formData, accountType: value, role: t.fields.role, isManager: t.fields.isManager,
+          clinicalRole, hasClinicalAccess: t.fields.hasClinicalAccess, managerClinicalAccess: access });
+      };
+      const chooseManagerAccess = (value) => {
+        const lvl = managerAccessCatalog.find(a => a.value === value);
+        setFormData({ ...formData, managerClinicalAccess: value, clinicalRole: (lvl && lvl.clinicalRole) || '' });
+      };
       // Session 4.11 B2 — the same pattern, for the same reason: an owner item is
       // only open for the owner once there is somewhere to do it. A console line
       // is not where an admin works.
@@ -1828,6 +1856,9 @@
         });
         api.getClinicalRoles(token).then(r => {
           if (r && Array.isArray(r.roles)) setClinicalRoleCatalog(r.roles);
+          if (r && Array.isArray(r.accountTypes)) setAccountTypeCatalog(r.accountTypes);
+          if (r && Array.isArray(r.managerClinicalAccess)) setManagerAccessCatalog(r.managerClinicalAccess);
+          if (r && r.defaultManagerClinicalAccess) setDefaultManagerAccess(r.defaultManagerClinicalAccess);
         });
       }, [token]);
 
@@ -1922,10 +1953,9 @@
           phone: user.phone || '',
           role: user.role || 'user',
           isManager: user.isManager || false,
-          hasServicePortalAccess: user.hasServicePortalAccess || false,
-          hasAdminHubAccess: user.hasAdminHubAccess || false,
+          accountType: user.accountType || '',
+          managerClinicalAccess: user.managerClinicalAccess || '',
           hasImplementationsAccess: user.hasImplementationsAccess || false,
-          hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || false,
           practiceName: user.practiceName || '',
           isNewClient: user.isNewClient || false,
           logo: user.logo || '',
@@ -2018,12 +2048,6 @@
         const result = await api.deleteUser(token, userId);
         if (result.error) setMessage(`Error: ${result.error}`);
         else loadData();
-      };
-
-      const toggleServiceAccess = async (user) => {
-        const result = await api.updateUser(token, user.id, { hasServicePortalAccess: !user.hasServicePortalAccess });
-        if (result.error) { setMessage(`Error: ${result.error}`); return; }
-        loadData();
       };
 
       const toggleEmailSubscription = async (user) => {
@@ -2127,28 +2151,15 @@
       // Export users to xlsx
       const exportUsersToXlsx = () => {
         // Prepare data for export
-        const getRoleDisplay = (user) => {
-          if (user.role === 'admin') return 'Super Admin';
-          if (user.isManager) return 'Manager';
-          if (user.role === 'user') return 'Clinical (FNP)';
-          if (user.role === 'client') return 'Client';
-          if (user.role === 'vendor') return 'Caregiver';
-          if (user.role === 'caseManager') return 'Case Manager';
-          if (user.role === 'family') return 'Family';
-          return user.role || '';
-        };
+        const getRoleDisplay = (user) => accountTypeLabel(user);
 
         const clientNameById = new Map(users.filter(u => u.role === 'client').map(u => [u.id, u.name]));
         const exportData = users.map(user => ({
           'Name': user.name || '',
           'Email': user.email || '',
-          'Role': getRoleDisplay(user),
-          'Is Manager': user.isManager ? 'Yes' : 'No',
+          'Account Type': getRoleDisplay(user),
+          'Clinical Access (Manager)': user.managerClinicalAccess || '',
           'Practice/Company': user.practiceName || '',
-          'Service Portal Access': user.hasServicePortalAccess ? 'Yes' : 'No',
-          'Admin Hub Access': user.hasAdminHubAccess ? 'Yes' : 'No',
-          'Implementations Access': user.hasImplementationsAccess ? 'Yes' : 'No',
-          'Client Portal Admin': user.hasClientPortalAdminAccess ? 'Yes' : 'No',
           // Lab-era CRM ids — empty for every GFC user, so they are three
           // empty columns in every export. Flip SHOW_LAB_LEGACY_UI to bring
           // them back with the rest.
@@ -2203,7 +2214,7 @@
 
       const filteredUsers = users.filter(user => {
         const matchesSearch = user.name?.toLowerCase().includes(searchTerm.toLowerCase()) || user.email?.toLowerCase().includes(searchTerm.toLowerCase());
-        const matchesRole = roleFilter === 'all' || user.role === roleFilter || (roleFilter === 'service' && user.hasServicePortalAccess);
+        const matchesRole = roleFilter === 'all' || user.role === roleFilter || false;
         return matchesSearch && matchesRole;
       });
 
@@ -2217,6 +2228,25 @@
               names them too, but the log scrubber redacts the addresses and a
               console line is not where an admin works. This banner stands
               until each role has been confirmed. */}
+          {pendingTypeReview.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">
+                {pendingTypeReview.length} account{pendingTypeReview.length === 1 ? '' : 's'} need{pendingTypeReview.length === 1 ? 's' : ''} an account type
+              </p>
+              <p className="text-sm text-amber-800 mt-1">
+                Each account now has one account type, and it decides what the person can do. These did not match a
+                type, so nothing was guessed. Open each one, choose the type and save.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-3">
+                {pendingTypeReview.map(u => (
+                  <button key={u.id} onClick={() => handleEdit(u)}
+                    className="px-3 py-1.5 rounded-lg text-sm bg-white border border-amber-300 text-amber-900 hover:bg-amber-100">
+                    {u.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {pendingRoleReview.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
               <p className="font-semibold text-amber-900">
@@ -2423,66 +2453,19 @@
                       </div>
                     )}
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                      <select value={formData.role === 'user' && formData.isManager ? 'manager' : (formData.role === 'caseManager' && formData.clinicalRole === 'coordinator' ? 'coordinator' : formData.role)} onChange={(e) => {
-                          const val = e.target.value;
-                          if (val === 'manager') {
-                            setFormData({ ...formData, role: 'user', isManager: true });
-                          } else if (val === 'coordinator') {
-                            // A care coordinator is a case-management account with the
-                            // unlicensed coordinator clinical role: they prepare notes and
-                            // schedule, and a licensed clinician signs.
-                            setFormData({ ...formData, role: 'caseManager', isManager: false, clinicalRole: 'coordinator', hasClinicalAccess: false });
-                          } else if (val === 'caseManager' && formData.clinicalRole === 'coordinator') {
-                            setFormData({ ...formData, role: val, isManager: false, clinicalRole: '' });
-                          } else {
-                            setFormData({ ...formData, role: val, isManager: false });
-                          }
-                        }}
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Account Type *</label>
+                      {/* ONE choice sets everything this person can do (owner,
+                          2026-10-15). The types come from the server; the form
+                          lists none of its own. */}
+                      <select value={formData.accountType} required onChange={(e) => chooseAccountType(e.target.value)}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                        <option value="user">Clinical (FNP)</option>
-                        <option value="manager">Manager</option>
-                        <option value="admin">Super Admin</option>
-                        <option value="client">Client</option>
-                        <option value="vendor">Caregiver</option>
-                        <option value="caseManager">Case Manager</option>
-                        <option value="coordinator">Care Coordinator</option>
-                        <option value="family">Family / Authorized Contact</option>
+                        <option value="">-- Choose an account type --</option>
+                        {accountTypeCatalog.map(t => (
+                          <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
                       </select>
                     </div>
                   </div>
-
-                  {/* Permission Flags (for team members) */}
-                  {(formData.role === 'user' || formData.role === 'admin') && (
-                    <div className="border-t pt-4">
-                      <h3 className="font-medium text-gray-800 mb-3">Access Permissions</h3>
-
-                      <div className="grid md:grid-cols-2 gap-3">
-                        <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg">
-                          <input type="checkbox" id="serviceAccess" checked={formData.hasServicePortalAccess}
-                            onChange={(e) => setFormData({ ...formData, hasServicePortalAccess: e.target.checked })}
-                            className="w-5 h-5 rounded border-gray-300 text-green-600 focus:ring-green-500" />
-                          <label htmlFor="serviceAccess" className="text-sm font-medium text-gray-700">Service Portal</label>
-                        </div>
-                        <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-lg">
-                          <input type="checkbox" id="adminHubAccess" checked={formData.hasAdminHubAccess}
-                            onChange={(e) => setFormData({ ...formData, hasAdminHubAccess: e.target.checked })}
-                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                          <label htmlFor="adminHubAccess" className="text-sm font-medium text-gray-700">Admin Hub</label>
-                        </div>
-                        {/* hasImplementationsAccess checkbox hidden (Bianca, 08/2026):
-                            the launch tracker is dormant per strip-list §7. The flag
-                            itself is preserved on user records for future repurposing. */}
-                        <div className="flex items-center gap-3 p-3 bg-orange-50 rounded-lg">
-                          <input type="checkbox" id="clientPortalAdmin" checked={formData.hasClientPortalAdminAccess}
-                            onChange={(e) => setFormData({ ...formData, hasClientPortalAdminAccess: e.target.checked })}
-                            className="w-5 h-5 rounded border-gray-300 text-orange-600 focus:ring-orange-500" />
-                          <label htmlFor="clientPortalAdmin" className="text-sm font-medium text-gray-700">Client Portal Admin</label>
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-2">Admins automatically have all permissions.</p>
-                    </div>
-                  )}
 
                   {/* License Level — shown for Caregiver (vendor) role */}
                   {formData.role === 'vendor' && (
@@ -2546,29 +2529,34 @@
                     </div>
                   )}
 
-                  {/* Clinical role (Session 4.8) — shown for clinical staff and
-                      case managers. This REPLACED a single "Clinical Access"
-                      checkbox that granted prescribing, ordering, CPT selection
-                      and billable signing all at once. The options are served by
-                      GET /api/admin/clinical-roles, never listed here. */}
+                  {/* Clinical access. The account type sets the clinical role;
+                      a MANAGER's is chosen here (owner, 2026-10-15): View only by
+                      default, or none, or chart editing. The levels are served. */}
                   {(formData.role === 'user' || formData.role === 'caseManager') && (
                     <div className="border-t pt-4">
                       <div className="p-3 bg-teal-50 rounded-lg">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Clinical role</label>
-                        <select value={formData.clinicalRole}
-                          onChange={(e) => { const v = e.target.value; const r = clinicalRoleCatalog.find(x => x.value === v); setFormData({ ...formData, clinicalRole: v, hasClinicalAccess: !!(r && r.licensed) }); }}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                          <option value="">No clinical access</option>
-                          {clinicalRoleCatalog.map(r => (
-                            <option key={r.value} value={r.value}>{r.label}</option>
-                          ))}
-                        </select>
-                        <p className="text-xs text-gray-500 mt-2">
-                          Certification decides what this person may do: prescribing, placing an order on their own
-                          authority, selecting CPT codes and signing a billable encounter are a provider's. An RN or an
-                          LMSW places orders under a signed standing order. Read-only is chart access without a clinical
-                          licence. A Care Coordinator prepares notes and books visits, and a licensed clinician signs.
-                        </p>
+                        {formData.accountType === 'manager' ? (
+                          <>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Clinical Workspace access</label>
+                            <select value={formData.managerClinicalAccess || defaultManagerAccess}
+                              onChange={(e) => chooseManagerAccess(e.target.value)}
+                              className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                              {managerAccessCatalog.map(a => (
+                                <option key={a.value} value={a.value}>{a.label}</option>
+                              ))}
+                            </select>
+                            <p className="text-xs text-gray-500 mt-2">
+                              A manager runs scheduling, billing and patient accounts. Billing is done inside the Clinical
+                              Workspace, so a manager who bills needs at least View only. View and edit charts lets them
+                              write and edit notes like a Care Coordinator. Nobody without a clinical licence signs.
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-sm text-gray-700">
+                            Clinical role: <b>{(clinicalRoleCatalog.find(r => r.value === formData.clinicalRole) || {}).label || 'None'}</b>
+                            <span className="block text-xs text-gray-500 mt-1">Set by the account type.</span>
+                          </p>
+                        )}
                         {selectedClinicalRole && (
                           <p className="text-xs text-teal-800 mt-2">
                             May execute under a standing order: {(selectedClinicalRole.credentialCeiling || []).join(', ') || 'nothing'}.
@@ -3331,23 +3319,12 @@
                               user.role === 'vendor' ? 'bg-green-100 text-green-700' :
                               user.role === 'caseManager' ? 'bg-teal-100 text-teal-700' :
                               user.role === 'family' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
-                            }`}>{
-                              user.role === 'admin' ? 'Super Admin' :
-                              user.isManager ? 'Manager' :
-                              user.role === 'client' ? 'Client' :
-                              user.role === 'vendor' ? 'Caregiver' :
-                              user.role === 'user' ? 'Clinical (FNP)' :
-                              user.role === 'caseManager' ? 'Case Manager' :
-                              user.role === 'family' ? 'Family' : user.role
-                            }</span>
+                            }`}>{accountTypeLabel(user)}</span>
                           </td>
                           <td className="px-4 py-4">
                             <div className="flex flex-wrap gap-1 justify-center">
                               {/* "Impl" badge hidden with the dormant tracker (strip-list §7) */}
                               <span className={`px-2 py-0.5 text-xs rounded ${user.role === 'client' || user.role === 'admin' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}`} title="Client Portal">Client</span>
-                              <button onClick={() => toggleServiceAccess(user)} disabled={user.role === 'admin'}
-                                className={`px-2 py-0.5 text-xs rounded ${user.hasServicePortalAccess || user.role === 'admin' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
-                                title={user.role === 'admin' ? 'Admins always have access' : 'Click to toggle'}>Service</button>
                             </div>
                           </td>
                           <td className="px-4 py-4 text-xs text-gray-500">
@@ -4854,6 +4831,13 @@
       });
       const [activePage, setActivePage] = useState('dashboard');
       const [isMobileOpen, setIsMobileOpen] = useState(false);
+
+      // Super Admin only until these areas are revised (owner, 2026-10-15). A
+      // non-admin who still holds a session from before is sent to the sign-in
+      // page, which routes them to their own area.
+      useEffect(() => {
+        if (user && user.role !== 'admin') window.location.replace('/login');
+      }, [user]);
 
       // Handle browser back/forward cache (bfcache) - re-validate auth when page is restored
       useEffect(() => {

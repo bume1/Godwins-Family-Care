@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Billing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The Billing module (owner, 2026-10-15). Its own page on the hub, not only
+       a corner of the clinical workspace, because billing covers both medical
+       visits and home care. Same look as /scheduling. */
+    :root{--navy:#033D50;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;--cream-d:#efe9db;
+          --ink:#2b2b28;--mut:#7a746a;--red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a{color:var(--gold);font-size:14px;font-weight:600;text-decoration:none}
+    .wrap{max-width:1180px;margin:0 auto;padding:20px 16px 60px}
+    .tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
+    .tab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 16px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit;font-weight:600}
+    .tab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+    .card h2{font-family:'Cormorant Garamond',serif;font-size:21px;color:var(--navy);font-weight:600;margin-bottom:4px}
+    .sub{font-size:14px;color:var(--mut);margin-bottom:12px}
+    .row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #ece6db;flex-wrap:wrap;align-items:flex-start}
+    .row:last-child{border:none}
+    .row b{color:var(--navy)}
+    .mu{color:var(--mut);font-size:14px}
+    label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:5px}
+    input,select{border:1px solid #ddd3c0;border-radius:8px;padding:9px;font-size:15px;background:#fff;color:var(--ink);max-width:100%}
+    .btn{border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit;text-decoration:none;display:inline-block}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .chip{display:inline-block;border-radius:12px;padding:3px 10px;font-size:11.5px;font-weight:700;text-transform:uppercase}
+    .chip.draft{background:#eee8db;color:#6d675d}
+    .chip.open{background:#fdf3dd;color:#8a6a1e}
+    .chip.paid{background:#eef3f0;color:var(--green)}
+    .chip.void{background:#f3eaea;color:var(--red)}
+    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .warn{background:#fdf6e6;border:1px solid #ecd9a8;color:#6d5313;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .empty{text-align:center;padding:26px;color:var(--mut)}
+    .fl{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+  </style>
+  <script src="/session-guard.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const API = window.location.origin;
+const getToken = () =>
+  localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) }
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.code = data && data.code; err.status = res.status; err.data = data;
+    throw err;
+  }
+  return data;
+};
+const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+
+const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
+const day = (iso) => {
+  if (!iso) return '';
+  try { return window.GFC_TIME ? window.GFC_TIME.fmtDate(iso) : new Date(iso).toLocaleDateString(); }
+  catch (e) { return String(iso).slice(0, 10); }
+};
+
+// ---- Claims: signed visits waiting on billing ------------------------------
+// The same worklist as the clinical workspace's "Awaiting Billing" filter,
+// oldest first. Submit runs the server's billing checks; if codes or a place of
+// service are missing the refusal says what, and the visit opens in the
+// Clinical Workspace to fix it.
+const Claims = ({ names }) => {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState('');
+  const load = useCallback(() => {
+    setErr('');
+    api('/api/clinical/encounters/queue?state=awaiting_billing').then(setD).catch(e => setErr(e.message));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const submit = (r, body) => {
+    setBusy(r.encounterUuid); setErr(''); setMsg('');
+    post(`/api/clinical/patients/${encodeURIComponent(r.clientId)}/encounters/${encodeURIComponent(r.encounterUuid)}/billing-submit`, body)
+      .then(() => { setMsg(body.noCharge ? 'Marked as no charge.' : 'Submitted to billing.'); load(); })
+      .catch(e => {
+        // An insurance block that billing may override carries a reason
+        // field; that override lives on the visit in the Clinical Workspace.
+        const where = e.data && e.data.overridable ? ' To override it with a reason, open the visit in the Clinical Workspace.' : '';
+        setErr(`${e.message}${where}`);
+      })
+      .finally(() => setBusy(''));
+  };
+  const noCharge = (r) => {
+    const reason = window.prompt('Why is this visit not being billed?');
+    if (reason && reason.trim()) submit(r, { noCharge: true, reason: reason.trim() });
+  };
+  return (
+    <div className="card">
+      <h2>Claims waiting on billing</h2>
+      <p className="sub">Visits a clinician has signed that are not submitted yet. Oldest first. To change codes or the place of service, open the visit in the Clinical Workspace.</p>
+      {err && <div className="err">{err}</div>}
+      {msg && <div className="ok">{msg}</div>}
+      {d && d.degraded && <div className="warn">OpenEMR could not be read, so this list shows only what the app holds{d.emrError ? ` (${d.emrError})` : ''}. Sign in to OpenEMR from the Clinical Workspace for the full list.</div>}
+      {!d && !err && <div className="empty">Loading…</div>}
+      {d && d.encounters.length === 0 && <div className="empty">Nothing is waiting on billing.</div>}
+      {d && d.encounters.map(r => (
+        <div className="row" key={r.encounterUuid}>
+          <div>
+            <b>{r.patientName || names.get(r.clientId) || 'Patient'}</b>
+            <div className="mu">Visit {day(r.date)}{r.signedAt ? ` · signed ${day(r.signedAt)}` : ''}{r.renderingProvider && r.renderingProvider.name ? ` · ${r.renderingProvider.name}` : ''}</div>
+            <div className="mu">{r.diagnosisCount} diagnosis code{r.diagnosisCount === 1 ? '' : 's'} · {r.serviceCount} service code{r.serviceCount === 1 ? '' : 's'}</div>
+          </div>
+          <div className="btns">
+            <button className="btn" disabled={busy === r.encounterUuid} onClick={() => {
+              // The same attestation the visit's Billing card asks for.
+              if (window.confirm('The service codes and modifiers on this visit are supported by the signed note.\n\nSubmit to billing?')) submit(r, { attest: true });
+            }}>Submit</button>
+            <button className="btn ghost" disabled={busy === r.encounterUuid} onClick={() => noCharge(r)}>No Charge</button>
+            <a className="btn ghost" href="/clinical#queue">Open in Clinical</a>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ---- Patient statements ----------------------------------------------------
+const Statements = ({ data, reload }) => {
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [show, setShow] = useState('outstanding');
+  const act = (inv, action, body) => {
+    setBusy(inv.id); setErr('');
+    post(`/api/gfc/admin/billing/invoices/${encodeURIComponent(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message)).finally(() => setBusy(''));
+  };
+  const rows = data.invoices.filter(i => show === 'all' ? true : show === 'outstanding' ? (i.status === 'draft' || i.status === 'open') : i.status === show);
+  return (
+    <div className="card">
+      <h2>Patient statements</h2>
+      <p className="sub">Copays and home care hours. A draft is checked here, then sent to the patient.</p>
+      {!data.stripe.configured && <div className="warn">Online payment is not set up yet. Statements still work; patients are told to call to pay.</div>}
+      {err && <div className="err">{err}</div>}
+      <div className="tabs">
+        {[['outstanding', 'Outstanding'], ['draft', 'Drafts'], ['open', 'Sent'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([k, l]) => (
+          <button key={k} className={`tab ${show === k ? 'on' : ''}`} onClick={() => setShow(k)}>{l}</button>
+        ))}
+      </div>
+      {rows.length === 0 && <div className="empty">No statements here.</div>}
+      {rows.map(i => (
+        <div className="row" key={i.id}>
+          <div>
+            <b>{i.clientName || 'Client'}</b> · {i.number}
+            <div className="mu">{i.kind === 'copay' ? 'Copay' : `Home care${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`} · created {day(i.createdAt)}</div>
+            {i.status === 'void' && <div className="mu">Voided: {i.voidReason}</div>}
+            {i.status === 'paid' && <div className="mu">Paid {day(i.paidAt)} by {((i.payments || []).slice(-1)[0] || {}).method}</div>}
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div><b>{usd(i.totalCents)}</b> <span className={`chip ${i.status}`}>{i.status === 'open' ? 'sent' : i.status}</span></div>
+            {(i.status === 'draft' || i.status === 'open') && (
+              <div className="btns" style={{ justifyContent: 'flex-end' }}>
+                {i.status === 'draft' && <button className="btn" disabled={busy === i.id} onClick={() => act(i, 'send')}>Send to Patient</button>}
+                {i.status === 'open' && <button className="btn" disabled={busy === i.id} onClick={() => {
+                  const m = window.prompt('Paid how? Type check, cash or other.');
+                  if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
+                }}>Record Payment</button>}
+                <button className="btn ghost" disabled={busy === i.id} onClick={() => {
+                  const r = window.prompt('Why void this statement? The patient sees it as cancelled.');
+                  if (r && r.trim()) act(i, 'void', { reason: r.trim() });
+                }}>Void</button>
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ---- New statement / copay for one client ---------------------------------
+const NewStatement = ({ data, reload }) => {
+  const [clientId, setClientId] = useState('');
+  const [d, setD] = useState(null);
+  const [copay, setCopay] = useState('');
+  const [range, setRange] = useState({ from: '', to: '' });
+  const [preview, setPreview] = useState(null);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState('');
+  useEffect(() => {
+    setD(null); setPreview(null); setErr(''); setMsg('');
+    if (!clientId) return;
+    api(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}`)
+      .then(r => { setD(r); setCopay(r.copayCents ? (r.copayCents / 100).toFixed(2) : ''); })
+      .catch(e => setErr(e.message));
+  }, [clientId]);
+  const run = (key, fn) => { setBusy(key); setErr(''); setMsg(''); return fn().catch(e => { setErr(e.message); return null; }).finally(() => setBusy('')); };
+  return (
+    <div className="card">
+      <h2>Copay and home care statements</h2>
+      <p className="sub">Choose a client to set their copay or make a home care statement from completed caregiver visits.</p>
+      <div style={{ marginBottom: 12 }}>
+        <label>Client</label>
+        <select value={clientId} onChange={e => setClientId(e.target.value)} style={{ minWidth: 260 }}>
+          <option value="">-- Choose a client --</option>
+          {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </div>
+      {err && <div className="err">{err}</div>}
+      {msg && <div className="ok">{msg}</div>}
+      {clientId && !d && !err && <div className="empty">Loading…</div>}
+      {d && (
+        <>
+          <div style={{ marginBottom: 16 }}>
+            <label>Fixed copay per visit</label>
+            <div className="mu" style={{ marginBottom: 6 }}>Only for plans with a set copay. Leave blank for none: for Medicare the patient's share comes from the insurance payment, not from here.</div>
+            <div className="fl">
+              <span>$</span><input style={{ width: 120 }} inputMode="decimal" value={copay} onChange={e => setCopay(e.target.value)} placeholder="none" />
+              <button className="btn" disabled={busy === 'copay'} onClick={() => run('copay', () => api(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/copay`, { method: 'PUT', body: JSON.stringify({ copay: copay.trim() || null }) })).then(r => r && setMsg('Copay saved.'))}>Save</button>
+            </div>
+          </div>
+          <div>
+            <label>Home care statement</label>
+            <div className="mu" style={{ marginBottom: 6 }}>{d.rate ? `From completed caregiver visits at ${usd(Math.round(d.rate.hourlyRate * 100))}/hour, ${d.rate.dailyMinimumHours}-hour daily minimum.` : 'No agreed rate on file. Set it on the client\'s enrollment record first.'}</div>
+            <div className="fl">
+              <input type="date" value={range.from} onChange={e => setRange({ ...range, from: e.target.value })} />
+              <span>to</span>
+              <input type="date" value={range.to} onChange={e => setRange({ ...range, to: e.target.value })} />
+              <button className="btn ghost" disabled={!range.from || !range.to || busy === 'preview'} onClick={() => run('preview', () => post(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/home-care/preview`, range)).then(r => r && setPreview(r))}>Preview</button>
+            </div>
+            {preview && (
+              <div className="card" style={{ marginTop: 10 }}>
+                {preview.lines.length === 0 && <div className="mu">No completed caregiver visits in those dates.</div>}
+                {preview.lines.map(l => (
+                  <div key={l.date} className="row" style={{ padding: '6px 0' }}>
+                    <span>{l.date} · {l.hours} h{l.minimumApplied ? ` (minimum; worked ${l.actualHours})` : ''}</span><span>{usd(l.amountCents)}</span>
+                  </div>
+                ))}
+                {preview.lines.length > 0 && <div className="row" style={{ padding: '6px 0' }}><b>Total</b><b>{usd(preview.totalCents)}</b></div>}
+                {preview.lines.length > 0 && (
+                  <button className="btn" disabled={busy === 'create'} onClick={() => run('create', () => post(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/home-care`, range)).then(r => {
+                    if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it under Statements, then send it.`); reload(); }
+                  })}>Create Draft Statement</button>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+const App = () => {
+  const [tab, setTab] = useState(() => (['claims', 'statements', 'new'].includes(String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'claims'));
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const load = useCallback(() => {
+    api('/api/gfc/admin/billing-statements').then(setData).catch(e => {
+      if (e.status === 401) { window.location.replace('/login'); return; }
+      setErr(e.status === 403 ? 'Billing is done by an admin, a manager or a care coordinator.' : e.message);
+    });
+  }, []);
+  useEffect(() => {
+    if (!getToken()) { window.location.replace('/login'); return; }
+    load();
+  }, [load]);
+  const pick = (t) => { setTab(t); try { history.replaceState(null, '', `#${t}`); } catch (e) { /* no history */ } };
+  const names = new Map(((data && data.clients) || []).map(c => [c.id, c.name]));
+  return (
+    <>
+      <div className="hdr">
+        <span className="t">Billing</span>
+        <a href="/login">Portal Hub</a>
+      </div>
+      <div className="wrap">
+        {err && <div className="err">{err}</div>}
+        <div className="tabs">
+          {[['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Copay & Home Care']].map(([k, l]) => (
+            <button key={k} className={`tab ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>
+          ))}
+        </div>
+        {!data && !err && <div className="empty">Loading…</div>}
+        {data && tab === 'claims' && <Claims names={names} />}
+        {data && tab === 'statements' && <Statements data={data} reload={load} />}
+        {data && tab === 'new' && <NewStatement data={data} reload={load} />}
+      </div>
+    </>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

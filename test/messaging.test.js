@@ -38,18 +38,15 @@ const thread = (extra = {}) => ({
 // 1. The channel matrix
 // ============================================================================
 
-test('every row of the brief\'s matrix resolves to a channel covering both ends', () => {
-  // The brief lists eleven FROM→TO rows; the owner added four on 2026-09-13
-  // (client↔case manager both ways, clinician→client, case manager→caregiver).
-  // The module stores ten channels, because several rows are one conversation
-  // read from either end. This is the test that makes that collapse safe: lose
-  // a row and it fails.
-  assert.strictEqual(msg.MATRIX_ROWS.length, 17, 'eleven from the brief, four from the owner on 2026-09-13, two more on 2026-09-29 (Care Team, both ways)');
-  const brief = msg.MATRIX_ROWS.slice(0, 11);
-  assert.ok(brief.every(r => msg.channelById(r.channel)), 'the brief\'s own eleven still resolve');
+test('every row of the owner\'s matrix resolves to a live channel covering both ends', () => {
+  // The owner restated the whole matrix on 2026-10-15; it replaces the Session
+  // 9 brief's table and its amendments. Several rows are one conversation read
+  // from either end, which is why this test exists: lose a row and it fails.
+  assert.strictEqual(msg.MATRIX_ROWS.length, 21, 'the 2026-10-15 matrix');
   for (const row of msg.MATRIX_ROWS) {
     const c = msg.channelById(row.channel);
     assert.ok(c, `${row.from}→${row.to} has no channel`);
+    assert.ok(!c.retired, `${row.channel} is retired and must not be in the matrix`);
     assert.strictEqual(c.label, row.label, `${row.channel} label must match the brief`);
     assert.ok(c.initiators.includes(row.from), `${row.from} must be able to open ${row.channel}`);
     if (row.to !== '*') {
@@ -58,33 +55,42 @@ test('every row of the brief\'s matrix resolves to a channel covering both ends'
   }
 });
 
-test('SAFETY: no channel exists that the brief did not ask for', () => {
+test('SAFETY: no live channel exists that the matrix did not ask for', () => {
   const fromMatrix = new Set(msg.MATRIX_ROWS.map(r => r.channel));
   const extra = msg.CHANNEL_IDS.filter(id => !fromMatrix.has(id));
-  assert.deepStrictEqual(extra, [], `channels not in the matrix: ${extra.join(', ')}`);
+  // Only the two the owner retired on 2026-10-15 sit outside it, kept so old
+  // threads stay readable, and nobody can start either.
+  assert.deepStrictEqual(extra.sort(), ['care_coordination', 'operations'], `channels not in the matrix: ${extra.join(', ')}`);
+  for (const id of extra) {
+    assert.strictEqual(msg.CHANNELS[id].retired, true, `${id} must be retired`);
+    assert.deepStrictEqual(msg.CHANNELS[id].initiators, [], `${id} must have no initiators`);
+    assert.strictEqual(msg.channelAvailability(id, { user: u('admin-1'), client: CLIENT, users: USERS }).code, 'CHANNEL_RETIRED', 'not even admin starts one');
+  }
 });
 
 test('a role is offered only the channels it may open', () => {
   const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
-  assert.deepStrictEqual(ids(u('client-1')), ['care_coordination', 'care_team', 'clinical_escalation', 'direct_care', 'support']);
-  assert.deepStrictEqual(ids(u('cg-1')), ['behavioral_escalation', 'direct_care', 'family_portal', 'operations']);
+  // Owner, 2026-10-15: any team member starts Support; Operations and Care
+  // Coordination are gone; case managers start Care Update and Care Team.
+  assert.deepStrictEqual(ids(u('client-1')), ['care_team', 'clinical_escalation', 'direct_care', 'support']);
+  assert.deepStrictEqual(ids(u('cg-1')), ['behavioral_escalation', 'care_team', 'direct_care', 'family_portal', 'support']);
   assert.deepStrictEqual(ids(u('fam-1')), ['family_portal', 'support']);
-  assert.deepStrictEqual(ids(u('fnp-1')), ['care_team', 'care_update', 'clinical_escalation', 'clinical_oversight']);
-  // A case manager had NO channel at all: they could receive a behavioral
-  // escalation and start nothing, so they could not reach the client whose care
-  // they coordinate. Owner rule 2026-09-13.
-  assert.deepStrictEqual(ids(u('cm-1')), ['behavioral_escalation', 'care_coordination']);
+  assert.deepStrictEqual(ids(u('fnp-1')), ['care_team', 'care_update', 'clinical_escalation', 'clinical_oversight', 'support']);
+  assert.deepStrictEqual(ids(u('cm-1')), ['behavioral_escalation', 'care_team', 'care_update', 'support']);
 });
 
-test('OWNER RULE: admin opens every channel, and a lab-era manager counts as admin', () => {
+test('OWNER RULE: admin opens every channel; a manager opens Support only (2026-10-15)', () => {
   // "admin / manager should be able to message anyone." There is no distinct
   // GFC manager role — `isManager` is a lab-era flag that collapses to admin
   // everywhere else in the app, so it collapses here too rather than inventing
   // a role the role model does not have.
   const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
-  assert.deepStrictEqual(ids(u('admin-1')), [...msg.CHANNEL_IDS].sort());
+  const live = msg.CHANNEL_IDS.filter(id => !msg.CHANNELS[id].retired).sort();
+  assert.deepStrictEqual(ids(u('admin-1')), live, 'every live channel, none of the retired ones');
+  // Owner, 2026-10-15: "only admin can see every type." A manager is the
+  // office for Support and starts nothing else.
   const manager = { id: 'mgr-1', name: 'Ops Manager', role: 'user', isManager: true };
-  assert.deepStrictEqual(ids(manager), [...msg.CHANNEL_IDS].sort());
+  assert.deepStrictEqual(ids(manager), ['support']);
 });
 
 test('OWNER RULE: a staff member who can SEE a thread can ANSWER it', () => {
@@ -216,14 +222,19 @@ test('SAFETY: a behavioral concern on a client with NO case manager still reache
 test('OWNER RULE: the client reaches everyone on their care team, case manager included', () => {
   // "client can message anyone who is assigned to them as part of their care
   // team." The brief had no client↔case-manager row at all.
+  // 2026-10-15: through Care Team, which carries the whole clinical care team.
   const ids = msg.channelsFor({ user: u('client-1'), client: CLIENT, users: USERS }).map(c => c.id);
-  assert.ok(ids.includes('care_coordination'), 'a client can open Care Coordination');
+  assert.ok(ids.includes('care_team'), 'a client opens Care Team');
+  assert.ok(!ids.includes('care_coordination'), 'Care Coordination is retired');
   assert.ok(ids.includes('direct_care'), 'and still reach their caregiver');
   assert.ok(ids.includes('clinical_escalation'), 'and still reach their clinician');
+  const ct = thread({ channel: 'care_team', participant_ids: ['client-1', 'fnp-1', 'cm-1'] });
+  assert.strictEqual(msg.threadVisibility(u('cm-1'), ct, { client: CLIENT }).visible, true, 'the case manager is in it');
+  assert.strictEqual(msg.threadVisibility(u('cg-1'), ct, { client: CLIENT }).visible, false, 'a caregiver is not');
+  // An old Care Coordination thread stays readable and answerable.
   const t = thread({ channel: 'care_coordination', participant_ids: ['client-1', 'cm-1'] });
   assert.strictEqual(msg.threadVisibility(u('client-1'), t, { client: CLIENT }).visible, true);
   assert.strictEqual(msg.canPostToThread(u('client-1'), t, { client: CLIENT }).allowed, true);
-  // And it stays a client↔case-manager conversation: a caregiver is not in it.
   assert.strictEqual(msg.threadVisibility(u('cg-1'), t, { client: CLIENT }).visible, false);
 });
 
@@ -743,7 +754,8 @@ test('a channel describes the OTHER person, never the viewer as somebody else', 
   assert.match(m.blurbFor('family_portal', m.ROLE.CAREGIVER), /family/i);
   assert.doesNotMatch(m.blurbFor('family_portal', m.ROLE.CAREGIVER), /your relative/);
 
-  assert.match(m.blurbFor('care_coordination', m.ROLE.CASE_MANAGER), /whose care you coordinate/);
+  assert.match(m.blurbFor('care_team', m.ROLE.CASE_MANAGER), /whole care team/);
+  assert.match(m.blurbFor('direct_care', m.ROLE.CLIENT), /office can see it/, 'Direct says the office can see it');
 });
 
 test('every channel resolves a blurb for every role that can be in it', () => {

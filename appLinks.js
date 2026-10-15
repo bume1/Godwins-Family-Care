@@ -41,6 +41,7 @@ const PATHS = Object.freeze({
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.
   ENROLLMENT: '/admin/enrollment',
+  MESSAGES: '/messages',                    // managers + care coordinators (owner, 2026-10-15)
   LOGIN: '/login',
   // T1 C4: the one-tap video join link's PREFIX. The token is appended per
   // recipient (`videoJoinFor`), so this entry is the prefix and not a whole
@@ -79,6 +80,9 @@ function messagesFor(user) {
   if (isCaregiver(user)) return PATHS.CAREGIVER_MORE;   // the More tab carries it
   if (isClinical(user) || user.role === ROLES.CASE_MANAGER) return PATHS.CLINICAL;
   if (user.role === ROLES.ADMIN) return PATHS.ADMIN;
+  // A manager or care coordinator reads the office's messages on their own
+  // page; the Admin Hub is the Super Admin's (owner, 2026-10-15).
+  if (user.isManager) return PATHS.MESSAGES;
   return PATHS.LOGIN;
 }
 

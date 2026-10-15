@@ -711,14 +711,19 @@ test('My Day has an End visit button once a visit is in progress', () => {
 test('My Day is the default landing view', () => {
   // 2026-10-12: `/clinical#inbox` (the referral email) opens the inbox; every
   // other arrival still opens on the day.
-  // 2026-10-14: the fragment is now read against NAV_VIEWS, so the to-do
-  // emails' `#queues` opens Tasks instead of silently landing on My Day. The
-  // rule is unchanged and is asserted as a rule rather than as one literal
-  // expression: a known view opens, ANYTHING ELSE opens the day.
+  // 2026-10-14: the fragment is read against NAV_VIEWS, so the to-do emails'
+  // `#queues` opens Tasks instead of silently landing on My Day.
+  // 2026-10-15: `/clinical#queue` (the Billing module's "Open in Clinical")
+  // opens the coding queue. Both arrived independently and both are covered
+  // by the one rule, so the rule is what is asserted — a known view opens,
+  // ANYTHING ELSE opens the day — plus a precondition per named link, so
+  // dropping either destination from NAV_VIEWS fails here.
   assert.match(pageCode, /const h = String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\);/);
   assert.match(pageCode, /return NAV_VIEWS\.some\(v => v\.key === h\) \? h : 'myday';/,
     'the workspace must open on the day unless the fragment names a view that exists');
-  assert.match(pageCode, /\{ key: 'inbox', tab: 'Inbox'/, 'precondition: #inbox must still resolve');
+  assert.match(pageCode, /\{ key: 'inbox', tab: 'Inbox'/, 'precondition: #inbox (the referral email) must still resolve');
+  assert.match(pageCode, /\{ key: 'queue', tab: 'Coding'/, "precondition: #queue (Billing's Open in Clinical) must still resolve");
+  assert.match(pageCode, /\{ key: 'queues', tab: 'Tasks'/, 'precondition: #queues (the to-do emails) must still resolve');
   assert.match(pageCode, /<MyDayView/);
 });
 
@@ -1158,7 +1163,10 @@ test('both new destinations are reachable and neither is hidden when empty', () 
   // (owner mockup); the view and its key are unchanged.
   assert.match(pageCode, /key: 'queues', tab: 'Tasks'/);
   assert.match(pageCode, /key: 'analytics', tab: 'Reports'/);
-  assert.match(pageCode, /onClick=\{\(\) => \{ setView\(v\.key\)/, 'the sidebar must actually call setView with the clicked entry');
+  // A page link (`href`, e.g. Enrollment) leaves the workspace first; every
+  // other entry switches the view.
+  assert.match(pageCode, /onClick=\{\(\) => \{ if \(v\.href\) \{ window\.location\.assign\(v\.href\); return; \} setView\(v\.key\)/, 'the sidebar must actually call setView with the clicked entry');
+  assert.match(pageCode, /key: 'analytics', tab: 'Reports'[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*\{ key: 'enrollment', tab: 'Enrollment'[^\n]*href: '\/admin\/enrollment'/, 'Enrollment sits directly under Reports and opens the enrollment page');
   assert.match(pageCode, /<WorkQueuesView/);
   assert.match(pageCode, /<AnalyticsView/);
   const i = pageCode.indexOf('const VIEW_TITLES');
@@ -1542,16 +1550,16 @@ test('F: the visit descriptor is STAMPED on the billing record at creation', () 
   assert.deepEqual(none.visit, { appointmentType: null, modality: null, location: null });
 });
 
-test('F build-enforced: the USUAL LOCATION is an admin write on enrollment; what a visit IS is chosen on the note', () => {
+test('F build-enforced: the USUAL LOCATION is an account-management write on enrollment; what a visit IS is chosen on the note', () => {
   const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
   // The patient's usual location is a billing default, so it keeps the admin
   // gate the facility assignment has.
   assert.match(server,
-    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireAdmin,/,
-    'the usual-location write must be admin-only');
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireEnrollmentManager,/,
+    'the usual-location write is admin, manager or coordinator (owner, 2026-10-15), never a clinician');
   assert.match(server,
-    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireAdmin,/,
-    'the facility assignment must stay admin-only');
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireEnrollmentManager,/,
+    'the facility assignment is admin, manager or coordinator, never a clinician');
   assert.match(server,
     /app\.get\('\/api\/clinical\/patients\/:clientId\/place-of-service',\s*authenticateToken,\s*requireClinicalRead,/,
     'the read stays on the clinical READ gate');

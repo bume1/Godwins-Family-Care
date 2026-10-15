@@ -423,11 +423,47 @@
       '<h3>' + esc(c.label || 'New Message') + '</h3>' +
       '<p class="mmu">' + esc(c.blurb || '') + '</p>' +
       (c.code ? '<div class="mnote"><b>Before you send</b>' + esc(c.reason || '') + '</div>' : '') +
+      renderComposeClient(state, c) +
+      renderRecipients(state, c) +
       '<label>Message</label>' + renderEditor(state) +
       '<div class="mbtns">' +
       '<button class="mbtn gold" data-send="1">Send</button>' +
       '<button class="mbtn ghost" data-back="1">Cancel</button>' +
       '</div></div>';
+  }
+
+  // WHO IT GOES TO (owner, 2026-10-15): Care Team, and Support started by the
+  // office. The list is the server's (channel.recipients); everyone starts
+  // ticked and the sender unticks anyone it should not reach, the patient
+  // included.
+  // SUPPORT ABOUT A CLIENT, OR NOT (owner, 2026-10-15): a team member may tag
+  // the client it is about, or send it with none. Tagging adds nobody; it only
+  // files the conversation under that client.
+  function renderComposeClient(state, c) {
+    if (c.id !== 'support' || state.fixedScope || !state.pickerClients || !state.pickerClients.length) return '';
+    var opts = ['<option value="">Not about a client</option>'].concat(state.pickerClients.map(function (p) {
+      return '<option value="' + esc(p.id) + '"' + (state.scopeClientId === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+    })).join('');
+    return '<label for="gfcm-compose-client">About a client (optional)</label>' +
+      '<select id="gfcm-compose-client" data-compose-client="1" style="margin-bottom:12px">' + opts + '</select>';
+  }
+  function recipientsOf(c) { return Array.isArray(c && c.recipients) ? c.recipients : null; }
+  function renderRecipients(state, c) {
+    var list = recipientsOf(c);
+    if (!list) return '';
+    if (!list.length) return '<div class="mnote"><b>Who gets this</b>There is nobody to send this to yet.</div>';
+    // Support from the office is one-to-one: one person, so a radio list with
+    // nobody picked yet (owner, 2026-10-15).
+    var one = !!c.singleRecipient;
+    return '<label>Send to</label>' +
+      '<div class="mmu" style="margin-bottom:6px">' + (one ? 'Choose the one person this goes to. Only they and the office see it.' : 'Everyone ticked gets it. Untick anyone who should not.') + '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">' +
+      list.map(function (m) {
+        var on = one ? !!(state.recipients && state.recipients[0] === m.id) : (!state.recipients || state.recipients.indexOf(m.id) !== -1);
+        return '<label style="display:flex;align-items:center;gap:8px;font-size:14px;text-transform:none;letter-spacing:0;font-weight:500;color:inherit">' +
+          '<input type="' + (one ? 'radio' : 'checkbox') + '" name="gfcm-recipient" data-recipient="' + esc(m.id) + '"' + (on ? ' checked' : '') + ' style="width:auto"> ' +
+          esc(m.name) + ' <span class="mmu">\u00b7 ' + esc(m.what) + '</span></label>';
+      }).join('') + '</div>';
   }
 
   function renderThread(state) {
@@ -508,6 +544,7 @@
       b.onclick = function () {
         state.composeChannel = b.getAttribute('data-compose');
         state.draft = newDraft();
+        state.recipients = null;   // null = everyone on the list
         state.view = 'compose';
         state.error = '';
         render(state);
@@ -615,13 +652,32 @@
       };
     });
 
+    var cc = root.querySelector('[data-compose-client]');
+    if (cc) cc.onchange = function () {
+      captureDraft(state, root);
+      state.scopeClientId = cc.value || null;
+      state.recipients = null;   // the office's list depends on the client
+      refresh(state).catch(function (err) { state.error = err.message; render(state); });
+    };
+    root.querySelectorAll('[data-recipient]').forEach(function (box) {
+      box.onchange = function () {
+        state.recipients = Array.prototype.slice.call(root.querySelectorAll('[data-recipient]'))
+          .filter(function (x) { return x.checked; }).map(function (x) { return x.getAttribute('data-recipient'); });
+      };
+    });
+
     var send = root.querySelector('[data-send]');
     if (send) send.onclick = function () {
       var d = draftPayload(state, root);
       if (d.blank && !state.draft.files.length) { state.error = 'Write a message first.'; render(state); return; }
+      var ch = state.channels.filter(function (x) { return x.id === state.composeChannel; })[0] || {};
+      var list = recipientsOf(ch);
+      var picked = list ? (state.recipients || (ch.singleRecipient ? [] : list.map(function (m) { return m.id; }))) : null;
+      if (list && list.length && !picked.length) { captureDraft(state, root); state.error = 'Choose at least one person to send this to.'; render(state); return; }
       send.disabled = true;
       go(postMessage(state, '/api/messaging/threads',
-        { channel: state.composeChannel, clientId: state.scopeClientId || undefined, body: d.body, format: d.format }, state.draft.files)
+        { channel: state.composeChannel, clientId: state.scopeClientId || undefined, body: d.body, format: d.format,
+          recipientIds: list && list.length ? JSON.stringify(picked) : undefined }, state.draft.files)
         .then(function (res) {
           state.draft = newDraft();      // cleared ONLY on success: a failed send keeps every word and file
           state.view = 'list';
@@ -731,6 +787,7 @@
       if (!ch) return;
       state.composeChannel = ch.id;
       state.draft = newDraft();
+      state.recipients = null;
       state.view = 'compose';
       render(state);
     }).catch(function (err) {

@@ -905,8 +905,8 @@
     
     const Sidebar = ({ activePage, onNavigate, user, isMobileOpen, onClose, projects }) => {
       const [adminExpanded, setAdminExpanded] = useState(activePage.startsWith('admin_'));
-      // Super Admin, Manager, or users with hasClientPortalAdminAccess can access admin features
-      const isAdmin = user?.role === 'admin' || user?.isManager || user?.hasClientPortalAdminAccess;
+      // Only the Super Admin opens the Client Portal Admin (owner, 2026-10-15).
+      const isAdmin = user?.role === 'admin';
 
       const mainItems = [
         { id: 'home', label: isAdmin ? 'Admin Dashboard' : 'Home', icon: Icons.home }
@@ -7752,8 +7752,8 @@
         return <GfcClientPortal token={token} user={user} />;
       }
       const urlSlug = getSlugFromUrl();
-      // Super Admin, Manager, or users with hasClientPortalAdminAccess can access admin features
-      const isAdmin = user?.role === 'admin' || user?.isManager || user?.hasClientPortalAdminAccess;
+      // Only the Super Admin opens the Client Portal Admin (owner, 2026-10-15).
+      const isAdmin = user?.role === 'admin';
       const slug = user?.slug || urlSlug || (isAdmin ? 'admin' : null);
 
       // URL routing helper functions
@@ -7963,8 +7963,8 @@
           window.location.replace('/login');
           return null;
         }
-        // Super Admin, Manager, or users with Client Portal Admin access get the admin portal view directly at /portal
-        if (user.role === 'admin' || user.isManager || user.hasClientPortalAdminAccess) {
+        // Only the Super Admin gets the admin portal view at /portal (owner, 2026-10-15).
+        if (user.role === 'admin') {
           return <Portal token={token} user={user} />;
         }
         // Family / authorized contacts have no slug of their own — render the

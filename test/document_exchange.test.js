@@ -89,11 +89,11 @@ test('the medical stage explains the service without the misleading voluntarines
 
 // ── Staff service-line change ───────────────────────────────────────
 
-test('a service line can be changed, and only an admin can change it', () => {
+test('a service line can be changed, by an admin, a manager or a coordinator', () => {
   // Owner rule, 2026-09-16: the enrollment surface is READ for clinicians and
   // case managers, WRITE for admin. A lane change rewrites which consents a
   // client owes, so it is squarely a write.
-  assert.match(SERVER, /app\.put\('\/api\/gfc\/admin\/enrollment\/:clientId\/service-line', authenticateToken, requireAdmin/);
+  assert.match(SERVER, /app\.put\('\/api\/gfc\/admin\/enrollment\/:clientId\/service-line', authenticateToken, requireEnrollmentManager/);
   assert.match(SERVER, /code: 'BAD_SERVICE_LINE'/);
   assert.match(ADMIN, /api\.setServiceLine/);
 });

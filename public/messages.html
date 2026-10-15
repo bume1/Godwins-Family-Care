@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Messages</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <!-- The same thread component every portal mounts. -->
+  <script src="/note-format.js"></script>
+  <script src="/components/gfc-messaging.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* Messages for managers and care coordinators (owner, 2026-10-15). The
+       Admin Hub's inbox is the Super Admin's; the office reads Support and Admin
+       Broadcasts here, plus anything the care team put them on. The server
+       decides every thread that comes back. */
+    :root{--navy:#033D50;--gold:#F5CD85;--cream-d:#efe9db;--ink:#2b2b28}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .hdr{background:var(--navy);color:#FAF7F2;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a{color:var(--gold);font-size:14px;font-weight:600;text-decoration:none}
+    .wrap{max-width:1000px;margin:0 auto;padding:20px 16px 60px}
+    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px}
+  </style>
+  <script src="/session-guard.js"></script>
+</head>
+<body>
+  <div class="hdr"><span class="t">Messages</span><a href="/login">Portal Hub</a></div>
+  <div class="wrap"><div id="gfc-messaging-office"></div></div>
+<script>
+(function () {
+  var token = localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+  if (!token) { window.location.replace('/login'); return; }
+  var user = null;
+  try { user = JSON.parse(localStorage.getItem('admin_user') || localStorage.getItem('unified_user') || 'null'); } catch (e) { user = null; }
+  if (!window.GFCMessaging) {
+    document.getElementById('gfc-messaging-office').innerHTML = '<div class="err">Messages did not load. Refresh the page.</div>';
+    return;
+  }
+  // role is display only; the server decides from the token.
+  window.GFCMessaging.mount('gfc-messaging-office', { userId: user && user.id, role: 'manager', authToken: token });
+})();
+</script>
+</body>
+</html>
