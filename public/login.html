@@ -300,91 +300,50 @@
     const PortalHub = ({ user, token, onLogout }) => {
       const [showFeedbackModal, setShowFeedbackModal] = useState(false);
       const isAdmin = user.role === 'admin'; // Super Admin
-      const isManager = user.isManager && !isAdmin; // Manager (limited admin access)
+      const isManager = user.isManager && !isAdmin; // Manager or Care Coordinator
+      const isCoordinator = isManager && user.clinicalRole === 'coordinator' && user.accountType !== 'manager';
       const isTeamMember = user.role === 'user';
       const isVendor = user.role === 'vendor';
       const isClient = user.role === 'client';
 
-      // Build list of available portals based on permissions
-      const availablePortals = [];
-
-      // Admin Hub - super admins, managers, or users with hasAdminHubAccess
-      if (isAdmin || isManager || user.hasAdminHubAccess) {
-        availablePortals.push({
-          id: 'admin',
-          name: 'Admin Hub',
-          description: isManager
-            ? 'Service portal management (limited access)'
-            : 'Central administration, user management, and service portal',
-          icon: Icons.admin,
-          color: 'from-primary-500 to-primary-700',
-          path: '/admin'
-        });
-      }
-
-      // Implementations/Launch tracker deactivated (Session 2): nav tile hidden; tracker code retained.
-
-      // Clinical Workspace — clinicians (hasClinicalAccess) and super admins (4.1/4.2)
-      if (isAdmin || user.hasClinicalAccess) {
-        availablePortals.push({
-          id: 'clinical',
-          name: 'Clinical Workspace',
-          description: 'IHPC charting, scheduling, and clinical enrollment (OpenEMR)',
-          icon: Icons.clinical,
-          color: 'from-teal-600 to-primary-700',
-          path: '/clinical'
-        });
-      }
-
-      // Caregiver Scheduling (Session 7) — admin-run. Every /api/scheduling/*
-      // filter is admin-only, so the tile follows the same audience as the hub's
-      // other staff tiles rather than inventing a new flag.
-      if (isAdmin || isManager) {
-        availablePortals.push({
-          id: 'scheduling',
-          name: 'Caregiver Scheduling',
-          description: 'Shifts, availability, time tracking, payroll, and client locations',
-          icon: Icons.service,
-          color: 'from-teal-500 to-teal-700',
-          path: '/scheduling'
-        });
-      }
-
-      // Service Portal - super admins, users with hasServicePortalAccess, or vendors (NOT managers)
-      if (isAdmin || user.hasServicePortalAccess || isVendor) {
-        availablePortals.push({
-          id: 'service',
-          name: 'Service Portal',
-          description: 'Submit and track service reports for field operations',
-          icon: Icons.service,
-          color: 'from-success-500 to-success-600',
-          path: '/service-portal'
-        });
-      }
-
-      // Client Portal Admin - super admins, managers, or users with hasClientPortalAdminAccess
-      if (isAdmin || isManager || user.hasClientPortalAdminAccess) {
-        availablePortals.push({
-          id: 'clientPortalAdmin',
-          name: 'Client Portal Admin',
-          description: 'Manage client portal content, settings, and communications',
-          icon: Icons.clientPortal,
-          color: 'from-warning-500 to-warning-600',
-          path: '/portal'
-        });
-      }
-
-      // Client Portal - for clients only
-      if (isClient && user.slug) {
-        availablePortals.push({
-          id: 'clientPortal',
-          name: 'My Portal',
-          description: `Access your practice portal: ${user.practiceName || 'Your Practice'}`,
-          icon: Icons.portal,
-          color: 'from-teal-500 to-teal-600',
-          path: `/portal/${user.slug}`
-        });
-      }
+      // THE TILES COME FROM THE SERVER (accountTypes.hubTilesFor, owner
+      // 2026-10-15), on the login response, so this page never decides who
+      // sees what. Only a Super Admin sees the Admin Hub, the Service Portal
+      // and the Client Portal Admin. A manager and a care coordinator see the
+      // Clinical Workspace (a manager only if granted it) and Private Home
+      // Care, which opens to Caregiver Management and Caregiver Scheduling.
+      // A user object saved before this change carries no tiles; it falls
+      // back to the same rule so nobody signed in sees an empty hub.
+      const TILE_STYLE = {
+        admin: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Central administration, user management, and settings' },
+        clinical: { icon: Icons.clinical, color: 'from-teal-600 to-primary-700', description: 'Charts, visits, orders, billing and the clinical inbox' },
+        privateHomeCare: { icon: Icons.service, color: 'from-teal-500 to-teal-700', description: 'Caregiver management and caregiver scheduling' },
+        service: { icon: Icons.service, color: 'from-success-500 to-success-600', description: 'Submit and track service reports for field operations' },
+        clientPortalAdmin: { icon: Icons.clientPortal, color: 'from-warning-500 to-warning-600', description: 'Manage client portal content, settings, and communications' },
+        caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
+        caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' }
+      };
+      const PHC_CHILDREN = [
+        { id: 'caregiverManagement', name: 'Caregiver Management', path: '/caregivers', description: 'Escalations, visit log review, incidents, documents and the caregiver feed' },
+        { id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling', description: 'Shifts, availability, time tracking, payroll and client locations' }
+      ];
+      const fallbackTiles = () => {
+        const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PHC_CHILDREN };
+        const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
+        if (isAdmin) return [{ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc,
+          { id: 'service', name: 'Service Portal', path: '/service-portal' },
+          { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
+        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc];
+        return [];
+      };
+      const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();
+      const availablePortals = tiles.map(t => ({ ...(TILE_STYLE[t.id] || { icon: Icons.portal, color: 'from-teal-500 to-teal-600' }), ...t,
+        description: t.description || (TILE_STYLE[t.id] || {}).description || '' }));
+      const [openGroup, setOpenGroup] = useState(null);
+      const group = openGroup ? availablePortals.find(p => p.id === openGroup) : null;
+      const shown = group
+        ? (group.children || []).map(c => ({ ...(TILE_STYLE[c.id] || {}), ...c }))
+        : availablePortals;
 
       const openPortal = (path) => {
         localStorage.setItem('portal_token', token);
@@ -411,6 +370,7 @@
                       isVendor ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
                     }`}>{
                       isAdmin ? 'Super Admin' :
+                      isCoordinator ? 'Care Coordinator' :
                       isManager ? 'Manager' :
                       isClient ? 'Client' :
                       isVendor ? 'Vendor' : 'Team Member'
@@ -441,12 +401,18 @@
               </div>
             </div>
 
-            {availablePortals.length > 0 ? (
+            {group && (
+              <div className="mb-4 flex items-center gap-3">
+                <button onClick={() => setOpenGroup(null)} className="px-3 py-1.5 text-sm text-primary-600 hover:bg-primary-50 rounded-lg">&larr; All Portals</button>
+                <h2 className="text-lg font-bold text-accent">{group.name}</h2>
+              </div>
+            )}
+            {shown.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                {availablePortals.map((portal, idx) => (
+                {shown.map((portal, idx) => (
                   <button
                     key={portal.id}
-                    onClick={() => openPortal(portal.path)}
+                    onClick={() => portal.children ? setOpenGroup(portal.id) : openPortal(portal.path)}
                     className="portal-card bg-white rounded-2xl shadow-lg p-4 sm:p-6 text-left hover:shadow-xl animate-fade-in"
                     style={{ animationDelay: `${idx * 0.1}s` }}
                   >
@@ -485,7 +451,7 @@
                 <div>
                   <p className="text-gray-500">Role</p>
                   <p className="font-medium capitalize">
-                    {isAdmin ? 'Super Admin' : isManager ? 'Manager' : user.role === 'user' ? 'Team Member' : user.role === 'vendor' ? 'External Vendor' : user.role === 'client' ? 'Client' : user.role}
+                    {isAdmin ? 'Super Admin' : isCoordinator ? 'Care Coordinator' : isManager ? 'Manager' : user.role === 'user' ? 'Team Member' : user.role === 'vendor' ? 'External Vendor' : user.role === 'client' ? 'Client' : user.role}
                   </p>
                 </div>
               </div>
@@ -679,35 +645,20 @@
       });
       const [showPasswordChange, setShowPasswordChange] = useState(false);
 
-      // The Portal Hub is SUPER-ADMIN ONLY (owner decision, 08/2026): every
-      // other user lands directly in their one destination on login — clients/
-      // family in the care portal, clinicians in /clinical, managers in the
-      // admin hub, vendors in the service portal. A user with several access
-      // flags goes to the highest-priority one below (the destination apps
-      // have their own navigation). Only a user with NO access at all still
-      // sees the hub's "no portals" card, since there is nowhere to send them.
-      // Finalized role → destination matrix (owner, 08/2026; v2 §4 role model):
-      // clients/family → care portal (family unlocks via the client's signed
-      // roiFamily consent); Clinical (FNP) → /clinical; Case Manager →
-      // /admin/enrollment (interim landing until the view-only clinical read
-      // lands with Session 4.3); Caregivers (repo role 'vendor', converted at
-      // Session 6) → the caregiver app once a license level is on file.
-      // isManager / hasAdminHubAccess / hasClientPortalAdminAccess are LEGACY
-      // lab-era flags — no distinct GFC role; they all just land in /admin and
-      // are slated for retirement at the Session 6/7 role migration.
+      // WHERE EACH ACCOUNT TYPE LANDS (owner, 2026-10-15), answered on the
+      // server (accountTypes.landingFor) and carried on the login response:
+      // Provider, RN, LCSW and LMSW / Case Manager go straight to /clinical;
+      // clients and family to their portal; caregivers to the caregiver app;
+      // the Super Admin, managers and care coordinators to this hub. `null`
+      // means the hub. A user object saved before this change has no
+      // `landing`, so it falls back to the same rule.
       const directDestination = (u) => {
         if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
+        if (Object.prototype.hasOwnProperty.call(u, 'landing')) return u.landing || null;
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
-        if (u.hasClinicalAccess) return '/clinical';
-        // Case managers land on the scoped clinical read (Session 4.3) —
-        // the enrollment view is one click away from the workspace header.
-        if (u.role === 'caseManager') return '/clinical';
-        if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return '/admin';
-        // Caregivers (vendor + a license level on file) land in the caregiver
-        // app; the Service Portal stops being their surface (Session 6). A
-        // lab-era vendor with no license level keeps the old destination.
+        if (u.isManager) return null; // manager and care coordinator → the hub
+        if (u.hasClinicalAccess || u.role === 'caseManager') return '/clinical';
         if (u.role === 'vendor' && u.licenseLevel) return '/caregiver';
-        if (u.role === 'vendor' || u.hasServicePortalAccess) return '/service-portal';
         return null; // no access anywhere → hub renders its empty state
       };
       const destination = directDestination(user);

@@ -131,8 +131,8 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
-          // Verify user has service portal access (super admin, vendor, or explicit access - NOT managers)
-          if (result.user && result.user.role !== 'admin' && !result.user.hasServicePortalAccess && result.user.role !== 'vendor') {
+          // The Service Portal is the Super Admin's alone until it is revised (owner, 2026-10-15).
+          if (result.user && result.user.role !== 'admin') {
             return { error: 'Access denied. You do not have Service Portal access.' };
           }
           return result;
@@ -3593,6 +3593,13 @@
       });
       const [activePage, setActivePage] = useState('home');
       const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+      // Super Admin only until these areas are revised (owner, 2026-10-15). A
+      // non-admin who still holds a session from before is sent to the sign-in
+      // page, which routes them to their own area.
+      useEffect(() => {
+        if (user && user.role !== 'admin') window.location.replace('/login');
+      }, [user]);
       const [data, setData] = useState(null);
       const [clients, setClients] = useState([]);
       const [viewingReport, setViewingReport] = useState(null);

@@ -132,7 +132,15 @@ test('every door the server opens to manager-level access is a door MFA covers',
     seen++;
     assert.ok(covered.has(flag), `GET /api/users admits req.user.${flag}, which mfaRequiredFor does not cover`);
   }
-  assert.ok(seen >= 9, `expected the gates to name their flags (found ${seen}); a scan that finds nothing proves nothing`);
+  // The three lab-era access checkboxes were retired (owner, 2026-10-15), so
+  // the gates now name only isManager. Still non-zero, or the scan proves nothing.
+  assert.ok(seen >= 3, `expected the gates to name their flags (found ${seen}); a scan that finds nothing proves nothing`);
+  for (const anchor of gates) {
+    const i = serverSrc.indexOf(anchor);
+    const body = strip(serverSrc.slice(i, serverSrc.indexOf('\n};', i)));
+    assert.ok(!/hasAdminHubAccess|hasClientPortalAdminAccess|hasServicePortalAccess/.test(body),
+      `${anchor.trim()} still opens on a retired lab-era checkbox`);
+  }
 });
 
 test('everyone the clinical workspace admits needs MFA (owner, 2026-10-14)', () => {

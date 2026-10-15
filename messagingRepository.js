@@ -41,6 +41,11 @@ const ROLE = Object.freeze({
 function actorRole(user) {
   if (!user) return null;
   if (user.role === 'admin') return ROLE.ADMIN;
+  // A manager or care coordinator (accountTypes.js, owner 2026-10-15) runs the
+  // office side and messages as the office. Before this a manager had no
+  // messaging role at all ("This account has no messaging role"). Who reads
+  // and starts what is the next pass; this keeps them from being locked out.
+  if (user.isManager) return ROLE.ADMIN;
   if (user.role === 'caseManager') return ROLE.CASE_MANAGER;
   if (user.hasClinicalAccess) return ROLE.CLINICAL;
   if (user.role === 'vendor') return ROLE.CAREGIVER;
