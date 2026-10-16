@@ -571,20 +571,32 @@ test('a send that fails AFTER its files were stored removes them and writes noth
 // Owner, 2026-10-14: replies open everywhere a person can read, and only the
 // super admin deletes a thread.
 // ============================================================
-test('a Care Update a clinician sends is answered by the patient, the POA, family and the case manager over HTTP', async () => {
+test('a Care Update a clinician sends is answered by the patient, the POA and family; on the staff side only its sender and the super admin answer', async () => {
+  // Owner, 2026-10-16: internal notes landed in a patient's Care Update. Only
+  // the staff member who sent it answers the patient side there.
   const h = await boot();
   try {
     const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Labs look good' } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
     const id = r.data.thread.id;
-    for (const who of ['client-1', 'poa-1', 'fam-1', 'cm-1']) {
+    assert.equal(rows(h, 'message_threads')[0].staff_responder_id, 'fnp-1', 'the sender answers here');
+    for (const who of ['client-1', 'poa-1', 'fam-1', 'fnp-1', 'admin-1']) {
       const open = await h.call(who, 'GET', `/api/messaging/threads/${id}`);
       assert.equal(open.status, 200, who);
       assert.equal(open.data.canPost, true, `${who}: ${open.data.cannotPostReason}`);
       const p = await h.call(who, 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: `Thanks from ${who}` } });
       assert.equal(p.status, 200, `${who}: ${JSON.stringify(p.data)}`);
     }
-    assert.equal(rows(h, 'messages').filter(m => m.thread_id === id).length, 5);
+    // The case manager reads it and is told where team notes go.
+    const cmOpen = await h.call('cm-1', 'GET', `/api/messaging/threads/${id}`);
+    assert.equal(cmOpen.status, 200, 'the case manager still reads it');
+    assert.equal(cmOpen.data.canPost, false);
+    assert.equal(cmOpen.data.cannotPostCode, 'PATIENT_THREAD_ONE_RESPONDER');
+    assert.match(cmOpen.data.cannotPostReason, /Care Team message without the patient/);
+    assert.equal(cmOpen.data.patientFacing, true, 'the page shows the yellow patient badge');
+    const cmPost = await h.call('cm-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'internal note' } });
+    assert.equal(cmPost.status, 403, 'and the server refuses the reply, not only the page');
+    assert.equal(rows(h, 'messages').filter(m => m.thread_id === id).length, 6);
     assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${id}`)).status, 403, 'a caregiver still does not read it');
   } finally { h.close(); }
 });
@@ -955,4 +967,175 @@ test('2026-10-15: the composer offers a team member an optional client on Suppor
   assert.match(fn, /Not about a client/, 'and "not about a client" is a real choice');
   assert.match(comp, /var one = !!c\.singleRecipient;/);
   assert.match(comp, /'<input type="' \+ \(one \? 'radio' : 'checkbox'\) \+ '"/, 'one person means a radio list');
+});
+
+// ============================================================
+// Owner, 2026-10-16: after internal notes reached a patient's chat.
+// ============================================================
+test('2026-10-16: the one-answerer rule is Care Update only — on Care Team every care team member still replies', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Plan for this week' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const id = r.data.thread.id;
+    assert.equal(rows(h, 'message_threads').find(t => t.id === id).staff_responder_id, undefined, 'no answerer is set off Care Update');
+    const cm = await h.call('cm-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'Noted' } });
+    assert.equal(cm.status, 200, JSON.stringify(cm.data));
+    // And the rule itself, asked directly: someone else holding the thread
+    // only matters on a Care Update.
+    const cmUser = { id: 'cm-1', role: 'caseManager' };
+    const holder = { id: 'fnp-1', name: 'Bethel Godwins' };
+    const client = h.store.get('users').find(u => u.id === 'client-1');
+    for (const ch of ['care_team', 'clinical_escalation']) {
+      const t = { id: 't', channel: ch, client_id: 'client-1', participant_ids: ['fnp-1', 'cm-1', 'client-1'] };
+      assert.notEqual(msg.canPostToThread(cmUser, t, { client, responder: holder }).code, 'PATIENT_THREAD_ONE_RESPONDER', ch);
+    }
+  } finally { h.close(); }
+});
+
+test('2026-10-16: on a Care Update the first staff reply claims it when nobody did; the super admin never claims it', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('admin-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Update from the office' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const id = r.data.thread.id;
+    assert.equal(rows(h, 'message_threads').find(t => t.id === id).staff_responder_id, undefined, 'admin starting it claims nothing');
+    assert.equal((await h.call('fnp-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'I will follow up' } })).status, 200);
+    assert.equal(rows(h, 'message_threads').find(t => t.id === id).staff_responder_id, 'fnp-1');
+    const cm = await h.call('cm-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'me too' } });
+    assert.equal(cm.status, 403);
+    assert.equal(cm.data.code, 'PATIENT_THREAD_ONE_RESPONDER');
+    assert.equal((await h.call('admin-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'admin still answers' } })).status, 200);
+  } finally { h.close(); }
+});
+
+test('2026-10-16: only the super admin deletes a single message; a reason is required; it is kept with who, when and why', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Labs look good' } });
+    const id = r.data.thread.id;
+    await h.call('fnp-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'INTERNAL: check her insurance' } });
+    const wrong = rows(h, 'messages').find(m => m.body === 'INTERNAL: check her insurance');
+    assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${id}`)).data.canDeleteMessage, true);
+    assert.equal((await h.call('fnp-1', 'GET', `/api/messaging/threads/${id}`)).data.canDeleteMessage, false);
+    h.store.get('users').push({ id: 'mgr-1', name: 'Manager', email: 'm@test.local', role: 'user', isManager: true });
+    for (const who of ['fnp-1', 'cm-1', 'client-1', 'poa-1', 'mgr-1']) {
+      const d = await h.call(who, 'DELETE', `/api/messaging/messages/${wrong.id}`, { json: { reason: 'x' } });
+      assert.equal(d.status, 403, who);
+    }
+    const noReason = await h.call('admin-1', 'DELETE', `/api/messaging/messages/${wrong.id}`, { json: {} });
+    assert.equal(noReason.data.code, 'DELETE_REASON_REQUIRED');
+    assert.ok(rows(h, 'messages').some(m => m.id === wrong.id), 'a refusal deletes nothing');
+
+    const ok = await h.call('admin-1', 'DELETE', `/api/messaging/messages/${wrong.id}`, { json: { reason: 'Internal note sent to the patient' } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.ok(!rows(h, 'messages').some(m => m.id === wrong.id), 'gone from the thread');
+    assert.equal(rows(h, 'messages').filter(m => m.thread_id === id).length, 1, 'the other message stays');
+    const thread = rows(h, 'message_threads').find(t => t.id === id);
+    assert.ok(!/INTERNAL/.test(thread.last_message_preview), 'the preview no longer shows the deleted words');
+    const kept = rows(h, 'deleted_messages').find(a => a.message.id === wrong.id);
+    assert.ok(kept, 'kept, never erased');
+    assert.equal(kept.deletedById, 'admin-1');
+    assert.equal(kept.reason, 'Internal note sent to the patient');
+    assert.equal(kept.message.body, 'INTERNAL: check her insurance');
+    const audit = h.activity.find(a => a[2] === 'message_deleted');
+    assert.ok(audit, 'the deletion is audited');
+    assert.ok(!JSON.stringify(audit).includes('insurance'), 'the audit row never carries the words');
+    const gone = await h.call('admin-1', 'DELETE', `/api/messaging/messages/${wrong.id}`, { json: { reason: 'again' } });
+    assert.equal(gone.status, 404);
+  } finally { h.close(); }
+});
+
+test('2026-10-16: every channel says who it is for and whether the patient sees it; staff get the badge, the patient side does not', async () => {
+  for (const [id, c] of Object.entries(msg.CHANNELS)) {
+    if (c.retired) continue;   // never offered, so never shown with a descriptor
+    assert.ok(msg.CHANNEL_AUDIENCE[id], `${id} has an audience entry`);
+    assert.ok(['yes', 'no', 'choose'].includes(msg.CHANNEL_AUDIENCE[id].patientSees), id);
+    assert.ok(String(msg.CHANNEL_AUDIENCE[id].note || '').length > 10, `${id} has a descriptor`);
+  }
+  assert.equal(msg.CHANNEL_AUDIENCE.care_update.patientSees, 'yes');
+  assert.equal(msg.CHANNEL_AUDIENCE.clinical_oversight.patientSees, 'no');
+  assert.equal(msg.CHANNEL_AUDIENCE.care_team.patientSees, 'choose');
+  const h = await boot();
+  try {
+    const staff = await h.call('fnp-1', 'GET', '/api/messaging/threads?clientId=client-1');
+    assert.equal(staff.data.staffView, true);
+    const patient = await h.call('client-1', 'GET', '/api/messaging/threads');
+    assert.equal(patient.data.staffView, false, 'the patient is never shown a "patient sees this" warning');
+  } finally { h.close(); }
+});
+
+test('2026-10-16: a Care Team note with the patient left off is NOT patient-facing; with the patient on, it is', async () => {
+  const h = await boot();
+  try {
+    const team = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Team only', recipientIds: ['cm-1'] } });
+    assert.equal(team.status, 200, JSON.stringify(team.data));
+    assert.equal(team.data.thread.patientFacing, false);
+    const withPt = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'With you', recipientIds: ['cm-1', 'client-1'] } });
+    assert.equal(withPt.data.thread.patientFacing, true);
+    // An older thread with no stored flag: a patient-started one is patient-facing.
+    assert.equal(msg.isPatientFacing({ channel: 'care_team', started_by_role: 'client', participant_ids: [] }), true);
+    assert.equal(msg.isPatientFacing({ channel: 'clinical_oversight', participant_ids: ['fnp-1', 'cg-1'] }), false);
+  } finally { h.close(); }
+});
+
+test('2026-10-16: the label on a person is their account type, never the coarse messaging role', () => {
+  const L = msg.personLabel;
+  assert.equal(L({ role: 'admin' }), 'Admin');
+  assert.equal(L({ role: 'user', isManager: true, clinicalRole: 'coordinator' }), 'Care coordinator', 'not "Office"');
+  assert.equal(L({ role: 'user', isManager: true, clinicalRole: 'readOnly', accountType: 'manager' }), 'Manager');
+  assert.equal(L({ role: 'user', clinicalRole: 'rn', hasClinicalAccess: true }), 'RN', 'not "Clinician"');
+  assert.equal(L({ role: 'user', clinicalRole: 'provider', hasClinicalAccess: true }), 'Provider');
+  assert.equal(L({ role: 'user', clinicalRole: 'lcsw', hasClinicalAccess: true }), 'LCSW');
+  assert.equal(L({ role: 'caseManager', clinicalRole: 'lmsw' }), 'Case manager (LMSW)');
+  assert.equal(L({ role: 'family', familyIsPoa: true }), 'POA');
+  assert.equal(L({ role: 'family' }), 'Family');
+  assert.equal(L({ role: 'vendor' }), 'Caregiver');
+  assert.equal(L({ role: 'client' }), 'Patient');
+});
+
+test('2026-10-16: "In this conversation" is the thread\'s own participant list, labelled, and every message says what its sender is', async () => {
+  const h = await boot();
+  try {
+    h.store.get('users').push({ id: 'coord-1', name: 'Cora Coordinator', email: 'co@test.local', role: 'user', isManager: true, clinicalRole: 'coordinator' });
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Team only', recipientIds: ['cm-1'] } });
+    const id = r.data.thread.id;
+    const open = await h.call('cm-1', 'GET', `/api/messaging/threads/${id}`);
+    const thread = rows(h, 'message_threads').find(t => t.id === id);
+    assert.deepEqual(open.data.people.map(p => p.id).sort(), thread.participant_ids.slice().sort(), 'the list is exactly who is on it');
+    assert.ok(!open.data.people.some(p => p.id === 'client-1'), 'the patient was left off, and the list says so');
+    assert.equal(open.data.people.find(p => p.id === 'cm-1').you, true);
+    assert.equal(open.data.people.find(p => p.id === 'cm-1').label, 'Case manager (LMSW)');
+    assert.equal(open.data.messages[0].fromRoleLabel, 'Provider', 'a legacy clinician with no stored role reads as a provider, not "Clinician"');
+
+    // A coordinator's reply reads "Care coordinator", stored on the message.
+    const sup = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', body: 'Help with the schedule' } });
+    assert.equal(sup.status, 200, JSON.stringify(sup.data));
+    const sid = sup.data.thread.id;
+    assert.equal((await h.call('coord-1', 'POST', `/api/messaging/threads/${sid}/messages`, { json: { body: 'Looking now' } })).status, 200);
+    assert.equal(rows(h, 'messages').find(m => m.body === 'Looking now').from_role_label, 'Care coordinator', 'not "Office"');
+    await h.call('admin-1', 'POST', `/api/messaging/threads/${sid}/messages`, { json: { body: 'On it' } });
+    assert.equal(rows(h, 'messages').find(m => m.body === 'On it').from_role_label, 'Admin', 'a reply stores its label too');
+
+    // An older message saved before labels were stored reads the sender's account now.
+    const old = rows(h, 'messages').find(m => m.body === 'Looking now');
+    delete old.from_role_label; old.from_role = 'manager';
+    const reread = await h.call('admin-1', 'GET', `/api/messaging/threads/${sid}`);
+    assert.equal(reread.data.messages.find(m => m.body === 'Looking now').fromRoleLabel, 'Care coordinator', 'not "Office"');
+
+    // A POA reply keeps "as POA for".
+    const cu = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Update' } });
+    await h.call('poa-1', 'POST', `/api/messaging/threads/${cu.data.thread.id}/messages`, { json: { body: 'Thanks' } });
+    assert.equal(rows(h, 'messages').find(m => m.body === 'Thanks').from_role_label, 'POA');
+  } finally { h.close(); }
+});
+
+test('2026-10-16: the component shows the badge, the descriptors, Delete and the people list only from the server', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.match(comp, /state\.canDeleteMessage = !!res\.canDeleteMessage;/);
+  assert.match(comp, /state\.canDeleteMessage && !ed \? ' · <button class="mbtn ghost" data-delete-msg=/);
+  assert.match(comp, /state\.people = res\.people \|\| \[\];/);
+  assert.match(comp, /In this conversation: /);
+  assert.match(comp, /if \(state\.staffView && state\.patientFacing\)/, 'the yellow bar is for staff only');
+  assert.match(comp, /c\.audienceNote/, 'start buttons carry their descriptor');
 });

@@ -124,12 +124,17 @@ test('Inbox, Results and the visit checklist open the right chart section', () =
   assert.match(details, /const goTab = \(t\) => \(\) => onOpenChart\(v\.clientId, \{ tab: t \}\);/);
 });
 
+const routes0 = () => fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
 test('the chart Messages split is the server\'s mark, never a list on the page', () => {
   const msg = slice('const MessagesTab = (', '\n    const App = () => {');
   assert.match(msg, /audience,/);
   assert.ok(!/care_team|clinical_escalation|behavioral_escalation/.test(msg), 'no channel ids on the page');
   const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
-  assert.match(comp, /state\.audience === 'patient' \? !!x\.withPatient : !x\.withPatient/);
+  // 2026-10-16: a THREAD files by whether the patient is actually on it, so a
+  // Care Team note with the patient left off is a team note, not a patient one.
+  assert.match(comp, /var withPatient = typeof x\.patientFacing === 'boolean' \? x\.patientFacing : !!x\.withPatient;/);
+  assert.match(comp, /return state\.audience === 'patient' \? withPatient : !withPatient;/);
+  assert.match(routes0(), /patientFacing: msg\.isPatientFacing\(t\)/);
   const repo = require('../messagingRepository');
   assert.strictEqual(repo.withPatient('care_team'), true);
   assert.strictEqual(repo.withPatient('clinical_escalation'), true, 'the client is a participant');

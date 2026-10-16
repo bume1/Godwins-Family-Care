@@ -25,6 +25,7 @@
 // ============================================================================
 
 const nf = require('./public/note-format.js');   // the six-shape message formatting, one source for editor, server and screen
+const accountTypes = require('./accountTypes');   // what kind of account someone is, for the label in a chat
 
 const ROLE = Object.freeze({
   CLIENT: 'client',
@@ -232,6 +233,25 @@ const CHANNELS = Object.freeze({
 });
 
 const CHANNEL_IDS = Object.freeze(Object.keys(CHANNELS));
+
+// WHO SEES IT, in a few words on every Start button (owner, 2026-10-16: "add
+// descriptors to the buttons for messages so people know which channel is for
+// what"). Clinical staff wrote internal team notes into a patient's thread;
+// the button now says plainly whether the patient sees what is written.
+// `patientSees`: 'yes' | 'no' | 'choose'.
+const CHANNEL_AUDIENCE = Object.freeze({
+  direct_care: { patientSees: 'yes', note: 'The patient and their caregiver. The patient sees this.' },
+  support: { patientSees: 'no', note: 'Just you and the office (admins and managers).' },
+  clinical_escalation: { patientSees: 'yes', note: 'A concern with the patient\'s clinical team. The patient sees this.' },
+  behavioral_escalation: { patientSees: 'no', note: 'Caregiver and case manager. Staff only.' },
+  clinical_oversight: { patientSees: 'no', note: 'Clinician direction to the caregiver. Staff only.' },
+  care_update: { patientSees: 'yes', note: 'An update for the family. The patient and family see this.' },
+  care_team: { patientSees: 'choose', note: 'You choose who gets it. The patient sees it only if you tick them. For team-only notes, untick the patient.' },
+  admin_direct: { patientSees: 'choose', note: 'From the office to whoever it picks.' },
+  family_portal: { patientSees: 'yes', note: 'Family and the caregiver. The patient and family see this.' },
+  operations: { patientSees: 'no', note: 'Retired.' },
+  care_coordination: { patientSees: 'yes', note: 'Retired.' }
+});
 
 /**
  * The one-line description of a channel, IN THE VIEWER'S OWN VOICE.
@@ -543,7 +563,10 @@ function channelsFor({ user, client, users, isPoa = false }) {
         // themselves (owner, 2026-10-15).
         ...(() => { const r = audienceFor(id, { user, client, users, isPoa }); return r ? { recipients: r } : {}; })(),
         // Support from the office goes to ONE person (owner, 2026-10-15).
-        singleRecipient: id === 'support' && isOffice(user)
+        singleRecipient: id === 'support' && isOffice(user),
+        // Who sees it, for the Start button (owner, 2026-10-16).
+        patientSees: (CHANNEL_AUDIENCE[id] || {}).patientSees || null,
+        audienceNote: (CHANNEL_AUDIENCE[id] || {}).note || null
       };
     });
 }
@@ -695,7 +718,7 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
 // May this user POST into a thread they can already see? Reading and writing
 // are different questions: a Care Update is readable by family and writable
 // only by the clinician who owns it.
-function canPostToThread(user, thread, { client, isPoa = false } = {}) {
+function canPostToThread(user, thread, { client, isPoa = false, responder = null } = {}) {
   const seen = threadVisibility(user, thread, { client, isPoa });
   if (!seen.visible) return { allowed: false, code: seen.code, reason: seen.reason };
 
@@ -724,7 +747,54 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   if (thread.status === 'closed') {
     return { allowed: false, code: 'THREAD_CLOSED', reason: 'That conversation has been closed.' };
   }
+  // One staff voice to the patient (owner, 2026-10-16). The super admin
+  // always may; anyone else on the staff side only if they are the one
+  // answering, or nobody is yet.
+  if (thread.channel === 'care_update' && isStaffRole(role) && role !== ROLE.ADMIN &&
+      responder && responder.id && String(responder.id) !== String(user.id)) {
+    return {
+      allowed: false, code: 'PATIENT_THREAD_ONE_RESPONDER',
+      reason: `The patient and family see this Care Update, and ${responder.name || 'the staff member who sent it'} is the one who answers them here. You can read it. For a note to the team, start a Care Team message without the patient, or use Clinical Oversight.`
+    };
+  }
   return { allowed: true, code: null, reason: null };
+}
+
+// ---- One staff voice on a Care Update (owner, 2026-10-16) ------------------
+// "Our clinical staff messaged internal team member notes to Ms. Juanita's
+// patient chat bubble." On a CARE UPDATE — and only there (owner: "I only want
+// this change for the care update thread") — the staff member who started it
+// is the one who answers the patient and family; the super admin can always
+// answer; every other staff member reads it and is pointed at a team-only
+// channel. The patient side replies as before. Every other channel is
+// unchanged. `isPatientFacing` also drives the yellow "Patient sees this"
+// badge on threads.
+const CLIENT_SIDE_ROLES = Object.freeze([ROLE.CLIENT, ROLE.FAMILY, 'POA']);
+// Is the patient side on this thread? Stored at creation (`patient_facing`);
+// for a thread written before that, worked out from who started it and
+// whether its channel carries the patient side.
+function isPatientFacing(thread) {
+  if (!thread) return false;
+  if (typeof thread.patient_facing === 'boolean') return thread.patient_facing;
+  if (CLIENT_SIDE_ROLES.includes(thread.started_by_role)) return true;
+  if (thread.audience_chosen) return false;
+  const ch = CHANNELS[thread.channel];
+  return !!ch && thread.channel !== 'support' && ch.participants.some(r => r === ROLE.CLIENT || r === ROLE.FAMILY);
+}
+// The ONE staff member who answers the patient on this thread, or null when
+// nobody has yet (the first to answer takes it). Stored as
+// `staff_responder_id`; for an older thread, the staff member who started it,
+// else the first staff member who wrote in it. The super admin never takes it,
+// so stepping in does not lock out the clinician who should answer.
+function staffResponder(thread, messages) {
+  if (!thread) return null;
+  if (thread.staff_responder_id) return { id: thread.staff_responder_id, name: thread.staff_responder_name || null };
+  const isStaffSender = (role) => role && !CLIENT_SIDE_ROLES.includes(role) && role !== ROLE.ADMIN;
+  if (isStaffSender(thread.started_by_role)) return { id: thread.started_by, name: thread.started_by_name || null };
+  const first = (Array.isArray(messages) ? messages : [])
+    .slice().sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)))
+    .find(m => m && isStaffSender(m.from_role));
+  return first ? { id: first.from_user_id, name: first.from_name || first.display_name || null } : null;
 }
 
 // Deleting a thread is the super admin's alone (owner, 2026-10-14): role
@@ -739,6 +809,36 @@ function canDeleteThread(user) {
 // cannot drift: role `admin`, never a manager, never the sender themselves.
 function canEditMessage(user) {
   return canDeleteThread(user);
+}
+
+// Deleting ONE message is the super admin's alone too (owner, 2026-10-16), by
+// the same rule, so the three cannot drift.
+function canDeleteMessage(user) {
+  return canDeleteThread(user);
+}
+
+// ---- What a person is, in words (owner, 2026-10-16) -----------------------
+// "Verify the labels for who is in the chat." The messaging ROLE is coarse (an
+// RN, an LCSW and a provider are all `clinical`; a care coordinator messages
+// as the office), so a label read off it was wrong for half the team: a
+// coordinator's message read "Office", every licensed clinician "Clinician".
+// This answers from the account itself, the same account type the user form
+// sets (accountTypes.js), and is stored on each message when it is sent.
+// It reads the ACCOUNT TYPE (accountTypes.js), so the label in a chat can
+// never disagree with what the user form says that person is.
+const PERSON_LABELS = Object.freeze({
+  admin: 'Admin', manager: 'Manager', provider: 'Provider', rn: 'RN', lcsw: 'LCSW',
+  lmsw: 'Case manager (LMSW)', coordinator: 'Care coordinator', caregiver: 'Caregiver',
+  client: 'Patient', family: 'Family'
+});
+function personLabel(u) {
+  if (!u) return 'Unknown';
+  const type = accountTypes.accountTypeOf(u);
+  if (type === 'family') return u.familyIsPoa ? 'POA' : 'Family';
+  if (type && PERSON_LABELS[type]) return PERSON_LABELS[type];
+  // A record that maps onto no type yet (an admin still has to choose one).
+  if (u.hasClinicalAccess) return 'Clinician';
+  return 'Staff';
 }
 
 // ---- Sender identity -------------------------------------------------------
@@ -842,6 +942,7 @@ module.exports = {
   ROLE, ROLE_LABELS, actorRole,
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
+  CHANNEL_AUDIENCE, isPatientFacing, canDeleteMessage, personLabel, staffResponder, CLIENT_SIDE_ROLES,
   careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, careTeamMembers, audienceFor, isOffice, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor, withPatient,
   isParty, ownClientId, threadVisibility, canPostToThread, canDeleteThread,
