@@ -4215,7 +4215,8 @@
       }, [value]);
       const emit = () => {
         if (!ref.current) return;
-        const markup = NF.domToMarkup(ref.current);
+        // newlines: Shift+Enter in this pre-wrap box is a real line break, not a space.
+        const markup = NF.domToMarkup(ref.current, { newlines: true });
         if (markup === emitted.current) return;
         emitted.current = markup;
         onChange && onChange(markup);

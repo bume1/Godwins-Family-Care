@@ -111,3 +111,59 @@ test('the page loads the module and never restates the rules', () => {
   const page = fs.readFileSync(path.join(__dirname, '../public/clinical.html'), 'utf8');
   assert.match(page, /<script src="\/note-format\.js"><\/script>/);
 });
+
+// ============================================================
+// Owner, 2026-10-16: messaging formatting "needs to be richer... it shows
+// oddly when saved, the formatting goes or when copied it leaves".
+// ============================================================
+const styled = (tag, style, ...children) => ({ nodeType: 1, nodeName: tag, childNodes: children, getAttribute: (a) => (a === 'style' ? style : null) });
+const STRIKE = { strike: true };
+
+test('strikethrough round-trips where it is asked for, and is ignored where it is not (clinical notes)', () => {
+  const m = 'Kept ~~struck out~~ and **~~both~~**';
+  assert.equal(nf.domToMarkup(frag(toDom(nf.renderTree(m))), STRIKE), m);
+  assert.match(nf.renderHtml(m), /<s>struck out<\/s>/);
+  assert.equal(nf.toPlainText(m), 'Kept struck out and both', 'the plain copy carries the words, not the marks');
+  // The clinical editor does not ask for strike: an <s> pasted there is plain text.
+  assert.equal(nf.domToMarkup(frag([el('S', txt('gone'))])), 'gone');
+  assert.equal(nf.domToMarkup(frag([styled('SPAN', 'text-decoration:line-through', txt('gone'))])), 'gone');
+  // A literal tilde typed or carried in is escaped, never a format.
+  const lit = nf.fromPlainText('approx ~5 mg, not ~~ a format');
+  assert.equal(nf.toPlainText(lit), 'approx ~5 mg, not ~~ a format');
+  assert.ok(!/<s>/.test(nf.renderHtml(lit)));
+});
+
+test('a Shift+Enter line break typed in the editor is kept as a line, not turned into a space', () => {
+  const box = frag([txt('Second paragraph\nsoft line')]);
+  assert.equal(nf.domToMarkup(box, { newlines: true }), 'Second paragraph\nsoft line');
+  assert.equal(nf.domToMarkup(box), 'Second paragraph soft line', 'HTML from elsewhere: a source newline is only spacing');
+});
+
+test('a Google Docs paste keeps its bold, italic and bullets (inline styles, the font-weight:normal wrapper, <li><p>)', () => {
+  const docs = frag([styled('B', 'font-weight:normal;',
+    el('P', styled('SPAN', 'font-weight:700;', txt('Docs bold')), styled('SPAN', 'font-weight:400', txt(' and ')),
+      styled('SPAN', 'font-style:italic;font-weight:400', txt('italic'))),
+    el('UL', el('LI', el('P', styled('SPAN', '', txt('doc bullet'))))),
+    el('P', styled('SPAN', 'text-decoration:underline', txt('under')), styled('SPAN', 'text-decoration:line-through', txt(' struck'))))]);
+  assert.equal(nf.domToMarkup(docs, STRIKE), '**Docs bold** and _italic_\n- doc bullet\n__under__~~ struck~~');
+});
+
+test('a Word paste: a list paragraph is a bullet and Word\'s own bullet character is dropped', () => {
+  const word = frag([
+    styled('P', 'mso-list:l0 level1 lfo1', styled('SPAN', 'mso-list:Ignore', txt('·  ')), el('B', txt('Word item'))),
+    el('P', txt('Word para '), el('U', txt('under')))
+  ]);
+  assert.equal(nf.domToMarkup(word, STRIKE), '- **Word item**\nWord para __under__');
+});
+
+test('links: a web address in a message opens in a new tab; nothing else becomes a link and nothing is unescaped', () => {
+  const html = nf.renderHtml('See https://example.com/a?b=1. and javascript:alert(1) or <b>x</b>', { linkify: true });
+  assert.match(html, /<a href="https:\/\/example\.com\/a\?b=1" target="_blank" rel="noopener noreferrer">https:\/\/example\.com\/a\?b=1<\/a>\./,
+    'the trailing full stop is not part of the link');
+  assert.ok(!/href="javascript/.test(html), 'only http(s) is ever a link');
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
+  const quoted = nf.renderHtml('https://a.com/"onmouseover="x', { linkify: true });
+  assert.ok(!/"onmouseover/.test(quoted), 'a quote cannot break out of the href');
+  assert.ok(!/<a /.test(nf.renderHtml('https://example.com')), 'notes are not linkified unless asked');
+  assert.match(nf.renderHtml('https://a.com/?x=1&y=2', { linkify: true }), /href="https:\/\/a\.com\/\?x=1&amp;y=2"/, 'the address is escaped inside the href');
+});
