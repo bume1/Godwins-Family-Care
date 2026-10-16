@@ -188,6 +188,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // PHI exposure and a breach assessment may need to read them back.
   { key: 'quarantined_messages', phi: true, owner: '9', note: 'misfiled messages removed from view by scripts/repair_cross_client_messages.js; retained for breach assessment' },
   { key: 'deleted_message_threads', phi: true, owner: '9', note: 'threads the super admin deleted, with their messages, who, when and why; kept, never erased' },
+  { key: 'deleted_messages', phi: true, owner: '9', note: 'single messages the super admin deleted, with who, when and why; kept, never erased (owner, 2026-10-16)' },
   // ---- notifications + email ----
   { key: 'pending_notifications', phi: true, owner: 'core', note: 'queued email bodies can name a client' },
   { key: 'notification_log', phi: true, owner: 'core' },
