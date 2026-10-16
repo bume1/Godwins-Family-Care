@@ -229,15 +229,22 @@ test('a staff filing answers the open request rather than leaving it chasing', (
     'the office must not keep asking the client for a document it filed itself');
 });
 
-test('the staff filing door is admin OR clinician, never the wider staff gate', () => {
+test('the staff filing door is every clinical staff member, never the wider staff gate', () => {
   const line = (SERVER.match(/app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload'[^\n]*/) || [])[0];
   assert.ok(line, 'the staff filing route is missing');
-  // 2026-10-14: requireDocumentFiler = the enrollment editors (admin or
-  // licensed clinician) plus a care coordinator. Still never the read gate.
+  // REPOINTED 2026-10-16 (owner): every clinical staff member attaches to the
+  // chart (any clinical role, read-only included, plus admin and managers);
+  // a care coordinator or the admin approves. Still never the read gate.
   assert.ok(line.includes('requireDocumentFiler'),
     'the clinician holding the document must be able to file it');
   const mw = SERVER.slice(SERVER.indexOf('const requireDocumentFiler ='), SERVER.indexOf('const requireEnrollmentEditor ='));
-  assert.match(mw, /canEditEnrollment\(req\.user\) \|\| clinicalRoles\.isCoordinator\(req\.user\)/);
+  assert.match(mw, /clinicalRoles\.canFileChartDocuments\(req\.user\)/);
+  const roles = require('../clinicalRoles');
+  for (const cr of ['provider', 'rn', 'lcsw', 'lmsw', 'readOnly', 'coordinator']) {
+    assert.equal(roles.canFileChartDocuments({ role: 'user', clinicalRole: cr }), true, cr);
+  }
+  assert.equal(roles.canFileChartDocuments({ role: 'vendor' }), false, 'a caregiver is not clinical staff');
+  assert.equal(roles.canFileChartDocuments({ role: 'client' }), false);
   assert.ok(!line.includes('requireEnrollmentStaff'),
     'a case manager reads this surface; filing into a patient file is a write');
 });

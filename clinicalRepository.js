@@ -406,6 +406,9 @@ const buildChartDocumentIndex = (input) => {
       inChart: !!u.emrFiled,
       // Sent by someone with no OpenEMR sign-in; files when a clinician opens the chart.
       emrWaiting: !u.emrFiled && !!u.emrFilingWaitingSince,
+      // Owner, 2026-10-16: attached by staff, not yet approved by a care
+      // coordinator or the admin. Shown on the chart, held out of OpenEMR.
+      awaitingApproval: !!u.awaitingApproval,
       // Only an UPLOAD row can be read into proposals: it is the one kind that
       // corresponds to a stored file the extractor can fetch. A consent, a care
       // plan and a record release are documents this app GENERATED from the

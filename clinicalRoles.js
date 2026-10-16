@@ -632,7 +632,21 @@ const buildMigrationWarning = (changed) => {
   return lines.join('\n');
 };
 
+// ---- Documents on the patient chart (owner, 2026-10-16) ------------------
+// EVERY clinical staff member may attach a document to a patient's chart:
+// anyone with a clinical role (read-only included), plus an admin or a
+// manager. Only a CARE COORDINATOR or the ADMIN approves one. A document
+// someone else attached waits as "awaiting approval" and reaches OpenEMR only
+// once approved. An approver's own filing needs no second look.
+const isActive = (u) => !!u && u.accountStatus !== 'inactive';
+const canFileChartDocuments = (u) => isActive(u) &&
+  (u.role === 'admin' || u.isManager === true || !!resolveClinicalRole(u));
+const canApproveChartDocuments = (u) => isActive(u) &&
+  (u.role === 'admin' || isCoordinator(u));
+
 module.exports = {
+  canFileChartDocuments,
+  canApproveChartDocuments,
   CLINICAL_ROLES,
   ALL_CLINICAL_ROLES,
   LICENSED_CLINICAL_ROLES,

@@ -8767,6 +8767,8 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       // service and Submit to billing. The page draws billing controls from
       // this answer and never decides it itself.
       canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
+      // Owner, 2026-10-16: who may approve a document attached to the chart.
+      canApproveDocuments: clinicalRoles.canApproveChartDocuments(req.user),
       // Where an order goes: the one order edit a case manager holds.
       canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user),
       // Patient to-dos: write, complete and be assigned one. A case manager
@@ -17996,9 +17998,16 @@ const canEditEnrollment = (user) => !!user &&
 // Filing a scanned document into a client's file (2026-10-14): the editors,
 // plus a care coordinator, whose job includes keeping the chart's paperwork in
 // order. Editing the enrollment submission itself stays with the editors.
+// Owner, 2026-10-16: EVERY clinical staff member attaches documents to the
+// chart; only a care coordinator or the admin approves them
+// (clinicalRoles.canFileChartDocuments / canApproveChartDocuments).
 const requireDocumentFiler = (req, res, next) => {
-  if (canEditEnrollment(req.user) || clinicalRoles.isCoordinator(req.user)) return next();
-  return res.status(403).json({ error: 'An admin, a clinician or a care coordinator files documents here.', code: 'DOCUMENT_FILER_ONLY' });
+  if (clinicalRoles.canFileChartDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'Clinical staff attach documents here.', code: 'DOCUMENT_FILER_ONLY' });
+};
+const requireDocumentApprover = (req, res, next) => {
+  if (clinicalRoles.canApproveChartDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'Only a care coordinator or the admin approves documents.', code: 'DOCUMENT_APPROVER_ONLY' });
 };
 const requireEnrollmentEditor = (req, res, next) => {
   if (canEditEnrollment(req.user)) return next();
@@ -18600,7 +18609,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
       clientEmail: client.email || null,
       // What this viewer may do to a document. Answered here so the page never
       // offers a button the route will refuse.
-      access: { canRemove: docRules.canRemoveDocuments(req.user), canShare: canShareDocuments(req.user) },
+      access: { canRemove: docRules.canRemoveDocuments(req.user), canShare: canShareDocuments(req.user), canApprove: clinicalRoles.canApproveChartDocuments(req.user) },
       uploadLink: liveUploadLink
         ? { url: uploadLinks.buildUrl(await getAppBaseUrl(), liveUploadLink.token), createdAt: liveUploadLink.createdAt }
         : null
@@ -18664,11 +18673,21 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
       });
     }
 
-    const row = buildClientDocumentRow({
+    const built = buildClientDocumentRow({
       client, kind, fileName, stored, safeName,
       buffer: prepared.buffer, sniffedType: prepared.sniffedType,
       actor: req.user, source: 'staff', encounterUuid
     });
+    // Owner, 2026-10-16: a document attached by anyone but a care coordinator
+    // or the admin WAITS for one of them to approve it. It shows on the chart
+    // as awaiting approval and reaches OpenEMR only once approved. An
+    // approver's own filing is accepted as it lands.
+    const approvedAtFiling = clinicalRoles.canApproveChartDocuments(req.user);
+    let row = built;
+    if (!approvedAtFiling) {
+      const { reviewedAt, reviewedByName, ...rest } = built;
+      row = { ...rest, status: 'received', awaitingApproval: true };
+    }
     const uploads = (await db.get('client_document_uploads')) || [];
     await db.set('client_document_uploads', [...uploads, row]);
 
@@ -18690,7 +18709,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
       db.get('client_document_uploads'), db.get('client_document_requests')
     ]);
     res.json({
-      message: `Filed to ${client.name || 'the client'}'s documents`,
+      message: approvedAtFiling
+        ? `Filed to ${client.name || 'the client'}'s documents`
+        : `Attached to ${client.name || 'the client'}'s chart. It is waiting for a care coordinator or the admin to approve it.`,
+      awaitingApproval: !approvedAtFiling,
       document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status, source: row.source },
       emrFiling,
       // The checklist is DERIVED, so it is returned here rather than left for
@@ -20220,7 +20242,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
 // or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
 // an insurance card goes back on the client's checklist with the reason on it
 // instead of sitting in a folder marked received.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireDocumentApprover, async (req, res) => {
   try {
     const decision = String((req.body || {}).decision || '').toLowerCase();
     if (!['accepted', 'rejected'].includes(decision)) {
@@ -20235,8 +20257,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
     if (i === -1 || docRules.isRemoved(uploads[i])) return res.status(404).json({ error: 'Document not found' });
 
     const now = new Date().toISOString();
+    const wasAwaitingApproval = !!uploads[i].awaitingApproval;
+    const { awaitingApproval, ...reviewed } = uploads[i];
     uploads[i] = {
-      ...uploads[i], status: decision, rejectionReason: decision === 'rejected' ? reason : null,
+      ...reviewed, status: decision, rejectionReason: decision === 'rejected' ? reason : null,
       reviewedAt: now, reviewedById: req.user.id, reviewedByName: req.user.name || req.user.email
     };
     await db.set('client_document_uploads', uploads);
@@ -20252,11 +20276,21 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       { kind: uploads[i].kind, decision });
     // The rejection reason is required at this route and was being captured
     // and never delivered — the client saw nothing and re-sent the same file.
-    await notify.documentReviewed({
-      clientId: uploads[i].clientId, decision,
-      label: uploads[i].label || uploads[i].kind, reason,
-      uploadId: uploads[i].id, actorId: req.user.id
-    });
+    // A document STAFF attached is the office's own paperwork: approving or
+    // rejecting it is not news for the client.
+    if (uploads[i].source !== 'staff') {
+      await notify.documentReviewed({
+        clientId: uploads[i].clientId, decision,
+        label: uploads[i].label || uploads[i].kind, reason,
+        uploadId: uploads[i].id, actorId: req.user.id
+      });
+    }
+    // An approved staff attachment goes to OpenEMR now, with the approver's
+    // sign-in; if they have none, it waits for the next clinician's.
+    if (decision === 'accepted' && wasAwaitingApproval) {
+      const owner = (await getUsers()).find(u => u.id === uploads[i].clientId);
+      await attemptEmrFiling({ client: owner, row: uploads[i], actor: req.user });
+    }
     if (decision === 'accepted') fileWaitingUploads(uploads[i].clientId, req.user);
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
@@ -20301,6 +20335,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
 const attemptEmrFiling = async ({ client, row, actor }) => {
   if (!client || !row) return { filed: false, reason: 'MISSING_INPUT' };
   if (row.status === 'rejected') return { filed: false, reason: 'DOCUMENT_REJECTED' };
+  // Owner, 2026-10-16: an attachment nobody has approved yet stays out of
+  // OpenEMR. The approval route files it.
+  if (row.awaitingApproval) return { filed: false, reason: 'AWAITING_APPROVAL' };
   if (row.emrFiled) return { filed: false, reason: 'ALREADY_FILED' };
   if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
   if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
