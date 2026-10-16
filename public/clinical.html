@@ -322,6 +322,7 @@
       fileClientDocument: (clientId, body) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents/upload`, {
         method: 'POST', body: JSON.stringify(body)
       }),
+      reviewDocument: (clientId, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents/${encodeURIComponent(uploadId)}/review`, { method: 'POST', body: JSON.stringify({ decision, reason }) }),
       documentKinds: (clientId) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents`),
       // Read-only here. The facility and the encounter type are ADMIN writes on
       // the enrollment record (4.12 F1, owner 2026-09-23) — this page states
@@ -679,8 +680,8 @@
                 onChange={e => { pick((e.target.files || [])[0]); e.target.value = ''; }} />
             </label>
             <Hint className="w-full">
-              Filed to the client's documents — it ticks the office checklist and the client sees it on their portal.
-              PDF, JPG or PNG.
+              Any clinical staff member can attach a document. A care coordinator or the admin approves it,
+              and it reaches OpenEMR once approved. The patient sees it only if someone shares it. PDF, JPG or PNG.
             </Hint>
           </div>
           {!kinds && !msg && <p className="text-[11px] text-stone-400 mt-2">Reading the document list…</p>}
@@ -1054,6 +1055,22 @@
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
       const canWrite = useCanWrite();
+      // Approving a document another staff member attached (owner,
+      // 2026-10-16): a care coordinator or the admin. The server says who.
+      const canApproveDocs = !!useContext(AccessContext).canApproveDocuments;
+      const review = async (d, decision) => {
+        let reason = '';
+        if (decision === 'rejected') {
+          reason = window.prompt('Why is this document being rejected?') || '';
+          if (!reason.trim()) return;
+        }
+        setBusy(d.id); setErr('');
+        try {
+          await api.reviewDocument(clientId, d.uploadId, decision, reason);
+          onRefresh && onRefresh();
+        } catch (e) { setErr(e.message || 'That could not be saved.'); }
+        finally { setBusy(''); }
+      };
       // Whether the patient sees a document the office filed (owner,
       // 2026-09-29). Off until someone shares it; the server decides who may.
       const setShared = async (d, shared) => {
@@ -1154,6 +1171,16 @@
                             {d.sharedWithPatient ? 'Shared with Patient' : 'Hidden from Patient'}
                           </button>
                         : <span className="chip bg-stone-100 text-stone-600">{d.sharedWithPatient ? 'Shared with Patient' : 'Hidden from Patient'}</span>)}
+                      {/* Owner, 2026-10-16: a care coordinator or the admin approves what other staff attach. */}
+                      {d.awaitingApproval && <span className="chip bg-amber-50 text-amber-800">Awaiting Approval</span>}
+                      {d.awaitingApproval && canApproveDocs && (
+                        <>
+                          <button className="chip border border-emerald-300 bg-emerald-50 text-emerald-700" disabled={busy === d.id}
+                            onClick={() => review(d, 'accepted')}>Approve</button>
+                          <button className="chip border border-red-200 bg-white text-red-700" disabled={busy === d.id}
+                            onClick={() => review(d, 'rejected')}>Reject</button>
+                        </>
+                      )}
                       {d.inChart && <span className="chip bg-emerald-50 text-emerald-700">In EMR</span>}
                       {d.emrWaiting && <span className="chip bg-amber-50 text-amber-800" title="Filing into OpenEMR with your sign-in now. Refresh to see it.">Filing to EMR</span>}
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}

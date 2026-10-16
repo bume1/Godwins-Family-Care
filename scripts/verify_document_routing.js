@@ -187,13 +187,18 @@ const LINKED_CLIENT = {
   intake: {}, openEmrPatientId: 'emr-uuid-123'
 };
 const STAFF = { id: 'staff_route_1', role: config.ROLES.ADMIN, email: 'routestaff@example.test', name: 'Route Verification Staff' };
+// Owner, 2026-10-16: every clinical staff member attaches; a care coordinator
+// or the admin approves.
+const RN = { id: 'rn_route_1', role: 'user', clinicalRole: 'rn', email: 'routern@example.test', name: 'Route RN' };
+const COORD = { id: 'coord_route_1', role: 'user', isManager: true, clinicalRole: 'coordinator', email: 'routecoord@example.test', name: 'Route Coordinator' };
+const MGR = { id: 'mgr_route_1', role: 'user', isManager: true, clinicalRole: 'readOnly', email: 'routemgr@example.test', name: 'Route Manager' };
 const CAREGIVER = {
   id: 'caregiver_route_1', role: 'vendor', licenseLevel: 'CNA',
   email: 'routecaregiver@example.test', name: 'Route Caregiver'
 };
 
 (async () => {
-  STORE.set('users', [CLIENT, LINKED_CLIENT, STAFF, CAREGIVER]);
+  STORE.set('users', [CLIENT, LINKED_CLIENT, STAFF, CAREGIVER, RN, COORD, MGR]);
   EMR_CONNECTED.add(STAFF.id);
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 2500));
@@ -384,6 +389,32 @@ const CAREGIVER = {
   r = await getAdminDocs(LINKED_CLIENT.id);
   const nowFiled = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === failId);
   check('and now the checklist shows it filed', !!(nowFiled && nowFiled.emrFiled), JSON.stringify(nowFiled));
+
+  console.log('\n── Any clinical staff attaches; a coordinator or the admin approves (owner, 2026-10-16) ──');
+  EMR_CONNECTED.add(COORD.id);
+  const docsBefore = EMR_DOCS.length;
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload`, tok(RN), { kind: 'otherDocument', fileName: 'rn-scan.png', fileDataB64: b64(PNG) });
+  check('an RN can attach a document to the chart', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  const rnDocId = r.body.document && r.body.document.id;
+  check('it lands awaiting approval, and says so', r.body.awaitingApproval === true && r.body.document.status === 'received' && /waiting for a care coordinator or the admin/.test(r.body.message), JSON.stringify(r.body).slice(0, 300));
+  check('and it is held out of OpenEMR', r.body.emrFiling && r.body.emrFiling.reason === 'AWAITING_APPROVAL' && EMR_DOCS.length === docsBefore, JSON.stringify(r.body.emrFiling));
+  r = await call('GET', `/api/clinical/patients/${LINKED_CLIENT.id}/chart`, st);
+  const pendingRow = (r.body.chartDocuments || []).find(d => d.uploadId === rnDocId);
+  check('the chart shows it as awaiting approval', !!(pendingRow && pendingRow.awaitingApproval && !pendingRow.inChart), JSON.stringify(pendingRow));
+  check('opening the chart does not slip it into OpenEMR', EMR_DOCS.length === docsBefore);
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${rnDocId}/review`, tok(RN), { decision: 'accepted' });
+  check('the RN cannot approve it', r.status === 403 && r.body.code === 'DOCUMENT_APPROVER_ONLY', JSON.stringify(r.body));
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${rnDocId}/review`, tok(MGR), { decision: 'accepted' });
+  check('a plain manager cannot approve it', r.status === 403, JSON.stringify(r.body));
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${rnDocId}/review`, tok(COORD), { decision: 'accepted' });
+  check('a care coordinator approves it', r.status === 200, JSON.stringify(r.body));
+  check('approval files it to OpenEMR', EMR_DOCS.length === docsBefore + 1 && EMR_DOCS[EMR_DOCS.length - 1].fileName === 'rn-scan.png', JSON.stringify(EMR_DOCS.slice(-1)));
+  const approvedRow = ((await new MemDb().get('client_document_uploads')) || []).find(u => u.id === rnDocId);
+  check('and it is accepted, no longer awaiting, approved by the coordinator', approvedRow && approvedRow.status === 'accepted' && !approvedRow.awaitingApproval && approvedRow.reviewedById === COORD.id, JSON.stringify(approvedRow).slice(0, 300));
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload`, tok(COORD), { kind: 'otherDocument', fileName: 'coord-scan.png', fileDataB64: b64(PNG) });
+  check('a coordinator\'s own attachment needs no second approval', r.status === 200 && !r.body.awaitingApproval && r.body.document.status === 'accepted', JSON.stringify(r.body).slice(0, 200));
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload`, tok(CAREGIVER), { kind: 'otherDocument', fileName: 'cg.png', fileDataB64: b64(PNG) });
+  check('a caregiver is not clinical staff and cannot attach', r.status === 403, JSON.stringify(r.body));
 
   console.log('\n── The activity trail ──');
   const log = (await new MemDb().get('activity_log')) || [];
