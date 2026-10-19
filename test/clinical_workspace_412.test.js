@@ -711,10 +711,19 @@ test('My Day has an End visit button once a visit is in progress', () => {
 test('My Day is the default landing view', () => {
   // 2026-10-12: `/clinical#inbox` (the referral email) opens the inbox; every
   // other arrival still opens on the day.
+  // 2026-10-14: the fragment is read against NAV_VIEWS, so the to-do emails'
+  // `#queues` opens Tasks instead of silently landing on My Day.
   // 2026-10-15: `/clinical#queue` (the Billing module's "Open in Clinical")
-  // opens the coding queue.
-  assert.match(pageCode, /const h = String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\); return h === 'inbox' \|\| h === 'queue' \? h : 'myday';/,
-    'the workspace must open on the day, not on a patient list');
+  // opens the coding queue. Both arrived independently and both are covered
+  // by the one rule, so the rule is what is asserted — a known view opens,
+  // ANYTHING ELSE opens the day — plus a precondition per named link, so
+  // dropping either destination from NAV_VIEWS fails here.
+  assert.match(pageCode, /const h = String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\);/);
+  assert.match(pageCode, /return NAV_VIEWS\.some\(v => v\.key === h\) \? h : 'myday';/,
+    'the workspace must open on the day unless the fragment names a view that exists');
+  assert.match(pageCode, /\{ key: 'inbox', tab: 'Inbox'/, 'precondition: #inbox (the referral email) must still resolve');
+  assert.match(pageCode, /\{ key: 'queue', tab: 'Coding'/, "precondition: #queue (Billing's Open in Clinical) must still resolve");
+  assert.match(pageCode, /\{ key: 'queues', tab: 'Tasks'/, 'precondition: #queues (the to-do emails) must still resolve');
   assert.match(pageCode, /<MyDayView/);
 });
 

@@ -52,6 +52,12 @@ const isYmd = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) &&
   !Number.isNaN(new Date(`${s}T12:00:00Z`).getTime()) &&
   new Date(`${s}T12:00:00Z`).toISOString().slice(0, 10) === s;
 
+// A wall-clock time of day, 24h, in GEORGIA — the practice clock, like every
+// other time this app shows. No zone travels with it: a to-do due at 2pm is
+// due at 2pm where the care happens.
+const isHm = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
+const hmToMinutes = (s) => isHm(s) ? (Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5))) : null;
+
 // Adds whole days to a bare calendar date. Read at midday UTC so no zone can
 // move it across a day boundary.
 const addDays = (ymd, n) => {
@@ -99,6 +105,15 @@ const validateFields = (input, { partial = false, findUser } = {}) => {
     const v = src.dueDate == null || src.dueDate === '' ? null : String(src.dueDate);
     if (v !== null && !isYmd(v)) throw new TaskError('The due date must be a real date (YYYY-MM-DD).', 'TASK_DUE_INVALID');
     out.dueDate = v;
+    // CLEARING THE DATE CLEARS THE TIME. "2pm" with no day is not a due time,
+    // and leaving it behind would fail the check below on the next edit of
+    // any other field.
+    if (v === null && !has('dueTime')) out.dueTime = null;
+  }
+  if (has('dueTime')) {
+    const v = src.dueTime == null || src.dueTime === '' ? null : String(src.dueTime).slice(0, 5);
+    if (v !== null && !isHm(v)) throw new TaskError('The due time must be a time of day (HH:MM).', 'TASK_DUE_TIME_INVALID');
+    out.dueTime = v;
   }
   if (!partial || has('priority')) {
     const p = src.priority == null || src.priority === '' ? 'routine' : String(src.priority);
@@ -125,6 +140,15 @@ const validateFields = (input, { partial = false, findUser } = {}) => {
   return out;
 };
 
+// A TIME HANGS OFF A DATE. Judged on the row AS IT LANDS, not on the fields
+// that arrived: a partial edit setting only a time on an undated to-do would
+// otherwise store something the sweep can never fire.
+const assertDueTimeHasDate = (row) => {
+  if (row.dueTime && !row.dueDate) {
+    throw new TaskError('Give the to-do a due date before a due time.', 'TASK_DUE_TIME_WITHOUT_DATE');
+  }
+};
+
 const changedKeys = (before, after) =>
   Object.keys(after).filter(k => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
 
@@ -137,12 +161,14 @@ const createTask = ({ input, actor, client, findUser, now }) => {
   if (!client) throw new TaskError('Choose the patient this to-do is about.', 'TASK_CLIENT_REQUIRED');
   const at = now || new Date().toISOString();
   const fields = validateFields({ assigneeId: actor.id, ...input }, { findUser });
+  assertDueTimeHasDate(fields);
   return {
     id: `task_${crypto.randomBytes(8).toString('hex')}`,
     clientId: String(client.id),
     title: fields.title,
     detail: fields.detail || null,
     dueDate: fields.dueDate || null,
+    dueTime: fields.dueTime || null,
     priority: fields.priority,
     category: fields.category,
     assigneeId: fields.assigneeId,
@@ -167,6 +193,7 @@ const applyTaskAction = ({ task, action, input, actor, findUser, now }) => {
   if (action === 'edit') {
     if (task.status !== 'open') throw new TaskError('Reopen this to-do before editing it.', 'TASK_NOT_OPEN', 409);
     const fields = validateFields(src, { partial: true, findUser });
+    assertDueTimeHasDate({ ...task, ...fields });
     const keys = changedKeys(task, fields).filter(k => k !== 'assigneeName');
     if (!keys.length) return { task, changed: [] };
     Object.assign(next, fields, { updatedAt: at });
@@ -209,6 +236,9 @@ const sortTasks = (rows, today) => {
   return [...rows].sort((a, b) =>
     (order[bucketFor(a, today)] - order[bucketFor(b, today)]) ||
     String(a.dueDate || '9999').localeCompare(String(b.dueDate || '9999')) ||
+    // Two to-dos on one day run in clock order; an untimed one sits with the
+    // 9am default rather than drifting to the end of the day.
+    (dueMinutesFor(a) - dueMinutesFor(b)) ||
     ((PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2)) ||
     String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 };
@@ -218,7 +248,7 @@ const sortTasks = (rows, today) => {
 // date math of its own.
 const publicTask = (task, viewer, today) => ({
   id: task.id, clientId: task.clientId, patientName: task.patientName || null,
-  title: task.title, detail: task.detail, dueDate: task.dueDate,
+  title: task.title, detail: task.detail, dueDate: task.dueDate, dueTime: task.dueTime || null,
   priority: task.priority, category: task.category,
   assigneeId: task.assigneeId, assigneeName: task.assigneeName,
   createdById: task.createdById, createdByName: task.createdByName, createdAt: task.createdAt,
@@ -341,9 +371,82 @@ const buildDigest = ({
   };
 };
 
+// ---------------------------------------------------------------------------
+// THE DAILY EMAIL SWEEP (owner, 2026-10-14: "email every time a task is
+// assigned, due, overdue (one email about task a day) and then marked
+// completed.")
+// ---------------------------------------------------------------------------
+// Assigned and completed are EVENTS and are sent where they happen, at the
+// route. Due and overdue are a STATE, so they are swept: a due date can be
+// edited after the fact, which is exactly why nothing is scheduled at write
+// time the way a visit reminder is. A to-do lives in this app's own store, so
+// a background sweep may read it — the rule that stops the visit reminders
+// being swept is OpenEMR's per-clinician OAuth, and it does not apply here.
+//
+// 9am Eastern when a to-do carries no time of its own — the owner's default,
+// and the hour the daily overdue chase goes out at. One constant.
+const TASK_EMAIL_SEND_HOUR_ET = 9;
+const DEFAULT_DUE_MINUTES = TASK_EMAIL_SEND_HOUR_ET * 60;
+
+// THE MINUTE A DUE NOTICE GOES OUT: the to-do's own time when it has one,
+// otherwise the 9am default (owner, 2026-10-15: "task email needs to be sent
+// during the exact time the task is due.. 9 am et is default when no time
+// added").
+const dueMinutesFor = (task) => {
+  const m = hmToMinutes(task && task.dueTime);
+  return m === null ? DEFAULT_DUE_MINUTES : m;
+};
+
+// ONE EMAIL ABOUT A TO-DO PER DAY, and the key is what guarantees it rather
+// than the queue's cooldown window. Keyed on GEORGIA'S date, so a restart, a
+// second scan or a changed scan interval cannot send twice, and the next
+// calendar day is a new key rather than a duplicate.
+const reminderKey = (task, kind, today) => `${task && task.id}:${kind}:${today}`;
+
+// Whole days between two bare calendar dates, read at midday UTC so no zone
+// moves either across a boundary.
+const daysBetween = (from, to) =>
+  Math.round((new Date(`${to}T12:00:00Z`) - new Date(`${from}T12:00:00Z`)) / 86400000);
+
+// Which to-dos want an email right now. PURE: the caller passes Georgia's date
+// and Georgia's hour, so nothing here reads a clock and the test does not have
+// to run in Eastern to mean anything.
+//
+// NOTHING GOES OUT BEFORE ITS MINUTE. After it, every later tick that day
+// re-derives the same row and the date key above drops it, so the first tick
+// past the due time is the one that sends — which is what makes "at the time
+// it is due" true without storing a sent flag per to-do.
+//
+// A to-do is due OR overdue, never both — `bucketFor` decides, and a closed,
+// cancelled or undated one is never chased.
+const remindersDue = ({ tasks, today, minutesOfDay }) => {
+  if (!isYmd(today) || !Number.isFinite(minutesOfDay)) return [];
+  const out = [];
+  for (const task of tasks || []) {
+    // WHAT ACTUALLY DOES THE WORK is `bucketFor` below: it answers CLOSED for
+    // a to-do that is not open and NO_DATE for one with no due date, so
+    // neither reaches the two branches. This line is belt-and-braces, and is
+    // recorded as such so a later simplification does not drop the real guard
+    // believing this one covers it.
+    if (!task || task.status !== 'open' || !task.dueDate) continue;
+    const bucket = bucketFor(task, today);
+    // DUE TODAY fires AT THE TO-DO'S OWN TIME, or 9am when it has none.
+    if (bucket === BUCKETS.TODAY) {
+      if (minutesOfDay >= dueMinutesFor(task)) out.push({ task, kind: 'due', daysLate: 0 });
+    // OVERDUE is the next morning's chase, not a re-run of yesterday's clock:
+    // its time has already passed, and somebody planning their day wants it at
+    // the start of the day. Always the 9am default, whatever time it was due.
+    } else if (bucket === BUCKETS.OVERDUE) {
+      if (minutesOfDay >= DEFAULT_DUE_MINUTES) out.push({ task, kind: 'overdue', daysLate: daysBetween(task.dueDate, today) });
+    }
+  }
+  return out;
+};
+
 module.exports = {
   STATUSES, PRIORITIES, CATEGORIES, CATEGORY_VALUES, BUCKETS, UPCOMING_DAYS,
   TITLE_MAX, DETAIL_MAX, TaskError,
-  isYmd, addDays, canManageTasks, canSee, bucketFor, validateFields,
-  createTask, applyTaskAction, sortTasks, publicTask, listForViewer, buildDigest
+  isYmd, isHm, hmToMinutes, addDays, canManageTasks, canSee, bucketFor, validateFields,
+  createTask, applyTaskAction, sortTasks, publicTask, listForViewer, buildDigest,
+  TASK_EMAIL_SEND_HOUR_ET, DEFAULT_DUE_MINUTES, dueMinutesFor, reminderKey, daysBetween, remindersDue
 };

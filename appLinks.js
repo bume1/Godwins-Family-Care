@@ -36,6 +36,7 @@ const PATHS = Object.freeze({
   CAREGIVER_MORE: '/caregiver#more',        // messages + documents live here
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
   CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
+  CLINICAL_TASKS: '/clinical#queues',       // straight to Tasks → My To-Dos (`queues` is that view's key)
   SCHEDULING: '/scheduling',                // ADMIN shift board, not the caregiver's
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.
@@ -85,6 +86,12 @@ function messagesFor(user) {
   return PATHS.LOGIN;
 }
 
+// Where THIS person reads their to-dos. Only the clinical team can hold one
+// (`clinicalRoles.canManageTasks`), and they all read them on the same page,
+// so this is a constant today — it exists as a resolver for the same reason
+// `messagesFor` does: the destination belongs here, not at the call site.
+const tasksFor = () => PATHS.CLINICAL_TASKS;
+
 // A shift concerns a caregiver, so it points at their schedule — never the
 // admin board at `/scheduling`, which they cannot open.
 const shiftFor = () => PATHS.CAREGIVER_SCHEDULE;
@@ -102,4 +109,4 @@ const routeOf = (p) => String(p || '').split('#')[0].split('?')[0];
 // excluded here and checked by its own assertion with a bogus token.
 const ALL_PATHS = Object.freeze(Object.values(PATHS).filter(p => p !== PATHS.VIDEO_JOIN_PREFIX));
 
-module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, videoJoinFor, routeOf, isCaregiver, isClinical };
+module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, videoJoinFor, routeOf, isCaregiver, isClinical };

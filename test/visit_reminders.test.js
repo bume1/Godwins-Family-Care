@@ -299,7 +299,15 @@ test('A4: a backlog drains oldest first', () => {
 test('A4: the reminder rides the EXISTING scanner, and the row is marked only after the queue accepts it', () => {
   // A new timer is a second thing to keep alive, and this one already runs on a
   // schedule the owner controls.
-  assert.match(SERVER_CODE, /await sendDueVisitReminders\(\);\s*\n\s*console\.log\('\[SCANNER\] Notification trigger scan completed'\)/);
+  // 2026-10-14: the to-do sweep now rides the same scanner and sits between
+  // this call and the closing log line, so the old adjacency match no longer
+  // describes the rule. What the rule always was: the send is called from
+  // INSIDE the scan, and has no timer of its own.
+  const scanFn = SERVER_CODE.slice(
+    SERVER_CODE.indexOf('const scanAndQueueNotifications'),
+    SERVER_CODE.indexOf("console.log('[SCANNER] Notification trigger scan completed')"));
+  assert.ok(scanFn.length > 200, 'could not read the scan function — an anchor moved');
+  assert.match(scanFn, /\n\s*await sendDueVisitReminders\(\);/, 'the send must be called from inside the scan');
   assert.equal((SERVER_CODE.match(/setInterval\(sendDueVisitReminders/g) || []).length, 0, 'no second timer');
   const sweep = SERVER_CODE.slice(SERVER_CODE.indexOf('const sendDueVisitReminders'));
   const dueBlock = sweep.slice(sweep.indexOf('for (const r of due)'));
