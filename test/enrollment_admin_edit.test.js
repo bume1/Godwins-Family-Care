@@ -101,7 +101,7 @@ const WORKFLOW_WRITES = [
   ["app.put('/api/gfc/admin/enrollment/:clientId/service-line'", 'change a service line'],
   ["app.post('/api/gfc/admin/enrollment/:clientId/documents/request'", 'ask a client for documents'],
   ["app.post('/api/gfc/admin/enrollment/:clientId/documents/remind'", 'chase them'],
-  ["app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review'", 'accept or reject a file'],
+  // Accept/reject a file moved to its own gate (owner, 2026-10-16): see account_types.test.js.
   ["app.post('/api/gfc/admin/enrollment/:clientId/review'", 'mark reviewed'],
   ["app.post('/api/gfc/admin/enrollment/:clientId/follow-up'", 'request follow-up'],
   ["app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline'", 'record a paper signature'],

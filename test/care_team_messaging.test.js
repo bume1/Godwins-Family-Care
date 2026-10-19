@@ -457,15 +457,16 @@ test('the component keeps what people type, clears it only on success, and rende
   const render = code.slice(code.indexOf('function render(state)'), code.indexOf('function scopeSettled'));
   assert.ok(!/captureDraft\(/.test(render.replace(/\/\/.*$/gm, '')), 'render does not capture the draft');
   assert.match(render, /ed\.innerHTML = nf\.renderHtml\(state\.draft\.markup \|\| ''\)/, 'and restores it');
-  assert.match(code, /editor\.oninput = keepDraft/);
+  assert.match(code, /wireRichEditor\(editor, editor\.previousElementSibling, keepDraft\)/);
+  assert.match(code, /editor\.oninput = function \(\) \{ autoList\(editor\); keep\(\);/, 'every keystroke keeps the draft');
   // a plain message never touches the formatter; a markup one goes through the escaping renderer
-  assert.match(code, /if \(m\.format === 'markup' && nf\) return '<div class="mfmt">' \+ nf\.renderHtml\(m\.body \|\| ''\) \+ '<\/div>';/);
+  assert.match(code, /if \(m\.format === 'markup' && nf\) return '<div class="mfmt">' \+ nf\.renderHtml\(m\.body \|\| '', \{ linkify: true \}\) \+ '<\/div>';/);
   assert.match(code, /return '<div>' \+ esc\(m\.body\)\.replace/);
   assert.ok(!/innerHTML\s*=\s*[^;]*m\.body/.test(code), 'a message body is never assigned to innerHTML unrendered');
   // attachments open with the caller's token, never a public link
   assert.match(code, /Authorization: 'Bearer ' \+ state\.authToken/);
   assert.ok(!/drive\.google|webViewLink|webContentLink/.test(code));
-  // a paste is text only
+  // A paste keeps its formatting since 2026-10-16 (owner); plain text still goes in as text.
   assert.match(code, /getData\('text\/plain'\)/);
 });
 
@@ -496,7 +497,8 @@ test('the routes: attachments are typed BEFORE storage, stored privately, and th
   // validated before stored, stored before the row is written, row written before anybody is told
   const create = code.slice(code.indexOf("router.post('/api/messaging/threads'"), code.indexOf("router.post('/api/messaging/threads/:id/messages'"));
   assert.ok(create.indexOf('msg.validateMessage(') < create.indexOf('storeAttachments(') && create.indexOf('storeAttachments(') < create.indexOf("db.set('messages'") && create.indexOf("db.set('messages'") < create.indexOf('notifyThread('));
-  const mount = serverSrc.slice(serverSrc.indexOf('app.use(messagingRoutes({'), serverSrc.indexOf('}));', serverSrc.indexOf('app.use(messagingRoutes({')));
+  const mount = serverSrc.slice(serverSrc.indexOf('= messagingRoutes({'), serverSrc.indexOf('});', serverSrc.indexOf('= messagingRoutes({')));
+  assert.ok(mount.length > 50, 'the mount was found');
   for (const dep of ['upload', 'uploadLimiter', 'googledrive', 'detectFileType', 'contentDisposition']) assert.match(mount, new RegExp(`\\b${dep}\\b`), `server.js passes ${dep}`);
   assert.match(mount, /detectFileType: \(buf\) => detectFileType\(buf\)/, 'a closure: the const is defined later in the file');
   assert.match(fs.readFileSync(path.join(root, 'googledrive.js'), 'utf8'), /'GFC Message Attachments'/);
@@ -1138,4 +1140,24 @@ test('2026-10-16: the component shows the badge, the descriptors, Delete and the
   assert.match(comp, /In this conversation: /);
   assert.match(comp, /if \(state\.staffView && state\.patientFacing\)/, 'the yellow bar is for staff only');
   assert.match(comp, /c\.audienceNote/, 'start buttons carry their descriptor');
+});
+
+test('2026-10-16: the composer keeps pasted formatting, Shift+Enter lines and strikethrough; messages show links; edits are rich', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  const code = stripComments(comp);
+  assert.match(code, /var CAPTURE = \{ strike: true, newlines: true \};/);
+  assert.match(code, /state\.draft\.markup = nf\.domToMarkup\(ed, CAPTURE\)/, 'the composer reads back with both options');
+  assert.match(code, /NF\(\)\.domToMarkup\(eed, CAPTURE\)/, 'and so does the edit box');
+  // A paste is parsed inert, reduced to the allowed shapes, then re-rendered by the escaping renderer.
+  assert.match(code, /new global\.DOMParser\(\)\.parseFromString\(html, 'text\/html'\)/);
+  assert.match(code, /nf\.domToMarkup\(doc\.body, \{ strike: true \}\)/);
+  assert.match(code, /document\.execCommand\('insertHTML', false, nf\.renderHtml\(markup\)\)/);
+  assert.ok(!/insertHTML', false, html\)/.test(code), 'raw pasted HTML is never inserted');
+  assert.match(code, /e\.key === 'Enter' && e\.shiftKey/);
+  assert.match(code, /nf\.renderHtml\(m\.body \|\| '', \{ linkify: true \}\)/);
+  assert.ok(!/Formatting marks: \*\*bold\*\*/.test(code), 'the edit box no longer shows raw marks');
+  assert.match(code, /data-edit-editor="1" contenteditable="true"/);
+  for (const t of ['bold', 'italic', 'underline', 'strikeThrough', 'insertUnorderedList', 'insertOrderedList', 'heading', 'clear']) {
+    assert.ok(code.includes(`['${t}'`), `toolbar has ${t}`);
+  }
 });

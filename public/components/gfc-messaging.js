@@ -127,6 +127,11 @@
     '.gfcm .mfmtbar{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 6px}',
     '.gfcm .mfmtb{border:1px solid var(--line);background:#fff;border-radius:7px;min-width:34px;height:32px;padding:0 9px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit}',
     '.gfcm .mfmtb:hover{background:var(--cream)}',
+    '.gfcm .mfmtb.on{background:var(--navy);color:#fff;border-color:var(--navy)}',
+    '.gfcm .mfmt s{text-decoration:line-through}',
+    '.gfcm .mfmt a{color:#0b5d7a;text-decoration:underline;word-break:break-all}',
+    '.gfcm .mbub.me .mfmt a{color:#033D50}',
+    '.gfcm .mhint{font-size:12px;margin-top:4px}',
     '.gfcm .meditor{min-height:96px;border:1px solid #d8cdb8;border-radius:9px;padding:10px 12px;background:#fff;color:var(--ink);outline:none;white-space:pre-wrap}',
     '.gfcm .meditor:focus{border-color:var(--goldd)}',
     '.gfcm .meditor:empty::before{content:attr(data-placeholder);color:#a8a29e}',
@@ -171,10 +176,17 @@
 
   var MAX_FILES = 5;
   var MAX_BYTES = 10 * 1024 * 1024;
+  // The formatting toolbar (owner, 2026-10-16: "richer... bold, italicized,
+  // etc"). Each command is the browser's own; what is SAVED is only ever the
+  // shapes in /note-format.js, read back out of the editor by domToMarkup.
   var FMT_TOOLS = [
-    ['bold', '<b>B</b>', 'Bold'], ['italic', '<i>I</i>', 'Italic'], ['underline', '<u>U</u>', 'Underline'],
-    ['insertUnorderedList', '&bull; List', 'Bulleted list'], ['insertOrderedList', '1. List', 'Numbered list'], ['heading', 'H', 'Heading']
+    ['bold', '<b>B</b>', 'Bold (Ctrl+B)'], ['italic', '<i>I</i>', 'Italic (Ctrl+I)'], ['underline', '<u>U</u>', 'Underline (Ctrl+U)'],
+    ['strikeThrough', '<s>S</s>', 'Strikethrough'],
+    ['insertUnorderedList', '&bull; List', 'Bulleted list (or type "- ")'], ['insertOrderedList', '1. List', 'Numbered list (or type "1. ")'],
+    ['heading', 'Heading', 'Heading'], ['clear', 'Clear', 'Clear formatting']
   ];
+  // What the editor reads back: strikethrough kept, Shift+Enter a real line break.
+  var CAPTURE = { strike: true, newlines: true };
   function NF() { return global.GFC_NOTE_FORMAT || null; }
   // The yellow badge (owner, 2026-10-16): 'yes' the patient sees it, 'choose'
   // it can include the patient. Staff only; the patient side never sees it.
@@ -196,7 +208,7 @@
   // message goes through the escaping renderer.
   function messageHtml(m) {
     var nf = NF();
-    if (m.format === 'markup' && nf) return '<div class="mfmt">' + nf.renderHtml(m.body || '') + '</div>';
+    if (m.format === 'markup' && nf) return '<div class="mfmt">' + nf.renderHtml(m.body || '', { linkify: true }) + '</div>';
     return '<div>' + esc(m.body).replace(/\n/g, '<br>') + '</div>';
   }
 
@@ -208,6 +220,13 @@
     }).join('') + '</div>';
   }
 
+  function formatBar() {
+    return '<div class="mfmtbar" role="toolbar" aria-label="Format your message">' + FMT_TOOLS.map(function (t) {
+      return '<button type="button" class="mfmtb" data-fmt="' + t[0] + '" title="' + t[2] + '" aria-label="' + t[2] + '" aria-pressed="false">' + t[1] + '</button>';
+    }).join('') + '</div>';
+  }
+  var FMT_HINT = '<div class="mmu mhint">Shift+Enter for a new line &middot; type "- " or "1. " to start a list &middot; pasted formatting is kept</div>';
+
   // The composer. `state.draft` is the source of truth, so a re-render (an error,
   // a refresh) never loses what somebody typed — the plain textarea it replaces
   // did, on every failed send.
@@ -216,10 +235,9 @@
     var d = state.draft;
     var html = '';
     if (nf) {
-      html += '<div class="mfmtbar" role="toolbar" aria-label="Format your message">' + FMT_TOOLS.map(function (t) {
-        return '<button type="button" class="mfmtb" data-fmt="' + t[0] + '" title="' + t[2] + '" aria-label="' + t[2] + '">' + t[1] + '</button>';
-      }).join('') + '</div>' +
-        '<div class="meditor mfmt" data-editor="1" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Write your message"></div>';
+      html += formatBar() +
+        '<div class="meditor mfmt" data-editor="1" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Write your message"></div>' +
+        FMT_HINT;
     } else {
       html += '<textarea data-field="body" maxlength="4000">' + esc(d.plain || '') + '</textarea>';
     }
@@ -233,13 +251,104 @@
     return html;
   }
 
+  // One rich editor, used by the composer and by the super admin's edit box.
+  // `bar` is the toolbar (or a node containing it); `keep` saves what is in
+  // the box. Everything here only changes what is ON SCREEN: what is saved is
+  // read back through domToMarkup, so nothing a paste or a browser adds can
+  // reach a message except the shapes /note-format.js allows.
+  function wireRichEditor(editor, bar, keep) {
+    var nf = NF();
+    var run = function (cmd) {
+      editor.focus();
+      if (cmd === 'heading') {
+        var inHeading = /^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''));
+        document.execCommand('formatBlock', false, inHeading ? 'div' : 'h3');
+      } else if (cmd === 'clear') {
+        document.execCommand('removeFormat', false, null);
+        if (/^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''))) document.execCommand('formatBlock', false, 'div');
+      } else {
+        document.execCommand(cmd, false, null);
+      }
+      keep(); paintBar();
+    };
+    var buttons = bar ? bar.querySelectorAll('[data-fmt]') : [];
+    var paintBar = function () {
+      Array.prototype.forEach.call(buttons, function (b) {
+        var cmd = b.getAttribute('data-fmt');
+        var on = false;
+        try {
+          if (cmd === 'heading') on = /^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''));
+          else if (cmd !== 'clear') on = document.queryCommandState(cmd);
+        } catch (e) { on = false; }
+        b.classList.toggle('on', !!on && editor.contains(document.getSelection().anchorNode));
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    };
+    Array.prototype.forEach.call(buttons, function (b) {
+      // mousedown, not click: a click would take focus (and the selection) off the editor
+      b.onmousedown = function (e) { e.preventDefault(); run(b.getAttribute('data-fmt')); };
+    });
+    editor.oninput = function () { autoList(editor); keep(); paintBar(); };
+    editor.onblur = keep;
+    editor.onkeyup = paintBar;
+    editor.onmouseup = paintBar;
+    editor.onfocus = paintBar;
+    editor.onkeydown = function (e) {
+      // Shift+Enter is a line break inside the paragraph, the way chat apps do it.
+      if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); document.execCommand('insertLineBreak'); keep(); return; }
+      var mod = e.ctrlKey || e.metaKey;
+      if (mod && e.shiftKey && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); run('strikeThrough'); }
+      else if (mod && e.shiftKey && e.key === '8') { e.preventDefault(); run('insertUnorderedList'); }
+      else if (mod && e.shiftKey && e.key === '7') { e.preventDefault(); run('insertOrderedList'); }
+    };
+    // A paste KEEPS its formatting (owner, 2026-10-16: "when copied it
+    // leaves"). The HTML is parsed inert (DOMParser runs no script and loads
+    // nothing), reduced to the allowed shapes, and re-rendered by the escaping
+    // renderer before it is inserted, so only bold, italic, underline,
+    // strikethrough, lists and headings come across. Plain text goes in as text.
+    editor.onpaste = function (e) {
+      var cd = e.clipboardData || window.clipboardData;
+      if (!cd) return;
+      e.preventDefault();
+      var html = cd.getData && cd.getData('text/html');
+      if (html && nf && global.DOMParser) {
+        var doc = new global.DOMParser().parseFromString(html, 'text/html');
+        var markup = nf.domToMarkup(doc.body, { strike: true });
+        if (!nf.isBlank(markup)) { document.execCommand('insertHTML', false, nf.renderHtml(markup)); keep(); return; }
+      }
+      document.execCommand('insertText', false, cd.getData('text/plain') || '');
+      keep();
+    };
+  }
+
+  // Typing "- " or "* " (a bullet) or "1. " (a numbered list) at the start of
+  // a line turns that line into a list, the way most editors do.
+  function autoList(editor) {
+    var sel = document.getSelection();
+    if (!sel || !sel.isCollapsed || !sel.anchorNode || !editor.contains(sel.anchorNode)) return;
+    var node = sel.anchorNode;
+    if (node.nodeType !== 3) return;
+    var text = node.nodeValue.slice(0, sel.anchorOffset).replace(/\u00a0/g, ' ');
+    var kind = /^[-*] $/.test(text) ? 'insertUnorderedList' : /^1\. $/.test(text) ? 'insertOrderedList' : null;
+    if (!kind) return;
+    // Only at the start of a line, never mid-sentence or inside a list already.
+    var prev = node.previousSibling;
+    if (prev && prev.nodeName !== 'BR') return;
+    for (var el = node.parentNode; el && el !== editor; el = el.parentNode) if (el.nodeName === 'LI') return;
+    var range = document.createRange();
+    range.setStart(node, 0); range.setEnd(node, sel.anchorOffset);
+    sel.removeAllRanges(); sel.addRange(range);
+    document.execCommand('delete');
+    document.execCommand(kind);
+  }
+
   // Read the editor (or the fallback textarea) into the draft. Called before
   // every re-render and before every send.
   function captureDraft(state, root) {
     if (!root) return;
     var nf = NF();
     var ed = root.querySelector('[data-editor]');
-    if (ed && nf) state.draft.markup = nf.domToMarkup(ed);
+    if (ed && nf) state.draft.markup = nf.domToMarkup(ed, CAPTURE);
     var ta = root.querySelector('[data-field="body"]');
     if (ta) state.draft.plain = ta.value;
   }
@@ -340,6 +449,8 @@
     var nf = NF();
     var ed = root.querySelector('[data-editor]');
     if (ed && nf) ed.innerHTML = nf.renderHtml(state.draft.markup || '');
+    var eed = root.querySelector('[data-edit-editor]');
+    if (eed && nf && state.editing) eed.innerHTML = nf.renderHtml(state.editing.body || '');
     bind(state, root);
   }
 
@@ -528,16 +639,19 @@
       // Edit is the super admin's alone; the server says who may (owner,
       // 2026-10-14). A formatted message is edited in its stored form (the six
       // marks: **bold**, _italic_, __underline__, "- ", "1. ", "## ").
+      // A formatted message is edited in the same rich box it was written in,
+      // never as raw marks; a plain one stays a plain text box.
       var body = ed
-        ? '<textarea class="minput" data-edit-body="1" rows="5" style="width:100%">' + esc(ed.body) + '</textarea>' +
-          (m.format === 'markup' ? '<div class="mmu">Formatting marks: **bold**, _italic_, __underline__, "- " bullet, "1. " numbered, "## " heading.</div>' : '') +
+        ? (m.format === 'markup' && NF()
+            ? formatBar() + '<div class="meditor mfmt" data-edit-editor="1" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Edit message"></div>'
+            : '<textarea class="minput" data-edit-body="1" rows="5" style="width:100%">' + esc(ed.body) + '</textarea>') +
           '<input class="minput" data-edit-reason="1" style="width:100%;margin-top:6px" maxlength="500" placeholder="Why is this being edited? (kept in the office record)" value="' + esc(ed.reason) + '">' +
           '<div class="mbtns"><button class="mbtn gold" data-edit-save="1">Save Edit</button><button class="mbtn ghost" data-edit-cancel="1">Cancel</button></div>'
         : messageHtml(m) + attachmentsHtml(m);
       return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
         body +
-        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.edited ? ' · Edited' : '') +
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.via === 'sms' ? ' · By text' : '') + (m.edited ? ' · Edited' : '') +
         (state.canEdit && !ed ? ' · <button class="mbtn ghost" data-edit-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px">Edit</button>' : '') +
         (state.canDeleteMessage && !ed ? ' · <button class="mbtn ghost" data-delete-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px;color:#b42318">Delete</button>' : '') +
         '</div></div>';
@@ -629,6 +743,11 @@
     // keeps it (the composer's rule).
     var eb = root.querySelector('[data-edit-body]');
     if (eb) eb.oninput = function () { state.editing.body = eb.value; };
+    var eed = root.querySelector('[data-edit-editor]');
+    if (eed) {
+      var keepEdit = function () { if (state.editing) state.editing.body = NF().domToMarkup(eed, CAPTURE); };
+      wireRichEditor(eed, eed.previousElementSibling, keepEdit);
+    }
     var er = root.querySelector('[data-edit-reason]');
     if (er) er.oninput = function () { state.editing.reason = er.value; };
     var ec = root.querySelector('[data-edit-cancel]');
@@ -647,33 +766,12 @@
 
     // ---- The composer ------------------------------------------------------
     var editor = root.querySelector('[data-editor]');
-    var runFmt = function (cmd) {
-      if (!editor) return;
-      editor.focus();
-      if (cmd === 'heading') {
-        var inHeading = /^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''));
-        document.execCommand('formatBlock', false, inHeading ? 'div' : 'h3');
-      } else {
-        document.execCommand(cmd, false, null);
-      }
-    };
-    root.querySelectorAll('[data-fmt]').forEach(function (b) {
-      // mousedown, not click: a click would take focus (and the selection) off the editor
-      b.onmousedown = function (e) { e.preventDefault(); runFmt(b.getAttribute('data-fmt')); };
-    });
-    // A paste arrives as TEXT: formatting from Word or a web page is not carried
-    // over, and the person applies what they mean with the toolbar.
     // Keep the draft current as people type, so a re-render (an error, a refresh)
     // can restore it and a successful send can clear it for good.
     var keepDraft = function () { captureDraft(state, root); };
-    if (editor) { editor.oninput = keepDraft; editor.onblur = keepDraft; }
+    if (editor) wireRichEditor(editor, editor.previousElementSibling, keepDraft);
     var plainBox = root.querySelector('[data-field="body"]');
     if (plainBox) plainBox.oninput = keepDraft;
-    if (editor) editor.onpaste = function (e) {
-      e.preventDefault();
-      var text = (e.clipboardData || window.clipboardData).getData('text/plain');
-      document.execCommand('insertText', false, text);
-    };
     var picker = root.querySelector('[data-files]');
     if (picker) picker.onchange = function () {
       captureDraft(state, root);

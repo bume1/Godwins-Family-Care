@@ -73,6 +73,7 @@ const accountTypes = require('./accountTypes');   // one account type sets role,
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+const chartComms = require('./chartCommunications'); // calls and messages into the chart (2026-10-19)
 const clinicalTasks = require('./clinicalTasks');
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
@@ -218,6 +219,8 @@ app.use(cors());
 // raw here, before the JSON parser (which skips a body already read). The
 // route itself is registered with the billing routes, after the audit layer.
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }));
+// Quo signs the exact bytes it sends, so its webhook keeps the raw body too.
+app.use('/api/webhooks/quo', express.raw({ type: () => true, limit: '1mb' }));
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
 // Session 5.4: request context (request id, hashed IP) for every request, and
 // the PHI-access audit row for every request under a PHI prefix. Registered
@@ -1649,6 +1652,74 @@ const scanAndQueueNotifications = async () => {
   }
 };
 
+// ── The to-do reminders (owner, 2026-10-14) ──────────────────────────────
+//
+// "one email about task a day": a to-do that is due today, or still open past
+// its due date, emails its ASSIGNEE once each day until it is closed.
+//
+// SWEPT RATHER THAN SCHEDULED, which is the opposite of the visit reminders
+// above, and the difference is the data. A visit reminder is written at
+// booking time because nothing can read OpenEMR's calendar in the background
+// (per-clinician OAuth, Session 5.2). A to-do lives in this app's own store,
+// and its due date can be edited after the fact — so a row scheduled at write
+// time would chase the old date. The sweep re-derives from the to-do as it
+// stands right now.
+//
+// ONE A DAY IS HELD BY THE KEY, NOT BY THE CADENCE. `remindersDue` sends
+// nothing before a to-do's own minute, and every tick after it re-derives the
+// same row, whose `<task>:<kind>:<date>` dedupe key the queue then drops. A
+// restart mid-morning cannot double-send.
+//
+// IT HAS ITS OWN MINUTE TICK RATHER THAN RIDING THE NOTIFICATION SCANNER, and
+// that reverses the call made on 2026-10-14 for a reason that changed under
+// it: the scanner runs every 30 minutes, which was invisible when every to-do
+// went out at 9am and is a broken promise now that a to-do carries a time
+// (owner, 2026-10-15). A 2pm to-do emailed at 2:29 is not "at the time it is
+// due". The tick is one collection read and the cached users read, which is
+// why it is affordable every minute where the full scan is not.
+//
+// Judged on GEORGIA'S date and hour, never the container's: UTC is already
+// tomorrow for four hours of every evening, so a to-do due today would turn
+// overdue at 8pm and a 9am send would fire at 4am.
+//
+// Wrapped in its own try/catch so a to-do problem never takes the rest of the
+// scan down with it.
+const TASK_SWEEP_INTERVAL_MS = 60 * 1000;
+
+const sendDueTaskReminders = async () => {
+  try {
+    const parts = practiceTime.zonedParts(new Date());
+    const today = (parts && parts.isoDate) || null;
+    if (!today) return;
+    const tasks = (await db.get('clinical_tasks')) || [];
+    const due = clinicalTasks.remindersDue({ tasks, today, minutesOfDay: parts.minutesOfDay });
+    if (!due.length) return;
+
+    const users = await getUsers();
+    const { findUser, nameOf } = taskNameLookup(users);
+    const base = await getAppBaseUrl();
+    let sent = 0;
+    for (const { task, kind, daysLate } of due) {
+      // THE ASSIGNEE ONLY. The author is told when it is finished, not chased
+      // daily about work that is not theirs to do.
+      const assignee = findUser(task.assigneeId);
+      if (!assignee || !assignee.email) continue;
+      const args = {
+        user: assignee, task, patientName: nameOf(task.clientId),
+        ctaUrl: `${base}${appLinks.tasksFor(assignee)}`,
+        dedupeId: clinicalTasks.reminderKey(task, kind, today)
+      };
+      const out = kind === 'overdue'
+        ? await notify.taskOverdue({ ...args, daysLate })
+        : await notify.taskDueToday(args);
+      sent += out.notified || 0;
+    }
+    if (sent) console.log(`[TASK] Queued ${sent} to-do reminder(s) for ${today}.`);
+  } catch (err) {
+    console.error('[TASK] to-do reminder sweep failed (non-fatal):', err.message);
+  }
+};
+
 // ── The reminder send (Session 4.11) ──────────────────────────────────────
 //
 // TWO OUTCOMES, AND THEY ARE DIFFERENT ACTIONS. A reminder whose send time has
@@ -2873,15 +2944,20 @@ app.use(schedulingRoutes({
 // Message attachments (2026-09-29): multipart parsing, private Drive storage, and
 // the byte-sniff. `detectFileType` is defined further down this file, so it is
 // passed as a closure; `contentDisposition` is imported at the top.
-app.use(messagingRoutes({
+const messagingRouter = messagingRoutes({
   db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
   upload, uploadLimiter, googledrive,
   detectFileType: (buf) => detectFileType(buf),
   contentDisposition,
+  // Texting (Quo): the portal link in a text, and a fresh user read after an
+  // opt-in or STOP changes a user record.
+  getAppBaseUrl: () => getAppBaseUrl(),
+  invalidateUsersCache: () => invalidateUsersCache(),
   // A GETTER, not the notifier itself: `notify` is built far below this line
   // and would be in its temporal dead zone here. Called only at request time.
   notify: () => notify
-}));
+});
+app.use(messagingRouter);
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -7452,12 +7528,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       generated: true
     } : null;
 
-    const faceSheet = !canOpenCopy ? null : {
-      title: 'Client Information Face Sheet',
-      description: 'Your contacts, medical team, directive and access details on one page',
-      url: '/api/gfc/face-sheet.pdf',
-      generated: true
-    };
+
     // The other direction: what we still need FROM them, and what they sent.
     const uploads = (await db.get('client_document_uploads')) || [];
     const requests = (await db.get('client_document_requests')) || [];
@@ -7466,7 +7537,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     const liveUploadLink = uploadLinks.liveLinkFor(client.id, links);
 
     res.json({
-      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet, offlinePacketFiles,
+      signedConsents, documents: clientDocs, enrollmentPacket, offlinePacketFiles,
       // Every executed consent in one download.
       consentPacketZip: hasSignedConsents && canOpenCopy ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null,
       checklist,
@@ -7672,27 +7743,6 @@ const serveStoredDocument = async (res, row, actor) => {
   res.setHeader('Content-Disposition', contentDisposition('inline', row.fileName));
   res.send(buf);
 };
-
-// GET /api/gfc/face-sheet.pdf — the Client Information Face Sheet.
-//
-// Every consent points at it ("recorded once on your Client Information Face
-// Sheet") and it did not exist anywhere in the app. It is assembled from the
-// client record and intake rather than collected again, which is the entire
-// reason those consents stopped repeating the questions.
-app.get('/api/gfc/face-sheet.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents, async (req, res) => {
-  try {
-    const client = await resolveGfcClientRecord(req.user);
-    if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, {});
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition('inline', `face-sheet-${client.slug || client.id}.pdf`));
-    res.send(pdf);
-  } catch (error) {
-    console.error('Face sheet PDF error:', error);
-    res.status(500).json({ error: 'Failed to generate the face sheet' });
-  }
-});
 
 // A client may download a document THEY signed at any point, including before
 // enrollment is complete. `requireEnrolledClient` is the wrong gate here: a
@@ -8421,6 +8471,80 @@ app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req
   }
 });
 
+// Care Team messages by text (owner, 2026-10-15). The client and a designated
+// POA each turn texts on for themselves; it is off until they do, and a STOP
+// text turns it off again. The client's texts go to the phone on their
+// profile; a POA's to their own phone, which they can set here.
+const quoSms = require('./quoSms');
+async function textSettingsFor(req) {
+  const client = await resolveGfcClientRecord(req.user);
+  if (!client) return { error: { status: 404, body: { error: 'No client record on file' } } };
+  const acting = patientRead.buildActingIdentity(req.user, client);
+  const isClient = req.user.role === config.ROLES.CLIENT;
+  if (!isClient && !acting.isPoa) {
+    return { error: { status: 403, body: { error: 'Only the client or their designated Power of Attorney can turn on texts.', code: 'TEXTS_CLIENT_ONLY' } } };
+  }
+  const users = await getUsers();
+  const me = users.find(u => u.id === req.user.id);
+  return { client, isClient, me, users };
+}
+const textSettingsView = (me, client, isClient) => {
+  const phone = quoSms.phoneForUser(me, client);
+  return {
+    available: quoSms.status().sending,
+    enabled: quoSms.textsOn(me),
+    phone: phone ? quoSms.prettyPhone(phone) : null,
+    // The client's number is the one on their profile; a POA sets their own here.
+    phoneFrom: isClient ? 'profile' : 'own',
+    officeNumber: quoSms.prettyPhone(quoSms.fromNumber()),
+    stoppedByText: !!(me && me.smsOptIn && !me.smsOptIn.enabled && me.smsOptIn.changedBy === 'text STOP')
+  };
+};
+app.get('/api/gfc/text-messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const t = await textSettingsFor(req);
+    if (t.error) return res.status(t.error.status).json(t.error.body);
+    res.json(textSettingsView(t.me, t.client, t.isClient));
+  } catch (error) {
+    console.error('Text settings error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.put('/api/gfc/text-messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const t = await textSettingsFor(req);
+    if (t.error) return res.status(t.error.status).json(t.error.body);
+    const body = req.body || {};
+    const { me, client, isClient, users } = t;
+    if (!me) return res.status(404).json({ error: 'Account not found' });
+    if (body.phone !== undefined) {
+      if (isClient) return res.status(400).json({ error: 'Change your phone number under Edit my details.', code: 'TEXTS_PHONE_ON_PROFILE' });
+      const p = quoSms.toE164(body.phone);
+      if (!p) return res.status(400).json({ error: 'Enter a 10-digit US mobile number.', code: 'TEXTS_PHONE_INVALID' });
+      me.phone = quoSms.prettyPhone(p);
+    }
+    if (body.enabled !== undefined) {
+      const on = body.enabled === true;
+      if (on) {
+        if (!quoSms.phoneForUser(me, client)) {
+          return res.status(400).json({ error: isClient ? 'Add your phone number under Edit my details first.' : 'Add your mobile number first.', code: 'TEXTS_NO_PHONE' });
+        }
+        me.smsOptIn = { ...(me.smsOptIn || {}), enabled: true, optedInAt: new Date().toISOString(), stoppedAt: null, changedBy: 'portal' };
+      } else {
+        me.smsOptIn = { ...(me.smsOptIn || {}), enabled: false, stoppedAt: new Date().toISOString(), changedBy: 'portal' };
+      }
+    }
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'sms_settings_changed', 'user', me.id,
+      { clientId: client.id, enabled: quoSms.textsOn(me), phoneChanged: body.phone !== undefined });
+    res.json(textSettingsView(me, client, isClient));
+  } catch (error) {
+    console.error('Text settings save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // The patient's own Profile (portal redesign, owner mockup 9): contact details
 // and insurance on file, member IDs to the last four. The client and a
 // designated POA only; other family never see it.
@@ -8777,6 +8901,8 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       // service and Submit to billing. The page draws billing controls from
       // this answer and never decides it itself.
       canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
+      // Owner, 2026-10-16: who may approve a document attached to the chart.
+      canApproveDocuments: clinicalRoles.canApproveChartDocuments(req.user),
       // Where an order goes: the one order edit a case manager holds.
       canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user),
       // Patient to-dos: write, complete and be assigned one. A case manager
@@ -9056,6 +9182,26 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
   }
 });
 
+// GET /api/clinical/patients/:clientId/face-sheet.pdf — the Client Information
+// Face Sheet, for the clinical team (owner, 2026-10-19: "move it from the
+// patient to the staff side"). The patient no longer downloads it; the staff
+// print it for a home visit, an ER transfer or a facility. Built from the client
+// record by the same generator, on the same read gate as every chart read.
+app.get('/api/clinical/patients/:clientId/face-sheet.pdf', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, { by: 'staff' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', `face-sheet-${client.slug || client.id}.pdf`));
+    res.send(pdf);
+  } catch (error) {
+    console.error('Face sheet PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the face sheet' });
+  }
+});
+
 app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -9113,6 +9259,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // files now, with this clinician's (best-effort, not awaited).
     fileWaitingUploads(client.id, req.user);
     syncPendingContactToEmr(client.id, req.user);
+    fileMessageNotes(client.id, req.user);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
     // Started here rather than awaited at banner-build time: the banner needs
@@ -9333,6 +9480,8 @@ app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, re
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     const removed = await clearNoteDraft(client.id, req.user.id);
     if (removed) await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_draft_discarded', 'client', client.id, {});
+    // A call this clinician had opened goes back to waiting for a note.
+    await releaseStartedCalls(client.id, req.user);
     res.json({ message: removed ? 'Draft discarded' : 'There was no draft to discard', discarded: removed > 0 });
   } catch (error) {
     console.error('Note draft discard error:', error);
@@ -12233,6 +12382,11 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
       invalidateUsersCache();
     }
     await clearNoteDraft(client.id, req.user.id);
+    // A Phone Call note opened from a call (2026-10-19) marks that call documented.
+    if (note.visit && note.visit.appointmentType === chartComms.PHONE_NOTE_TYPE) {
+      try { await linkStartedCall(client.id, req.user, encounterUuid); }
+      catch (e) { console.warn('Call link after note save failed (non-fatal):', e.message); }
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_saved', 'client', client.id, {
       encounterUuid, version: 1, kind: note.kind, appointmentEid: appointment ? String(appointment.pc_eid) : null,
       carriedFrom: carry.carriedFrom, warnings: warnings.length
@@ -15977,6 +16131,54 @@ app.get('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req
   } catch (e) { sendTaskError(res, e, 'Task list error'); }
 });
 
+// ── The to-do emails (owner, 2026-10-14) ─────────────────────────────────────
+//
+// Two of the four are events and are sent here, where they happen. The other
+// two are a state and are swept once a day — see `sendDueTaskReminders`.
+//
+// BOTH ARE BEST-EFFORT AND NEITHER MAY THROW. A to-do that is already written
+// must not be undone because an email failed, which is the rule every notice
+// in `notifications.js` follows; the notices catch their own failures and
+// these wrappers catch anything the lookup throws on top.
+//
+// WHO IS TOLD IS `canSee` AND NOTHING WIDER: the assignee hears they have been
+// handed one, the author hears when it is finished. Never admin, never the
+// rest of the team — emailing a third person a to-do they cannot open would
+// hand out by push exactly what the read gate refuses.
+const notifyTaskAssigned = async ({ task, actor, findUser, nameOf }) => {
+  try {
+    if (String(task.assigneeId) === String(actor.id)) return { notified: 0, reason: 'self-assigned' };
+    const assignee = findUser(task.assigneeId);
+    if (!assignee || !assignee.email) return { notified: 0, reason: 'no address' };
+    return await notify.taskAssigned({
+      user: assignee, task, patientName: nameOf(task.clientId),
+      assignedByName: actor.name || null,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.tasksFor(assignee)}`,
+      actorId: actor.id
+    });
+  } catch (e) {
+    console.error('[TASK] assigned notice failed (non-fatal):', e.message);
+    return { notified: 0, reason: e.message };
+  }
+};
+
+const notifyTaskCompleted = async ({ task, actor, findUser, nameOf }) => {
+  try {
+    if (String(task.createdById) === String(actor.id)) return { notified: 0, reason: 'finished by its author' };
+    const author = findUser(task.createdById);
+    if (!author || !author.email) return { notified: 0, reason: 'no address' };
+    return await notify.taskCompleted({
+      user: author, task, patientName: nameOf(task.clientId),
+      completedByName: actor.name || null,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.tasksFor(author)}`,
+      actorId: actor.id
+    });
+  } catch (e) {
+    console.error('[TASK] completed notice failed (non-fatal):', e.message);
+    return { notified: 0, reason: e.message };
+  }
+};
+
 app.post('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req, res) => {
   try {
     const today = practiceToday();
@@ -15992,6 +16194,10 @@ app.post('/api/clinical/tasks', authenticateToken, requireTaskManager, async (re
     await db.set('clinical_tasks', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_task_created', 'client', task.clientId,
       { taskId: task.id, assigneeId: task.assigneeId, assignedToSomeoneElse: task.assigneeId !== String(actor.id) });
+    // Tell the assignee — best-effort, and never when they assigned it to
+    // themselves. A notice failure must not undo a to-do that is already
+    // written, the same rule every other notice in this file follows.
+    await notifyTaskAssigned({ task, actor, findUser, nameOf });
     res.status(201).json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
   } catch (e) { sendTaskError(res, e, 'Task create error'); }
 });
@@ -16007,12 +16213,24 @@ app.put('/api/clinical/tasks/:taskId', authenticateToken, requireTaskManager, as
       return res.status(404).json({ error: 'To-do not found.', code: 'TASK_NOT_FOUND' });
     }
     const action = String((req.body && req.body.action) || 'edit');
-    const { task, changed } = clinicalTasks.applyTaskAction({ task: rows[idx], action, input: req.body, actor, findUser });
+    const before = rows[idx];
+    const { task, changed } = clinicalTasks.applyTaskAction({ task: before, action, input: req.body, actor, findUser });
     if (changed.length) {
       rows[idx] = task;
       await db.set('clinical_tasks', rows);
       await logActivity(req.user.id, req.user.name || req.user.email, `clinical_task_${action === 'edit' ? 'edited' : action}`, 'client', task.clientId,
         { taskId: task.id, fields: changed });
+      // HANDED TO SOMEBODY NEW is the same event as being handed one in the
+      // first place, so it sends the same notice. Compared against the row as
+      // it stood BEFORE the change — `before` is a snapshot, not the live row,
+      // because `applyTaskAction` returns a new object and an alias here would
+      // read the new assignee on both sides (the bug the shift editor paid for).
+      if (action === 'edit' && changed.includes('assigneeId')) {
+        await notifyTaskAssigned({ task, actor, findUser, nameOf });
+      }
+      // FINISHED: the person waiting on it is the one who wrote it, and they
+      // only hear when somebody else ticked the box.
+      if (action === 'done') await notifyTaskCompleted({ task, actor, findUser, nameOf });
     }
     res.json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
   } catch (e) { sendTaskError(res, e, 'Task update error'); }
@@ -16313,7 +16531,15 @@ app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireC
         : 'This patient is not linked to an OpenEMR chart, so visits are not on this thread.';
     }
 
+    // Message notes (only conversations this viewer may read) and calls on
+    // the office line, 2026-10-19. A note's words are opened on request, never
+    // listed here: the timeline says a conversation happened, not what it said.
+    const filingRows = (await loadRows('message_note_filings')).filter(f => f && f.client_id === client.id);
+    const messageNotes = (await messageNotesFor(client, req.user)).map(n => ({ ...n, filing: chartComms.filingState(n, filingRows) }));
+    const calls = (await loadRows('phone_calls')).filter(c => c && !c.pending_summary && String(c.client_id) === String(client.id))
+      .map(c => chartComms.publicCall(c, client.name));
     const timeline = clinicalRepo.buildTimeline({
+      messageNotes, calls,
       encounters, appointments, messages: visibleThreads,
       prescriptions: (rxRows || []).filter(mine),
       orders: (orderRows || []).filter(mine),
@@ -17241,10 +17467,22 @@ app.get('/api/clinical/inbox', authenticateToken, requireClinicalRead, async (re
     // Any client's plan can wait on a second signature (an LMSW authors a
     // home care plan too); the pending flag on the plan decides.
     const carePlanClients = clients;
+    // Calls waiting to be documented (2026-10-19), each described with its
+    // patient's name; who may document one is canDocumentCall, the same
+    // answer the Document Call route gives.
+    const calls = (await loadRows('phone_calls')).filter(c => c && !c.pending_summary)
+      .map(c => ({ ...c, detail: chartComms.callDetail(c, patientNames.get(String(c.client_id))) }));
+    const nameById = new Map(users.map(u => [String(u.id), u.name || u.email || null]));
+    const clinicianNamesFor = (clientId) => {
+      const c = clients.find(x => String(x.id) === String(clientId));
+      const ids = (c && c.careTeam && c.careTeam.assignedFNPs) || [];
+      return ids.map(id => nameById.get(String(id))).filter(Boolean);
+    };
     const built = clinicalInbox.buildInbox({
       viewer: actorFromReq(req),
       encounterRecords: records, attestations, orders,
-      carePlanClients, visitLogs, patientNames, now: new Date().toISOString()
+      carePlanClients, visitLogs, patientNames, now: new Date().toISOString(),
+      calls, canDocumentCall: canDocumentCall(req.user), clinicianNamesFor
     });
     res.json(built);
   } catch (error) {
@@ -17252,6 +17490,178 @@ app.get('/api/clinical/inbox', authenticateToken, requireClinicalRead, async (re
     res.status(500).json({ error: 'Could not build the clinical inbox' });
   }
 });
+
+// ============================================================================
+// CALLS AND MESSAGES INTO THE CHART (owner, 2026-10-19)
+// A call on the office line becomes a call waiting to be documented
+// (routes/messaging.js, the Quo webhook). Here a clinician opens it as a
+// Phone Call note already filled in, or dismisses it with a reason. The note
+// is theirs: it is saved and signed like any other, with their own OpenEMR
+// sign-in, and nothing reaches OpenEMR before that.
+// ============================================================================
+const canDocumentCall = (user) => !!user && clinicalRoles.canDocumentClinically(user) &&
+  (clinicalRoles.can(user, clinicalRoles.CAPABILITIES.NURSING_NOTE) || clinicalRoles.can(user, clinicalRoles.CAPABILITIES.BEHAVIORAL_NOTE)) &&
+  apptTypes.canDocumentType(chartComms.PHONE_NOTE_TYPE, clinicalRoles.resolveClinicalRole(user)).ok;
+const canDismissCall = (user) => canDocumentCall(user) || !!(user && user.role === config.ROLES.ADMIN);
+
+const findCall = async (callId) => {
+  const calls = await loadRows('phone_calls');
+  const i = calls.findIndex(c => c && c.id === String(callId) && !c.pending_summary);
+  return { calls, i, call: i === -1 ? null : calls[i] };
+};
+
+app.post('/api/clinical/calls/:callId/document', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
+  try {
+    if (!canDocumentCall(req.user)) {
+      return res.status(403).json({ error: 'Your role does not write Phone Call notes.', code: 'CALL_NOTE_NOT_YOURS' });
+    }
+    const { calls, i, call } = await findCall(req.params.callId);
+    if (!call) return res.status(404).json({ error: 'That call was not found.', code: 'CALL_NOT_FOUND' });
+    if (call.status === chartComms.CALL_STATUS.DOCUMENTED || call.status === chartComms.CALL_STATUS.DISMISSED) {
+      return res.status(409).json({ error: call.status === 'documented' ? 'This call has already been documented.' : 'This call was dismissed.', code: 'CALL_ALREADY_HANDLED' });
+    }
+    if (call.status === chartComms.CALL_STATUS.STARTED && String(call.started_by_id) !== String(req.user.id)) {
+      return res.status(409).json({ error: `${call.started_by_name || 'Another clinician'} is already writing this call up.`, code: 'CALL_STARTED_BY_OTHER' });
+    }
+    const { client, wrongLine } = await loadClinicalClient(call.client_id);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'This patient is not on a clinical service line, so there is no clinical note to write.' : 'Client not found', code: wrongLine ? 'CALL_NOT_CLINICAL' : 'CLIENT_NOT_FOUND' });
+    // A scratch note this clinician already has for the patient is never
+    // overwritten: they finish or discard it first.
+    const drafts = await loadNoteDrafts();
+    const draftId = clinicalRepo.noteDraftId(client.id, req.user.id);
+    const existing = drafts.find(r => r.id === draftId) || null;
+    const resuming = call.status === chartComms.CALL_STATUS.STARTED;
+    if (existing && !resuming) {
+      return res.status(409).json({ error: 'You have an unsaved note for this patient. Open the chart and save or discard it, then document the call.', code: 'NOTE_DRAFT_EXISTS' });
+    }
+    if (!existing) {
+      const clean = clinicalNotes.sanitizeNote({
+        visit: { appointmentType: chartComms.PHONE_NOTE_TYPE, modality: 'phone' },
+        sections: { callNote: chartComms.callNotePrefill(call, { clientName: client.name }) }
+      });
+      if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
+      const row = clinicalRepo.buildNoteDraft({ clientId: client.id, actor: actorFromReq(req), draft: { note: clean.note }, existing: null });
+      await db.set('clinical_note_drafts', drafts.concat([row]));
+    }
+    calls[i] = { ...call, status: chartComms.CALL_STATUS.STARTED, started_by_id: req.user.id, started_by_name: req.user.name || req.user.email, started_doc_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    await db.set('phone_calls', calls);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'phone_call_note_started', 'client', client.id, { callRowId: call.id });
+    res.json({ clientId: client.id, tab: 'visit', call: chartComms.publicCall(calls[i], client.name) });
+  } catch (error) {
+    console.error('Document call error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/clinical/calls/:callId/dismiss', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    if (!canDismissCall(req.user)) return res.status(403).json({ error: 'Only a clinician who writes Phone Call notes, or an admin, can dismiss a call.', code: 'CALL_DISMISS_NOT_YOURS' });
+    const reason = String((req.body && req.body.reason) || '').trim().slice(0, 500);
+    if (reason.length < 3) return res.status(400).json({ error: 'Say why this call does not need a note (for example: a scheduling call).', code: 'CALL_DISMISS_REASON_REQUIRED' });
+    const { calls, i, call } = await findCall(req.params.callId);
+    if (!call) return res.status(404).json({ error: 'That call was not found.', code: 'CALL_NOT_FOUND' });
+    if (call.status === chartComms.CALL_STATUS.DOCUMENTED) return res.status(409).json({ error: 'This call has already been documented.', code: 'CALL_ALREADY_HANDLED' });
+    calls[i] = { ...call, status: chartComms.CALL_STATUS.DISMISSED, dismissed_by_id: req.user.id, dismissed_by_name: req.user.name || req.user.email, dismissed_at: new Date().toISOString(), dismissed_reason: reason, updated_at: new Date().toISOString() };
+    await db.set('phone_calls', calls);
+    // The audit row names the call, never the reason's words.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'phone_call_dismissed', 'client', call.client_id, { callRowId: call.id });
+    res.json({ dismissed: true });
+  } catch (error) {
+    console.error('Dismiss call error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The note a clinician opened from a call is saved: the call is documented,
+// and names the encounter it became.
+const linkStartedCall = async (clientId, user, encounterUuid) => {
+  const calls = await loadRows('phone_calls');
+  const mine = calls.map((c, i) => ({ c, i })).filter(({ c }) => c && c.status === chartComms.CALL_STATUS.STARTED &&
+    String(c.client_id) === String(clientId) && String(c.started_by_id) === String(user.id))
+    .sort((a, b) => String(b.c.started_doc_at).localeCompare(String(a.c.started_doc_at)));
+  if (!mine.length) return null;
+  const { c, i } = mine[0];
+  calls[i] = { ...c, status: chartComms.CALL_STATUS.DOCUMENTED, encounter_uuid: encounterUuid, documented_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  await db.set('phone_calls', calls);
+  await logActivity(user.id, user.name || user.email, 'phone_call_documented', 'client', clientId, { callRowId: c.id, encounterUuid });
+  return calls[i];
+};
+// A discarded scratch note puts the call back in the queue.
+const releaseStartedCalls = async (clientId, user) => {
+  const calls = await loadRows('phone_calls');
+  let changed = 0;
+  calls.forEach((c, i) => {
+    if (c && c.status === chartComms.CALL_STATUS.STARTED && String(c.client_id) === String(clientId) && String(c.started_by_id) === String(user.id)) {
+      calls[i] = { ...c, status: chartComms.CALL_STATUS.WAITING, started_by_id: null, started_by_name: null, started_doc_at: null, updated_at: new Date().toISOString() };
+      changed++;
+    }
+  });
+  if (changed) await db.set('phone_calls', calls);
+  return changed;
+};
+
+// Message notes for one patient, as THIS viewer may see them: only
+// conversations messagingRepository.threadVisibility lets them read.
+const messageNotesFor = async (client, viewer) => {
+  const [threads, messages] = await Promise.all([loadRows('message_threads'), loadRows('messages')]);
+  const visible = viewer
+    ? threads.filter(t => t && String(t.client_id) === String(client.id) && (messagingRepo.threadVisibility(viewer, t, { client }) || {}).visible)
+    : threads;
+  return chartComms.buildMessageNotes({ clientId: client.id, threads: visible, messages, today: practiceToday() });
+};
+
+app.get('/api/clinical/patients/:clientId/message-notes/:key', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const note = (await messageNotesFor(client, req.user)).find(n => n.key === String(req.params.key));
+    if (!note) return res.status(404).json({ error: 'That message note was not found.', code: 'MESSAGE_NOTE_NOT_FOUND' });
+    const filings = (await loadRows('message_note_filings')).filter(f => f && f.client_id === client.id);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'message_note_read', 'client', client.id, { key: note.key });
+    res.json({ key: note.key, title: `${note.channelLabel} message note`, date: note.date,
+      filing: chartComms.filingState(note, filings), text: chartComms.messageNoteText(note, { clientName: client.name }) });
+  } catch (error) {
+    console.error('Message note read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Closed days of a patient's patient-facing conversations file to OpenEMR
+// with the next clinician's (or admin's) own sign-in, the way patient uploads
+// do (fileWaitingUploads). Best-effort, never awaited, at most a batch at a
+// time; a day that changed after filing files again as a corrected copy.
+const MESSAGE_NOTE_BATCH = 20;
+const fileMessageNotes = (clientId, user) => {
+  if (!clientId || !user || !clinicalRoles.canClinicalWrite(user)) return;
+  (async () => {
+    const users = await getUsers();
+    const client = users.find(u => u.id === clientId);
+    if (!client || !client.openEmrPatientId || !openemr.isConfigured()) return;
+    const connected = await emrAuth.statusFor(user.id).then(s => !!s.connected).catch(() => false);
+    if (!connected) return;
+    const filings = await loadRows('message_note_filings');
+    const due = chartComms.notesToFile(await messageNotesFor(client, null), filings.filter(f => f && f.client_id === client.id)).slice(0, MESSAGE_NOTE_BATCH);
+    let filed = 0;
+    for (const { note, corrected } of due) {
+      const text = chartComms.messageNoteText(note, { clientName: client.name, corrected });
+      const pdf = await pdfGenerator.generateMessageNotePDF({ text, clientName: client.name });
+      const fileName = `Message_note_${note.channel}_${note.date}${corrected ? '_corrected' : ''}.pdf`;
+      try {
+        await openemr.forActor(user).uploadPatientDocument(client.openEmrPatientId, fileName, pdf, 'application/pdf', '/Medical Record');
+      } catch (e) {
+        console.warn('[MESSAGE NOTES] OpenEMR refused a message note:', e.message);
+        break;
+      }
+      const list = await loadRows('message_note_filings');
+      list.push({ id: uuidv4(), key: note.key, client_id: client.id, thread_id: note.threadId, date: note.date, hash: note.hash,
+        count: note.count, corrected, filed_at: new Date().toISOString(), by_id: user.id, by_name: user.name || user.email });
+      await db.set('message_note_filings', list);
+      await logActivity(user.id, user.name || user.email, 'message_note_filed_to_emr', 'client', client.id, { key: note.key, corrected });
+      filed++;
+    }
+    if (filed) console.log(`[MESSAGE NOTES] filed ${filed} message note(s) for a client`);
+  })().catch(e => console.warn('[MESSAGE NOTES] not filed:', e.message));
+};
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
@@ -18006,9 +18416,16 @@ const canEditEnrollment = (user) => !!user &&
 // Filing a scanned document into a client's file (2026-10-14): the editors,
 // plus a care coordinator, whose job includes keeping the chart's paperwork in
 // order. Editing the enrollment submission itself stays with the editors.
+// Owner, 2026-10-16: EVERY clinical staff member attaches documents to the
+// chart; only a care coordinator or the admin approves them
+// (clinicalRoles.canFileChartDocuments / canApproveChartDocuments).
 const requireDocumentFiler = (req, res, next) => {
-  if (canEditEnrollment(req.user) || clinicalRoles.isCoordinator(req.user)) return next();
-  return res.status(403).json({ error: 'An admin, a clinician or a care coordinator files documents here.', code: 'DOCUMENT_FILER_ONLY' });
+  if (clinicalRoles.canFileChartDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'Clinical staff attach documents here.', code: 'DOCUMENT_FILER_ONLY' });
+};
+const requireDocumentApprover = (req, res, next) => {
+  if (clinicalRoles.canApproveChartDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'Only a care coordinator or the admin approves documents.', code: 'DOCUMENT_APPROVER_ONLY' });
 };
 const requireEnrollmentEditor = (req, res, next) => {
   if (canEditEnrollment(req.user)) return next();
@@ -18648,7 +19065,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
       clientEmail: client.email || null,
       // What this viewer may do to a document. Answered here so the page never
       // offers a button the route will refuse.
-      access: { canRemove: docRules.canRemoveDocuments(req.user), canShare: canShareDocuments(req.user) },
+      access: { canRemove: docRules.canRemoveDocuments(req.user), canShare: canShareDocuments(req.user), canApprove: clinicalRoles.canApproveChartDocuments(req.user) },
       uploadLink: liveUploadLink
         ? { url: uploadLinks.buildUrl(await getAppBaseUrl(), liveUploadLink.token), createdAt: liveUploadLink.createdAt }
         : null
@@ -18712,11 +19129,21 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
       });
     }
 
-    const row = buildClientDocumentRow({
+    const built = buildClientDocumentRow({
       client, kind, fileName, stored, safeName,
       buffer: prepared.buffer, sniffedType: prepared.sniffedType,
       actor: req.user, source: 'staff', encounterUuid
     });
+    // Owner, 2026-10-16: a document attached by anyone but a care coordinator
+    // or the admin WAITS for one of them to approve it. It shows on the chart
+    // as awaiting approval and reaches OpenEMR only once approved. An
+    // approver's own filing is accepted as it lands.
+    const approvedAtFiling = clinicalRoles.canApproveChartDocuments(req.user);
+    let row = built;
+    if (!approvedAtFiling) {
+      const { reviewedAt, reviewedByName, ...rest } = built;
+      row = { ...rest, status: 'received', awaitingApproval: true };
+    }
     const uploads = (await db.get('client_document_uploads')) || [];
     await db.set('client_document_uploads', [...uploads, row]);
 
@@ -18738,7 +19165,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
       db.get('client_document_uploads'), db.get('client_document_requests')
     ]);
     res.json({
-      message: `Filed to ${client.name || 'the client'}'s documents`,
+      message: approvedAtFiling
+        ? `Filed to ${client.name || 'the client'}'s documents`
+        : `Attached to ${client.name || 'the client'}'s chart. It is waiting for a care coordinator or the admin to approve it.`,
+      awaitingApproval: !approvedAtFiling,
       document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status, source: row.source },
       emrFiling,
       // The checklist is DERIVED, so it is returned here rather than left for
@@ -20268,7 +20698,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
 // or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
 // an insurance card goes back on the client's checklist with the reason on it
 // instead of sitting in a folder marked received.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireDocumentApprover, async (req, res) => {
   try {
     const decision = String((req.body || {}).decision || '').toLowerCase();
     if (!['accepted', 'rejected'].includes(decision)) {
@@ -20283,8 +20713,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
     if (i === -1 || docRules.isRemoved(uploads[i])) return res.status(404).json({ error: 'Document not found' });
 
     const now = new Date().toISOString();
+    const wasAwaitingApproval = !!uploads[i].awaitingApproval;
+    const { awaitingApproval, ...reviewed } = uploads[i];
     uploads[i] = {
-      ...uploads[i], status: decision, rejectionReason: decision === 'rejected' ? reason : null,
+      ...reviewed, status: decision, rejectionReason: decision === 'rejected' ? reason : null,
       reviewedAt: now, reviewedById: req.user.id, reviewedByName: req.user.name || req.user.email
     };
     await db.set('client_document_uploads', uploads);
@@ -20300,11 +20732,21 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       { kind: uploads[i].kind, decision });
     // The rejection reason is required at this route and was being captured
     // and never delivered — the client saw nothing and re-sent the same file.
-    await notify.documentReviewed({
-      clientId: uploads[i].clientId, decision,
-      label: uploads[i].label || uploads[i].kind, reason,
-      uploadId: uploads[i].id, actorId: req.user.id
-    });
+    // A document STAFF attached is the office's own paperwork: approving or
+    // rejecting it is not news for the client.
+    if (uploads[i].source !== 'staff') {
+      await notify.documentReviewed({
+        clientId: uploads[i].clientId, decision,
+        label: uploads[i].label || uploads[i].kind, reason,
+        uploadId: uploads[i].id, actorId: req.user.id
+      });
+    }
+    // An approved staff attachment goes to OpenEMR now, with the approver's
+    // sign-in; if they have none, it waits for the next clinician's.
+    if (decision === 'accepted' && wasAwaitingApproval) {
+      const owner = (await getUsers()).find(u => u.id === uploads[i].clientId);
+      await attemptEmrFiling({ client: owner, row: uploads[i], actor: req.user });
+    }
     if (decision === 'accepted') fileWaitingUploads(uploads[i].clientId, req.user);
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
@@ -20349,6 +20791,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
 const attemptEmrFiling = async ({ client, row, actor }) => {
   if (!client || !row) return { filed: false, reason: 'MISSING_INPUT' };
   if (row.status === 'rejected') return { filed: false, reason: 'DOCUMENT_REJECTED' };
+  // Owner, 2026-10-16: an attachment nobody has approved yet stays out of
+  // OpenEMR. The approval route files it.
+  if (row.awaitingApproval) return { filed: false, reason: 'AWAITING_APPROVAL' };
   if (row.emrFiled) return { filed: false, reason: 'ALREADY_FILED' };
   if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
   if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
@@ -28386,6 +28831,14 @@ app.listen(PORT, () => {
   // Start notification queue processor (Feature 1)
   const queueInterval = config.NOTIFICATION_CHECK_INTERVAL_MINUTES * 60 * 1000;
   setInterval(processNotificationQueue, queueInterval);
+
+  // The to-do reminders tick every minute so a to-do with a time of its own is
+  // emailed AT that time rather than up to a notification-scan away from it.
+  setInterval(sendDueTaskReminders, TASK_SWEEP_INTERVAL_MS).unref?.();
+  console.log(`🗒️  To-do reminder sweep started (every ${TASK_SWEEP_INTERVAL_MS / 1000}s; each to-do at its own time, ${clinicalTasks.TASK_EMAIL_SEND_HOUR_ET}:00 ET default)`);
+  // Care Team texts held for quiet hours, and retries (Quo). Every minute.
+  setInterval(() => { messagingRouter.sms.drainSmsOutbox().catch(err => console.error('SMS outbox sweep failed:', err.message)); }, 60 * 1000).unref?.();
+  { const st = require('./quoSms').status(); console.log(`💬 Care Team texts: sending ${st.sending ? 'ON' : 'OFF'}, replies ${st.receiving ? 'ON' : 'OFF'}${st.missing.length ? ` (missing ${st.missing.join(', ')})` : ''}`); }
   console.log(`📧 Notification queue processor started (every ${config.NOTIFICATION_CHECK_INTERVAL_MINUTES}m)`);
 
   // Start notification trigger scanner (Feature 2)

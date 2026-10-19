@@ -200,5 +200,8 @@ test('the activity log records a removal without its reason text', () => {
 test('the pages ask the server who may remove or share, rather than deciding it', () => {
   assert.match(ENROLL, /access\.canRemove && \(/);
   assert.match(ENROLL, /access\.canShare/);
-  assert.match(SERVER, /access: \{ canRemove: docRules\.canRemoveDocuments\(req\.user\), canShare: canShareDocuments\(req\.user\) \}/);
+  // 2026-10-16: the same block now also answers who may approve (a care
+  // coordinator or the admin), and the page's Accept/Reject read it.
+  assert.match(SERVER, /access: \{ canRemove: docRules\.canRemoveDocuments\(req\.user\), canShare: canShareDocuments\(req\.user\), canApprove: clinicalRoles\.canApproveChartDocuments\(req\.user\) \}/);
+  assert.match(ENROLL, /\{access\.canApprove && <button className="text-success-600"[\s\S]{0,80}review\(f\.id, 'accepted'\)/);
 });

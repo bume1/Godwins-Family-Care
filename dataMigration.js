@@ -187,6 +187,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   // cross-client leak repair. Tombstoned, never deleted: they are evidence of a
   // PHI exposure and a breach assessment may need to read them back.
   { key: 'quarantined_messages', phi: true, owner: '9', note: 'misfiled messages removed from view by scripts/repair_cross_client_messages.js; retained for breach assessment' },
+  { key: 'sms_outbox', phi: true, owner: '9', note: 'Care Team texts the app sends through Quo: the text, the number, waiting / sent / failed' },
+  { key: 'sms_events', phi: true, owner: '9', note: 'one row per Quo webhook handled, by message id, so a retry is never recorded twice; no words' },
+  { key: 'phone_calls', phi: true, owner: '9', note: 'calls on the office line with a patient or POA, waiting to be documented as a Phone Call note; who, when, how long, Quo summary (owner, 2026-10-19)' },
+  { key: 'message_note_filings', phi: true, owner: '9', note: 'each closed day of a patient-facing conversation filed to OpenEMR as a message note: by whom, when, a hash of what was filed; no words (owner, 2026-10-19)' },
   { key: 'deleted_message_threads', phi: true, owner: '9', note: 'threads the super admin deleted, with their messages, who, when and why; kept, never erased' },
   { key: 'deleted_messages', phi: true, owner: '9', note: 'single messages the super admin deleted, with who, when and why; kept, never erased (owner, 2026-10-16)' },
   // ---- notifications + email ----

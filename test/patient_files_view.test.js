@@ -10,7 +10,6 @@ const PF = require('../public/patient-files');
 const docs = {
   enrollmentPacket: { url: '/api/gfc/enrollment-packet.pdf' },
   consentPacketZip: { url: '/api/gfc/enrollment-packet.zip' },
-  faceSheet: { url: '/api/gfc/face-sheet.pdf' },
   signedConsents: [
     { key: 'npp', label: 'Notice of Privacy Practices', status: 'signed', signedAt: '2026-10-01', copyUrl: '/api/gfc/consents/npp.pdf' },
     { key: 'serviceAgreement', label: 'Service Agreement', status: 'signed_offline', signedAt: '2026-09-01', copyUrl: '/api/gfc/consents/serviceAgreement.pdf' }

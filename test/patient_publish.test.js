@@ -1440,14 +1440,16 @@ test('A5. clinician list edits republish the portal chart, and refresh-chart bri
   assert.match(pub, /appMedications: patientPublish\.reconciledAppMeds\(client\)/);
 });
 
-test('A6. documents: the intake summary and face sheet are the client\'s or POA\'s, and the packet link is the on-demand route', () => {
-  assert.match(server, /app\.get\('\/api\/gfc\/face-sheet\.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents,/);
+test('A6. documents: the intake summary is the client\'s or POA\'s, the face sheet is staff-only, and the packet link is the on-demand route', () => {
+  // REPOINTED 2026-10-19 (owner): the face sheet moved to the staff side.
+  assert.ok(!server.includes("app.get('/api/gfc/face-sheet.pdf'"), 'the patient face-sheet route is gone');
   assert.match(server, /app\.get\('\/api\/gfc\/enrollment-packet\.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents,/);
   const route = stripComments(routeBody("app.get('/api/gfc/documents'"));
   assert.match(route, /url: '\/api\/gfc\/enrollment-packet\.pdf'/);
   assert.ok(!/client\.enrollmentPacket/.test(route), 'the private Drive copy is never handed to a patient');
   assert.match(route, /consentPacketZip: hasSignedConsents && canOpenCopy \?/);
-  assert.ok(server.indexOf('const requireClientForOwnConsents') < server.indexOf("app.get('/api/gfc/face-sheet.pdf'"), 'defined before first use, or the app does not boot');
+  assert.ok(!/faceSheet/.test(route), 'the documents list no longer offers the face sheet');
+  assert.ok(server.indexOf('const requireClientForOwnConsents') < server.indexOf("app.get('/api/gfc/enrollment-packet.pdf'"), 'defined before first use, or the app does not boot');
 });
 
 test('A7. the care team reaches the portal as names and roles only, never ids; family at summary level gets none', () => {
