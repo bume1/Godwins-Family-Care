@@ -190,6 +190,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'sms_outbox', phi: true, owner: '9', note: 'Care Team texts the app sends through Quo: the text, the number, waiting / sent / failed' },
   { key: 'sms_events', phi: true, owner: '9', note: 'one row per Quo webhook handled, by message id, so a retry is never recorded twice; no words' },
   { key: 'deleted_message_threads', phi: true, owner: '9', note: 'threads the super admin deleted, with their messages, who, when and why; kept, never erased' },
+  { key: 'deleted_messages', phi: true, owner: '9', note: 'single messages the super admin deleted, with who, when and why; kept, never erased (owner, 2026-10-16)' },
   // ---- notifications + email ----
   { key: 'pending_notifications', phi: true, owner: 'core', note: 'queued email bodies can name a client' },
   { key: 'notification_log', phi: true, owner: 'core' },

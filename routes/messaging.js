@@ -164,6 +164,8 @@ module.exports = function createMessagingRoutes(deps) {
     channel: t.channel,
     channelLabel: msg.threadTitle(t),
     withPatient: msg.withPatient(t.channel),
+    // The yellow "Patient sees this" badge on the thread list (owner, 2026-10-16).
+    patientFacing: msg.isPatientFacing(t),
     clientId: t.client_id,
     clientName: t.client_name,
     subject: t.subject,
@@ -184,7 +186,9 @@ module.exports = function createMessagingRoutes(deps) {
     threadId: m.thread_id,
     from: m.display_name,
     fromRole: m.from_role,
-    fromRoleLabel: msg.ROLE_LABELS[m.from_role] || m.from_role,
+    // What the sender IS, stored when it was sent (owner, 2026-10-16); an
+    // older message falls back to its coarse messaging role.
+    fromRoleLabel: m.from_role_label || msg.ROLE_LABELS[m.from_role] || m.from_role,
     isPoa: m.from_role === 'POA',
     actingFor: m.acting_for || null,
     body: m.body,
@@ -346,7 +350,9 @@ module.exports = function createMessagingRoutes(deps) {
         visible.push(publicThread(t, msg.unreadCount(mine, req.user.id)));
       }
       visible.sort((a, b) => String(b.lastMessageAt || '').localeCompare(String(a.lastMessageAt || '')));
-      res.json({ threads: visible.slice(0, 200) });
+      // The yellow "Patient sees this" badges are for staff; a patient or
+      // their family is the patient side and is not shown them.
+      res.json({ threads: visible.slice(0, 200), staffView: !msg.CLIENT_SIDE_ROLES.includes(msg.actorRole(req.user)) });
     } catch (error) {
       console.error('Messaging thread list error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -378,21 +384,44 @@ module.exports = function createMessagingRoutes(deps) {
       }
       if (changed) await db.set('messages', all);
 
-      const post = msg.canPostToThread(req.user, thread, { client, isPoa });
+      const responder = thread.channel === 'care_update' ? msg.staffResponder(thread, rows) : null;
+      const everyone = await getUsers();
+      const post = msg.canPostToThread(req.user, thread, { client, isPoa, responder });
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_read', 'message_thread', thread.id,
         { role: msg.actorRole(req.user), channel: thread.channel, clientId: thread.client_id });
 
       res.json({
         thread: publicThread(thread, 0),
-        messages: rows.map(m => ({ ...publicMessage(m), mine: m.from_user_id === req.user.id })),
+        // A message sent before labels were stored reads the sender's account
+        // now, rather than the coarse messaging role ("Office", "Clinician").
+        messages: rows.map(m => {
+          const out = { ...publicMessage(m), mine: m.from_user_id === req.user.id };
+          if (!m.from_role_label && m.from_role !== 'POA') {
+            const u = everyone.find(x => x && x.id === m.from_user_id);
+            if (u) out.fromRoleLabel = msg.personLabel(u);
+          }
+          return out;
+        }),
         canPost: post.allowed,
         cannotPostReason: post.allowed ? null : post.reason,
         cannotPostCode: post.allowed ? null : post.code,
         // The page draws Delete Thread from this answer and decides nothing.
         canDelete: msg.canDeleteThread(req.user),
         // The same for Edit, on every message in the thread.
-        canEdit: msg.canEditMessage(req.user)
+        canEdit: msg.canEditMessage(req.user),
+        // And for deleting a single message (owner, 2026-10-16).
+        canDeleteMessage: msg.canDeleteMessage(req.user),
+        // WHO IS IN THIS CONVERSATION, from the thread's own participant list
+        // (owner, 2026-10-16), so the screen cannot say something the thread
+        // does not. Names and what each person is; nothing else.
+        people: (thread.participant_ids || []).map(id => {
+          const u = everyone.find(x => x && x.id === id);
+          return u ? { id: u.id, name: u.name || u.email || 'Unknown', label: msg.personLabel(u), you: u.id === req.user.id } : null;
+        }).filter(Boolean),
+        // The yellow "Patient sees this" badge, and on a Care Update who answers.
+        patientFacing: msg.isPatientFacing(thread),
+        staffResponderName: responder ? responder.name : null
       });
     } catch (error) {
       console.error('Messaging thread read error:', error);
@@ -438,6 +467,50 @@ module.exports = function createMessagingRoutes(deps) {
       res.json({ deleted: true, threadId: thread.id, messageCount: removed.length });
     } catch (error) {
       console.error('Messaging thread delete error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // Delete ONE message — SUPER ADMIN ONLY (owner, 2026-10-16)
+  // "Allow for super admin to DELETE individual messages within threads. Keep
+  // an internal audit log like everything else." The message leaves every
+  // screen; it is moved, never erased: kept in `deleted_messages` with who,
+  // when and why, like a deleted thread. The thread's preview and last-message
+  // time follow what is left. The audit row names the message, never its words.
+  // ==========================================================================
+  router.delete('/api/messaging/messages/:messageId', authenticateToken, requireMessagingRole, async (req, res) => {
+    try {
+      if (!msg.canDeleteMessage(req.user)) {
+        return res.status(403).json({ error: 'Only the super admin can delete a message.', code: 'DELETE_SUPER_ADMIN_ONLY' });
+      }
+      const reason = String((req.body && req.body.reason) || '').trim().slice(0, 500);
+      if (!reason) return res.status(400).json({ error: 'Say why this message is being deleted.', code: 'DELETE_REASON_REQUIRED' });
+      const all = await readRows('messages');
+      const idx = all.findIndex(m => m && m.id === req.params.messageId);
+      if (idx < 0) return res.status(404).json({ error: 'That message was not found.', code: 'MESSAGE_NOT_FOUND' });
+      const removed = all[idx];
+      const deletedAt = new Date().toISOString();
+      const archive = await readRows('deleted_messages');
+      archive.push({ id: uuidv4(), message: removed, deletedAt, deletedById: req.user.id, deletedByName: req.user.name || req.user.email || null, reason });
+      // Archive FIRST, so a failure part-way leaves a copy rather than a gap.
+      await db.set('deleted_messages', archive);
+      all.splice(idx, 1);
+      await db.set('messages', all);
+      const threads = await readRows('message_threads');
+      const t = threads.find(x => x && x.id === removed.thread_id);
+      if (t) {
+        const left = all.filter(m => m && m.thread_id === t.id).sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)));
+        const last = left[left.length - 1];
+        t.last_message_at = last ? last.sent_at : t.created_at;
+        t.last_message_preview = last ? msg.previewOf(last.body, last.body_format, last.attachments) : '';
+        await db.set('message_threads', threads);
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'message_deleted', 'message', removed.id,
+        { threadId: removed.thread_id, channel: t ? t.channel : null, clientId: t ? t.client_id : null });
+      res.json({ deleted: true, messageId: removed.id, threadId: removed.thread_id });
+    } catch (error) {
+      console.error('Messaging message delete error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -611,6 +684,15 @@ module.exports = function createMessagingRoutes(deps) {
         last_message_preview: msg.previewOf(clean.body, clean.format, attachments)
       };
 
+      // Is the patient side on it, and who answers them (owner, 2026-10-16)?
+      const familyIds = client ? users.filter(u => u && u.role === ROLES.FAMILY && u.familyOfClientId === client.id).map(u => u.id) : [];
+      thread.patient_facing = !!client && thread.participant_ids.some(id => id === client.id || familyIds.includes(id));
+      const starterRole = msg.actorRole(req.user);
+      if (channelId === 'care_update' && !isPoa && starterRole && !msg.CLIENT_SIDE_ROLES.includes(starterRole) && starterRole !== msg.ROLE.ADMIN) {
+        thread.staff_responder_id = req.user.id;
+        thread.staff_responder_name = sender.displayName;
+      }
+
       const message = {
         id: uuidv4(),
         thread_id: threadId,
@@ -620,6 +702,7 @@ module.exports = function createMessagingRoutes(deps) {
         from_role: sender.fromRole,
         from_name: sender.fromName,
         display_name: sender.displayName,
+        from_role_label: isPoa ? 'POA' : msg.personLabel(users.find(u => u && u.id === req.user.id) || req.user),
         acting_for: sender.actingFor,
         body: clean.body,
         body_format: clean.format,
@@ -673,7 +756,10 @@ module.exports = function createMessagingRoutes(deps) {
       if (opened.error) return res.status(opened.error.status).json(opened.error.body);
       const { thread, client, isPoa } = opened;
 
-      const post = msg.canPostToThread(req.user, thread, { client, isPoa });
+      const responder = thread.channel === 'care_update'
+        ? msg.staffResponder(thread, (await readRows('messages')).filter(m => m && m.thread_id === thread.id))
+        : null;
+      const post = msg.canPostToThread(req.user, thread, { client, isPoa, responder });
       if (!post.allowed) return res.status(403).json({ error: post.reason, code: post.code });
 
       const files = req.files || [];
@@ -685,6 +771,7 @@ module.exports = function createMessagingRoutes(deps) {
       filed = attachments;
 
       const sender = msg.senderIdentity(req.user, { client, isPoa });
+      const senderRecord = (await freshUser(req.user.id)) || req.user;
       const at = nowIso();
       const message = {
         id: uuidv4(),
@@ -695,6 +782,7 @@ module.exports = function createMessagingRoutes(deps) {
         from_role: sender.fromRole,
         from_name: sender.fromName,
         display_name: sender.displayName,
+        from_role_label: isPoa ? 'POA' : msg.personLabel(senderRecord),
         acting_for: sender.actingFor,
         body: clean.body,
         body_format: clean.format,
@@ -724,6 +812,15 @@ module.exports = function createMessagingRoutes(deps) {
       // A participant who was not on the row (an admin stepping in) joins it,
       // so the thread records who actually took part.
       if (!threads[idx].participant_ids.includes(req.user.id)) threads[idx].participant_ids.push(req.user.id);
+      // The first staff member to answer the patient becomes the one who
+      // answers them on this thread (owner, 2026-10-16). Not the super admin,
+      // who may always answer and must not lock out the clinician.
+      const role = msg.actorRole(req.user);
+      if (thread.channel === 'care_update' && !responder && !threads[idx].staff_responder_id &&
+          role && !msg.CLIENT_SIDE_ROLES.includes(role) && role !== msg.ROLE.ADMIN && !isPoa) {
+        threads[idx].staff_responder_id = req.user.id;
+        threads[idx].staff_responder_name = sender.displayName;
+      }
       await db.set('message_threads', threads);
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_sent', 'message', message.id,
