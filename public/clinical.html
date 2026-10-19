@@ -1053,7 +1053,11 @@
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
-      const canWrite = useCanWrite();
+      // The share route admits a licensed clinician or a manager, and a care
+      // coordinator is stored as a manager, so they get the toggle too.
+      const licensed = useCanWrite();
+      const documents = useCanDocument();
+      const canWrite = licensed || documents;
       // Whether the patient sees a document the office filed (owner,
       // 2026-09-29). Off until someone shares it; the server decides who may.
       const setShared = async (d, shared) => {
