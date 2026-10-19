@@ -2535,7 +2535,29 @@ async function generateAfterVisitSummaryPDF(d) {
   });
 }
 
+// A message note (owner, 2026-10-19): one patient-facing conversation on one
+// day, filed to OpenEMR so the chart holds what was said. `d.text` is
+// chartCommunications.messageNoteText; the first line is its heading.
+async function generateMessageNotePDF(d) {
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+  const done = new Promise(resolve => doc.on('end', () => resolve(Buffer.concat(chunks))));
+  const lines = String((d && d.text) || '').split('\n');
+  const heading = lines.shift() || 'MESSAGE NOTE';
+  let y = faceSheetHeader(doc, heading.charAt(0) + heading.slice(1).toLowerCase(), (d && d.clientName) || '');
+  doc.font('Helvetica').fontSize(9.5).fillColor(GFC_COLORS.ink);
+  for (const line of lines) {
+    if (y > doc.page.height - 70) { doc.addPage(); y = 50; }
+    doc.text(line || ' ', 50, y, { width: 512 });
+    y = doc.y + 2;
+  }
+  doc.end();
+  return done;
+}
+
 module.exports = {
+  generateMessageNotePDF,
   generateSignedNotePDF,
   generateAfterVisitSummaryPDF,
   generateServiceReportPDF,

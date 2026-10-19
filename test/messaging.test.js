@@ -477,7 +477,10 @@ test('a behavioral escalation writes to SESSION 6\'s store, in Session 6\'s shap
 
 test('server.js mounts messaging with exactly one require and one app.use', () => {
   assert.strictEqual((serverSrc.match(/require\('\.\/routes\/messaging'\)/g) || []).length, 1);
-  assert.strictEqual((serverSrc.match(/app\.use\(messagingRoutes\(/g) || []).length, 1);
+  // Built once and mounted once. The router is held by name (2026-10-15) so the
+  // every-minute text sweep can reach it.
+  assert.strictEqual((serverSrc.match(/\bmessagingRoutes\(/g) || []).length, 1);
+  assert.strictEqual((serverSrc.match(/app\.use\(messagingRouter\)/g) || []).length, 1);
   // Sessions 6 and 7 stay mounted exactly once each.
   assert.strictEqual((serverSrc.match(/app\.use\(caregiverRoutes\(/g) || []).length, 1);
   assert.strictEqual((serverSrc.match(/app\.use\(schedulingRoutes\(/g) || []).length, 1);

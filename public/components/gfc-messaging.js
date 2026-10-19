@@ -537,7 +537,7 @@
       return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
         body +
-        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.edited ? ' · Edited' : '') +
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.via === 'sms' ? ' · By text' : '') + (m.edited ? ' · Edited' : '') +
         (state.canEdit && !ed ? ' · <button class="mbtn ghost" data-edit-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px">Edit</button>' : '') +
         (state.canDeleteMessage && !ed ? ' · <button class="mbtn ghost" data-delete-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px;color:#b42318">Delete</button>' : '') +
         '</div></div>';
