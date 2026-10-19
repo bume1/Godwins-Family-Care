@@ -234,7 +234,9 @@ test('the facility assignment route is actually called from a page', () => {
 
 test('the facility picker is shown only to those the route admits (admin, manager, coordinator)', () => {
   const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
-  const body = card.slice(0, card.indexOf('const DetailView = ('));
+  // Bounded at the NEXT component, not at DetailView: cards added between
+  // them (eligibility, 2026-10-19) carry their own selects and gates.
+  const body = card.slice(0, card.indexOf('const BillingCard = ('));
   // COUNTED, not merely present. The card has two write controls — the
   // facility and the encounter type — so `includes('canEdit &&')` cannot tell
   // "both gated" from "one gated": the surviving gate satisfies it either way.

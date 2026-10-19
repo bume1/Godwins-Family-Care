@@ -132,3 +132,83 @@ test('the page asks the server who approves, and offers approve only to them', (
   // canEditChecklist stays "manager or clinician", which now matches the route.
   assert.match(PAGE, /const canEditChecklist = canEdit \|\| !!\(user && user\.hasClinicalAccess\);/);
 });
+
+// ---- Emails (owner, 2026-10-19: "yes we need email") ----------------------
+const { createNotifier } = require('../notifications');
+const makeNotifier = (users, covered) => {
+  const sent = [];
+  const n = createNotifier({
+    getUsers: async () => users,
+    queueNotification: async (type, userId, email, name, data, meta) => { sent.push({ type, userId, email, data, meta }); return { id: 'q' }; },
+    getAppBaseUrl: async () => 'https://app.example.test',
+    emailTransport: { transportStatus: () => ({ baaCovered: covered }) },
+    staffRoles: ['admin', 'user', 'caseManager'], clientRole: 'client', familyRole: 'family'
+  });
+  return { n, sent };
+};
+const CLIENT = { id: 'c9', name: 'Ada Bell', role: 'client' };
+const REQ = { id: 'r1', kind: 'rate', summary: 'Agreed rate: $30/hr, 4-hour daily minimum → $34/hr, 4-hour daily minimum', note: 'Family asked', requestedBy: { id: 'c1', name: 'Cora' } };
+
+test('a waiting change emails every active Super Admin, and only them', async () => {
+  const users = [
+    { id: 'a1', role: 'admin', email: 'owner@x.test', name: 'Owner' },
+    { id: 'a2', role: 'admin', email: 'old@x.test', name: 'Old', accountStatus: 'inactive' },
+    { id: 'm1', role: 'user', isManager: true, email: 'mgr@x.test', name: 'Morgan' },
+    { ...COORD, email: 'cora@x.test' }
+  ];
+  const { n, sent } = makeNotifier(users, true);
+  const r = await n.enrollmentChangeRequested({ client: CLIENT, request: REQ, actorId: 'c1' });
+  assert.strictEqual(r.notified, 1);
+  assert.deepStrictEqual(sent.map(s => s.userId), ['a1']);
+  assert.ok(!/Ada Bell/.test(sent[0].data.subject), 'the client name never goes in a subject');
+  assert.match(sent[0].data.body, /Ada Bell/); assert.match(sent[0].data.body, /\$34\/hr/);
+  assert.strictEqual(sent[0].meta.phi, true);
+  assert.match(sent[0].data.ctaUrl, /\/admin\/enrollment\?client=c9$/);
+});
+
+test('on a transport outside the BAA the request email names nobody', async () => {
+  const { n, sent } = makeNotifier([{ id: 'a1', role: 'admin', email: 'owner@x.test', name: 'Owner' }], false);
+  await n.enrollmentChangeRequested({ client: CLIENT, request: REQ, actorId: 'c1' });
+  assert.ok(!/Ada Bell|\$34/.test(sent[0].data.body + sent[0].data.subject));
+  assert.strictEqual(sent[0].meta.phi, false);
+});
+
+test('the person who asked hears the answer, with the reason on a decline', async () => {
+  const users = [{ ...COORD, email: 'cora@x.test' }];
+  const { n, sent } = makeNotifier(users, true);
+  await n.enrollmentChangeDecided({ client: CLIENT, request: { ...REQ, status: 'declined', decisionNote: 'Keep $30 until January' }, actorId: 'a1' });
+  assert.strictEqual(sent.length, 1); assert.strictEqual(sent[0].userId, 'c1');
+  assert.match(sent[0].data.subject, /declined/); assert.match(sent[0].data.body, /Keep \$30 until January/);
+  await n.enrollmentChangeDecided({ client: CLIENT, request: { ...REQ, status: 'approved' }, actorId: 'a1' });
+  assert.match(sent[1].data.subject, /approved/);
+});
+
+test('the routes send them: on each request, and on a decision only after it is saved', () => {
+  const sl = sliceRoute("app.put('/api/gfc/admin/enrollment/:clientId/service-line'", '\n});\n');
+  const rate = sliceRoute("app.put('/api/gfc/admin/enrollment/:clientId/rate'", '\n});\n');
+  for (const r of [sl, rate]) {
+    assert.ok(r.indexOf('notify.enrollmentChangeRequested(') > r.indexOf("await db.set('users', users)"), 'emailed after the request is saved');
+  }
+  const decide = sliceRoute("app.post('/api/gfc/admin/enrollment/:clientId/change-requests/:requestId/decide'", '\n});\n');
+  // Each of the three approve exits (already set, line changed, rate) tells
+  // the asker, and each does it after its own save.
+  const between = (from, to) => decide.slice(decide.indexOf(from), decide.indexOf(to, decide.indexOf(from)));
+  assert.match(between('if (!change) {', "return res.json({ message: 'Approved. The service line"), /await tellAsker\(\)/, 'no-op approval emails the asker');
+  assert.match(between('const body = serviceLineResponse(', 'return res.json({ ...body'), /await tellAsker\(\)/, 'line approval emails the asker');
+  assert.match(between('await commitRate(', "res.json({ message: 'Approved. The new rate"), /await tellAsker\(\)/, 'rate approval emails the asker');
+  assert.strictEqual((decide.match(/await tellAsker\(\)/g) || []).length, 3);
+  assert.match(decide, /invalidateUsersCache\(\);\n\s*await notify\.enrollmentChangeDecided/);
+});
+
+// ---- Eligibility lives on the enrollment record (owner, 2026-10-19) -------
+test('eligibility is recorded on the enrollment record, not the clinical chart', () => {
+  const CLIN = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(PAGE, /const EligibilityCard = \(/);
+  assert.match(PAGE, /<EligibilityCard clientId=\{clientId\} \/>/);
+  assert.match(PAGE, /\/insurance-verification`/);
+  assert.ok(!/const InsuranceCard = \(/.test(CLIN), 'the chart no longer carries the check form');
+  assert.ok(!/recordInsuranceCheck/.test(CLIN), 'the chart no longer posts a check');
+  assert.match(CLIN, /\/admin\/enrollment\?client=\$\{encodeURIComponent\(patient\.id\)\}/, 'the chart points billing at the enrollment record');
+  // The routes behind it still admit admin, manager and coordinator only.
+  assert.match(SERVER, /app\.post\('\/api\/clinical\/patients\/:clientId\/insurance-verification', authenticateToken, requireBilling,/);
+});

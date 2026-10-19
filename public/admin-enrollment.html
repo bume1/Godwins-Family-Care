@@ -244,6 +244,14 @@
       setRate: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/rate`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       }),
+      // Insurance eligibility (B1). Moved here from the clinical chart (owner,
+      // 2026-10-19): checking coverage is enrollment work. Same routes, gated
+      // requireBilling (admin, manager, care coordinator).
+      insurance: (id) => authedFetch(`/api/clinical/patients/${id}/insurance`),
+      insuranceCompanies: () => authedFetch('/api/clinical/insurance-companies'),
+      recordInsuranceCheck: (id, body) => authedFetch(`/api/clinical/patients/${id}/insurance-verification`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }),
       decideChange: (id, requestId, decision, note) => authedFetch(`/api/gfc/admin/enrollment/${id}/change-requests/${requestId}/decide`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, note })
       }),
@@ -1894,6 +1902,132 @@
       );
     };
 
+    // B1 — insurance eligibility, on the enrollment record (owner, 2026-10-19:
+    // "run the eligibility through this area, not the clinician EHR area").
+    // The biller runs the check in the Availity portal and records what it
+    // found: typed facts, never free text, never an X12 file. A MISMATCH keeps
+    // both values. Nothing here auto-verifies. Picking OpenEMR's insurance
+    // company is what lets a VERIFIED row be written to the chart. The words
+    // for each state come from the server; this only colours them.
+    const InsuranceCheckLine = ({ state, kinds }) => {
+      if (!state || !state.status) return null;
+      const tone = state.status === 'verified' ? 'bg-success-50 text-success-600'
+        : (state.status === 'mismatch' || state.status === 'inactive') ? 'bg-danger-50 text-danger-600' : 'bg-warning-50 text-warning-600';
+      const v = state.verification;
+      const label = (k) => ((kinds || []).find(x => x.value === k) || {}).label || k;
+      return (
+        <div className={`text-xs rounded px-2 py-1 mt-1 ${tone}`}>
+          {state.status === 'mismatch' && v
+            ? <span><strong>Coverage mismatch.</strong> Intake: {label(v.recorded.kind)} ({v.recorded.payerName}). Check found: {label(v.planTypeAsFound)} ({v.payerAsFound}).</span>
+            : state.label}
+        </div>
+      );
+    };
+
+    const EligibilityCard = ({ clientId }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [msg, setMsg] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [companies, setCompanies] = useState(null);
+      const [companiesErr, setCompaniesErr] = useState('');
+      const [form, setForm] = useState(null);
+      const load = useCallback(() => { api.insurance(clientId).then(setData).catch(e => setErr(e.message)); }, [clientId]);
+      useEffect(() => { setData(null); setErr(''); setForm(null); setMsg(null); load(); }, [load]);
+      const loadCompanies = () => { setCompaniesErr(''); api.insuranceCompanies().then(r => setCompanies(r.companies || [])).catch(e => setCompaniesErr(e.message)); };
+      if (err) return <Section title="Insurance eligibility"><div className="text-sm text-danger-600">{err}</div></Section>;
+      if (!data) return <Section title="Insurance eligibility"><div className="text-sm text-gray-400">Loading…</div></Section>;
+      const open = (p) => setForm({ rank: p.rank, status: 'verified', method: 'availity_portal', planTypeAsFound: p.kind, payerAsFound: '', checkedAt: '', note: '', openEmrInsuranceCompanyId: '' });
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const save = () => {
+        setBusy(true); setMsg(null);
+        api.recordInsuranceCheck(clientId, form)
+          .then(r => { setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' — ') }); setForm(null); load(); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      const primary = data.payers.find(p => p.rank === 'primary');
+      return (
+        <Section title="Insurance eligibility">
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            {primary && primary.state && (
+              <span className={`badge ${primary.state.status === 'verified' ? 'bg-success-50 text-success-600' : primary.state.status === 'mismatch' || primary.state.status === 'inactive' ? 'bg-danger-50 text-danger-600' : 'bg-warning-50 text-warning-600'}`}>
+                {primary.state.status === 'verified' ? 'Primary verified' : primary.state.status === 'mismatch' ? 'Primary: mismatch' : primary.state.status === 'inactive' ? 'Primary: inactive' : 'Primary not verified'}
+              </span>
+            )}
+            {data.qmb === 'yes' && <span className="badge bg-warning-50 text-warning-600">QMB: no patient cost sharing</span>}
+          </div>
+          {data.payers.length === 0 && <p className="text-sm text-warning-600">No coverage is recorded. Add it under Enrollment submission → Edit submission (insurance).</p>}
+          {(data.unresolved || []).map((u, i) => <p key={i} className="text-xs text-warning-600 mb-2">{u.message}</p>)}
+          <div className="space-y-3">
+            {data.payers.map((p, i) => (
+              <div key={i} className="border border-gray-200 rounded-lg p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong>{p.payerName}</strong>
+                  <span className="badge bg-gray-100 text-gray-600">{p.kindLabel}</span>
+                  {p.rank && <span className="badge bg-gray-100 text-gray-600">{p.rank === 'not_billed' ? 'Not billed' : p.rank}{p.rankSource === 'inferred' ? ' (assumed)' : ''}</span>}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  {p.memberId ? <span>Member ID <span className="font-mono">{p.memberId}</span></span> : 'No member ID on file'}
+                  {p.groupNumber ? ` · Group ${p.groupNumber}` : ''}
+                  {p.coverageStart ? ` · from ${p.coverageStart}` : ''}{p.coverageEnd ? ` to ${p.coverageEnd}` : ''}
+                </div>
+                {p.memberIdValid === false && <p className="text-xs text-danger-600 mt-1">This is not a valid Medicare number. Check it against the card.</p>}
+                {(p.missing || []).includes('coverageStart') && <p className="text-xs text-warning-600 mt-1">No coverage start date. OpenEMR needs one before this can go on the chart.</p>}
+                <InsuranceCheckLine state={p.state} kinds={data.kinds} />
+                {p.emrInsurance && <p className="text-xs text-gray-500 mt-1">{p.emrInsurance.written ? `On the OpenEMR chart as ${p.emrInsurance.type}.` : `Not on the OpenEMR chart: ${p.emrInsurance.error}`}</p>}
+                {p.rank && p.rank !== 'not_billed' && (!form || form.rank !== p.rank) && (
+                  <button className="btn btn-ghost text-xs mt-2" onClick={() => open(p)}>Record Eligibility Check</button>
+                )}
+                {form && form.rank === p.rank && (
+                  <div className="border-t border-gray-100 pt-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div><label className="label">Result</label>
+                        <select className="input" value={form.status} onChange={e => set('status', e.target.value)}>
+                          <option value="verified">Verified, active</option><option value="mismatch">Does not match intake</option><option value="inactive">Inactive</option>
+                        </select></div>
+                      <div><label className="label">Checked through</label>
+                        <select className="input" value={form.method} onChange={e => set('method', e.target.value)}>
+                          <option value="availity_portal">Availity portal</option><option value="x12_270">X12 270 (OpenEMR)</option>
+                        </select></div>
+                      <div><label className="label">Plan type found</label>
+                        <select className="input" value={form.planTypeAsFound} onChange={e => set('planTypeAsFound', e.target.value)}>
+                          {data.kinds.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+                        </select></div>
+                      <div><label className="label">Payer name found *</label>
+                        <input className="input" value={form.payerAsFound} maxLength={120} onChange={e => set('payerAsFound', e.target.value)} placeholder="As the check returned it" /></div>
+                      <div><label className="label">Date checked</label>
+                        <input className="input" type="date" value={form.checkedAt} onChange={e => set('checkedAt', e.target.value)} /></div>
+                      <div><label className="label">OpenEMR insurance company</label>
+                        {companies
+                          ? <select className="input" value={form.openEmrInsuranceCompanyId} onChange={e => set('openEmrInsuranceCompanyId', e.target.value)}>
+                              <option value="">Do not write to OpenEMR yet</option>
+                              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          : <button type="button" className="btn btn-ghost text-xs" onClick={loadCompanies}>Load OpenEMR List</button>}
+                        {companiesErr && <div className="text-xs text-warning-600 mt-1">{companiesErr}</div>}
+                      </div>
+                      <div className="sm:col-span-2"><label className="label">Note (optional)</label>
+                        <input className="input" value={form.note} maxLength={data.noteMax || 240} onChange={e => set('note', e.target.value)} /></div>
+                    </div>
+                    {form.status === 'verified' && form.planTypeAsFound !== p.kind && (
+                      <p className="text-xs text-danger-600 mt-2">The plan type found is not what intake recorded, so this will be saved as a mismatch with both values kept.</p>
+                    )}
+                    <div className="flex gap-2 mt-3">
+                      <button className="btn btn-primary" disabled={busy || !form.payerAsFound.trim()} onClick={save}>{busy ? 'Saving…' : 'Save Check'}</button>
+                      <button className="btn btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-success-600' : 'text-danger-600'}`}>{msg.text}</p>}
+          <p className="text-xs text-gray-400 mt-3">Run the check in the Availity portal and record what it found here. A visit cannot be submitted to billing until the primary payer is verified, unless an admin overrides it with a reason. Signing a note is never affected.</p>
+        </Section>
+      );
+    };
+
     // Service line and rate changes waiting on the owner (owner, 2026-10-19).
     // A manager or coordinator asks; the Super Admin approves or declines here.
     // Recent answers stay visible for 30 days so the person who asked sees the
@@ -2411,6 +2545,11 @@
             <div className="lg:col-span-2">
               <FamilyInvites clientId={clientId} isAdmin={canManageRole(user)} />
             </div>
+            {user && (user.role === 'admin' || user.isManager) && (
+              <div className="lg:col-span-2">
+                <EligibilityCard clientId={clientId} />
+              </div>
+            )}
             {user && (user.role === 'admin' || user.isManager) && (
               <div className="lg:col-span-2">
                 <BillingCard clientId={clientId} />

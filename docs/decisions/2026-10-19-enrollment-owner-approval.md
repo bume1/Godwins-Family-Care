@@ -14,3 +14,11 @@
 - **Tags on the screen:** "Consents x/y" turning to "All consents signed", each packet's count turning to "Complete", a green "Every required consent is signed" line, "Awaiting owner approval" on the record and the list row, and an "Awaiting approval" filter on the list.
 - **Verified:** `test/enrollment_changes.test.js` (10), 11 of 11 mutations caught; `scripts/verify_enrollment_approvals.js` **31/31** over the real routes; full suite 2544, 0 failing; both pages compile. Three existing guards repointed at the shared commit, none loosened.
 - **Open for the owner:** no email goes out when a request is waiting. The list filter and the tag are where it shows. Say if you want an email too.
+
+## Follow-up the same day: emails, and eligibility on the enrollment record
+
+"Yes we need email for document requests. And to run the eligibility through this area, not the clinician EHR area."
+
+- **Emails.** `notify.enrollmentChangeRequested` emails every active Super Admin when a manager or coordinator asks for a line or rate change. `notify.enrollmentChangeDecided` emails the person who asked once you decide, with the reason on a decline. The approval email goes only **after** the change is saved, so "approved" is never sent about a change that failed. The client's name never goes in a subject line; the body names the client and the values only on a BAA-covered transport, marked PHI. The button opens that client's enrollment record (`/admin/enrollment?client=<id>`). Client document requests already emailed the client and are unchanged.
+- **Eligibility moved.** The Insurance card that records an Availity check (`InsuranceCard` in `clinical.html`) is gone from the chart. `EligibilityCard` on the enrollment record replaces it, using the same routes (`requireBilling`: admin, manager, care coordinator). The chart keeps its read-only coverage status lines and a link to the enrollment record, and the billing-submit refusal now points there.
+- **Verified:** `test/enrollment_changes.test.js` 15 tests; 7 more mutations, all caught after one assertion was tightened (dropping the approval email on a line change first slipped past). Probe `scripts/verify_enrollment_approvals.js` 35/35, now reading the queued emails back. Full suite 2549, 0 failing. One existing guard was narrowed to end at the next component rather than loosened.

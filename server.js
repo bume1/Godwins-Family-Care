@@ -18603,6 +18603,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, r
       invalidateUsersCache();
       await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_change_requested', 'enrollment', client.id,
         { kind: request.kind, from: previous, to: line, requestId: request.id });
+      await notify.enrollmentChangeRequested({ client, request, actorId: req.user.id });
       return res.status(202).json({
         pending: true, request,
         message: `Sent to the owner for approval: service line ${previous} → ${line}. Nothing changes until it is approved.`
@@ -21702,6 +21703,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireEn
       invalidateUsersCache();
       await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_change_requested', 'enrollment', client.id,
         { kind: request.kind, requestId: request.id, hourlyRate: built.rateAgreement.hourlyRate, dailyMinimumHours: built.rateAgreement.dailyMinimumHours });
+      await notify.enrollmentChangeRequested({ client, request, actorId: req.user.id });
       return res.status(202).json({
         pending: true, request,
         message: 'Sent to the owner for approval. The current rate stays in place until it is approved.'
@@ -21735,7 +21737,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/change-requests/:requestId/decide'
     if (!check.ok) return res.status(check.status).json({ error: check.error, code: check.code });
     const row = check.row;
 
-    enrollmentChanges.recordDecision(client, row.id, decision, req.user, note);
+    const decided = enrollmentChanges.recordDecision(client, row.id, decision, req.user, note);
     users[idx] = client;
     await logActivity(req.user.id, req.user.name || req.user.email,
       decision === 'approve' ? 'enrollment_change_approved' : 'enrollment_change_declined', 'enrollment', client.id,
@@ -21744,22 +21746,29 @@ app.post('/api/gfc/admin/enrollment/:clientId/change-requests/:requestId/decide'
     if (decision === 'decline') {
       await db.set('users', users);
       invalidateUsersCache();
+      await notify.enrollmentChangeDecided({ client, request: decided, actorId: req.user.id });
       return res.json({ message: `Declined. ${row.requestedBy.name} will see your reason on this record.`, request: client.enrollmentChangeRequests.find(r => r.id === row.id) });
     }
 
     const extraLog = { requestId: row.id, requestedById: row.requestedBy.id, requestedByName: row.requestedBy.name };
+    // Told once the change is saved, never before: an email saying "approved"
+    // about a change that then failed to save would be a false record.
+    const tellAsker = () => notify.enrollmentChangeDecided({ client, request: decided, actorId: req.user.id });
     if (row.kind === enrollmentChanges.KINDS.SERVICE_LINE) {
       const previous = String(client.serviceLine || 'PHC').toUpperCase();
       const { change, carePlanFiling } = await commitServiceLine(users, idx, row.value, req.user, extraLog);
       if (!change) {
         await db.set('users', users);
         invalidateUsersCache();
+        await tellAsker();
         return res.json({ message: 'Approved. The service line was already set to that.' });
       }
       const body = serviceLineResponse(row.value, previous, change, carePlanFiling);
+      await tellAsker();
       return res.json({ ...body, message: `Approved. ${body.message}` });
     }
     await commitRate(users, idx, row.value, req.user, extraLog);
+    await tellAsker();
     res.json({ message: 'Approved. The new rate is in place.', rateAgreement: users[idx].rateAgreement, rateSet: true });
   } catch (error) {
     console.error('GFC change-request decision error:', error);

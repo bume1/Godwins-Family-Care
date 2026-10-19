@@ -48,6 +48,9 @@ const call = async (m, u, t, b) => {
 };
 const login = async (email) => { const r = await call('POST', '/api/auth/login', null, { email, password: PW }); return r.body && r.body.token; };
 const stored = (id) => (STORE.get('users') || []).find(u => u.id === id);
+// Every email, queued or already drained to the log.
+const emails = (type) => [...(STORE.get('pending_notifications') || []), ...(STORE.get('notification_log') || [])]
+  .filter(n => n.type === type);
 
 const ADMIN = { id: 'adm_1', name: 'Owner (TEST DATA)', email: 'owner@example.test', role: 'admin', accountStatus: 'active' };
 const COORD = { id: 'coord_1', name: 'Cora Lane (TEST DATA)', email: 'coord@example.test', role: 'user', isManager: true, clinicalRole: 'coordinator', accountType: 'coordinator', hasClinicalAccess: false, accountStatus: 'active' };
@@ -83,6 +86,12 @@ const CLIENT = {
   check('the record shows it awaiting owner approval', (d.changeRequests || []).some(x => x.id === slReq.id && x.status === 'pending'), d.changeRequests);
   check('the coordinator is told their changes need approval and cannot approve', d.changesNeedApproval === true && d.canApproveChanges === false);
   r = await call('GET', '/api/gfc/admin/enrollment/list?filter=awaiting_approval', tok.admin);
+  // The server also seeds its default admin at boot, so "every Super Admin"
+  // is two accounts here: both admins, nobody else.
+  const admins = (STORE.get('users') || []).filter(u => u.role === 'admin').map(u => u.email);
+  const sentTo = emails('enrollment_change_requested').map(e => e.recipientEmail);
+  check('every Super Admin is emailed, and nobody else', sentTo.includes(ADMIN.email) && sentTo.every(e => admins.includes(e)), sentTo);
+  check('the client is not emailed about a change that has not happened', !emails('enrollment_change_requested').some(e => e.recipientEmail === CLIENT.email));
   check('the list filter finds it, and the row is tagged', r.body.clients.some(c => c.id === CLIENT.id && c.pendingApprovals === 1) && r.body.counts.awaiting_approval === 1, r.body.counts);
 
   console.log('\n── 2. Only the owner approves ──');
@@ -95,6 +104,7 @@ const CLIENT = {
   check('the client is now BOTH', stored(CLIENT.id).serviceLine === 'BOTH');
   check('the medical packet is now owed', (r.body.newlyRequired || []).length > 0, r.body.newlyRequired);
   d = await detail(tok.admin);
+  check('the coordinator is emailed that it was approved', emails('enrollment_change_decided').some(e => e.recipientEmail === COORD.email));
   check('the request reads approved, by the owner', d.changeRequests.some(x => x.id === slReq.id && x.status === 'approved' && x.decidedBy.id === ADMIN.id));
   check('the banner names what is now outstanding', d.consentActionRequired && d.consentActionRequired.consents.length > 0, d.consentActionRequired);
   r = await call('POST', `${E}/change-requests/${slReq.id}/decide`, tok.admin, { decision: 'approve' });
@@ -111,6 +121,8 @@ const CLIENT = {
   check('the owner declines', r.status === 200, r.body);
   check('the rate is still $30', stored(CLIENT.id).rateAgreement.hourlyRate === 30);
   d = await detail(tok.mgr);
+  check('the manager is emailed the decline with the reason', emails('enrollment_change_decided').some(e => e.recipientEmail === MGR.email &&
+    /Keep \$30 until January/.test(JSON.stringify(e))), emails('enrollment_change_decided').map(e => e.recipientEmail));
   check('the manager sees the decline and the reason', d.changeRequests.some(x => x.id === rateReq.id && x.status === 'declined' && x.decisionNote === 'Keep $30 until January'));
 
   console.log('\n── 4. A stale ask is refused, never applied to a different value ──');
