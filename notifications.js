@@ -1033,10 +1033,82 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- 8. A manager or coordinator asked for a service line or rate change --
+  // Owner, 2026-10-19: those changes wait for the Super Admin, so the Super
+  // Admin is told. Never the client: nothing has changed for them yet. The
+  // client's name stays out of the SUBJECT always (a subject is shown in
+  // places the body is not), and in the body only on a covered transport.
+  async function enrollmentChangeRequested({ client, request, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const users = await getUsers();
+      const owners = users.filter(u => u && u.email && u.role === 'admin' && u.accountStatus !== 'inactive');
+      if (!owners.length) return { notified: 0, reason: 'no admin with an email address' };
+      const base = await getAppBaseUrl();
+      const url = `${base}/admin/enrollment?client=${encodeURIComponent(client.id)}`;
+      let n = 0;
+      for (const u of owners) {
+        const ok = await send({
+          type: 'enrollment_change_requested',
+          user: u,
+          subject: 'A change is waiting for your approval',
+          headline: 'A change is waiting for your approval',
+          paragraphs: detail
+            ? [`${request.requestedBy.name} asked for this change on ${client.name}'s record: ${request.summary}.`,
+               request.note ? `Their note: "${request.note}"` : null,
+               'Nothing changes until you approve it.'].filter(Boolean)
+            : [`${request.requestedBy.name} asked for a service line or rate change on a client's enrollment record. Nothing changes until you approve it.`],
+          ctaUrl: url, ctaLabel: 'Review the request',
+          relatedEntityId: request.id, relatedEntityType: 'enrollment_change',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[PHC] change-request notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 9. The owner answered it ---------------------------------------------
+  // The person who asked is told, with the reason on a decline, so they know
+  // what to do next without checking the record.
+  async function enrollmentChangeDecided({ client, request, actorId }) {
+    try {
+      const users = await getUsers();
+      const asker = users.find(u => u && u.id === request.requestedBy.id && u.email && u.accountStatus !== 'inactive');
+      if (!asker) return { notified: 0, reason: 'requester has no email address' };
+      const detail = transportAllowsDetail();
+      const base = await getAppBaseUrl();
+      const approved = request.status === 'approved';
+      const ok = await send({
+        type: 'enrollment_change_decided',
+        user: asker,
+        subject: approved ? 'Your change was approved' : 'Your change was declined',
+        headline: approved ? 'Your change was approved' : 'Your change was declined',
+        paragraphs: [
+          detail ? `${request.summary}, for ${client.name}.` : 'Your service line or rate change on a client\'s enrollment record has an answer.',
+          approved ? 'It is now in effect.' : null,
+          !approved && request.decisionNote ? `Reason: "${request.decisionNote}"` : null
+        ].filter(Boolean),
+        ctaUrl: `${base}/admin/enrollment?client=${encodeURIComponent(client.id)}`, ctaLabel: 'Open the record',
+        relatedEntityId: `${request.id}:decided`, relatedEntityType: 'enrollment_change',
+        actorId, phi: detail
+      });
+      return { notified: ok ? 1 : 0, detailed: detail };
+    } catch (e) {
+      console.error('[PHC] change-decision notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
     // private home care
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,
+    // enrollment changes that wait for the owner (2026-10-19)
+    enrollmentChangeRequested, enrollmentChangeDecided,
     // clinical visits
     appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder, videoReminder,
     // patient portal (P1)

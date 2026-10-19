@@ -97,6 +97,7 @@ const avs = require('./afterVisitSummary');         // after-visit summary: one 
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const appLinks = require('./appLinks');               // the ONE place that answers "where does this person go?"
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
+const enrollmentChanges = require('./enrollmentChanges'); // service line / rate changes that wait for the owner (2026-10-19)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
 const uploadLinks = require('./uploadLinks');         // the branded, no-login document upload link (2026-09-23)
@@ -2698,6 +2699,15 @@ const requireClinicalDocumenter = (req, res, next) => {
     return res.status(403).json({ error: 'Case managers have read-only clinical access.', code: 'CLINICAL_READ_ONLY' });
   }
   return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
+};
+// The clinical enrollment sequence (mark a manual step, activate IHPC). Office
+// work as much as clinical (payer verification is a phone call), so a manager
+// or care coordinator runs it as well as a licensed clinician (owner,
+// 2026-10-19). The steps that are clinical facts (H&P, care plan, consents)
+// still derive from the record and cannot be hand-set by anyone.
+const requireClinicalEnrollmentStep = (req, res, next) => {
+  if (patientRead.canClinicalWrite(req.user) || canManageEnrollment(req.user)) return next();
+  return res.status(403).json({ error: 'An admin, a manager, a care coordinator or a clinician runs the clinical enrollment steps.', code: 'CLINICAL_ENROLLMENT_STEP_ONLY' });
 };
 const requireClinicalWrite = (req, res, next) => {
   if (patientRead.canClinicalWrite(req.user)) return next();
@@ -10069,7 +10079,7 @@ app.get('/api/clinical/patients/:clientId/checklist', authenticateToken, require
   }
 });
 
-app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToken, requireClinicalEnrollmentStep, async (req, res) => {
   try {
     const { stepKey } = req.params;
     if (!clinicalRepo.MANUAL_CHECKLIST_STEPS.includes(stepKey)) {
@@ -10096,7 +10106,7 @@ app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToke
   }
 });
 
-app.post('/api/clinical/patients/:clientId/activate', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/activate', authenticateToken, requireClinicalEnrollmentStep, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -18574,7 +18584,8 @@ const enrollmentListRow = (client) => {
     source: /offline/i.test(rawSource) ? 'offline' : 'in_app',
     sourceRaw: rawSource,
     reviewedAt: (client.enrollmentReview && client.enrollmentReview.reviewedAt) || null,
-    needsFollowUp: client.reviewStatus === 'needs_followup'
+    needsFollowUp: client.reviewStatus === 'needs_followup',
+    pendingApprovals: enrollmentChanges.pendingCount(client)
   };
 };
 
@@ -18671,8 +18682,13 @@ const enrollmentDetail = (client) => {
     rateSet: consentRender.hasRateAgreement(client),
     // Scope A migration + Scope F3 lane change: consents this client must
     // (re-)sign, and why. Surfaced here so admin sees it without being told.
-    consentActionRequired: client.consentActionRequired || null,
-    consentReaffirmRequired: client.consentReaffirmRequired || null,
+    // Live: only the consents not yet signed since the banner went up, so it
+    // clears by itself the moment the last one is signed, whichever route
+    // signed it.
+    consentActionRequired: enrollmentChanges.liveConsentFlag(client.consentActionRequired, consents, consentMeta, isConsentSatisfied, t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
+    consentReaffirmRequired: enrollmentChanges.liveConsentFlag(client.consentReaffirmRequired, consents, consentMeta, isConsentSatisfied, t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
+    // Service line and rate changes waiting on the owner, plus recent answers.
+    changeRequests: enrollmentChanges.forDisplay(client),
     serviceLineHistory: client.serviceLineHistory || [],
     // Internal review status. Scope E2: this belongs in the admin view, never
     // on the client's own copy of what they signed.
@@ -18699,13 +18715,14 @@ app.get('/api/gfc/admin/enrollment/list', authenticateToken, requireEnrollmentSt
     }
 
     // Chip counts across the searched set.
-    const counts = { all: clients.length, intake_pending: 0, ready_for_review: 0, enrolled: 0, needs_followup: 0 };
-    clients.forEach(c => { counts[enrollmentReviewState(c)]++; });
+    const counts = { all: clients.length, intake_pending: 0, ready_for_review: 0, enrolled: 0, needs_followup: 0, awaiting_approval: 0 };
+    clients.forEach(c => { counts[enrollmentReviewState(c)]++; if (enrollmentChanges.pendingCount(c)) counts.awaiting_approval++; });
 
     // Apply the active filter chip.
     const f = String(req.query.filter || 'all').toLowerCase();
     const filterMap = { pending: 'intake_pending', intake_pending: 'intake_pending', ready: 'ready_for_review', ready_for_review: 'ready_for_review', enrolled: 'enrolled', followup: 'needs_followup', needs_followup: 'needs_followup' };
     if (filterMap[f]) clients = clients.filter(c => enrollmentReviewState(c) === filterMap[f]);
+    else if (f === 'awaiting_approval') clients = clients.filter(c => enrollmentChanges.pendingCount(c) > 0);
 
     let rows = clients.map(enrollmentListRow);
 
@@ -18917,7 +18934,9 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
     // Whether THIS viewer may edit is answered by the server, from the same
     // predicate the write gate uses — never inferred by the page from a stored
     // login, which is how a screen starts offering a button the API refuses.
-    res.json({ client: { ...enrollmentDetail(client), canEdit: canEditEnrollment(req.user) } });
+    res.json({ client: { ...enrollmentDetail(client), canEdit: canEditEnrollment(req.user),
+      canApproveChanges: enrollmentChanges.canApprove(req.user),
+      changesNeedApproval: enrollmentChanges.needsApproval(req.user) } });
   } catch (error) {
     console.error('GFC enrollment detail error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -18942,6 +18961,38 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
 // nobody finds out by accident — and it is already what the intake save calls.
 // This route is the staff-facing door onto the same function, which is the only
 // way the two paths cannot drift.
+// Apply a service line change and everything that follows from it. ONE path,
+// used by an admin's direct change and by the owner approving a manager's or
+// coordinator's request, so the consent recompute cannot differ between them.
+const commitServiceLine = async (users, idx, line, actor, extraLog = {}) => {
+  const client = users[idx];
+  const change = applyServiceLineChange(client, line, actor);
+  if (!change) return { change: null };
+  users[idx] = client;
+  await db.set('users', users);
+  invalidateUsersCache();
+  await logActivity(actor.id, actor.name || actor.email, 'service_line_changed', 'enrollment', client.id,
+    { from: change.from, to: change.to, newlyRequired: change.newlyRequired, noLongerRequired: change.noLongerRequired, ...extraLog });
+  // Adding medical care is one of the two moments a client becomes a patient.
+  // If the chart is already linked, their plan of care belongs in it now — and
+  // nothing else would ever put it there, because authoring and co-signing are
+  // both behind them. Reported either way; a filing failure never fails the
+  // line change, which has already been recorded.
+  const carePlanFiling = await fileCarePlanToChart(client.id, actor, 'service_line_changed');
+  return { change, carePlanFiling };
+};
+const serviceLineResponse = (line, previous, change, carePlanFiling) => ({
+  message: change.newlyRequired.length
+    ? `Service line set to ${line}. ${change.newlyRequired.length} document(s) now await the client's signature.`
+    : `Service line set to ${line}.`,
+  serviceLine: line, previous,
+  newlyRequired: change.newlyRequired,
+  noLongerRequired: change.noLongerRequired,
+  carePlanFiling,
+  titles: change.newlyRequired.map(t => consentRegistry.titleForType(t)),
+  requiredConsents: requiredConsentTypes(line)
+});
+
 app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
@@ -18954,36 +19005,33 @@ app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, r
     }
     const client = users[idx];
     const previous = String(client.serviceLine || 'PHC').toUpperCase();
-
-    const change = applyServiceLineChange(client, line, req.user);
-    if (!change) {
+    if (line === previous) {
       return res.status(200).json({ message: 'No change', serviceLine: line, newlyRequired: [], noLongerRequired: [] });
     }
 
-    users[idx] = client;
-    await db.set('users', users);
-    invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'service_line_changed', 'enrollment', client.id,
-      { from: change.from, to: change.to, newlyRequired: change.newlyRequired, noLongerRequired: change.noLongerRequired });
+    // A manager or coordinator ASKS; the owner approves (owner, 2026-10-19).
+    // Nothing about the client changes until then.
+    if (enrollmentChanges.needsApproval(req.user)) {
+      const request = enrollmentChanges.fileRequest(client, {
+        kind: enrollmentChanges.KINDS.SERVICE_LINE, value: line, previous, actor: req.user, note: (req.body || {}).note
+      });
+      users[idx] = client;
+      await db.set('users', users);
+      invalidateUsersCache();
+      await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_change_requested', 'enrollment', client.id,
+        { kind: request.kind, from: previous, to: line, requestId: request.id });
+      await notify.enrollmentChangeRequested({ client, request, actorId: req.user.id });
+      return res.status(202).json({
+        pending: true, request,
+        message: `Sent to the owner for approval: service line ${previous} → ${line}. Nothing changes until it is approved.`
+      });
+    }
 
-    // Adding medical care is one of the two moments a client becomes a patient.
-    // If the chart is already linked, their plan of care belongs in it now — and
-    // nothing else would ever put it there, because authoring and co-signing are
-    // both behind them. Reported either way; a filing failure never fails the
-    // line change, which has already been recorded.
-    const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'service_line_changed');
-
-    res.json({
-      message: change.newlyRequired.length
-        ? `Service line set to ${line}. ${change.newlyRequired.length} document(s) now await the client's signature.`
-        : `Service line set to ${line}.`,
-      serviceLine: line, previous,
-      newlyRequired: change.newlyRequired,
-      noLongerRequired: change.noLongerRequired,
-      carePlanFiling,
-      titles: change.newlyRequired.map(t => consentRegistry.titleForType(t)),
-      requiredConsents: requiredConsentTypes(line)
-    });
+    const { change, carePlanFiling } = await commitServiceLine(users, idx, line, req.user);
+    if (!change) {
+      return res.status(200).json({ message: 'No change', serviceLine: line, newlyRequired: [], noLongerRequired: [] });
+    }
+    res.json(serviceLineResponse(line, previous, change, carePlanFiling));
   } catch (error) {
     console.error('GFC service-line change error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -22053,39 +22101,122 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
 // table. Until it exists neither consent is presentable, by design: a client
 // signing a financial agreement with no price in it is the defect, not the
 // blocked signature.
+// Apply an agreed rate and its re-signature flag. ONE path for an admin's
+// direct change and the owner approving a request.
+const commitRate = async (users, idx, rateAgreement, actor, extraLog = {}) => {
+  const { hourlyRate, dailyMinimumHours } = rateAgreement;
+  const prior = users[idx].rateAgreement || null;
+  users[idx].rateAgreement = rateAgreement;
+  // A rate change after the client already signed against the old figures is
+  // not a silent edit — the agreement they hold no longer matches the record.
+  const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']
+    .filter(t => isConsentSatisfied((users[idx].consents || {})[t]))
+    .filter(() => Number(prior.hourlyRate) !== hourlyRate || Number(prior.dailyMinimumHours) !== dailyMinimumHours);
+  if (signedAgainstOldRate && signedAgainstOldRate.length) {
+    users[idx].consentActionRequired = {
+      reason: 'rate_changed', at: new Date().toISOString(),
+      consents: signedAgainstOldRate,
+      titles: signedAgainstOldRate.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t)
+    };
+  }
+  await db.set('users', users);
+  invalidateUsersCache();
+  await logActivity(actor.id, actor.name || actor.email, 'client_rate_set', 'enrollment', users[idx].id, {
+    hourlyRate, dailyMinimumHours, hadPriorRate: !!prior, ...extraLog
+  });
+};
+
 app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const b = req.body || {};
     const built = buildRateAgreement(b, req.user);
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
-    const { hourlyRate, dailyMinimumHours } = built.rateAgreement;
 
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
 
-    const prior = users[idx].rateAgreement || null;
-    users[idx].rateAgreement = built.rateAgreement;
-    // A rate change after the client already signed against the old figures is
-    // not a silent edit — the agreement they hold no longer matches the record.
-    const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']
-      .filter(t => isConsentSatisfied((users[idx].consents || {})[t]))
-      .filter(() => Number(prior.hourlyRate) !== hourlyRate || Number(prior.dailyMinimumHours) !== dailyMinimumHours);
-    if (signedAgainstOldRate && signedAgainstOldRate.length) {
-      users[idx].consentActionRequired = {
-        reason: 'rate_changed', at: new Date().toISOString(),
-        consents: signedAgainstOldRate,
-        titles: signedAgainstOldRate.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t)
-      };
+    // A manager or coordinator ASKS; the owner approves (owner, 2026-10-19).
+    if (enrollmentChanges.needsApproval(req.user)) {
+      const client = users[idx];
+      const request = enrollmentChanges.fileRequest(client, {
+        kind: enrollmentChanges.KINDS.RATE, value: built.rateAgreement,
+        previous: client.rateAgreement || null, actor: req.user, note: b.note
+      });
+      users[idx] = client;
+      await db.set('users', users);
+      invalidateUsersCache();
+      await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_change_requested', 'enrollment', client.id,
+        { kind: request.kind, requestId: request.id, hourlyRate: built.rateAgreement.hourlyRate, dailyMinimumHours: built.rateAgreement.dailyMinimumHours });
+      await notify.enrollmentChangeRequested({ client, request, actorId: req.user.id });
+      return res.status(202).json({
+        pending: true, request,
+        message: 'Sent to the owner for approval. The current rate stays in place until it is approved.'
+      });
     }
-    await db.set('users', users);
-    invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'client_rate_set', 'enrollment', users[idx].id, {
-      hourlyRate, dailyMinimumHours, hadPriorRate: !!prior
-    });
+
+    await commitRate(users, idx, built.rateAgreement, req.user);
     res.json({ message: 'Rate agreement saved', rateAgreement: users[idx].rateAgreement, rateSet: true });
   } catch (error) {
     console.error('GFC rate set error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/change-requests/:requestId/decide —
+// the owner approves or declines a manager's or coordinator's service line or
+// rate change. Approving applies it through the same commit an admin's own
+// change uses. Declining needs a reason, which the person who asked sees.
+app.post('/api/gfc/admin/enrollment/:clientId/change-requests/:requestId/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { decision, note } = req.body || {};
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+    const pending = (client.enrollmentChangeRequests || []).find(r => r.id === req.params.requestId);
+    const current = pending && pending.kind === enrollmentChanges.KINDS.SERVICE_LINE
+      ? String(client.serviceLine || 'PHC').toUpperCase()
+      : (client.rateAgreement || null);
+    const check = enrollmentChanges.checkDecision(client, req.params.requestId, decision, note, current);
+    if (!check.ok) return res.status(check.status).json({ error: check.error, code: check.code });
+    const row = check.row;
+
+    const decided = enrollmentChanges.recordDecision(client, row.id, decision, req.user, note);
+    users[idx] = client;
+    await logActivity(req.user.id, req.user.name || req.user.email,
+      decision === 'approve' ? 'enrollment_change_approved' : 'enrollment_change_declined', 'enrollment', client.id,
+      { kind: row.kind, requestId: row.id, requestedById: row.requestedBy.id });
+
+    if (decision === 'decline') {
+      await db.set('users', users);
+      invalidateUsersCache();
+      await notify.enrollmentChangeDecided({ client, request: decided, actorId: req.user.id });
+      return res.json({ message: `Declined. ${row.requestedBy.name} will see your reason on this record.`, request: client.enrollmentChangeRequests.find(r => r.id === row.id) });
+    }
+
+    const extraLog = { requestId: row.id, requestedById: row.requestedBy.id, requestedByName: row.requestedBy.name };
+    // Told once the change is saved, never before: an email saying "approved"
+    // about a change that then failed to save would be a false record.
+    const tellAsker = () => notify.enrollmentChangeDecided({ client, request: decided, actorId: req.user.id });
+    if (row.kind === enrollmentChanges.KINDS.SERVICE_LINE) {
+      const previous = String(client.serviceLine || 'PHC').toUpperCase();
+      const { change, carePlanFiling } = await commitServiceLine(users, idx, row.value, req.user, extraLog);
+      if (!change) {
+        await db.set('users', users);
+        invalidateUsersCache();
+        await tellAsker();
+        return res.json({ message: 'Approved. The service line was already set to that.' });
+      }
+      const body = serviceLineResponse(row.value, previous, change, carePlanFiling);
+      await tellAsker();
+      return res.json({ ...body, message: `Approved. ${body.message}` });
+    }
+    await commitRate(users, idx, row.value, req.user, extraLog);
+    await tellAsker();
+    res.json({ message: 'Approved. The new rate is in place.', rateAgreement: users[idx].rateAgreement, rateSet: true });
+  } catch (error) {
+    console.error('GFC change-request decision error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

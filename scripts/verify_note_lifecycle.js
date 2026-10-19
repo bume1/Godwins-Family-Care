@@ -155,6 +155,9 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', 'LMSW');
 const CM = staff('cm_1', 'Casey Reed', 'readOnly', null, { role: 'caseManager', hasClinicalAccess: false });
 // Billing (owner, 2026-09-29): an admin or a manager. The manager holds no
 // clinical role at all.
+// Care Coordinator (owner, 2026-10-15): stored as a manager plus clinical
+// role coordinator, exactly what accountTypes.fieldsFor('coordinator') writes.
+const COORD = { id: 'coord_1', name: 'Cora Lane (TEST DATA)', email: 'coord_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false, clinicalRole: 'coordinator', accountType: 'coordinator', accountStatus: 'active' };
 const MGR = { id: 'mgr_1', name: 'Morgan Price (TEST DATA)', email: 'mgr_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false, accountStatus: 'active' };
 const PHONEPATIENT = { ...PATIENT, id: 'c_phone', email: 'c_phone@example.test', name: 'Phone Probe Patient (TEST DATA)', slug: 'phone-probe', openEmrPatientId: 'uuid-phone-patient' };
 const BILLPATIENT = { ...PATIENT, id: 'c_bill', email: 'c_bill@example.test', name: 'Billing Probe Patient (TEST DATA)', slug: 'bill-probe', openEmrPatientId: 'uuid-bill-patient',
@@ -175,7 +178,7 @@ const HP_NOTE = {
 
 (async () => {
   const hash = await bcrypt.hash(PW, 4);
-  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, PHONEPATIENT, RN, FNP, LCSW, LMSW, CM, MGR].map(u => ({ ...u, password: hash })));
+  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, PHONEPATIENT, RN, FNP, LCSW, LMSW, CM, MGR, COORD].map(u => ({ ...u, password: hash })));
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   const fresh = new Date().toISOString();
   STORE.set('gfc_ncci_source_version', { ptp: { quarter: '2026Q4', loadedAt: fresh }, mue: { quarter: '2026Q4', loadedAt: fresh } });
@@ -183,7 +186,7 @@ const HP_NOTE = {
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 3000));
   const tok = {};
-  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM, mgr: MGR })) tok[k] = await login(u.email);
+  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM, mgr: MGR, coord: COORD })) tok[k] = await login(u.email);
   if (!tok.rn || !tok.fnp || !tok.lmsw) { console.log('LOGIN FAILED', tok); process.exit(1); }
   const P = `/api/clinical/patients/${PATIENT.id}`;
 
@@ -634,6 +637,40 @@ const HP_NOTE = {
   r = await call('PUT', `${PH}/encounters/${fu}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
   r = await call('POST', `${PH}/encounters/${fu}/sign`, tok.fnp, { attest: true });
   check('it signs with NO blood pressure in either arm', r.status === 200 && record(fu).billingStatus === 'awaiting_billing', r.body);
+
+  console.log('\n── 18. A Care Coordinator prepares and saves notes; a clinician signs ──');
+  {
+    const st = await call('GET', '/api/clinical/status', tok.coord);
+    check('the coordinator is told they can document, not sign', st.status === 200 && st.body.access && st.body.access.canDocument === true && st.body.access.canWrite === false, st.body && st.body.access);
+    r = await call('PUT', `${PH}/visit/draft`, tok.coord, { draft: { chiefConcern: 'Coordinator scratch' } });
+    check('the coordinator saves a scratch draft', r.status === 200, r.body);
+    const CN = { kind: 'followup', visit: { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' },
+      chiefConcern: 'Prepared by coordinator', subjective: 'Daughter reports better appetite.', objective: 'Alert, steady gait.', assessment: 'Stable', plan: 'Continue current plan',
+      vitals: { bpRightSys: '122', bpRightDia: '76', hr: '72' }, sections: { medReconciliation: 'Bottles checked.', followUp: 'Two weeks.', mdmOrTime: '20 minutes.' } };
+    r = await call('POST', `${PH}/notes`, tok.coord, { note: CN });
+    const cn = r.body && r.body.encounterUuid;
+    check('the coordinator saves a new note', r.status === 200 && !!cn, r.body);
+    check('it is stored at version 1 with their text', cn && record(cn) && record(cn).noteVersion === 1 && record(cn).note.chiefConcern === 'Prepared by coordinator');
+    check('the save is in OpenEMR under their name', cn && /Cora Lane/.test(narrativeText(cn)));
+    r = await call('GET', `${PH}/encounters/${cn}/note`, tok.coord);
+    check('the coordinator reopens it and may edit it', r.status === 200 && r.body.canEdit !== false, r.body && { canEdit: r.body.canEdit, canSign: r.body.noteActions && r.body.noteActions.canSign });
+    r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.coord, { note: { ...CN, plan: 'Continue current plan; call Friday' }, baseVersion: 1 });
+    check('the coordinator saves an edit', r.status === 200 && record(cn).noteVersion === 2 && /Friday/.test(record(cn).note.plan), r.body);
+    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.coord, { attest: true });
+    check('the coordinator cannot sign', r.status === 403, r.body);
+    r = await call('POST', `${PH}/encounters/${cn}/co-signatures`, tok.coord, {});
+    check('the coordinator cannot co-sign', r.status === 403, r.body);
+    r = await call('POST', `${PH}/encounters/${cn}/prescriptions`, tok.coord, { drug: 'x' });
+    check('the coordinator cannot prescribe', r.status === 403, r.body);
+    r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.fnp, { note: { ...record(cn).note, assessment: 'Stable; BP at goal' }, baseVersion: 2 });
+    check('the clinician picks up the coordinator\'s draft', r.status === 200 && record(cn).noteVersion === 3, r.body);
+    r = await call('PUT', `${PH}/encounters/${cn}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.fnp, { attest: true });
+    check('the clinician signs it', r.status === 200, r.body);
+    check('the coordinator is named as preparer, never as a signer', /Prepared by Cora Lane/.test(narrativeText(cn)) && !/Cora Lane[^\n]*— (AUTHOR|SIGNED)/.test(narrativeText(cn)), narrativeText(cn).slice(-600));
+    r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.coord, { note: CN, baseVersion: 3 });
+    check('a signed note is locked for the coordinator too', r.status === 409, r.body);
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

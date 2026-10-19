@@ -415,9 +415,6 @@
       carrySources: (id) => authedFetch(`/api/clinical/patients/${id}/notes/carry-forward-sources`),
       carryContent: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/note/carry-forward`),
       clinicianAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-sign`, { method: 'POST', body: JSON.stringify({ attest: true, text }) }),
-      insurance: (id) => authedFetch(`/api/clinical/patients/${id}/insurance`),
-      insuranceCompanies: () => authedFetch('/api/clinical/insurance-companies'),
-      recordInsuranceCheck: (id, body) => authedFetch(`/api/clinical/patients/${id}/insurance-verification`, { method: 'POST', body: JSON.stringify(body) }),
       billingSubmit: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/billing-submit`, { method: 'POST', body: JSON.stringify(body) }),
       refreshPos: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/pos/refresh`, { method: 'POST', body: '{}' }),
       syncFacilities: () => authedFetch('/api/clinical/facilities/sync', { method: 'POST', body: '{}' }),
@@ -1064,7 +1061,11 @@
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
-      const canWrite = useCanWrite();
+      // The share route admits a licensed clinician or a manager, and a care
+      // coordinator is stored as a manager, so they get the toggle too.
+      const licensed = useCanWrite();
+      const documents = useCanDocument();
+      const canWrite = licensed || documents;
       // Approving a document another staff member attached (owner,
       // 2026-10-16): a care coordinator or the admin. The server says who.
       const canApproveDocs = !!useContext(AccessContext).canApproveDocuments;
@@ -1288,111 +1289,19 @@
       );
     };
 
-    // B1 — the insurance round trip, billing's side. The biller runs the
-    // eligibility check in the Availity portal and records what it found here:
-    // five typed facts, never free text, never an X12 file. A MISMATCH keeps
-    // both values. Nothing here auto-verifies. Picking OpenEMR's insurance
-    // company is what lets a VERIFIED row be written to the chart.
-    const InsuranceCard = ({ patient }) => {
-      const [data, setData] = useState(null);
-      const [err, setErr] = useState(null);
-      const [msg, setMsg] = useState(null);
-      const [busy, setBusy] = useState(false);
-      const [companies, setCompanies] = useState(null);
-      const [companiesErr, setCompaniesErr] = useState(null);
-      const [form, setForm] = useState(null);
-      const load = () => api.insurance(patient.id).then(setData).catch(e => setErr(e.message));
-      useEffect(() => { setData(null); setErr(null); setForm(null); setMsg(null); load(); }, [patient.id]);
-      const loadCompanies = () => { setCompaniesErr(null); api.insuranceCompanies().then(r => setCompanies(r.companies || [])).catch(e => setCompaniesErr(e.message)); };
-      const title = <h2><i className="ti ti-shield-check mr-1 text-accent" />Insurance</h2>;
-      if (err) return <div className="card mb-4"><div className="card-h">{title}</div><div className="p-4 text-xs text-red-600">{err}</div></div>;
-      if (!data) return <div className="card mb-4"><div className="card-h">{title}</div><div className="p-4 text-[11px] text-stone-400">Reading…</div></div>;
-      const open = (p) => setForm({ rank: p.rank, status: 'verified', method: 'availity_portal', planTypeAsFound: p.kind, payerAsFound: '', checkedAt: '', note: '', openEmrInsuranceCompanyId: '' });
-      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-      const save = () => {
-        setBusy(true); setMsg(null);
-        api.recordInsuranceCheck(patient.id, form)
-          .then(r => { setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' — ') }); setForm(null); setData(r); load(); })
-          .catch(e => setMsg({ ok: false, text: e.message }))
-          .finally(() => setBusy(false));
-      };
-      return (
-        <div className="card mb-4">
-          <div className="card-h">
-            {title}
-            {data.qmb === 'yes' && <span className="chip bg-amber-100 text-amber-800">QMB: no patient cost sharing</span>}
-          </div>
-          <div className="p-4 text-sm grid gap-3">
-            {data.payers.length === 0 && <p className="text-xs text-amber-800">No coverage is recorded. Add it on the enrollment record.</p>}
-            {(data.unresolved || []).map((u, i) => <p key={i} className="text-xs text-amber-800"><i className="ti ti-alert-triangle mr-1" />{u.message}</p>)}
-            {data.payers.map((p, i) => (
-              <div key={i} className="border border-stone-200 rounded-lg p-2.5 grid gap-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <b>{p.payerName}</b>
-                  <span className="chip bg-stone-100 text-stone-700">{p.kindLabel}</span>
-                  {p.rank && <span className="chip bg-stone-100 text-stone-700">{p.rank === 'not_billed' ? 'Not billed' : p.rank}{p.rankSource === 'inferred' ? ' (assumed)' : ''}</span>}
-                </div>
-                <div className="text-xs text-stone-600">
-                  {p.memberId ? <>Member ID <span className="font-mono">{p.memberId}</span></> : 'No member ID on file'}
-                  {p.groupNumber ? <> · Group {p.groupNumber}</> : null}
-                  {p.coverageStart ? <> · from {p.coverageStart}</> : null}{p.coverageEnd ? <> to {p.coverageEnd}</> : null}
-                </div>
-                {p.memberIdValid === false && <p className="text-xs text-red-700">This is not a valid Medicare number. Check it against the card.</p>}
-                {(p.missing || []).includes('coverageStart') && <p className="text-xs text-amber-700">No coverage start date. OpenEMR needs one before this can go on the chart.</p>}
-                {p.state && <InsuranceCheck v={{ ...p.state, recorded: p.state.status === 'mismatch' && p.state.verification ? { planType: (data.kinds.find(k => k.value === p.state.verification.recorded.kind) || {}).label, payer: p.state.verification.recorded.payerName } : null,
-                  found: p.state.status === 'mismatch' && p.state.verification ? { planType: (data.kinds.find(k => k.value === p.state.verification.planTypeAsFound) || {}).label, payer: p.state.verification.payerAsFound } : null }} />}
-                {p.emrInsurance && <p className="text-[11px] text-stone-500">{p.emrInsurance.written ? `On the OpenEMR chart as ${p.emrInsurance.type}.` : `Not on the OpenEMR chart: ${p.emrInsurance.error}`}</p>}
-                {p.rank && p.rank !== 'not_billed' && (!form || form.rank !== p.rank) && (
-                  <button className="btn ghost !py-1 !px-2.5 text-xs w-fit" onClick={() => open(p)}>Record Eligibility Check</button>
-                )}
-                {form && form.rank === p.rank && (
-                  <div className="grid gap-2 border-t border-stone-100 pt-2 mt-1">
-                    <div className="grid sm:grid-cols-2 gap-2">
-                      <label className="text-xs">Result
-                        <select className="inp" value={form.status} onChange={e => set('status', e.target.value)}>
-                          <option value="verified">Verified, active</option><option value="mismatch">Does not match intake</option><option value="inactive">Inactive</option>
-                        </select></label>
-                      <label className="text-xs">Checked through
-                        <select className="inp" value={form.method} onChange={e => set('method', e.target.value)}>
-                          <option value="availity_portal">Availity portal</option><option value="x12_270">X12 270 (OpenEMR)</option>
-                        </select></label>
-                      <label className="text-xs">Plan type found
-                        <select className="inp" value={form.planTypeAsFound} onChange={e => set('planTypeAsFound', e.target.value)}>
-                          {data.kinds.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
-                        </select></label>
-                      <label className="text-xs">Payer name found
-                        <input className="inp" value={form.payerAsFound} maxLength={120} onChange={e => set('payerAsFound', e.target.value)} placeholder="As the check returned it" /></label>
-                      <label className="text-xs">Date checked
-                        <input className="inp" type="date" value={form.checkedAt} onChange={e => set('checkedAt', e.target.value)} /></label>
-                      <label className="text-xs">OpenEMR insurance company
-                        {companies
-                          ? <select className="inp" value={form.openEmrInsuranceCompanyId} onChange={e => set('openEmrInsuranceCompanyId', e.target.value)}>
-                              <option value="">Do not write to OpenEMR yet</option>
-                              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                            </select>
-                          : <button type="button" className="btn ghost !py-1 !px-2.5 text-xs w-fit block" onClick={loadCompanies}>Load OpenEMR List</button>}
-                        {companiesErr && <span className="block text-[11px] text-amber-700">{companiesErr}</span>}
-                      </label>
-                    </div>
-                    <label className="text-xs">Note (optional)
-                      <input className="inp" value={form.note} maxLength={data.noteMax || 240} onChange={e => set('note', e.target.value)} /></label>
-                    {form.status === 'verified' && form.planTypeAsFound !== p.kind && (
-                      <p className="text-xs text-red-700">The plan type found is not what intake recorded, so this will be saved as a mismatch with both values kept.</p>
-                    )}
-                    <div className="flex gap-2">
-                      <button className="btn gold w-fit" disabled={busy || !form.payerAsFound.trim()} onClick={save}>{busy ? 'Saving…' : 'Save Check'}</button>
-                      <button className="btn ghost w-fit" onClick={() => setForm(null)}>Cancel</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-            {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-            <Hint>Run the check in the Availity portal and record what it found. A visit cannot be submitted to billing until the primary payer is verified, unless an admin overrides it with a reason. Signing a note is never affected.</Hint>
-          </div>
+    // B1 — eligibility is recorded on the ENROLLMENT record now (owner,
+    // 2026-10-19: "run the eligibility through this area, not the clinician
+    // EHR area"). The chart keeps the read-only status line (InsuranceCheck)
+    // and points billing at the enrollment record.
+    const InsurancePointer = ({ patient }) => (
+      <div className="card mb-4">
+        <div className="card-h"><h2><i className="ti ti-shield-check mr-1 text-accent" />Insurance</h2></div>
+        <div className="p-4 text-sm">
+          Insurance eligibility is checked and recorded on the enrollment record.{' '}
+          <a className="text-accent underline" href={`/admin/enrollment?client=${encodeURIComponent(patient.id)}`}>Open Enrollment</a>
         </div>
-      );
-    };
+      </div>
+    );
 
     // The clinical inbox — what is waiting on a clinician. Every row says WHO
     // it is waiting on, because a count that does not is a number nobody can
@@ -4051,7 +3960,7 @@
           {/* Billing's only (owner, 2026-09-29): a clinician chooses what KIND
               of visit it is, never where it bills. */}
           {chart.linked && canBill && <PlaceOfServiceCard patient={patient} />}
-          {canBill && <InsuranceCard patient={patient} />}
+          {canBill && <InsurancePointer patient={patient} />}
           {/* The AI review sits on Overview, above the chart sections it
               reviews. It renders nothing at all until the server answers, and
               says plainly when reading is not switched on — "off" and
@@ -8913,7 +8822,7 @@
                         Override and Submit
                       </button>
                     </div>
-                  ) : <p className="text-xs text-amber-800">Record the eligibility check on the patient's Insurance card, or ask an admin to override.</p>)}
+                  ) : <p className="text-xs text-amber-800">Record the eligibility check on the patient's enrollment record (<a className="underline" href={`/admin/enrollment?client=${encodeURIComponent(patient.id)}`}>open it</a>), or ask an admin to override.</p>)}
                   {noChargeOpen && (
                     <div className="grid gap-2 border border-stone-200 rounded-lg p-2.5">
                       <label className="text-xs text-stone-600">Why is this visit not being billed?</label>

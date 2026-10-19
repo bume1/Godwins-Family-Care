@@ -244,6 +244,17 @@
       setRate: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/rate`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       }),
+      // Insurance eligibility (B1). Moved here from the clinical chart (owner,
+      // 2026-10-19): checking coverage is enrollment work. Same routes, gated
+      // requireBilling (admin, manager, care coordinator).
+      insurance: (id) => authedFetch(`/api/clinical/patients/${id}/insurance`),
+      insuranceCompanies: () => authedFetch('/api/clinical/insurance-companies'),
+      recordInsuranceCheck: (id, body) => authedFetch(`/api/clinical/patients/${id}/insurance-verification`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }),
+      decideChange: (id, requestId, decision, note) => authedFetch(`/api/gfc/admin/enrollment/${id}/change-requests/${requestId}/decide`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, note })
+      }),
       setClientDetails: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/details`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       }),
@@ -319,7 +330,10 @@
       { key: 'intake_pending', label: 'Intake pending' },
       { key: 'ready_for_review', label: 'Ready for review' },
       { key: 'enrolled', label: 'Enrolled' },
-      { key: 'needs_followup', label: 'Needs follow-up' }
+      { key: 'needs_followup', label: 'Needs follow-up' },
+      // A manager's or coordinator's service line or rate change waiting on
+      // the owner (2026-10-19).
+      { key: 'awaiting_approval', label: 'Awaiting approval' }
     ];
 
     const STATE_BADGE = {
@@ -467,7 +481,10 @@
                   {!loading && data.clients.length === 0 && <tr><td colSpan="8" className="text-center text-gray-400 py-10">No submissions match this filter.</td></tr>}
                   {!loading && data.clients.map(c => (
                     <tr key={c.id} onClick={() => onOpen(c.id)}>
-                      <td className="font-medium text-primary-500">{c.name}</td>
+                      <td className="font-medium text-primary-500">
+                        {c.name}
+                        {c.pendingApprovals > 0 && <span className="badge bg-warning-50 text-warning-600 ml-2">Awaiting approval</span>}
+                      </td>
                       <td>{c.dob || '—'}</td>
                       <td>{c.serviceLine || '—'}</td>
                       <td>{c.careTierLabel || '—'}</td>
@@ -1466,10 +1483,11 @@
       const isPhc = client.serviceLineResolved === 'PHC' || client.serviceLineResolved === 'BOTH';
       if (!isPhc) return <span className="text-sm text-gray-400">Not applicable — the rate table belongs to the home care documents.</span>;
 
+      const pendingRate = (client.changeRequests || []).find(r => r.kind === 'rate' && r.status === 'pending');
       const save = () => {
         setBusy(true); setErr('');
         api.setRate(client.id, { ...f, hourlyRate: Number(f.hourlyRate), dailyMinimumHours: Number(f.dailyMinimumHours) })
-          .then(() => { setOpen(false); onSaved(); })
+          .then(() => { setOpen(false); onSaved(); })  // a 202 lands as a pending request, shown above
           .catch(e => setErr(e.message))
           .finally(() => setBusy(false));
       };
@@ -1488,10 +1506,16 @@
               No agreed rate on file. The Financial Agreement and the home care Service Agreement both print this table, so neither can be presented to the client until it is set.
             </div>
           )}
+          {pendingRate && (
+            <div className="bg-warning-50 text-warning-600 text-xs rounded-lg px-3 py-2 mt-3">
+              Awaiting owner approval: {pendingRate.summary.replace(/^Agreed rate: /, '')} (asked by {pendingRate.requestedBy.name}).
+            </div>
+          )}
           {canEdit && !open && <button className="btn btn-ghost text-sm mt-3" onClick={() => setOpen(true)}>{client.rateSet ? 'Change Rate' : 'Set Rate'}</button>}
           {canEdit && open && (
             <div className="mt-3">
               {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
+              {client.changesNeedApproval && <p className="text-xs text-warning-600 mb-2">This goes to the owner for approval. The current rate stays until then.</p>}
               <div className="grid grid-cols-3 gap-3 mb-3">
                 <div><label className="label">Hourly rate ($) *</label><input className="input" type="number" min="0" step="0.01" value={f.hourlyRate} onChange={e => setF(v => ({ ...v, hourlyRate: e.target.value }))} /></div>
                 <div><label className="label">Daily minimum (hours) *</label><input className="input" type="number" min="0" step="0.5" value={f.dailyMinimumHours} onChange={e => setF(v => ({ ...v, dailyMinimumHours: e.target.value }))} /></div>
@@ -1504,7 +1528,7 @@
                 <div className="col-span-2"><label className="label">Errand fuel and mileage</label><input className="input" value={f.errandFuel} onChange={e => setF(v => ({ ...v, errandFuel: e.target.value }))} /></div>
               </div>
               <div className="flex gap-2">
-                <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Rate'}</button>
+                <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : client.changesNeedApproval ? 'Send for Approval' : 'Save Rate'}</button>
                 <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
               </div>
             </div>
@@ -1551,9 +1575,9 @@
     // manual (payer verification, NPA/prescriptive authority). ACTIVATE writes
     // the same client.enrollmentStatus that Approve enrollment writes,
     // independently — the two checklists are unrelated, they just share a
-    // field. Write actions are admin-only here, same as every other workflow
-    // button on this page; the underlying /api/clinical routes also allow a
-    // clinician, which is unreachable from this admin-only screen on purpose.
+    // field. An admin, a manager, a care coordinator or a licensed clinician
+    // marks the manual steps and activates (owner, 2026-10-19); the route gate
+    // is requireClinicalEnrollmentStep, the same set.
     const ClinicalEnrollmentChecklist = ({ clientId, canEdit, onActivated }) => {
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
@@ -1616,7 +1640,7 @@
               </button>
             )
           ) : (
-            <p className="text-xs text-gray-400 mt-3">Read-only — an admin or clinician activates IHPC enrollment.</p>
+            <p className="text-xs text-gray-400 mt-3">Read-only. The office or a clinician activates IHPC enrollment.</p>
           )}
           <p className="text-xs text-gray-400 mt-2">Payer verification is manual until B1 (Availity eligibility) lands. Records/ROI, initial visit, care plan, and consents derive from the record and cannot be hand-set.</p>
         </Section>
@@ -1878,6 +1902,193 @@
       );
     };
 
+    // B1 — insurance eligibility, on the enrollment record (owner, 2026-10-19:
+    // "run the eligibility through this area, not the clinician EHR area").
+    // The biller runs the check in the Availity portal and records what it
+    // found: typed facts, never free text, never an X12 file. A MISMATCH keeps
+    // both values. Nothing here auto-verifies. Picking OpenEMR's insurance
+    // company is what lets a VERIFIED row be written to the chart. The words
+    // for each state come from the server; this only colours them.
+    const InsuranceCheckLine = ({ state, kinds }) => {
+      if (!state || !state.status) return null;
+      const tone = state.status === 'verified' ? 'bg-success-50 text-success-600'
+        : (state.status === 'mismatch' || state.status === 'inactive') ? 'bg-danger-50 text-danger-600' : 'bg-warning-50 text-warning-600';
+      const v = state.verification;
+      const label = (k) => ((kinds || []).find(x => x.value === k) || {}).label || k;
+      return (
+        <div className={`text-xs rounded px-2 py-1 mt-1 ${tone}`}>
+          {state.status === 'mismatch' && v
+            ? <span><strong>Coverage mismatch.</strong> Intake: {label(v.recorded.kind)} ({v.recorded.payerName}). Check found: {label(v.planTypeAsFound)} ({v.payerAsFound}).</span>
+            : state.label}
+        </div>
+      );
+    };
+
+    const EligibilityCard = ({ clientId }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [msg, setMsg] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [companies, setCompanies] = useState(null);
+      const [companiesErr, setCompaniesErr] = useState('');
+      const [form, setForm] = useState(null);
+      const load = useCallback(() => { api.insurance(clientId).then(setData).catch(e => setErr(e.message)); }, [clientId]);
+      useEffect(() => { setData(null); setErr(''); setForm(null); setMsg(null); load(); }, [load]);
+      const loadCompanies = () => { setCompaniesErr(''); api.insuranceCompanies().then(r => setCompanies(r.companies || [])).catch(e => setCompaniesErr(e.message)); };
+      if (err) return <Section title="Insurance eligibility"><div className="text-sm text-danger-600">{err}</div></Section>;
+      if (!data) return <Section title="Insurance eligibility"><div className="text-sm text-gray-400">Loading…</div></Section>;
+      const open = (p) => setForm({ rank: p.rank, status: 'verified', method: 'availity_portal', planTypeAsFound: p.kind, payerAsFound: '', checkedAt: '', note: '', openEmrInsuranceCompanyId: '' });
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const save = () => {
+        setBusy(true); setMsg(null);
+        api.recordInsuranceCheck(clientId, form)
+          .then(r => { setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' — ') }); setForm(null); load(); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      const primary = data.payers.find(p => p.rank === 'primary');
+      return (
+        <Section title="Insurance eligibility">
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            {primary && primary.state && (
+              <span className={`badge ${primary.state.status === 'verified' ? 'bg-success-50 text-success-600' : primary.state.status === 'mismatch' || primary.state.status === 'inactive' ? 'bg-danger-50 text-danger-600' : 'bg-warning-50 text-warning-600'}`}>
+                {primary.state.status === 'verified' ? 'Primary verified' : primary.state.status === 'mismatch' ? 'Primary: mismatch' : primary.state.status === 'inactive' ? 'Primary: inactive' : 'Primary not verified'}
+              </span>
+            )}
+            {data.qmb === 'yes' && <span className="badge bg-warning-50 text-warning-600">QMB: no patient cost sharing</span>}
+          </div>
+          {data.payers.length === 0 && <p className="text-sm text-warning-600">No coverage is recorded. Add it under Enrollment submission → Edit submission (insurance).</p>}
+          {(data.unresolved || []).map((u, i) => <p key={i} className="text-xs text-warning-600 mb-2">{u.message}</p>)}
+          <div className="space-y-3">
+            {data.payers.map((p, i) => (
+              <div key={i} className="border border-gray-200 rounded-lg p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong>{p.payerName}</strong>
+                  <span className="badge bg-gray-100 text-gray-600">{p.kindLabel}</span>
+                  {p.rank && <span className="badge bg-gray-100 text-gray-600">{p.rank === 'not_billed' ? 'Not billed' : p.rank}{p.rankSource === 'inferred' ? ' (assumed)' : ''}</span>}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  {p.memberId ? <span>Member ID <span className="font-mono">{p.memberId}</span></span> : 'No member ID on file'}
+                  {p.groupNumber ? ` · Group ${p.groupNumber}` : ''}
+                  {p.coverageStart ? ` · from ${p.coverageStart}` : ''}{p.coverageEnd ? ` to ${p.coverageEnd}` : ''}
+                </div>
+                {p.memberIdValid === false && <p className="text-xs text-danger-600 mt-1">This is not a valid Medicare number. Check it against the card.</p>}
+                {(p.missing || []).includes('coverageStart') && <p className="text-xs text-warning-600 mt-1">No coverage start date. OpenEMR needs one before this can go on the chart.</p>}
+                <InsuranceCheckLine state={p.state} kinds={data.kinds} />
+                {p.emrInsurance && <p className="text-xs text-gray-500 mt-1">{p.emrInsurance.written ? `On the OpenEMR chart as ${p.emrInsurance.type}.` : `Not on the OpenEMR chart: ${p.emrInsurance.error}`}</p>}
+                {p.rank && p.rank !== 'not_billed' && (!form || form.rank !== p.rank) && (
+                  <button className="btn btn-ghost text-xs mt-2" onClick={() => open(p)}>Record Eligibility Check</button>
+                )}
+                {form && form.rank === p.rank && (
+                  <div className="border-t border-gray-100 pt-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div><label className="label">Result</label>
+                        <select className="input" value={form.status} onChange={e => set('status', e.target.value)}>
+                          <option value="verified">Verified, active</option><option value="mismatch">Does not match intake</option><option value="inactive">Inactive</option>
+                        </select></div>
+                      <div><label className="label">Checked through</label>
+                        <select className="input" value={form.method} onChange={e => set('method', e.target.value)}>
+                          <option value="availity_portal">Availity portal</option><option value="x12_270">X12 270 (OpenEMR)</option>
+                        </select></div>
+                      <div><label className="label">Plan type found</label>
+                        <select className="input" value={form.planTypeAsFound} onChange={e => set('planTypeAsFound', e.target.value)}>
+                          {data.kinds.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+                        </select></div>
+                      <div><label className="label">Payer name found *</label>
+                        <input className="input" value={form.payerAsFound} maxLength={120} onChange={e => set('payerAsFound', e.target.value)} placeholder="As the check returned it" /></div>
+                      <div><label className="label">Date checked</label>
+                        <input className="input" type="date" value={form.checkedAt} onChange={e => set('checkedAt', e.target.value)} /></div>
+                      <div><label className="label">OpenEMR insurance company</label>
+                        {companies
+                          ? <select className="input" value={form.openEmrInsuranceCompanyId} onChange={e => set('openEmrInsuranceCompanyId', e.target.value)}>
+                              <option value="">Do not write to OpenEMR yet</option>
+                              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          : <button type="button" className="btn btn-ghost text-xs" onClick={loadCompanies}>Load OpenEMR List</button>}
+                        {companiesErr && <div className="text-xs text-warning-600 mt-1">{companiesErr}</div>}
+                      </div>
+                      <div className="sm:col-span-2"><label className="label">Note (optional)</label>
+                        <input className="input" value={form.note} maxLength={data.noteMax || 240} onChange={e => set('note', e.target.value)} /></div>
+                    </div>
+                    {form.status === 'verified' && form.planTypeAsFound !== p.kind && (
+                      <p className="text-xs text-danger-600 mt-2">The plan type found is not what intake recorded, so this will be saved as a mismatch with both values kept.</p>
+                    )}
+                    <div className="flex gap-2 mt-3">
+                      <button className="btn btn-primary" disabled={busy || !form.payerAsFound.trim()} onClick={save}>{busy ? 'Saving…' : 'Save Check'}</button>
+                      <button className="btn btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-success-600' : 'text-danger-600'}`}>{msg.text}</p>}
+          <p className="text-xs text-gray-400 mt-3">Run the check in the Availity portal and record what it found here. A visit cannot be submitted to billing until the primary payer is verified, unless an admin overrides it with a reason. Signing a note is never affected.</p>
+        </Section>
+      );
+    };
+
+    // Service line and rate changes waiting on the owner (owner, 2026-10-19).
+    // A manager or coordinator asks; the Super Admin approves or declines here.
+    // Recent answers stay visible for 30 days so the person who asked sees the
+    // outcome and, on a decline, the reason.
+    const ChangeRequests = ({ client, onDecided }) => {
+      const [busy, setBusy] = useState('');
+      const [declining, setDeclining] = useState('');
+      const [reason, setReason] = useState('');
+      const [msg, setMsg] = useState(null);
+      const rows = client.changeRequests || [];
+      if (!rows.length && !msg) return null;
+      const decide = (r, decision) => {
+        setBusy(r.id); setMsg(null);
+        api.decideChange(client.id, r.id, decision, decision === 'decline' ? reason.trim() : undefined)
+          .then(res => { setDeclining(''); setReason(''); onDecided(res.message); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(''));
+      };
+      const pending = rows.filter(r => r.status === 'pending');
+      const decided = rows.filter(r => r.status !== 'pending');
+      return (
+        <div className="mb-4 space-y-2">
+          {msg && <div className={`text-sm rounded-lg px-4 py-2 ${msg.ok ? 'bg-success-50 text-success-600' : 'bg-danger-50 text-danger-600'}`}>{msg.text}</div>}
+          {pending.map(r => (
+            <div key={r.id} className="bg-warning-50 text-warning-600 text-sm rounded-lg px-4 py-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <strong>Awaiting owner approval:</strong> {r.summary}
+                  <div className="text-xs mt-1 text-gray-600">
+                    Asked by {r.requestedBy.name} on {new Date(r.requestedAt).toLocaleString()}{r.note ? ` · “${r.note}”` : ''}
+                  </div>
+                  {!client.canApproveChanges && <div className="text-xs mt-1 text-gray-600">Nothing changes until it is approved.</div>}
+                </div>
+                {client.canApproveChanges && declining !== r.id && (
+                  <div className="flex gap-2 shrink-0">
+                    <button className="btn btn-primary !py-1 !px-3 text-xs" disabled={busy === r.id} onClick={() => decide(r, 'approve')}>Approve</button>
+                    <button className="btn btn-ghost !py-1 !px-3 text-xs" disabled={busy === r.id} onClick={() => { setDeclining(r.id); setReason(''); }}>Decline</button>
+                  </div>
+                )}
+              </div>
+              {client.canApproveChanges && declining === r.id && (
+                <div className="mt-2 flex gap-2 flex-wrap">
+                  <input className="input flex-1 min-w-[220px]" value={reason} onChange={e => setReason(e.target.value)}
+                    placeholder={`Why? ${r.requestedBy.name} will see this.`} />
+                  <button className="btn btn-ghost text-xs" disabled={busy === r.id || !reason.trim()} onClick={() => decide(r, 'decline')}>Decline</button>
+                  <button className="btn btn-ghost text-xs" disabled={busy === r.id} onClick={() => setDeclining('')}>Cancel</button>
+                </div>
+              )}
+            </div>
+          ))}
+          {decided.map(r => (
+            <div key={r.id} className={`text-xs rounded-lg px-4 py-2 ${r.status === 'approved' ? 'bg-success-50 text-success-600' : 'bg-gray-100 text-gray-600'}`}>
+              <strong>{r.status === 'approved' ? 'Approved' : 'Declined'}:</strong> {r.summary} · asked by {r.requestedBy.name}
+              {r.decidedBy ? `, ${r.status} by ${r.decidedBy.name} on ${new Date(r.decidedAt).toLocaleDateString()}` : ''}
+              {r.decisionNote ? ` · “${r.decisionNote}”` : ''}
+            </div>
+          ))}
+        </div>
+      );
+    };
+
     const DetailView = ({ clientId, user, onBack }) => {
       // THREE answers, because the API gives three shapes of "may write here",
       // and each is asked once so no control can drift from the route behind
@@ -1894,11 +2105,9 @@
       //                         months ago.
       //   canEditChecklist    — the clinical enrollment sequence (mark a step,
       //                         activate IHPC). Its routes are
-      //                         `requireClinicalWrite` — admin OR any licensed
-      //                         clinician — so the button was answering 403
-      //                         for a provider who could see it and not use
-      //                         it. Matched to that gate rather than left on
-      //                         the admin-only `canEdit`.
+      //                         `requireClinicalEnrollmentStep`: admin, a
+      //                         manager or care coordinator, or any licensed
+      //                         clinician (owner, 2026-10-19).
       const canEdit = canManageRole(user);
       const canEditChecklist = canEdit || !!(user && user.hasClinicalAccess);
       const [client, setClient] = useState(null);
@@ -1912,6 +2121,9 @@
       const [lineOpen, setLineOpen] = useState(false);
       const [lineChoice, setLineChoice] = useState('');
       const [lineResult, setLineResult] = useState(null);
+      // Kept here because a decision reloads the record, which remounts the
+      // approval banner and would drop a message held inside it.
+      const [decisionMsg, setDecisionMsg] = useState('');
       // Deliberately NOT `err`: that one REPLACES the whole detail view, so a
       // failed download would blank the client's record to show a sentence.
       const [downloadErr, setDownloadErr] = useState('');
@@ -1942,7 +2154,7 @@
         if (!lineChoice || lineChoice === client.serviceLineResolved) return;
         setBusy(true); setLineResult(null);
         api.setServiceLine(clientId, lineChoice)
-          .then(r => { setLineResult(r); setLineOpen(false); load(); })
+          .then(r => { setLineResult(r); setLineOpen(false); load(); })  // r.pending: sent to the owner
           .catch(e => setErr(e.message))
           .finally(() => setBusy(false));
       };
@@ -1962,6 +2174,19 @@
                 <span className="badge bg-gray-100 text-gray-600">{client.serviceLine || 'Service line —'}</span>
                 <span className="badge bg-gray-100 text-gray-600">{client.careTierLabel || 'Care tier —'}</span>
                 <span className="badge bg-gray-100 text-gray-600">{client.source === 'offline' ? 'Offline-onboarded' : 'In-app'}</span>
+                {(() => {
+                  // Re-read on every load, so it turns green the moment the
+                  // last required consent is signed or recorded on paper.
+                  const req = (client.consents || []).filter(c => c.required && !c.retained && !c.inactive);
+                  const signed = req.filter(c => c.satisfied || c.status === 'na').length;
+                  if (!req.length) return null;
+                  return <span className={`badge ${signed === req.length ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'}`}>
+                    {signed === req.length ? 'All consents signed' : `Consents ${signed}/${req.length}`}
+                  </span>;
+                })()}
+                {(client.changeRequests || []).some(r => r.status === 'pending') && (
+                  <span className="badge bg-warning-50 text-warning-600">Awaiting owner approval</span>
+                )}
               </div>
             </div>
             {/* The workflow writes are admin-only at the API. A button that is
@@ -1979,12 +2204,15 @@
               ) : (
                 <span className="badge bg-gray-100 text-gray-600">
                   {canEditSubmission
-                    ? 'You can correct this submission — approving and the service line are an admin’s'
+                    ? 'You can correct this submission. Approving and the service line are the office’s'
                     : 'Read-only — an admin or clinician makes changes here'}
                 </span>
               )}
             </div>
           </div>
+
+          {decisionMsg && <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-2 mb-4">{decisionMsg}</div>}
+          <ChangeRequests client={client} onDecided={(m) => { setDecisionMsg(m || ''); load(); }} />
 
           {approveErr && (
             <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3 mb-4">
@@ -2062,7 +2290,7 @@
           )}
 
           {lineResult && (
-            <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-3 mb-4">
+            <div className={`${lineResult.pending ? 'bg-warning-50 text-warning-600' : 'bg-success-50 text-success-600'} text-sm rounded-lg px-4 py-3 mb-4`}>
               <strong>{lineResult.message}</strong>
               {!!(lineResult.added || []).length && (
                 <div className="mt-1">Now awaiting signature: {lineResult.added.length} document(s). The client sees them at their next portal login.</div>
@@ -2081,6 +2309,9 @@
                 queues the medical packet rather than reopening what is already signed.
                 A document already signed is never unsigned by this change.
               </p>
+              {client.changesNeedApproval && (
+                <p className="text-sm text-warning-600 mb-3">This goes to the owner for approval. Nothing changes until it is approved.</p>
+              )}
               <div className="space-y-2">
                 {[
                   { value: 'PHC',  label: 'Home care only (PHC)',  hint: 'Personal care services. Home-care packet only.' },
@@ -2098,7 +2329,7 @@
                 ))}
               </div>
               <button className="btn btn-primary mt-3" disabled={busy || !lineChoice || lineChoice === client.serviceLineResolved} onClick={submitServiceLine}>
-                Save Service Line
+                {client.changesNeedApproval ? 'Send for Approval' : 'Save Service Line'}
               </button>
               {!!(client.serviceLineHistory || []).length && (
                 <div className="text-xs text-gray-500 mt-4">
@@ -2217,6 +2448,9 @@
 
             <Section title="Consents">
               {downloadErr && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{downloadErr}</div>}
+              {client.consents.filter(c => c.outstanding).length === 0 && (
+                <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-2 mb-3">Every required consent is signed.</div>
+              )}
               <p className="text-xs text-gray-400 mb-2">
                 Outstanding: {client.consents.filter(c => c.outstanding).length === 0
                   ? 'none'
@@ -2243,7 +2477,7 @@
                         <div key={g.stage}>
                           <div className="flex items-center justify-between mb-2">
                             <div className="text-xs uppercase tracking-wide text-gray-500 font-medium">{g.label}</div>
-                            <span className="badge bg-gray-100 text-gray-500">{done}/{items.length}</span>
+                            <span className={`badge ${done === items.length ? 'bg-success-50 text-success-600' : 'bg-gray-100 text-gray-500'}`}>{done === items.length ? 'Complete' : `${done}/${items.length}`}</span>
                           </div>
                           <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} onDownloadError={setDownloadErr} />)}</div>
                         </div>
@@ -2311,6 +2545,11 @@
             <div className="lg:col-span-2">
               <FamilyInvites clientId={clientId} isAdmin={canManageRole(user)} />
             </div>
+            {user && (user.role === 'admin' || user.isManager) && (
+              <div className="lg:col-span-2">
+                <EligibilityCard clientId={clientId} />
+              </div>
+            )}
             {user && (user.role === 'admin' || user.isManager) && (
               <div className="lg:col-span-2">
                 <BillingCard clientId={clientId} />
