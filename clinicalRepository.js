@@ -406,6 +406,9 @@ const buildChartDocumentIndex = (input) => {
       inChart: !!u.emrFiled,
       // Sent by someone with no OpenEMR sign-in; files when a clinician opens the chart.
       emrWaiting: !u.emrFiled && !!u.emrFilingWaitingSince,
+      // Owner, 2026-10-16: attached by staff, not yet approved by a care
+      // coordinator or the admin. Shown on the chart, held out of OpenEMR.
+      awaitingApproval: !!u.awaitingApproval,
       // Only an UPLOAD row can be read into proposals: it is the one kind that
       // corresponds to a stored file the extractor can fetch. A consent, a care
       // plan and a record release are documents this app GENERATED from the
@@ -2673,11 +2676,11 @@ const lastVisitDateOf = (encounters) => {
 // looks like and what order the rows go in.
 
 const TIMELINE_KINDS = Object.freeze([
-  'visit', 'message', 'medication', 'order', 'result', 'referral', 'document', 'hospitalization'
+  'visit', 'message', 'message_note', 'call', 'medication', 'order', 'result', 'referral', 'document', 'hospitalization'
 ]);
 
 const TIMELINE_ICONS = Object.freeze({
-  visit: 'home', message: 'message', medication: 'pill', order: 'flask',
+  visit: 'home', message: 'message', message_note: 'notes', call: 'phone', medication: 'pill', order: 'flask',
   result: 'report-medical', referral: 'share', document: 'file', hospitalization: 'building-hospital'
 });
 
@@ -2702,7 +2705,8 @@ const timelineDate = (v) => {
 };
 
 const buildTimeline = ({
-  encounters, appointments, messages, prescriptions, orders, results, documents, kinds
+  encounters, appointments, messages, prescriptions, orders, results, documents, kinds,
+  messageNotes, calls
 }) => {
   const rows = [];
   let undated = 0;
@@ -2721,6 +2725,15 @@ const buildTimeline = ({
     a.title || 'Appointment', [a.state, a.location].filter(Boolean).join(' · '), a.eid));
   (messages || []).forEach(m => push('message', m.date || m.createdAt,
     m.subject || 'Message', m.channel || null, m.id));
+  // A message note (2026-10-19): one patient-facing conversation on one day.
+  // Its words are opened on request; the row says only that it exists and
+  // whether it has reached OpenEMR. Placed on the day itself, not a time.
+  const FILING_WORDS = { open: 'Today, still open', waiting: 'Files to OpenEMR next time the chart is opened', filed: 'Filed to OpenEMR', changed: 'Changed since filing; files again as a corrected copy' };
+  (messageNotes || []).forEach(n => push('message_note', n.date,
+    `${n.channelLabel} message note`, [`${n.count} message${n.count === 1 ? '' : 's'}`, FILING_WORDS[n.filing]].filter(Boolean).join(' · '), n.key));
+  const CALL_WORDS = { waiting: 'Waiting to be documented', started: 'Being written up', documented: 'Documented', dismissed: 'Dismissed: no note needed' };
+  (calls || []).forEach(c => push('call', c.startedAt,
+    `Phone call${c.minutes ? ` · ${c.minutes} min` : ''}`, [c.withName, CALL_WORDS[c.status]].filter(Boolean).join(' · '), c.id));
   (prescriptions || []).forEach(rx => push('medication', rx.date || rx.createdAt,
     rx.drug || rx.name || 'Medication', [rx.dose, rx.kind].filter(Boolean).join(' · '), rx.id));
   (orders || []).forEach(o => {

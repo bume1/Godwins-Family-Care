@@ -88,6 +88,12 @@
     '.gfcm .mchip.acknowledged{background:#e7edf0;color:var(--navy)}',
     '.gfcm .mchip.responded{background:#e3f0ea;color:var(--green)}',
     '.gfcm .mchip.closed{background:#eee;color:#555}',
+    // Yellow: the patient (or family) sees this (owner, 2026-10-16).
+    '.gfcm .mpt{display:inline-block;border-radius:20px;padding:2px 9px;font-size:11.5px;font-weight:700;background:#fdf3c4;color:#7a5a00;border:1px solid #f2d36b;white-space:nowrap}',
+    '.gfcm .mptbar{background:#fdf6d8;border:1px solid #f2d36b;color:#6b4f00;border-radius:9px;padding:9px 11px;font-size:13.5px;margin:0 0 10px}',
+    '.gfcm .mstart{display:flex;flex-direction:column;gap:8px}',
+    '.gfcm .mstart .mbtn{text-align:left;display:flex;flex-direction:column;align-items:flex-start;gap:3px;white-space:normal}',
+    '.gfcm .mstart .mdesc{font-size:12.5px;font-weight:400;color:#6b6458}',
     '.gfcm .mbub{border-radius:18px;padding:10px 14px;margin-bottom:4px;max-width:78%}',
     '.gfcm .mwrap{display:flex;flex-direction:column;margin-bottom:10px}',
     '.gfcm .mwrap.me{align-items:flex-end}',
@@ -170,6 +176,14 @@
     ['insertUnorderedList', '&bull; List', 'Bulleted list'], ['insertOrderedList', '1. List', 'Numbered list'], ['heading', 'H', 'Heading']
   ];
   function NF() { return global.GFC_NOTE_FORMAT || null; }
+  // The yellow badge (owner, 2026-10-16): 'yes' the patient sees it, 'choose'
+  // it can include the patient. Staff only; the patient side never sees it.
+  function patientBadge(state, kind) {
+    if (!state.staffView) return '';
+    if (kind === 'yes') return ' <span class="mpt">Patient sees this</span>';
+    if (kind === 'choose') return ' <span class="mpt">Can include the patient</span>';
+    return '';
+  }
   function newDraft() { return { markup: '', plain: '', files: [] }; }
   function fmtSize(n) {
     if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
@@ -362,7 +376,13 @@
   // (`withPatient`, from the channel's participants); this only filters on it.
   function inAudience(state, x) {
     if (!state.audience) return true;
-    return state.audience === 'patient' ? !!x.withPatient : !x.withPatient;
+    // A THREAD files by whether the patient is actually on it (owner,
+    // 2026-10-16): a Care Team note with the patient left off is a team note.
+    // A CHANNEL where the sender chooses (Care Team) is offered on both tabs.
+    var withPatient = typeof x.patientFacing === 'boolean' ? x.patientFacing : !!x.withPatient;
+    if (x.patientSees === 'choose') return true;
+    if (x.patientSees === 'no') withPatient = false;
+    return state.audience === 'patient' ? withPatient : !withPatient;
   }
 
   function renderList(state) {
@@ -378,7 +398,7 @@
       html += threads.map(function (t) {
         return '<button class="mrow" data-open="' + esc(t.id) + '">' +
           '<span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><span class="mbody">' +
-          '<div class="mtop"><span class="mlabel">' + esc(t.channelLabel) + '</span>' +
+          '<div class="mtop"><span class="mlabel">' + esc(t.channelLabel) + patientBadge(state, t.patientFacing ? 'yes' : null) + '</span>' +
           '<span class="mmu">' + esc(fmtWhen(t.lastMessageAt)) +
           (t.unread ? ' <span class="mbadge">' + t.unread + '</span>' : '') + '</span></div>' +
           '<div class="mmu">' + esc(t.clientName || '') +
@@ -395,9 +415,14 @@
     // passes hostStartsMessages, so the list does not say it twice.
     if (state.hostStartsMessages) return html;
     if (openable.length) {
+      // Each button says who sees it (owner, 2026-10-16), so nobody writes a
+      // team note where the patient reads it.
       html += '<div class="mcard"><h3>Start a Message</h3>' +
-        '<div class="mbtns">' + openable.map(function (c) {
-          return '<button class="mbtn ghost" data-compose="' + esc(c.id) + '">' + esc(c.label) + '</button>';
+        '<div class="mstart">' + openable.map(function (c) {
+          return '<button class="mbtn ghost" data-compose="' + esc(c.id) + '">' +
+            '<span>' + esc(c.label) + patientBadge(state, c.patientSees) + '</span>' +
+            (c.audienceNote ? '<span class="mdesc">' + esc(c.audienceNote) + '</span>' : '') +
+            '</button>';
         }).join('') + '</div></div>';
     }
 
@@ -422,6 +447,7 @@
     return '<div class="mcard">' +
       '<h3>' + esc(c.label || 'New Message') + '</h3>' +
       '<p class="mmu">' + esc(c.blurb || '') + '</p>' +
+      (state.staffView && c.patientSees === 'yes' ? '<div class="mptbar"><b>The patient sees what you write here.</b> For a note to the team only, use Care Team without the patient, or Clinical Oversight.</div>' : '') +
       (c.code ? '<div class="mnote"><b>Before you send</b>' + esc(c.reason || '') + '</div>' : '') +
       renderComposeClient(state, c) +
       renderRecipients(state, c) +
@@ -484,6 +510,18 @@
     // Chat bubbles (owner mockup 12): theirs on the left, yours on the right,
     // each with its sender and time. The attribution line stays on every
     // bubble, because a POA's message must say whose behalf it is on.
+    // Who is in this conversation, as the server lists them (owner,
+    // 2026-10-16): name and what each person is, from their account.
+    if (state.people && state.people.length) {
+      html += '<div class="mmu" data-people="1" style="margin:-4px 0 10px">In this conversation: ' +
+        state.people.map(function (p) {
+          return esc(p.you ? 'You' : p.name) + ' (' + esc(p.label) + ')';
+        }).join(', ') + '</div>';
+    }
+    if (state.staffView && state.patientFacing) {
+      html += '<div class="mptbar"><b>The patient sees this conversation.</b>' +
+        (state.staffResponderName ? ' ' + esc(state.staffResponderName) + ' answers the patient here.' : '') + '</div>';
+    }
     html += '<div class="mlog">' + state.messages.map(function (m) {
       var side = m.mine ? 'me' : 'them';
       var ed = state.editing && state.editing.id === m.id ? state.editing : null;
@@ -499,8 +537,9 @@
       return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
         body +
-        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.edited ? ' · Edited' : '') +
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.via === 'sms' ? ' · By text' : '') + (m.edited ? ' · Edited' : '') +
         (state.canEdit && !ed ? ' · <button class="mbtn ghost" data-edit-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px">Edit</button>' : '') +
+        (state.canDeleteMessage && !ed ? ' · <button class="mbtn ghost" data-delete-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px;color:#b42318">Delete</button>' : '') +
         '</div></div>';
     }).join('') + '</div>';
 
@@ -564,6 +603,18 @@
         }));
     };
 
+    // Delete ONE message: the super admin's alone; the server says who may and
+    // keeps the message in the office record (owner, 2026-10-16).
+    root.querySelectorAll('[data-delete-msg]').forEach(function (b) {
+      b.onclick = function () {
+        var reason = window.prompt('Delete this message for everyone? It is removed from every screen and kept in the office record. Say why:');
+        if (reason === null) return;
+        if (!String(reason).trim()) { state.error = 'Say why this message is being deleted.'; render(state); return; }
+        b.disabled = true;
+        go(api(state, '/api/messaging/messages/' + b.getAttribute('data-delete-msg'), { method: 'DELETE', body: { reason: reason } })
+          .then(function () { state.notice = 'Message deleted.'; return openThread(state, state.thread.id); }));
+      };
+    });
     root.querySelectorAll('[data-edit-msg]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-edit-msg');
@@ -714,6 +765,10 @@
       state.cannotPostReason = res.cannotPostReason;
       state.canDelete = !!res.canDelete;
       state.canEdit = !!res.canEdit;
+      state.canDeleteMessage = !!res.canDeleteMessage;
+      state.patientFacing = !!res.patientFacing;
+      state.staffResponderName = res.staffResponderName || null;
+      state.people = res.people || [];
       state.view = 'thread';
       state.loading = false;
       render(state);
@@ -733,6 +788,7 @@
                        : api(state, '/api/messaging/clients').catch(function () { return { clients: [] }; })
     ]).then(function (r) {
       state.threads = r[0].threads || [];
+      state.staffView = !!r[0].staffView;
       state.channels = r[1].channels || [];
       state.pickerClients = r[2].clients || [];
       state.loading = false;
