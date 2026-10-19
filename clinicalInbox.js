@@ -30,7 +30,8 @@ const KINDS = Object.freeze({
   VISIT_LOG_REVIEW: 'visit_log_review',
   ENCOUNTER_UNSIGNED: 'encounter_unsigned',
   ENCOUNTER_AWAITING_BILLING: 'encounter_awaiting_billing',
-  INTERNAL_REFERRAL: 'internal_referral'
+  INTERNAL_REFERRAL: 'internal_referral',
+  PHONE_CALL: 'phone_call'
 });
 
 const KIND_LABELS = Object.freeze({
@@ -40,7 +41,8 @@ const KIND_LABELS = Object.freeze({
   [KINDS.VISIT_LOG_REVIEW]: 'Caregiver note awaiting review',
   [KINDS.ENCOUNTER_UNSIGNED]: 'Encounter documented but not signed',
   [KINDS.ENCOUNTER_AWAITING_BILLING]: 'Signed note awaiting billing',
-  [KINDS.INTERNAL_REFERRAL]: 'Referral from the team'
+  [KINDS.INTERNAL_REFERRAL]: 'Referral from the team',
+  [KINDS.PHONE_CALL]: 'Phone call to document'
 });
 
 const iso = (v) => {
@@ -89,7 +91,8 @@ const item = (o) => ({
 });
 
 const buildInbox = ({
-  viewer, encounterRecords, attestations, orders, carePlanClients, visitLogs, patientNames, now
+  viewer, encounterRecords, attestations, orders, carePlanClients, visitLogs, patientNames, now,
+  calls, canDocumentCall, clinicianNamesFor
 } = {}) => {
   const at = iso(now) || new Date().toISOString();
   const v = viewerAbilities(viewer);
@@ -239,6 +242,31 @@ const buildInbox = ({
       actionable: mine,
       waitingOn: mine ? 'you' : (to.name || 'the colleague it was referred to'),
       detail: `${o.status === 'accepted' ? 'Accepted. ' : ''}From ${from}${r.reason ? `: ${r.reason}` : ''}`
+    }));
+  }
+
+  // 8. A call on the office line with a patient or their POA (owner,
+  //    2026-10-19), waiting to be written up as a Phone Call note. Whether the
+  //    viewer may write that note type is the SERVER's answer
+  //    (`canDocumentCall`, from appointmentTypes.canDocumentType), never a
+  //    role list here. It waits on the patient's assigned clinicians by name;
+  //    one already opened waits on whoever opened it.
+  for (const c of (calls || [])) {
+    if (!c || c.pending_summary) continue;
+    if (c.status !== 'waiting' && c.status !== 'started') continue;
+    const startedByMe = c.status === 'started' && !!v.id && String(c.started_by_id) === String(v.id);
+    const names = typeof clinicianNamesFor === 'function' ? clinicianNamesFor(c.client_id) : [];
+    const waitingOn = c.status === 'started'
+      ? (startedByMe ? 'you' : (c.started_by_name || 'the clinician who opened it'))
+      : (canDocumentCall ? 'you' : (names.length ? names.join(', ') : "the patient's clinician"));
+    items.push(item({
+      kind: KINDS.PHONE_CALL,
+      status: c.status,
+      id: c.id, clientId: c.client_id, patientName: nameOf(c.client_id),
+      at: c.started_at || c.created_at,
+      actionable: c.status === 'started' ? startedByMe : !!canDocumentCall,
+      waitingOn,
+      detail: (c.status === 'started' ? `Opened by ${c.started_by_name || 'a clinician'}, not saved yet. ` : '') + (c.detail || '')
     }));
   }
 

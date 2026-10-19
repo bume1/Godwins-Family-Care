@@ -310,6 +310,9 @@
       patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
       patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
       timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
+      messageNote: (id, key) => authedFetch(`/api/clinical/patients/${id}/message-notes/${encodeURIComponent(key)}`),
+      documentCall: (callId) => authedFetch(`/api/clinical/calls/${encodeURIComponent(callId)}/document`, { method: 'POST', body: '{}' }),
+      dismissCall: (callId, reason) => authedFetch(`/api/clinical/calls/${encodeURIComponent(callId)}/dismiss`, { method: 'POST', body: JSON.stringify({ reason }) }),
       preVisit: (id, eid) => authedFetch(`/api/clinical/patients/${id}/pre-visit${eid ? `?eid=${encodeURIComponent(eid)}` : ''}`),
       // PROPOSES an order. It never applies one — accepting rebooks through the
       // existing appointment routes so the patient is told.
@@ -1368,7 +1371,8 @@
       visit_log_review: 'ti-notes',
       encounter_unsigned: 'ti-file-pencil',
       encounter_awaiting_billing: 'ti-receipt',
-      internal_referral: 'ti-arrow-forward-up'
+      internal_referral: 'ti-arrow-forward-up',
+      phone_call: 'ti-phone'
     };
     // 2026-10-12 redesign (owner mockup 7): the same items, filed under
     // All · Co-sign · Orders · Other. The grouping is by KIND only; who may act
@@ -1407,7 +1411,22 @@
       };
       // Every row opens the place where its work is done: an encounter on its
       // note, a care plan on the Care Plan tab, anything else on the chart.
+      // A call (2026-10-19) opens as a Phone Call note already filled in, on
+      // the chart's Visit tab, where it is saved and signed like any note.
+      const documentCall = (i) => {
+        setRowBusy(i.id); setRowErr({});
+        api.documentCall(i.id).then(r => onOpenChart(r.clientId, { tab: 'visit' }))
+          .catch(e => setRowErr({ [i.id]: e.message })).finally(() => setRowBusy(''));
+      };
+      const dismissCall = (i) => {
+        const reason = window.prompt('Why does this call not need a note? (for example: a scheduling call)');
+        if (!reason || !reason.trim()) return;
+        setRowBusy(i.id); setRowErr({});
+        api.dismissCall(i.id, reason.trim()).then(load)
+          .catch(e => setRowErr({ [i.id]: e.message })).finally(() => setRowBusy(''));
+      };
       const open = (i) => {
+        if (i.kind === 'phone_call') return i.actionable ? documentCall(i) : onOpenChart(i.clientId, { tab: 'timeline' });
         if (i.encounterUuid) return onOpenEncounter(i.clientId, i.encounterUuid);
         return onOpenChart(i.clientId, i.kind === 'care_plan_co_sign' ? { tab: 'careplan' } : i.kind === 'internal_referral' ? { tab: 'referrals' } : undefined);
       };
@@ -1485,9 +1504,18 @@
                         <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap"
                           onClick={() => { setCompleting(i.id); setDoneNote(''); }}>Mark Complete</button>
                       )}
-                      <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap" onClick={() => open(i)}>
-                        {i.encounterUuid ? 'Open Encounter' : i.kind === 'care_plan_co_sign' ? 'Open Care Plan' : 'Open Chart'}
-                      </button>
+                      {i.kind === 'phone_call' && i.actionable && (
+                        <button className="btn !py-1 !px-2.5 text-[12px] whitespace-nowrap" disabled={rowBusy === i.id} onClick={() => documentCall(i)}>
+                          <i className="ti ti-file-pencil" />{i.status === 'started' ? 'Resume Note' : 'Document Call'}</button>
+                      )}
+                      {i.kind === 'phone_call' && i.actionable && i.status === 'waiting' && (
+                        <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap" disabled={rowBusy === i.id} onClick={() => dismissCall(i)}>Dismiss</button>
+                      )}
+                      {!(i.kind === 'phone_call' && i.actionable) && (
+                        <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap" onClick={() => open(i)}>
+                          {i.encounterUuid ? 'Open Encounter' : i.kind === 'care_plan_co_sign' ? 'Open Care Plan' : 'Open Chart'}
+                        </button>
+                      )}
                     </div>
                   </div>
                   {completing === i.id && (
@@ -2348,7 +2376,7 @@
 
     // ---- D5 TIMELINE -------------------------------------------------------
     const TIMELINE_LABELS = {
-      visit: 'Visits', message: 'Messages', medication: 'Medications', order: 'Orders',
+      visit: 'Visits', message: 'Messages', message_note: 'Message Notes', call: 'Calls', medication: 'Medications', order: 'Orders',
       result: 'Results', referral: 'Referrals', document: 'Documents', hospitalization: 'Hospitalizations'
     };
 
@@ -2364,6 +2392,12 @@
         return () => { live = false; };
       }, [patient && patient.id, filter.join(',')]);
       const toggle = (k) => setFilter(f => f.includes(k) ? f.filter(x => x !== k) : [...f, k]);
+      // A message note's words open on request (2026-10-19), never on the list.
+      const [noteView, setNoteView] = useState(null);
+      const openNote = (key) => {
+        setNoteView({ loading: true });
+        api.messageNote(patient.id, key).then(r => setNoteView(r)).catch(e => setNoteView({ error: e.message }));
+      };
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       return (
         <div className="card">
@@ -2401,11 +2435,26 @@
                 <div className="w-[84px] shrink-0 text-[12px] text-stone-500 pt-0.5">{r.date}</div>
                 <div className="w-5 shrink-0 text-accent pt-0.5"><i className={`ti ti-${r.icon}`} /></div>
                 <div className="min-w-0">
-                  <div className="text-[13px] font-semibold text-stone-800">{r.title}</div>
+                  {r.kind === 'message_note'
+                    ? <button type="button" className="text-[13px] font-semibold text-primary underline text-left" onClick={() => openNote(r.id)}>{r.title}</button>
+                    : <div className="text-[13px] font-semibold text-stone-800">{r.title}</div>}
                   {r.detail && <div className="text-[11.5px] text-stone-500">{r.detail}</div>}
                 </div>
               </div>
             ))}
+            {noteView && (
+              <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={() => setNoteView(null)}>
+                <div className="card w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  <div className="card-h"><h2><i className="ti ti-notes mr-1 text-accent" />{noteView.title || 'Message note'}</h2>
+                    <button className="btn ghost !py-1 !px-2.5 text-[12px] ml-auto" onClick={() => setNoteView(null)}>Close</button></div>
+                  <div className="p-4 overflow-auto">
+                    {noteView.loading && <p className="text-sm text-stone-500">Loading…</p>}
+                    {noteView.error && <p className="text-sm text-red-600">{noteView.error}</p>}
+                    {noteView.text && <pre className="whitespace-pre-wrap text-[13px] font-sans text-stone-800">{noteView.text}</pre>}
+                  </div>
+                </div>
+              </div>
+            )}
             {/* "Nothing here" and "four things could not be placed" are
                 different facts, and only one of them is a data gap. */}
             {data && data.undated > 0 && (

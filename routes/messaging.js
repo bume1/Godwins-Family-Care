@@ -37,6 +37,7 @@ const msg = require('../messagingRepository');
 const caregiverRepo = require('../caregiverRepository');
 const nf = require('../public/note-format.js');   // the message formatting: plain text for escalations and previews
 const quoSms = require('../quoSms');   // Care Team messages by text (owner, 2026-10-15)
+const chartComms = require('../chartCommunications');   // calls into the chart (owner, 2026-10-19)
 
 module.exports = function createMessagingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
@@ -1132,7 +1133,64 @@ module.exports = function createMessagingRoutes(deps) {
     return { hit: hits.find(h => !h.isPoa) || hits[0] };
   }
 
+  // ==========================================================================
+  // Calls on the office line become calls waiting to be documented (owner,
+  // 2026-10-19). Only an ANSWERED call with a number that belongs to one
+  // patient (theirs, or a designated POA's); a missed call, a voicemail, a
+  // number nobody has or two patients share is recorded as handled and goes
+  // no further, never guessed. Quo sends the AI summary as a second event; it
+  // fills in whichever half arrived first. Nothing reaches OpenEMR from here:
+  // a clinician writes and signs the note (chartCommunications.js).
+  // ==========================================================================
+  async function handleQuoCall(evt) {
+    const ev = chartComms.readCallEvent(evt);
+    if (!ev) return { outcome: 'ignored' };
+    const key = `call:${ev.type}:${ev.callId}`;
+    const events = await readRows('sms_events');
+    if (events.some(e => e && e.key === key)) return { outcome: 'duplicate' };
+    const record = async (outcome, extra = {}) => {
+      const list = await readRows('sms_events');
+      list.push({ id: uuidv4(), key, quo_call_id: ev.callId, kind: 'call', outcome, at: nowIso(), ...extra });
+      await db.set('sms_events', list);
+      return { outcome, ...extra };
+    };
+    const calls = await readRows('phone_calls');
+    const i = calls.findIndex(c => c && c.quo_call_id === ev.callId);
+    if (ev.type === 'call.summary.completed') {
+      if (i === -1) {
+        // The summary came first: keep it until the call itself arrives.
+        calls.push({ id: uuidv4(), quo_call_id: ev.callId, pending_summary: true, summary: ev.summary, next_steps: ev.nextSteps, created_at: nowIso(), updated_at: nowIso() });
+        await db.set('phone_calls', calls);
+        return record('summary_waiting');
+      }
+      calls[i] = chartComms.mergeSummary(calls[i], ev);
+      await db.set('phone_calls', calls);
+      return record('summary_added', { callRowId: calls[i].id });
+    }
+    if (ev.officePhone !== quoSms.fromNumber()) return record('other_line');
+    if (!ev.answered) return record('not_answered');
+    const who = resolveTexter(ev.patientPhone, await getUsers());
+    if (!who.hit) {
+      if (i !== -1 && calls[i].pending_summary) { calls.splice(i, 1); await db.set('phone_calls', calls); }
+      return record(who.outcome);
+    }
+    const row = chartComms.buildCallRow({ id: i !== -1 ? calls[i].id : uuidv4(), ev, hit: who.hit, at: nowIso() });
+    if (i !== -1 && calls[i].pending_summary) {
+      row.summary = calls[i].summary || []; row.next_steps = calls[i].next_steps || [];
+      calls[i] = row;
+    } else if (i !== -1) {
+      return record('duplicate_call');
+    } else {
+      calls.push(row);
+    }
+    await db.set('phone_calls', calls);
+    await logActivity('quo-webhook', 'Quo', 'phone_call_recorded', 'client', row.client_id,
+      { callRowId: row.id, direction: row.direction, withPoa: row.with_poa, durationSec: row.duration_sec });
+    return record('call_waiting', { clientId: row.client_id, callRowId: row.id });
+  }
+
   async function handleQuoEvent(evt) {
+    if (evt && /^call\./.test(String(evt.type || ''))) return handleQuoCall(evt);
     const ev = quoSms.readEvent(evt);
     if (!ev || !ev.id) return { outcome: 'ignored' };
     if (ev.officePhone !== quoSms.fromNumber()) return { outcome: 'other_line' };
