@@ -7450,12 +7450,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       generated: true
     } : null;
 
-    const faceSheet = !canOpenCopy ? null : {
-      title: 'Client Information Face Sheet',
-      description: 'Your contacts, medical team, directive and access details on one page',
-      url: '/api/gfc/face-sheet.pdf',
-      generated: true
-    };
+
     // The other direction: what we still need FROM them, and what they sent.
     const uploads = (await db.get('client_document_uploads')) || [];
     const requests = (await db.get('client_document_requests')) || [];
@@ -7464,7 +7459,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     const liveUploadLink = uploadLinks.liveLinkFor(client.id, links);
 
     res.json({
-      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet, offlinePacketFiles,
+      signedConsents, documents: clientDocs, enrollmentPacket, offlinePacketFiles,
       // Every executed consent in one download.
       consentPacketZip: hasSignedConsents && canOpenCopy ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null,
       checklist,
@@ -7670,27 +7665,6 @@ const serveStoredDocument = async (res, row, actor) => {
   res.setHeader('Content-Disposition', contentDisposition('inline', row.fileName));
   res.send(buf);
 };
-
-// GET /api/gfc/face-sheet.pdf — the Client Information Face Sheet.
-//
-// Every consent points at it ("recorded once on your Client Information Face
-// Sheet") and it did not exist anywhere in the app. It is assembled from the
-// client record and intake rather than collected again, which is the entire
-// reason those consents stopped repeating the questions.
-app.get('/api/gfc/face-sheet.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents, async (req, res) => {
-  try {
-    const client = await resolveGfcClientRecord(req.user);
-    if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, {});
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', contentDisposition('inline', `face-sheet-${client.slug || client.id}.pdf`));
-    res.send(pdf);
-  } catch (error) {
-    console.error('Face sheet PDF error:', error);
-    res.status(500).json({ error: 'Failed to generate the face sheet' });
-  }
-});
 
 // A client may download a document THEY signed at any point, including before
 // enrollment is complete. `requireEnrolledClient` is the wrong gate here: a
@@ -9127,6 +9101,26 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
   } catch (error) {
     console.error('Chart document read error:', error);
     res.status(500).json({ error: 'Failed to open that document' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/face-sheet.pdf — the Client Information
+// Face Sheet, for the clinical team (owner, 2026-10-19: "move it from the
+// patient to the staff side"). The patient no longer downloads it; the staff
+// print it for a home visit, an ER transfer or a facility. Built from the client
+// record by the same generator, on the same read gate as every chart read.
+app.get('/api/clinical/patients/:clientId/face-sheet.pdf', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, { by: 'staff' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', `face-sheet-${client.slug || client.id}.pdf`));
+    res.send(pdf);
+  } catch (error) {
+    console.error('Face sheet PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the face sheet' });
   }
 });
 

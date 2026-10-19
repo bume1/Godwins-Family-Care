@@ -1713,6 +1713,43 @@
       );
     };
 
+    // The Client Information Face Sheet, opened with the token and handed to
+    // the browser as a blob (never a link carrying the session). A pop-up opened
+    // after an await is blocked on some phones, so a download is the fallback.
+    const FaceSheetItem = ({ clientId, onDone }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const open = async () => {
+        setBusy(true); setErr('');
+        try {
+          const res = await fetch(`${API_URL}/api/clinical/patients/${encodeURIComponent(clientId)}/face-sheet.pdf`,
+            { headers: { Authorization: `Bearer ${getToken()}` } });
+          if (!res.ok) {
+            let msg = 'The face sheet could not be opened.';
+            try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* non-JSON body */ }
+            setErr(msg); return;
+          }
+          const url = URL.createObjectURL(await res.blob());
+          if (!window.open(url, '_blank')) {
+            const a = document.createElement('a'); a.href = url; a.download = 'face-sheet.pdf';
+            document.body.appendChild(a); a.click(); a.remove();
+          }
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          onDone && onDone();
+        } catch (e) { setErr('The face sheet could not be opened.'); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div>
+          <button className="w-full text-left px-3 py-2 rounded-lg text-[13px] text-primary font-semibold hover:bg-cream flex items-center gap-2"
+            onClick={open} disabled={busy}>
+            <i className="ti ti-id" />{busy ? 'Opening…' : 'Face Sheet'}
+          </button>
+          {err && <p className="px-3 pb-1 text-[11.5px] text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
     const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved, onMessage }) => {
       const [open, setOpen] = useState(false);
       const [menu, setMenu] = useState(false);
@@ -1766,6 +1803,9 @@
                     onClick={() => { setOpen(true); setMenu(false); }}>
                     <i className="ti ti-address-book" />Contact Details
                   </button>
+                  {/* Staff-only since 2026-10-19 (owner): every chart viewer can
+                      print it, so it is a read, not behind canWrite. */}
+                  {patient && patient.id && <FaceSheetItem clientId={patient.id} onDone={() => setMenu(false)} />}
                   {patient && patient.id && access.canWrite && (
                     <div className="px-3 pb-1"><RefreshPortalChart key={patient.id} clientId={patient.id} /></div>
                   )}

@@ -141,7 +141,9 @@ test('the enrollment view groups consents by the visit they are signed at', () =
 test('the face sheet exists and is assembled from the record', () => {
   // Five consents point at it — "recorded once on your Client Information Face
   // Sheet" — and it existed nowhere in the app.
-  assert.match(SERVER, /app\.get\('\/api\/gfc\/face-sheet\.pdf'/);
+  // REPOINTED 2026-10-19 (owner): staff-only now, on the clinical read gate.
+  assert.match(SERVER, /app\.get\('\/api\/clinical\/patients\/:clientId\/face-sheet\.pdf', authenticateToken, requireClinicalRead,/);
+  assert.ok(!SERVER.includes("app.get('/api/gfc/face-sheet.pdf'"), 'the patient no longer downloads it');
   const gen = fs.readFileSync(path.join(__dirname, '..', 'pdf-generator.js'), 'utf8');
   assert.match(gen, /async function generateFaceSheetPDF/);
   // Footers are stamped on buffered pages after layout. Writing them below the

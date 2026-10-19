@@ -53,13 +53,6 @@
         pinned: true
       });
     }
-    if (d.faceSheet) {
-      push({
-        id: 'facesheet', group: 'forms', icon: 'ti-id', title: 'Face sheet',
-        sub: 'Your contacts, care team and wishes on one page',
-        open: { type: 'pdf', url: d.faceSheet.url }, pinned: true
-      });
-    }
     for (const s of d.signedConsents || []) {
       push({
         id: `consent:${s.key}`, group: 'forms', icon: 'ti-signature', title: s.label,
