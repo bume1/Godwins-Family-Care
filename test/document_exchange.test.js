@@ -102,14 +102,17 @@ test('the route does not restate the transition rules', () => {
   // Two copies of "what a lane change does to the consent set" is the drift
   // this codebase has already paid for twice. The route is a door onto
   // applyServiceLineChange, which is what the intake save already calls.
+  // Since 2026-10-19 the work lives in commitServiceLine, shared by an admin's
+  // direct change and the owner approving a manager's request.
   const route = SERVER.slice(
-    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'"),
+    SERVER.indexOf('const commitServiceLine ='),
     SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/review'")
   );
   assert.ok(route.length > 200, 'the service-line route must exist');
-  assert.match(route, /applyServiceLineChange\(client, line, req\.user\)/);
+  assert.match(route, /applyServiceLineChange\(client, line, actor\)/);
   assert.ok(!/delete consents\[/.test(route), 'the route must not touch the consent map itself');
   assert.match(route, /'service_line_changed'/);
+  assert.match(route, /await commitServiceLine\(users, idx, line, req\.user\)/, 'the route applies through the shared commit');
 });
 
 test('a lane change never unsigns a signed consent', () => {
@@ -316,10 +319,10 @@ test('becoming a patient backfills the plan into the chart', () => {
   // which are over by the time a home care client adds medical care. Nothing
   // re-filed, so the chart had no plan of care and nothing said so.
   const line = SERVER.slice(
-    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'"),
-    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/review'")
+    SERVER.indexOf('const commitServiceLine ='),
+    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'")
   );
-  assert.match(line, /fileCarePlanToChart\(client\.id, req\.user, 'service_line_changed'\)/);
+  assert.match(line, /fileCarePlanToChart\(client\.id, actor, 'service_line_changed'\)/);
   const link = SERVER.slice(
     SERVER.indexOf("app.post('/api/clinical/patients/:clientId/link'"),
     SERVER.indexOf("app.post('/api/clinical/patients/:clientId/link'") + 6000
