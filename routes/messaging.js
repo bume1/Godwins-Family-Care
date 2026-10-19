@@ -1156,16 +1156,20 @@ module.exports = function createMessagingRoutes(deps) {
     };
     const calls = await readRows('phone_calls');
     const i = calls.findIndex(c => c && c.quo_call_id === ev.callId);
-    if (ev.type === 'call.summary.completed') {
+    // The summary and the transcript come as their own events, before or
+    // after the call itself. One that comes first is kept on a placeholder
+    // row (`pending_summary`) until the call arrives.
+    if (ev.type === 'call.summary.completed' || ev.type === 'call.transcript.completed') {
+      const isSummary = ev.type === 'call.summary.completed';
+      const merge = (row) => (isSummary ? chartComms.mergeSummary(row, ev) : chartComms.mergeTranscript(row, ev));
       if (i === -1) {
-        // The summary came first: keep it until the call itself arrives.
-        calls.push({ id: uuidv4(), quo_call_id: ev.callId, pending_summary: true, summary: ev.summary, next_steps: ev.nextSteps, created_at: nowIso(), updated_at: nowIso() });
+        calls.push(merge({ id: uuidv4(), quo_call_id: ev.callId, pending_summary: true, summary: [], next_steps: [], transcript: [], created_at: nowIso(), updated_at: nowIso() }));
         await db.set('phone_calls', calls);
-        return record('summary_waiting');
+        return record(isSummary ? 'summary_waiting' : 'transcript_waiting');
       }
-      calls[i] = chartComms.mergeSummary(calls[i], ev);
+      calls[i] = merge(calls[i]);
       await db.set('phone_calls', calls);
-      return record('summary_added', { callRowId: calls[i].id });
+      return record(isSummary ? 'summary_added' : 'transcript_added', { callRowId: calls[i].id });
     }
     if (ev.officePhone !== quoSms.fromNumber()) return record('other_line');
     if (!ev.answered) return record('not_answered');
@@ -1176,7 +1180,7 @@ module.exports = function createMessagingRoutes(deps) {
     }
     const row = chartComms.buildCallRow({ id: i !== -1 ? calls[i].id : uuidv4(), ev, hit: who.hit, at: nowIso() });
     if (i !== -1 && calls[i].pending_summary) {
-      row.summary = calls[i].summary || []; row.next_steps = calls[i].next_steps || [];
+      row.summary = calls[i].summary || []; row.next_steps = calls[i].next_steps || []; row.transcript = calls[i].transcript || [];
       calls[i] = row;
     } else if (i !== -1) {
       return record('duplicate_call');

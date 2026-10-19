@@ -7,14 +7,17 @@
 //  - MESSAGE NOTES. Only conversations the patient or their family are on
 //    (messagingRepository.isPatientFacing): a Care Update, a Care Team message
 //    with the patient on it, a clinical escalation. Internal team notes stay
-//    out of the record. ONE note per conversation per day (Eastern), not one
-//    per message.
+//    out of the record. ONE note per conversation (owner, 2026-10-19: "one
+//    note updated with messaging details per convo"), kept up to date as the
+//    conversation goes on, not one note per message or per day.
 //
 //    A message note is DERIVED from the messages, never a second copy kept in
 //    step by hand: an edit or a super admin's delete shows in it at once. What
-//    is stored is only the FILING — that a closed day was filed to OpenEMR,
-//    by whom, and a hash of what was filed — so a day that changed after it
-//    was filed is filed again as a corrected copy.
+//    is stored is only the FILING — that the conversation was filed to
+//    OpenEMR, by whom, and a hash of what was filed. OpenEMR cannot replace a
+//    document, so a conversation that grew or changed after it was filed is
+//    filed again as an UPDATED copy holding the whole conversation: the newest
+//    copy in the chart is always complete.
 //
 //  - CALL NOTES. A call on the office line (Quo) with a patient's or a
 //    designated POA's phone becomes a call waiting to be documented. The
@@ -23,6 +26,13 @@
 //    OpenEMR without that signature: a signed note is what bills and what is
 //    the legal record. A call that was not about care (a scheduling call) is
 //    dismissed with a reason.
+//
+//  - CALL NOTES (the record). Every answered call with a patient or POA also
+//    becomes a call note on the chart by itself (owner, 2026-10-19: "all call
+//    summary / transcript for patient or poa becomes a note"): who, when, how
+//    long, Quo's summary and next steps, and the full transcript. It is a
+//    record of the conversation, like a message note, and files to OpenEMR
+//    the same way. The billable Phone Call note above stays the clinician's.
 //
 // This file is pure: no I/O. The webhook, the routes and the chart call it.
 // ============================================================================
@@ -45,6 +55,11 @@ const CALL_STATUS = Object.freeze({
 const PHONE_NOTE_TYPE = 'pc_phone_ccm';
 const MAX_SUMMARY_ITEMS = 20;
 const MAX_ITEM_CHARS = 600;
+const MAX_TRANSCRIPT_LINES = 600;
+const MAX_TRANSCRIPT_LINE = 2000;
+// A call note files once the transcript is in, or this long after the call
+// if none comes (Quo transcripts off, or a very short call).
+const CALL_NOTE_WAIT_MS = 2 * 60 * 60 * 1000;
 
 const iso = (v) => {
   if (!v) return null;
@@ -68,6 +83,20 @@ function readCallEvent(evt) {
     const callId = o.callId || o.call_id || o.id || null;
     if (!callId) return null;
     return { type, callId: String(callId), summary: cleanList(o.summary), nextSteps: cleanList(o.nextSteps || o.next_steps) };
+  }
+  if (type === 'call.transcript.completed') {
+    const callId = o.callId || o.call_id || o.id || null;
+    if (!callId) return null;
+    const lines = (Array.isArray(o.dialogue) ? o.dialogue : [])
+      .map(d => ({
+        speaker: quoSms.toE164(d && (d.identifier || d.from)) || null,
+        quoUserId: (d && d.userId) || null,
+        start: Number.isFinite(Number(d && d.start)) ? Number(d.start) : null,
+        text: String((d && (d.content || d.text)) || '').replace(/\s+/g, ' ').trim().slice(0, MAX_TRANSCRIPT_LINE)
+      }))
+      .filter(l => l.text)
+      .slice(0, MAX_TRANSCRIPT_LINES);
+    return { type, callId: String(callId), transcript: lines };
   }
   if (type !== 'call.completed') return null;
   if (!o.id) return null;
@@ -112,6 +141,7 @@ function buildCallRow({ id, ev, hit, at }) {
     with_name: hit.user.name || null,
     with_poa: !!hit.isPoa,
     direction: ev.direction,
+    patient_phone: ev.patientPhone,
     started_at: ev.startedAt,
     completed_at: ev.completedAt,
     duration_sec: ev.durationSec,
@@ -128,6 +158,10 @@ function buildCallRow({ id, ev, hit, at }) {
 // second fills in the other half.
 function mergeSummary(row, ev) {
   return { ...row, summary: ev.summary, next_steps: ev.nextSteps, summary_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+}
+
+function mergeTranscript(row, ev) {
+  return { ...row, transcript: ev.transcript, transcript_at: new Date().toISOString(), updated_at: new Date().toISOString() };
 }
 
 // Who the call was with, in words: "Juanita Guess" or "Luka Agent (POA for
@@ -154,6 +188,7 @@ function callNotePrefill(row, { clientName } = {}) {
     lines.push('', '## Next steps from the phone system');
     row.next_steps.forEach(s => lines.push('- ' + escapeMarkup(s)));
   }
+  lines.push('', '_The full call note, with the transcript, is on the chart Timeline._');
   lines.push('', '## Assessment and plan', '');
   return lines.join('\n');
 }
@@ -185,13 +220,71 @@ const publicCall = (row, clientName) => ({
   detail: callDetail(row, clientName)
 });
 
+// ---- Call notes (the record) ------------------------------------------------------
+
+// A speaker in the transcript: the patient-side person when it is their number,
+// otherwise the office.
+const speakerName = (row, line, clientName) => {
+  if (line.speaker && row.patient_phone && line.speaker === row.patient_phone) return withWhom(row, clientName);
+  if (line.quoUserId || (line.speaker && line.speaker !== row.patient_phone)) return 'GFC staff';
+  return 'Speaker';
+};
+const mmss = (sec) => (Number.isFinite(sec) ? `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}` : '');
+
+function callNoteText(row, { clientName, updated = false } = {}) {
+  const mins = callMinutes(row.duration_sec);
+  const lines = [
+    `CALL NOTE${updated ? ' (UPDATED COPY)' : ''}`,
+    `Patient: ${clientName || ''}`,
+    `${row.direction === 'incoming' ? 'Incoming call from' : 'Outgoing call to'} ${withWhom(row, clientName)}`,
+    `When: ${row.started_at ? gfcTime.fmtDateTime(row.started_at) : 'not recorded'}`,
+    `Length: ${mins ? `${mins} minute${mins === 1 ? '' : 's'}` : 'not recorded'}`,
+    ''
+  ];
+  lines.push('SUMMARY (from the phone system)');
+  if ((row.summary || []).length) row.summary.forEach(s => lines.push('• ' + s));
+  else lines.push('No summary from the phone system.');
+  if ((row.next_steps || []).length) { lines.push('', 'NEXT STEPS (from the phone system)'); row.next_steps.forEach(s => lines.push('• ' + s)); }
+  lines.push('', 'TRANSCRIPT (from the phone system)');
+  if ((row.transcript || []).length) {
+    row.transcript.forEach(l => lines.push(`${Number.isFinite(l.start) ? `[${mmss(l.start)}] ` : ''}${speakerName(row, l, clientName)}: ${l.text}`));
+  } else lines.push('No transcript from the phone system.');
+  if (row.status === CALL_STATUS.DOCUMENTED) lines.push('', 'A clinician documented this call in a Phone Call note on the chart.');
+  if (row.status === CALL_STATUS.DISMISSED) lines.push('', 'Marked as not needing a clinical note.');
+  lines.push('', 'Recorded automatically from the GFC office phone line.');
+  return lines.join('\n');
+}
+
+// What a call note's filing hash covers: what the phone system said, never the
+// workflow state, so documenting the call does not refile it.
+const callNoteHash = (row) => crypto.createHash('sha256')
+  .update(JSON.stringify([row.summary || [], row.next_steps || [], row.transcript || [], row.duration_sec || null])).digest('hex');
+
+// A call note is ready to file once the transcript is in, or once enough time
+// has passed that none is coming.
+const callNoteReady = (row, now = Date.now()) => !!row && !row.pending_summary &&
+  (((row.transcript || []).length > 0) || (Date.parse(row.completed_at || row.created_at || 0) + CALL_NOTE_WAIT_MS < now));
+
+function callNotesToFile(rows, filings, now = Date.now()) {
+  const last = new Map();
+  for (const f of (filings || [])) {
+    if (!f || !f.key) continue;
+    const prev = last.get(f.key);
+    if (!prev || String(f.filed_at) > String(prev.filed_at)) last.set(f.key, f);
+  }
+  return (rows || []).filter(r => callNoteReady(r, now))
+    .map(r => ({ row: r, key: `call:${r.id}`, hash: callNoteHash(r), previous: last.get(`call:${r.id}`) || null }))
+    .filter(x => !x.previous || x.previous.hash !== x.hash)
+    .map(x => ({ ...x, updated: !!x.previous }));
+}
+
 // ---- Message notes ---------------------------------------------------------------
 
 const easternDate = (v) => {
   const p = v ? gfcTime.zonedParts(new Date(v)) : null;
   return p ? p.isoDate : null;
 };
-const noteKey = (threadId, date) => `${threadId}:${date}`;
+const noteKey = (threadId) => `msg:${threadId}`;
 
 const plainBody = (m) => {
   const t = m.body_format === 'markup' ? nf.toPlainText(String(m.body || '')) : String(m.body || '');
@@ -204,26 +297,23 @@ const fromLine = (m) => {
   return label ? `${who} (${label})` : who;
 };
 
-// Every message note for one patient: their patient-facing conversations, one
-// note per conversation per Eastern day. `today` is the Eastern date; a day is
-// CLOSED once it is over, and only a closed day is filed.
+// Every message note for one patient: ONE per patient-facing conversation,
+// holding every message in it. `today` is the Eastern date. A conversation
+// with a message today is still OPEN and waits; once a day has passed with no
+// new message it is filed, and filed again (updated) if it grows or changes.
 function buildMessageNotes({ clientId, threads, messages, today }) {
   const mine = (threads || []).filter(t => t && String(t.client_id) === String(clientId) && msg.isPatientFacing(t));
   const byThread = new Map(mine.map(t => [t.id, t]));
   const groups = new Map();
   for (const m of (messages || [])) {
-    if (!m || !byThread.has(m.thread_id)) continue;
-    const date = easternDate(m.sent_at);
-    if (!date) continue;
-    const key = noteKey(m.thread_id, date);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(m);
+    if (!m || !byThread.has(m.thread_id) || !easternDate(m.sent_at)) continue;
+    if (!groups.has(m.thread_id)) groups.set(m.thread_id, []);
+    groups.get(m.thread_id).push(m);
   }
   const notes = [];
-  for (const [key, list] of groups) {
+  for (const [threadId, list] of groups) {
     list.sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)));
-    const t = byThread.get(list[0].thread_id);
-    const date = easternDate(list[0].sent_at);
+    const t = byThread.get(threadId);
     const entries = list.map(m => ({
       id: m.id,
       at: m.sent_at,
@@ -233,13 +323,16 @@ function buildMessageNotes({ clientId, threads, messages, today }) {
       files: (m.attachments || []).map(a => a && a.name).filter(Boolean),
       edited: !!m.edited_at || (Array.isArray(m.edits) && m.edits.length > 0)
     }));
+    const firstDate = easternDate(list[0].sent_at);
+    const date = easternDate(list[list.length - 1].sent_at);
     notes.push({
-      key,
+      key: noteKey(threadId),
       clientId: String(clientId),
       threadId: t.id,
       channel: t.channel,
       channelLabel: (msg.channelById(t.channel) || {}).label || t.channel,
       title: msg.threadTitle(t),
+      firstDate,
       date,
       closed: !!today && date < today,
       count: entries.length,
@@ -252,17 +345,20 @@ function buildMessageNotes({ clientId, threads, messages, today }) {
 }
 
 // The note as a document: what is filed to OpenEMR and shown on the chart.
-function messageNoteText(note, { clientName, corrected = false } = {}) {
+function messageNoteText(note, { clientName, updated = false } = {}) {
+  const span = note.firstDate && note.firstDate !== note.date
+    ? `${gfcTime.fmtDate(`${note.firstDate}T12:00:00Z`)} to ${gfcTime.fmtDate(`${note.date}T12:00:00Z`)}`
+    : gfcTime.fmtDate(`${note.date}T12:00:00Z`);
   const lines = [
-    `MESSAGE NOTE${corrected ? ' (CORRECTED COPY)' : ''}`,
+    `MESSAGE NOTE${updated ? ' (UPDATED COPY, replaces earlier copies)' : ''}`,
     `Patient: ${clientName || ''}`,
     `Conversation: ${note.channelLabel}${note.title && note.title !== note.channelLabel ? ` (${note.title})` : ''}`,
-    `Date: ${gfcTime.fmtDate(`${note.date}T12:00:00Z`)}`,
+    `Dates: ${span}`,
     `Messages: ${note.count}`,
     ''
   ];
   for (const e of note.entries) {
-    lines.push(`${gfcTime.fmtTime(e.at)} · ${e.from}${e.via === 'text' ? ' · by text' : ''}${e.edited ? ' · edited' : ''}`);
+    lines.push(`${gfcTime.fmtDateTime(e.at)} · ${e.from}${e.via === 'text' ? ' · by text' : ''}${e.edited ? ' · edited' : ''}`);
     if (e.text) lines.push(e.text);
     if (e.files.length) lines.push(`[Attached: ${e.files.join(', ')}]`);
     lines.push('');
@@ -271,8 +367,8 @@ function messageNoteText(note, { clientName, corrected = false } = {}) {
   return lines.join('\n');
 }
 
-// Which closed days still need filing: never filed, or changed since the last
-// filing (an edit or a deleted message), which files again as a corrected copy.
+// Which conversations still need filing: never filed, or grown or changed since
+// the last filing, which files again as an updated copy.
 function notesToFile(notes, filings) {
   const last = new Map();
   for (const f of (filings || [])) {
@@ -283,7 +379,7 @@ function notesToFile(notes, filings) {
   return (notes || []).filter(n => n.closed && n.count > 0)
     .map(n => ({ note: n, previous: last.get(n.key) || null }))
     .filter(x => !x.previous || x.previous.hash !== x.note.hash)
-    .map(x => ({ ...x, corrected: !!x.previous }));
+    .map(x => ({ ...x, updated: !!x.previous }));
 }
 
 const filingState = (note, filings) => {
@@ -295,6 +391,7 @@ const filingState = (note, filings) => {
 
 module.exports = {
   CALL_STATUS, PHONE_NOTE_TYPE,
-  readCallEvent, callMinutes, buildCallRow, mergeSummary, callNotePrefill, callDetail, publicCall, withWhom,
+  readCallEvent, callMinutes, buildCallRow, mergeSummary, mergeTranscript, callNotePrefill, callDetail, publicCall, withWhom,
+  callNoteText, callNoteHash, callNoteReady, callNotesToFile, CALL_NOTE_WAIT_MS,
   easternDate, noteKey, buildMessageNotes, messageNoteText, notesToFile, filingState
 };

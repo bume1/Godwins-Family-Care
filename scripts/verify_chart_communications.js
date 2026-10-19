@@ -11,10 +11,15 @@
  *     clinician's own draft; a second clinician cannot take it; discarding the
  *     draft puts it back; saving the note marks it documented.
  *   - A call can be dismissed only with a reason.
- *   - Message notes: only patient-facing conversations, one per day; the
- *     timeline lists them without their words; the words open on request; a
- *     closed day files to OpenEMR on chart open with the clinician's sign-in,
- *     once; an edited day files again as a corrected copy.
+ *   - The note is dated the day of the CALL (the encounter date fills itself in).
+ *   - Every answered call is also a call note: summary and transcript, on the
+ *     timeline, filed to OpenEMR on chart open.
+ *   - Message notes: only patient-facing conversations, ONE per conversation;
+ *     the timeline lists them without their words; the words open on
+ *     request; a conversation with no message today files to OpenEMR on chart
+ *     open with the clinician's sign-in, once; one that grew files again as
+ *     an updated copy.
+ *   - A text from the patient shows in the patient's own portal thread.
  *
  * Stubbed: the KV store, OpenEMR (stateful, documents kept), the OpenEMR
  * sign-in check, and Quo. Assertions read stored rows back.
@@ -100,14 +105,18 @@ const call = async (m, u, t, b) => {
 const sign = (raw) => { const ts = Date.now(); return `hmac;1;${ts};` + crypto.createHmac('sha256', Buffer.from(process.env.QUO_WEBHOOK_SECRET, 'base64')).update(ts + '.' + raw).digest('base64'); };
 const hook = async (evt) => { const raw = JSON.stringify(evt); const r = await fetch(`${BASE}/api/webhooks/quo`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'openphone-signature': sign(raw) }, body: raw }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
 const OFFICE = '+14049136705';
-const callDone = (id, from, { to = OFFICE, answered = true, mins = 12, direction = 'incoming' } = {}) => {
-  const end = Date.now() - 60 * 1000;
+const callDone = (id, from, { to = OFFICE, answered = true, mins = 12, direction = 'incoming', endAt = Date.now() - 60 * 1000 } = {}) => {
+  const end = endAt;
   const start = end - mins * 60 * 1000;
   return { type: 'call.completed', createdAt: new Date(end).toISOString(), data: { object: {
     id, direction, from: direction === 'incoming' ? from : to, to: direction === 'incoming' ? to : from,
     status: answered ? 'completed' : 'no-answer', createdAt: new Date(start - 5000).toISOString(),
     answeredAt: answered ? new Date(start).toISOString() : null, completedAt: new Date(end).toISOString(), userId: 'US-office' } } };
 };
+const transcript = (callId) => ({ type: 'call.transcript.completed', data: { object: { callId, dialogue: [
+  { identifier: OFFICE, userId: 'US-office', start: 0, content: 'Godwins Family Care, this is Bethel.' },
+  { identifier: '+14045550200', start: 5, content: 'Hi, I am calling about my mother\'s blood pressure.' }
+] } } });
 const summary = (callId) => ({ type: 'call.summary.completed', data: { object: { callId, summary: ['Asked about the new blood pressure medicine', 'Morning readings around *150*'], nextSteps: ['Recheck BP Friday'] } } });
 
 const staff = (id, name, clinicalRole, extra = {}) => ({ id, name, email: `${id}@example.test`, role: 'user', clinicalRole, clinicalRoleConfirmed: true,
@@ -130,12 +139,13 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   const tIso = new Date().toISOString();
   STORE.set('message_threads', [
     { id: 't_cu', channel: 'care_update', client_id: PATIENT.id, participant_ids: ['fnp_1', PATIENT.id, POA.id], patient_facing: true, created_at: yIso, last_message_at: tIso, subject: 'BP update' },
+    { id: 't_cu2', channel: 'care_update', client_id: PATIENT.id, participant_ids: ['fnp_1', PATIENT.id], patient_facing: true, created_at: tIso, last_message_at: tIso, subject: 'Today' },
     { id: 't_team', channel: 'care_team', client_id: PATIENT.id, participant_ids: ['fnp_1', 'lmsw_1'], audience_chosen: true, patient_facing: false, created_at: yIso, last_message_at: yIso }
   ]);
   STORE.set('messages', [
     { id: 'm1', thread_id: 't_cu', client_id: PATIENT.id, channel: 'care_update', from_user_id: 'fnp_1', from_role: 'clinical', from_role_label: 'Provider', from_name: 'Bethel Godwins', display_name: 'Bethel Godwins', body: 'Your **labs** look good.', body_format: 'markup', attachments: [], sent_at: yIso },
     { id: 'm2', thread_id: 't_cu', client_id: PATIENT.id, channel: 'care_update', from_user_id: POA.id, from_role: 'POA', from_name: 'Luka Agent', display_name: 'Luka Agent as POA for Juanita Guess', body: 'Thank you', body_format: 'plain', attachments: [], sent_at: new Date(Date.parse(yIso) + 600000).toISOString(), via: 'sms' },
-    { id: 'm3', thread_id: 't_cu', client_id: PATIENT.id, channel: 'care_update', from_user_id: 'fnp_1', from_role: 'clinical', from_name: 'Bethel Godwins', display_name: 'Bethel Godwins', body: 'Today too', body_format: 'plain', attachments: [], sent_at: tIso },
+    { id: 'm3', thread_id: 't_cu2', client_id: PATIENT.id, channel: 'care_update', from_user_id: 'fnp_1', from_role: 'clinical', from_name: 'Bethel Godwins', display_name: 'Bethel Godwins', body: 'Today too', body_format: 'plain', attachments: [], sent_at: tIso },
     { id: 'm4', thread_id: 't_team', client_id: PATIENT.id, channel: 'care_team', from_user_id: 'fnp_1', from_role: 'clinical', from_name: 'Bethel Godwins', display_name: 'Bethel Godwins', body: 'INTERNAL: check insurance', body_format: 'plain', attachments: [], sent_at: yIso }
   ]);
 
@@ -148,8 +158,10 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   console.log('\n── 1. Calls on the office line ──');
   let r = await hook(summary('AC-1'));
   check('a summary that arrives first is kept', r.body.outcome === 'summary_waiting', r.body);
-  r = await hook(callDone('AC-1', '+14045550200'));
+  r = await hook(callDone('AC-1', '+14045550200', { endAt: Date.parse(yIso) }));
   check('an answered call from the POA\'s phone is waiting to be documented', r.body.outcome === 'call_waiting', r.body);
+  r = await hook(transcript('AC-1'));
+  check('its transcript is added', r.body.outcome === 'transcript_added' && callRow('AC-1').transcript.length === 2, r.body);
   const c1 = callRow('AC-1');
   check('it is the patient\'s, with the POA, 12 minutes, summary merged',
     c1 && c1.client_id === PATIENT.id && c1.with_poa === true && c1.duration_sec === 720 && c1.summary.length === 2 && !c1.pending_summary, c1);
@@ -163,6 +175,11 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   check('a call on another line is ignored', r.body.outcome === 'other_line' && !callRow('AC-4'), r.body);
   r = await hook(callDone('AC-5', '+14045550100', { direction: 'outgoing', mins: 3 }));
   check('an outgoing call to the patient\'s phone waits too', r.body.outcome === 'call_waiting' && callRow('AC-5').direction === 'outgoing' && callRow('AC-5').with_poa === false, r.body);
+  r = await hook(transcript('AC-7'));
+  check('a transcript that arrives before its call is kept', r.body.outcome === 'transcript_waiting', r.body);
+  r = await hook(callDone('AC-7', '+14045550200', { mins: 2 }));
+  check('and joins the call when it arrives', r.body.outcome === 'call_waiting' && callRow('AC-7').transcript.length === 2 && !callRow('AC-7').pending_summary, callRow('AC-7'));
+  { const all = rows('phone_calls'); STORE.set('phone_calls', all.filter(c => c.quo_call_id !== 'AC-7')); }
   const bad = await fetch(`${BASE}/api/webhooks/quo`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'openphone-signature': 'hmac;1;1;x' }, body: JSON.stringify(callDone('AC-6', '+14045550100')) });
   check('an unsigned call webhook is refused', bad.status === 401 && !callRow('AC-6'));
 
@@ -187,6 +204,8 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   const cn = (draftNote && draftNote.sections && draftNote.sections.callNote) || '';
   check('filled in with who, when, minutes and the labelled summary', /Luka Agent \(POA for Juanita Guess\)/.test(cn) && /12 minutes/.test(cn) && /Summary from the phone system/.test(cn) && /Recheck BP Friday/.test(cn), cn);
   check('Quo\'s text goes in as text, never a format', /\\\*150\\\*/.test(cn), cn);
+  const callDay = gfcTime.zonedParts(new Date(Date.parse(yIso))).isoDate;
+  check('the encounter date fills in as the day of the call, not today', draftNote && draftNote.visitDate === callDay && callDay !== today, { visitDate: draftNote && draftNote.visitDate, callDay, today });
   r = await call('POST', `/api/clinical/calls/${c1.id}/document`, T.fnp2);
   check('a second clinician cannot take a call already opened', r.status === 409 && r.body.code === 'CALL_STARTED_BY_OTHER' && /Bethel Godwins/.test(r.body.error), r.body);
   r = await call('POST', `/api/clinical/calls/${callRow('AC-5').id}/document`, T.fnp);
@@ -201,6 +220,8 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   check('saving the note creates the encounter', r.status === 200 && !!r.body.encounterUuid, r.body);
   const enc = r.body && r.body.encounterUuid;
   check('the call is documented and names the encounter', callRow('AC-1').status === 'documented' && callRow('AC-1').encounter_uuid === enc, callRow('AC-1'));
+  const recd = rows('encounter_billing').find(x => x.encounterUuid === enc);
+  check('the saved encounter is dated the day of the call', recd && recd.date === callDay && EMR.encounters.get(enc).date === callDay, { record: recd && recd.date, emr: EMR.encounters.get(enc) && EMR.encounters.get(enc).date, callDay });
   r = await call('GET', '/api/clinical/inbox', T.fnp);
   check('it has left the inbox', !item(r.body, c1.id));
   r = await call('POST', `/api/clinical/calls/${c1.id}/document`, T.fnp);
@@ -216,44 +237,60 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   check('the provider dismisses it with a reason', r.status === 200 && callRow('AC-5').status === 'dismissed' && callRow('AC-5').dismissed_reason === 'Scheduling call only');
   check('the audit row names the call, never the reason', !JSON.stringify(rows('activity_log')).includes('Scheduling call only'));
 
-  console.log('\n── 5. Message notes on the timeline ──');
+  console.log('\n── 5. Message notes and call notes on the timeline ──');
   r = await call('GET', `${P}/timeline`, T.fnp);
   const mn = ((r.body && r.body.rows) || []).filter(x => x.kind === 'message_note');
-  check('two Care Update notes: yesterday and today', mn.length === 2 && mn.every(x => /^Care Update message note$/.test(x.title)), mn);
+  check('one message note per patient-facing conversation', mn.length === 2 && mn.every(x => /^Care Update message note$/.test(x.title)) && mn.some(x => x.id === 'msg:t_cu') && mn.some(x => x.id === 'msg:t_cu2'), mn);
   check('the team note the patient was left off is not a message note', !mn.some(x => /t_team/.test(x.id)));
-  check('the timeline carries no message words', !/labs|INTERNAL|Thank you/i.test(JSON.stringify(r.body)), JSON.stringify(r.body).slice(0, 300));
-  const calls = ((r.body && r.body.rows) || []).filter(x => x.kind === 'call');
-  check('calls show with their state', calls.length === 2 && calls.some(x => /Documented/.test(x.detail)) && calls.some(x => /Dismissed/.test(x.detail)), calls);
-  const yKey = `t_cu:${gfcTime.zonedParts(new Date(yIso)).isoDate}`;
-  const yRow = mn.find(x => x.id === yKey);
-  check('yesterday\'s note waits to be filed; today\'s is still open', yRow && /Files to OpenEMR/.test(yRow.detail) && mn.some(x => x.id !== yKey && /still open/.test(x.detail)), mn);
-  r = await call('GET', `${P}/message-notes/${encodeURIComponent(yKey)}`, T.fnp);
+  check('the timeline carries no message words', !/labs|INTERNAL|Thank you|blood pressure/i.test(JSON.stringify(r.body)), JSON.stringify(r.body).slice(0, 300));
+  const cRows = ((r.body && r.body.rows) || []).filter(x => x.kind === 'call');
+  check('calls show as call notes with their state', cRows.length === 2 && cRows.every(x => /^Call note/.test(x.title)) && cRows.some(x => /Documented/.test(x.detail)) && cRows.some(x => /Dismissed/.test(x.detail)), cRows);
+  check('yesterday\'s conversation waits to be filed; today\'s is still open', /Files to OpenEMR/.test((mn.find(x => x.id === 'msg:t_cu') || {}).detail) && /Still open/.test((mn.find(x => x.id === 'msg:t_cu2') || {}).detail), mn);
+  r = await call('GET', `${P}/message-notes/${encodeURIComponent('msg:t_cu')}`, T.fnp);
   check('the note\'s words open on request, plain text, with who and how', r.status === 200 && /Your labs look good\./.test(r.body.text) && /Luka Agent as POA for Juanita Guess · by text/.test(r.body.text) && !/\*\*/.test(r.body.text), r.body);
-  r = await call('GET', `${P}/message-notes/${encodeURIComponent('t_team:' + yKey.split(':')[1])}`, T.fnp);
+  r = await call('GET', `${P}/message-notes/${encodeURIComponent('msg:t_team')}`, T.fnp);
   check('the team note cannot be opened as a message note', r.status === 404);
+  r = await call('GET', `${P}/calls/${c1.id}/note`, T.fnp);
+  check('the call note holds the summary and the transcript, with speakers', r.status === 200 && /Asked about the new blood pressure medicine/.test(r.body.text) && /GFC staff: Godwins Family Care, this is Bethel\./.test(r.body.text) && /Luka Agent \(POA for Juanita Guess\): Hi, I am calling/.test(r.body.text), r.body);
 
   console.log('\n── 6. Filing to OpenEMR on chart open ──');
   await call('GET', `${P}/chart`, T.fnp);
-  await new Promise(res => setTimeout(res, 800));
-  const filed = EMR.documents.filter(d => /^Message_note_/.test(d.fileName));
-  check('yesterday\'s closed note filed as a PDF, with the clinician\'s sign-in', filed.length === 1 && filed[0].head === '%PDF-' && filed[0].byId === 'fnp_1' && filed[0].puuid === 'uuid-cc', EMR.documents);
-  check('the filing is recorded with a hash, no words', rows('message_note_filings').length === 1 && rows('message_note_filings')[0].key === yKey && !/labs/.test(JSON.stringify(rows('message_note_filings'))));
+  await new Promise(res => setTimeout(res, 900));
+  const msgDocs = () => EMR.documents.filter(d => /^Message_note_/.test(d.fileName));
+  const callDocs = () => EMR.documents.filter(d => /^Call_note_/.test(d.fileName));
+  check('the closed conversation filed as one PDF, with the clinician\'s sign-in', msgDocs().length === 1 && msgDocs()[0].head === '%PDF-' && msgDocs()[0].byId === 'fnp_1' && msgDocs()[0].puuid === 'uuid-cc' && /through_/.test(msgDocs()[0].fileName), EMR.documents);
+  check('the call with a transcript filed as a call note; the one still waiting for a transcript did not', callDocs().length === 1 && new RegExp(callRow('AC-1').id.replace(/[^A-Za-z0-9]/g, '').slice(0, 8)).test(callDocs()[0].fileName), EMR.documents);
+  check('the filings are recorded with a hash, no words', rows('message_note_filings').length === 2 && rows('message_note_filings').some(f => f.key === 'msg:t_cu') && !/labs|blood pressure/.test(JSON.stringify(rows('message_note_filings'))));
   await call('GET', `${P}/chart`, T.fnp);
-  await new Promise(res => setTimeout(res, 800));
-  check('opening the chart again files nothing twice', EMR.documents.filter(d => /^Message_note_/.test(d.fileName)).length === 1);
+  await new Promise(res => setTimeout(res, 900));
+  check('opening the chart again files nothing twice', msgDocs().length === 1 && callDocs().length === 1);
   r = await call('GET', `${P}/timeline`, T.fnp);
-  check('the timeline now says it is filed', ((r.body && r.body.rows) || []).some(x => x.id === yKey && /Filed to OpenEMR/.test(x.detail)));
-  const msgs = rows('messages'); msgs.find(m => m.id === 'm2').body = 'Thank you, she is resting'; msgs.find(m => m.id === 'm2').edited_at = new Date().toISOString(); STORE.set('messages', msgs);
+  check('the timeline now says both are filed', ((r.body && r.body.rows) || []).some(x => x.id === 'msg:t_cu' && /Filed to OpenEMR/.test(x.detail)) && ((r.body && r.body.rows) || []).some(x => x.id === c1.id && /Filed to OpenEMR/.test(x.detail)));
+  const msgs = rows('messages');
+  msgs.push({ id: 'm5', thread_id: 't_cu', client_id: PATIENT.id, channel: 'care_update', from_user_id: 'fnp_1', from_role: 'clinical', from_name: 'Bethel Godwins', display_name: 'Bethel Godwins', body: 'One more thing', body_format: 'plain', attachments: [], sent_at: new Date(Date.parse(yIso) + 1200000).toISOString() });
+  STORE.set('messages', msgs);
   await call('GET', `${P}/chart`, T.fnp);
-  await new Promise(res => setTimeout(res, 800));
-  const docs2 = EMR.documents.filter(d => /^Message_note_/.test(d.fileName));
-  check('an edited day files again as a corrected copy', docs2.length === 2 && /_corrected\.pdf$/.test(docs2[1].fileName) && rows('message_note_filings')[1].corrected === true, docs2);
+  await new Promise(res => setTimeout(res, 900));
+  check('a conversation that grew files again as an updated copy with every message', msgDocs().length === 2 && /_updated\.pdf$/.test(msgDocs()[1].fileName) && rows('message_note_filings').some(f => f.key === 'msg:t_cu' && f.updated === true && f.count === 3), msgDocs());
   EMR_CONNECTED.delete('fnp_2');
   const before = EMR.documents.length;
   const msgs2 = rows('messages'); msgs2.find(m => m.id === 'm1').body = 'changed again'; STORE.set('messages', msgs2);
   await call('GET', `${P}/chart`, T.fnp2);
-  await new Promise(res => setTimeout(res, 800));
+  await new Promise(res => setTimeout(res, 900));
   check('a clinician with no OpenEMR sign-in files nothing', EMR.documents.length === before);
+
+  console.log('\n── 7. Texts in the patient\'s portal ──');
+  r = await hook({ type: 'message.received', data: { object: { id: 'SM-1', from: '+14045550100', to: [OFFICE], direction: 'incoming', body: 'Can someone call me back?', createdAt: new Date().toISOString() } } });
+  check('a text from the patient is recorded', r.body.outcome === 'recorded', r.body);
+  const pt = tok(PATIENT);
+  r = await call('GET', '/api/messaging/threads', pt);
+  const ctThread = ((r.body && r.body.threads) || []).find(t => t.channel === 'care_team');
+  check('the patient sees the Care Team conversation in their portal', r.status === 200 && !!ctThread, r.body);
+  r = ctThread ? await call('GET', `/api/messaging/threads/${ctThread.id}`, pt) : { body: {} };
+  const sms = ((r.body && r.body.messages) || []).find(m => m.body === 'Can someone call me back?');
+  check('their own text is there, marked as sent by text', !!sms && sms.via === 'sms' && sms.mine === true, r.body);
+  r = await call('GET', `${P}/timeline`, T.fnp);
+  check('and it becomes part of that conversation\'s message note', ((r.body && r.body.rows) || []).some(x => x.kind === 'message_note' && /^Care Team message note$/.test(x.title)), (r.body && r.body.rows || []).filter(x => x.kind === 'message_note'));
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);

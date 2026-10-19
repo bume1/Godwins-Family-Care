@@ -2725,15 +2725,18 @@ const buildTimeline = ({
     a.title || 'Appointment', [a.state, a.location].filter(Boolean).join(' · '), a.eid));
   (messages || []).forEach(m => push('message', m.date || m.createdAt,
     m.subject || 'Message', m.channel || null, m.id));
-  // A message note (2026-10-19): one patient-facing conversation on one day.
-  // Its words are opened on request; the row says only that it exists and
-  // whether it has reached OpenEMR. Placed on the day itself, not a time.
-  const FILING_WORDS = { open: 'Today, still open', waiting: 'Files to OpenEMR next time the chart is opened', filed: 'Filed to OpenEMR', changed: 'Changed since filing; files again as a corrected copy' };
+  // A message note (2026-10-19): ONE per patient-facing conversation, kept up
+  // to date. Its words are opened on request; the row says only that it exists
+  // and whether it has reached OpenEMR. Placed on the day of its last message.
+  const FILING_WORDS = { open: 'Still open (new today); files to OpenEMR after today', waiting: 'Files to OpenEMR next time the chart is opened', filed: 'Filed to OpenEMR', changed: 'Grew or changed since filing; files again as an updated copy' };
   (messageNotes || []).forEach(n => push('message_note', n.date,
     `${n.channelLabel} message note`, [`${n.count} message${n.count === 1 ? '' : 's'}`, FILING_WORDS[n.filing]].filter(Boolean).join(' · '), n.key));
   const CALL_WORDS = { waiting: 'Waiting to be documented', started: 'Being written up', documented: 'Documented', dismissed: 'Dismissed: no note needed' };
+  // Every answered call with a patient or POA is a call note (summary and
+  // transcript), whatever happens to the billable Phone Call note.
+  const CALL_FILING = { open: 'Waiting for the transcript', waiting: 'Files to OpenEMR next time the chart is opened', filed: 'Filed to OpenEMR', changed: 'Changed since filing; files again as an updated copy' };
   (calls || []).forEach(c => push('call', c.startedAt,
-    `Phone call${c.minutes ? ` · ${c.minutes} min` : ''}`, [c.withName, CALL_WORDS[c.status]].filter(Boolean).join(' · '), c.id));
+    `Call note${c.minutes ? ` · ${c.minutes} min` : ''}`, [c.withName, CALL_WORDS[c.status], CALL_FILING[c.filing]].filter(Boolean).join(' · '), c.id));
   (prescriptions || []).forEach(rx => push('medication', rx.date || rx.createdAt,
     rx.drug || rx.name || 'Medication', [rx.dose, rx.kind].filter(Boolean).join(' · '), rx.id));
   (orders || []).forEach(o => {

@@ -311,6 +311,7 @@
       patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
       timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
       messageNote: (id, key) => authedFetch(`/api/clinical/patients/${id}/message-notes/${encodeURIComponent(key)}`),
+      callNote: (id, callId) => authedFetch(`/api/clinical/patients/${id}/calls/${encodeURIComponent(callId)}/note`),
       documentCall: (callId) => authedFetch(`/api/clinical/calls/${encodeURIComponent(callId)}/document`, { method: 'POST', body: '{}' }),
       dismissCall: (callId, reason) => authedFetch(`/api/clinical/calls/${encodeURIComponent(callId)}/dismiss`, { method: 'POST', body: JSON.stringify({ reason }) }),
       preVisit: (id, eid) => authedFetch(`/api/clinical/patients/${id}/pre-visit${eid ? `?eid=${encodeURIComponent(eid)}` : ''}`),
@@ -2359,7 +2360,7 @@
 
     // ---- D5 TIMELINE -------------------------------------------------------
     const TIMELINE_LABELS = {
-      visit: 'Visits', message: 'Messages', message_note: 'Message Notes', call: 'Calls', medication: 'Medications', order: 'Orders',
+      visit: 'Visits', message: 'Messages', message_note: 'Message Notes', call: 'Call Notes', medication: 'Medications', order: 'Orders',
       result: 'Results', referral: 'Referrals', document: 'Documents', hospitalization: 'Hospitalizations'
     };
 
@@ -2377,9 +2378,10 @@
       const toggle = (k) => setFilter(f => f.includes(k) ? f.filter(x => x !== k) : [...f, k]);
       // A message note's words open on request (2026-10-19), never on the list.
       const [noteView, setNoteView] = useState(null);
-      const openNote = (key) => {
+      const openNote = (key, kind) => {
         setNoteView({ loading: true });
-        api.messageNote(patient.id, key).then(r => setNoteView(r)).catch(e => setNoteView({ error: e.message }));
+        (kind === 'call' ? api.callNote(patient.id, key) : api.messageNote(patient.id, key))
+          .then(r => setNoteView(r)).catch(e => setNoteView({ error: e.message }));
       };
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       return (
@@ -2418,8 +2420,8 @@
                 <div className="w-[84px] shrink-0 text-[12px] text-stone-500 pt-0.5">{r.date}</div>
                 <div className="w-5 shrink-0 text-accent pt-0.5"><i className={`ti ti-${r.icon}`} /></div>
                 <div className="min-w-0">
-                  {r.kind === 'message_note'
-                    ? <button type="button" className="text-[13px] font-semibold text-primary underline text-left" onClick={() => openNote(r.id)}>{r.title}</button>
+                  {(r.kind === 'message_note' || r.kind === 'call')
+                    ? <button type="button" className="text-[13px] font-semibold text-primary underline text-left" onClick={() => openNote(r.id, r.kind)}>{r.title}</button>
                     : <div className="text-[13px] font-semibold text-stone-800">{r.title}</div>}
                   {r.detail && <div className="text-[11.5px] text-stone-500">{r.detail}</div>}
                 </div>
@@ -4712,6 +4714,10 @@
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
       const [f, setF] = useState({
         chiefConcern: pf.chiefConcern ? NF.fromPlainText(pf.chiefConcern) : '',
+        // The encounter date fills itself in (owner, 2026-10-19): today, or
+        // the date a saved note or a call already carries. A note opened from
+        // an appointment takes the appointment's date on the server.
+        visitDate: appointmentEid ? '' : todayYmd(),
         subjective: '', objective: '', assessment: '', plan: '', sections: {},
         // bpSys/bpDia/pain are the follow-up note's single BP: a follow-up
         // visit type opens the SOAP note here (owner, 2026-10-12).
@@ -4748,6 +4754,7 @@
           ...prev,
           chiefConcern: n.chiefConcern || '', subjective: n.subjective || '', objective: n.objective || '',
           assessment: n.assessment || '', plan: n.plan || '', sections: { ...(n.sections || {}) },
+          visitDate: n.visitDate || prev.visitDate,
           vitals: { ...prev.vitals, ...(n.vitals || {}) },
           ...HP_SECTIONS.reduce((acc, k) => { acc[k] = { ...prev[k], ...((n.hp || {})[k] || {}) }; return acc; }, {})
         }));
@@ -4840,8 +4847,9 @@
 
       // Typed and not yet saved — see useNoteDirty.
       const markSaved = useNoteDirty(f, onNoteState, () => saveDraft());
-      // This form → the shared note's shape.
-      const toNote = () => (sectionsOnly ? {
+      // This form → the shared note's shape, carrying the encounter date.
+      const toNote = () => ({ ...(f.visitDate ? { visitDate: f.visitDate } : {}), ...toNoteBody() });
+      const toNoteBody = () => (sectionsOnly ? {
         kind: 'followup',
         chiefConcern: '', subjective: '', objective: '',
         assessment: '', plan: '', sections: f.sections, vitals: {},
@@ -5154,7 +5162,7 @@
               <h2><i className="ti ti-clipboard-list mr-1 text-accent" />Visit</h2>
               {visitType && <span className="chip bg-primary-50 text-primary">{visitType.defaultMinutes} min</span>}
             </div>
-            <div className="p-4 grid md:grid-cols-3 gap-3 text-sm">
+            <div className="p-4 grid md:grid-cols-4 gap-3 text-sm">
               <Field label="Visit Type">
                 <select className="inp" value={visit.appointmentType} onChange={e => chooseType(e.target.value)}>
                   <option value="">— choose —</option>
@@ -5178,6 +5186,13 @@
                         : (m.key === 'telehealth' && visitType && !visitType.telehealthAllowed)}>{m.label}</option>
                   ))}
                 </select>
+              </Field>
+              <Field label="Encounter Date">
+                {sn.euuid
+                  ? <div className="inp bg-stone-50 text-stone-600">{f.visitDate ? fmtDate(f.visitDate) : 'Set when the note was saved'}</div>
+                  : appointmentEid && !f.visitDate
+                    ? <div className="inp bg-stone-50 text-stone-500">The appointment's date</div>
+                    : <input className="inp" type="date" value={f.visitDate || ''} max={todayYmd()} onChange={e => set('visitDate', e.target.value)} />}
               </Field>
               <Field label="Visit Location">
                 {isPhone

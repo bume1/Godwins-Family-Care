@@ -16537,7 +16537,10 @@ app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireC
     const filingRows = (await loadRows('message_note_filings')).filter(f => f && f.client_id === client.id);
     const messageNotes = (await messageNotesFor(client, req.user)).map(n => ({ ...n, filing: chartComms.filingState(n, filingRows) }));
     const calls = (await loadRows('phone_calls')).filter(c => c && !c.pending_summary && String(c.client_id) === String(client.id))
-      .map(c => chartComms.publicCall(c, client.name));
+      .map(c => {
+        const f = filingRows.filter(x => x.key === `call:${c.id}`).sort((a, b) => String(b.filed_at).localeCompare(String(a.filed_at)))[0];
+        return { ...chartComms.publicCall(c, client.name), filing: f ? (f.hash === chartComms.callNoteHash(c) ? 'filed' : 'changed') : (chartComms.callNoteReady(c) ? 'waiting' : 'open') };
+      });
     const timeline = clinicalRepo.buildTimeline({
       messageNotes, calls,
       encounters, appointments, messages: visibleThreads,
@@ -17536,6 +17539,8 @@ app.post('/api/clinical/calls/:callId/document', authenticateToken, requireClini
     }
     if (!existing) {
       const clean = clinicalNotes.sanitizeNote({
+        // The encounter is dated the day of the CALL, not the day it is written up.
+        visitDate: chartComms.easternDate(call.started_at) || undefined,
         visit: { appointmentType: chartComms.PHONE_NOTE_TYPE, modality: 'phone' },
         sections: { callNote: chartComms.callNotePrefill(call, { clientName: client.name }) }
       });
@@ -17639,29 +17644,58 @@ const fileMessageNotes = (clientId, user) => {
     if (!client || !client.openEmrPatientId || !openemr.isConfigured()) return;
     const connected = await emrAuth.statusFor(user.id).then(s => !!s.connected).catch(() => false);
     if (!connected) return;
-    const filings = await loadRows('message_note_filings');
-    const due = chartComms.notesToFile(await messageNotesFor(client, null), filings.filter(f => f && f.client_id === client.id)).slice(0, MESSAGE_NOTE_BATCH);
+    const filings = (await loadRows('message_note_filings')).filter(f => f && f.client_id === client.id);
+    const short = (id) => String(id).replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+    // One list for both kinds: each says what it is, what to file and its name.
+    const due = [
+      ...chartComms.notesToFile(await messageNotesFor(client, null), filings).map(({ note, updated }) => ({
+        kind: 'message', key: note.key, hash: note.hash, updated, threadId: note.threadId, date: note.date, count: note.count,
+        text: chartComms.messageNoteText(note, { clientName: client.name, updated }),
+        fileName: `Message_note_${note.channel}_${short(note.threadId)}_through_${note.date}${updated ? '_updated' : ''}.pdf`
+      })),
+      ...chartComms.callNotesToFile((await loadRows('phone_calls')).filter(c => c && String(c.client_id) === String(client.id)), filings).map(({ row, key, hash, updated }) => ({
+        kind: 'call', key, hash, updated, callRowId: row.id, date: chartComms.easternDate(row.started_at),
+        text: chartComms.callNoteText(row, { clientName: client.name, updated }),
+        fileName: `Call_note_${chartComms.easternDate(row.started_at) || 'undated'}_${short(row.id)}${updated ? '_updated' : ''}.pdf`
+      }))
+    ].slice(0, MESSAGE_NOTE_BATCH);
     let filed = 0;
-    for (const { note, corrected } of due) {
-      const text = chartComms.messageNoteText(note, { clientName: client.name, corrected });
-      const pdf = await pdfGenerator.generateMessageNotePDF({ text, clientName: client.name });
-      const fileName = `Message_note_${note.channel}_${note.date}${corrected ? '_corrected' : ''}.pdf`;
+    for (const d of due) {
+      const pdf = await pdfGenerator.generateMessageNotePDF({ text: d.text, clientName: client.name });
       try {
-        await openemr.forActor(user).uploadPatientDocument(client.openEmrPatientId, fileName, pdf, 'application/pdf', '/Medical Record');
+        await openemr.forActor(user).uploadPatientDocument(client.openEmrPatientId, d.fileName, pdf, 'application/pdf', '/Medical Record');
       } catch (e) {
-        console.warn('[MESSAGE NOTES] OpenEMR refused a message note:', e.message);
+        console.warn('[CHART NOTES] OpenEMR refused a note:', e.message);
         break;
       }
       const list = await loadRows('message_note_filings');
-      list.push({ id: uuidv4(), key: note.key, client_id: client.id, thread_id: note.threadId, date: note.date, hash: note.hash,
-        count: note.count, corrected, filed_at: new Date().toISOString(), by_id: user.id, by_name: user.name || user.email });
+      list.push({ id: uuidv4(), key: d.key, kind: d.kind, client_id: client.id, thread_id: d.threadId || null, call_row_id: d.callRowId || null,
+        date: d.date, hash: d.hash, count: d.count || null, updated: d.updated, filed_at: new Date().toISOString(), by_id: user.id, by_name: user.name || user.email });
       await db.set('message_note_filings', list);
-      await logActivity(user.id, user.name || user.email, 'message_note_filed_to_emr', 'client', client.id, { key: note.key, corrected });
+      await logActivity(user.id, user.name || user.email, d.kind === 'call' ? 'call_note_filed_to_emr' : 'message_note_filed_to_emr', 'client', client.id, { key: d.key, updated: d.updated });
       filed++;
     }
-    if (filed) console.log(`[MESSAGE NOTES] filed ${filed} message note(s) for a client`);
-  })().catch(e => console.warn('[MESSAGE NOTES] not filed:', e.message));
+    if (filed) console.log(`[CHART NOTES] filed ${filed} message/call note(s) for a client`);
+  })().catch(e => console.warn('[CHART NOTES] not filed:', e.message));
 };
+
+// A call note's words, opened from the chart Timeline (2026-10-19).
+app.get('/api/clinical/patients/:clientId/calls/:callId/note', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const row = (await loadRows('phone_calls')).find(c => c && c.id === String(req.params.callId) && !c.pending_summary && String(c.client_id) === String(client.id));
+    if (!row) return res.status(404).json({ error: 'That call was not found.', code: 'CALL_NOT_FOUND' });
+    const filings = (await loadRows('message_note_filings')).filter(f => f && f.key === `call:${row.id}`).sort((a, b) => String(b.filed_at).localeCompare(String(a.filed_at)));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'call_note_read', 'client', client.id, { callRowId: row.id });
+    res.json({ key: `call:${row.id}`, title: 'Call note', date: chartComms.easternDate(row.started_at),
+      filing: !filings.length ? (chartComms.callNoteReady(row) ? 'waiting' : 'open') : (filings[0].hash === chartComms.callNoteHash(row) ? 'filed' : 'changed'),
+      text: chartComms.callNoteText(row, { clientName: client.name }) });
+  } catch (error) {
+    console.error('Call note read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
