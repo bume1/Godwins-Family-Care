@@ -112,7 +112,7 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
 const ENROLLMENT_WRITES = [
   "'/api/gfc/admin/signups/:id/decide'", "'/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide'",
   "'/api/gfc/admin/enrollment/:clientId/service-line'", "'/api/gfc/admin/enrollment/:clientId/documents/request'",
-  "'/api/gfc/admin/enrollment/:clientId/documents/remind'", "'/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review'",
+  "'/api/gfc/admin/enrollment/:clientId/documents/remind'",
   "'/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver'", "'/api/gfc/admin/enrollment/:clientId/documents/upload-link'",
   "'/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke'", "'/api/gfc/admin/enrollment/:clientId/review'",
   "'/api/gfc/admin/enrollment/:clientId/follow-up'", "'/api/gfc/admin/enrollment/:clientId/approve'",
@@ -284,4 +284,16 @@ test('a manager or coordinator messages as the office (not as admin) rather than
   assert.equal(messaging.actorRole({ role: 'user', isManager: true }), messaging.ROLE.MANAGER);
   assert.equal(messaging.actorRole({ ...at.fieldsFor('coordinator') }), messaging.ROLE.MANAGER);
   assert.equal(messaging.actorRole({ ...at.fieldsFor('lmsw') }), messaging.ROLE.CASE_MANAGER);
+});
+
+// Owner, 2026-10-16: approving a document is narrower than the other enrollment
+// decisions: a care coordinator or the admin, never a plain manager.
+test('document approval is the care coordinator\'s or the admin\'s alone', () => {
+  assert.match(serverSrc, /app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/:uploadId\/review', authenticateToken, requireDocumentApprover/);
+  const roles = require('../clinicalRoles');
+  assert.equal(roles.canApproveChartDocuments({ role: 'admin' }), true);
+  assert.equal(roles.canApproveChartDocuments(at.fieldsFor('coordinator')), true);
+  assert.equal(roles.canApproveChartDocuments(at.fieldsFor('manager', { managerClinicalAccess: 'view' })), false, 'a plain manager');
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) assert.equal(roles.canApproveChartDocuments(at.fieldsFor(t)), false, t);
+  assert.equal(roles.canApproveChartDocuments({ ...at.fieldsFor('coordinator'), accountStatus: 'inactive' }), false);
 });

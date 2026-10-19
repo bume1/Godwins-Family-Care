@@ -1027,8 +1027,8 @@
                           ? <span className="text-success-600">Accepted</span>
                           : (
                             <span className="flex gap-2">
-                              {canEdit && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
-                              {canEdit && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
+                              {access.canApprove && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
+                              {access.canApprove && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
                             </span>
                           )}
                       {/* A rejected file is not read: it is not going on the
