@@ -152,7 +152,14 @@ const RN = staff('rn_1', 'Ruth Nolan', 'rn', 'RN');
 const FNP = staff('fnp_1', 'Bethel Godwins', 'provider', 'FNP');
 const LCSW = staff('lcsw_1', 'Lena Cole', 'lcsw', 'LCSW');
 const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', 'LMSW');
-const CM = staff('cm_1', 'Casey Reed', 'readOnly', null, { role: 'caseManager', hasClinicalAccess: false });
+// LMSW / Case Manager (owner, 2026-10-15): every case manager is an LMSW, so
+// this is exactly what accountTypes.fieldsFor('lmsw') writes. It is NOT a
+// read-only account any more.
+const CM = staff('cm_1', 'Casey Reed', 'lmsw', 'LMSW', { role: 'caseManager', accountType: 'lmsw' });
+// The read-only account that still exists: a Manager with Clinical Workspace
+// set to View only, exactly what accountTypes.fieldsFor('manager', 'view') writes.
+const VIEW = { id: 'view_1', name: 'Vera Hill (TEST DATA)', email: 'view_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false,
+  clinicalRole: 'readOnly', accountType: 'manager', managerClinicalAccess: 'view', accountStatus: 'active' };
 // Billing (owner, 2026-09-29): an admin or a manager. The manager holds no
 // clinical role at all.
 // Care Coordinator (owner, 2026-10-15): stored as a manager plus clinical
@@ -178,7 +185,7 @@ const HP_NOTE = {
 
 (async () => {
   const hash = await bcrypt.hash(PW, 4);
-  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, PHONEPATIENT, RN, FNP, LCSW, LMSW, CM, MGR, COORD].map(u => ({ ...u, password: hash })));
+  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, PHONEPATIENT, RN, FNP, LCSW, LMSW, CM, VIEW, MGR, COORD].map(u => ({ ...u, password: hash })));
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   const fresh = new Date().toISOString();
   STORE.set('gfc_ncci_source_version', { ptp: { quarter: '2026Q4', loadedAt: fresh }, mue: { quarter: '2026Q4', loadedAt: fresh } });
@@ -186,8 +193,8 @@ const HP_NOTE = {
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 3000));
   const tok = {};
-  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM, mgr: MGR, coord: COORD })) tok[k] = await login(u.email);
-  if (!tok.rn || !tok.fnp || !tok.lmsw) { console.log('LOGIN FAILED', tok); process.exit(1); }
+  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM, view: VIEW, mgr: MGR, coord: COORD })) tok[k] = await login(u.email);
+  if (!tok.rn || !tok.fnp || !tok.lmsw || !tok.cm || !tok.view) { console.log('LOGIN FAILED', tok); process.exit(1); }
   const P = `/api/clinical/patients/${PATIENT.id}`;
 
   console.log('\n── 1. Save draft writes the app AND OpenEMR in one action ──');
@@ -278,8 +285,8 @@ const HP_NOTE = {
   check('one co-signature per person', r.status === 409 && r.body.code === 'CO_SIGN_DUPLICATE', r.body);
   r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.rn, { attest: true });
   check('the signer cannot co-sign their own note', r.status === 409 && r.body.code === 'CO_SIGN_SELF', r.body);
-  r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.cm, { attest: true });
-  check('read-only staff cannot co-sign', r.status === 403, r.body);
+  r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.view, { attest: true });
+  check('a View-only manager cannot co-sign', r.status === 403, r.body);
   r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.lcsw, { attest: true });
   check('a second clinician co-signs too', r.status === 200 && (record(hp).coSignatures || []).length === 2, r.body);
 
@@ -354,8 +361,11 @@ const HP_NOTE = {
   const lm = r.body.encounterUuid;
   r = await call('POST', `${P}/encounters/${lm}/sign`, tok.lmsw, { attest: true });
   check('and signs it as author — held for a clinician addendum', r.status === 200 && record(lm).coSignStatus === 'pending', r.body);
+  r = await call('POST', `${P}/notes`, tok.view, { note: { kind: 'followup', chiefConcern: 'x' } });
+  check('a View-only manager cannot write a note', r.status === 403, r.body);
+  // A case manager is an LMSW: they write, but only a social work visit type.
   r = await call('POST', `${P}/notes`, tok.cm, { note: { kind: 'followup', chiefConcern: 'x' } });
-  check('read-only staff cannot write a note', r.status === 403, r.body);
+  check('a case manager (LMSW) must pick a social work visit type', r.status === 400 && r.body.code === 'VISIT_TYPE_REQUIRED', r.body);
   r = await call('POST', `${P}/notes`, tok.rn, { note: { kind: 'followup', chiefConcern: '<script>alert(1)</script>' } });
   check('typed HTML is stored as text and reaches OpenEMR as text', r.status === 200 && narrativeText(r.body.encounterUuid).includes('<script>alert(1)</script>'));
 
@@ -594,8 +604,8 @@ const HP_NOTE = {
   r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.lcsw, { instrument: 'phq9', score: 11, item9: 1 });
   check('a PHQ-9 is recorded and flags item 9', r.status === 200 && r.body.screening.interpretation === 'Moderate' && (r.body.warnings || []).some(w => /item 9/.test(w)), r.body);
   check('the screening reaches the OpenEMR note', /SCREENINGS RECORDED[\s\S]*PHQ-9 11\/27/.test(narrativeText(sw)));
-  r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.cm, { instrument: 'gad7', score: 3 });
-  check('read-only staff cannot record a screening', r.status === 403, r.body);
+  r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.view, { instrument: 'gad7', score: 3 });
+  check('a View-only manager cannot record a screening', r.status === 403, r.body);
   r = await call('GET', `${PH}/encounters/${sw}`, tok.lcsw);
   check('the encounter lists the screening and says the note is sections-only', r.status === 200 && (r.body.screenings || []).length === 1 && r.body.sectionsOnly === true, { s: r.body.screenings, so: r.body.sectionsOnly });
   r = await call('PUT', `${PH}/encounters/${sw}/coding`, tok.lcsw, { diagnoses: [{ code: 'Z63.6', description: 'Dependent relative needing care at home' }], services: [] });
