@@ -462,6 +462,33 @@
     const { useState, useEffect, useRef, useCallback } = React;
     
     const API_URL = window.location.origin;
+
+    // A family account linked to several patients (owner, 2026-10-20) works
+    // on one at a time, chosen per sign-in on the server. Every call to our
+    // own API names the patient this page is showing; if another tab has
+    // switched patient since, the server answers 409 and this page reloads
+    // rather than reading or writing the wrong person's record.
+    window.GFC_ACTIVE_CLIENT = null;
+    (() => {
+      const base = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const ours = url.startsWith('/api/') || url.startsWith(`${window.location.origin}/api/`);
+        if (ours && window.GFC_ACTIVE_CLIENT) {
+          const headers = new Headers((init && init.headers) || (typeof input !== 'string' && input.headers) || {});
+          headers.set('X-GFC-Client', window.GFC_ACTIVE_CLIENT);
+          init = { ...(init || {}), headers };
+        }
+        const res = await base(input, init);
+        if (ours && res.status === 409) {
+          try {
+            const body = await res.clone().json();
+            if (body && body.code === 'ACTIVE_CLIENT_CHANGED') { window.location.reload(); }
+          } catch (_) { /* not JSON */ }
+        }
+        return res;
+      };
+    })();
     
     const getSlugFromUrl = () => {
       const path = window.location.pathname;
@@ -597,6 +624,14 @@
       getGfcMe: (token) =>
         fetch(`${API_URL}/api/gfc/me`, {
           headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      // Choose which linked patient this sign-in is working on.
+      setActiveClient: (token, clientId) =>
+        fetch(`${API_URL}/api/gfc/active-client`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId })
         }).then(handleResponse).catch(asError),
 
       getGfcCarePlan: (token) =>
@@ -7527,6 +7562,45 @@
       </div>
     );
 
+    // Whose portal to open, for a family account linked to more than one
+    // patient. Names and the POA badge only; nothing else is read until a
+    // patient is chosen.
+    const chooseClient = async (token, id) => {
+      const r = await api.setActiveClient(token, id);
+      if (r && r.error) { alert(r.error); return; }
+      window.location.hash = '';
+      window.location.reload();
+    };
+    const GfcPatientPicker = ({ token, me }) => (
+      <div className="gfc"><div className="gfc-shell">
+        <div className="gfc-hdr"><span style={{ width: 18 }} /><span className="ttl">Choose a portal</span><button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button></div>
+        <div className="gfc-body">
+          <h2 className="disp" style={{ marginBottom: 6 }}>Whose portal would you like to open?</h2>
+          <p className="sub" style={{ marginBottom: 18 }}>You help with more than one person. You can switch at any time.</p>
+          {(me.linkedClients || []).map(c => (
+            <button key={c.id} className="btn line" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: 10 }} onClick={() => chooseClient(token, c.id)}>
+              <span>{c.name}</span>
+              {c.isPoa && <span className="ro"><i className="ti ti-user-shield" />POA</span>}
+            </button>
+          ))}
+          {!(me.linkedClients || []).length && <div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>No patients linked</b><span>Please call the office so we can link your account.</span></div></div>}
+        </div>
+      </div></div>
+    );
+    const GfcPatientSwitch = ({ token, me }) => {
+      const list = (me && me.linkedClients) || [];
+      if (list.length < 2) return null;
+      return (
+        <label className="gfc-switch" style={{ display: 'block', padding: '8px 12px', fontSize: 12.5, color: 'var(--mut)' }}>
+          Viewing
+          <select value={me.activeClientId || ''} onChange={(e) => chooseClient(token, e.target.value)}
+            style={{ display: 'block', width: '100%', marginTop: 4, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--line, #ddd)', fontSize: 14 }}>
+            {list.map(c => <option key={c.id} value={c.id}>{c.name}{c.isPoa ? ' (POA)' : ''}</option>)}
+          </select>
+        </label>
+      );
+    };
+
     const GfcClientPortal = ({ token, user }) => {
       const [me, setMe] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -7576,6 +7650,33 @@
           const result = await api.getGfcMe(token);
           if (cancelled) return;
           if (result.error) { setError(result.error); setLoading(false); return; }
+          // A notice sent to a family member names which patient it is about
+          // (/portal?for=<id>), so the link opens that patient's portal even
+          // when this person helps more than one. Only a linked patient is
+          // switched to; the server checks again.
+          let wanted = null;
+          try { wanted = new URLSearchParams(window.location.search).get('for'); } catch (_) { wanted = null; }
+          if (!wanted) {
+            try {
+              const saved = JSON.parse(sessionStorage.getItem('gfc_portal_for') || 'null');
+              sessionStorage.removeItem('gfc_portal_for');
+              if (saved && saved.for) {
+                wanted = saved.for;
+                if (saved.hash === '#messages' && !window.location.hash) { window.location.hash = 'messages'; setView('messages'); }
+              }
+            } catch (_) { wanted = null; }
+          }
+          if (wanted && result.isFamily) {
+            const q = new URLSearchParams(window.location.search); q.delete('for');
+            const clean = `${window.location.pathname}${q.toString() ? `?${q}` : ''}${window.location.hash || ''}`;
+            const linked = (result.linkedClients || []).some(c => c.id === wanted);
+            if (linked && result.activeClientId !== wanted) {
+              const sw = await api.setActiveClient(token, wanted);
+              if (!sw.error) { window.location.replace(clean); return; }
+            }
+            try { window.history.replaceState(null, '', clean); } catch (_) { /* older browsers */ }
+          }
+          window.GFC_ACTIVE_CLIENT = result.activeClientId || null;
           setMe(result);
           setLoading(false);
         })();
@@ -7593,7 +7694,7 @@
       // the reason. A tab that silently is not there reads as "no health data".
       // PHC-only clients never see it (schema §6).
       const clinicalBlocked = !!(me && me.clinicalRead && !me.clinicalRead.available && me.clinicalRead.code && me.clinicalRead.code !== 'CLINICAL_NOT_ON_LINE');
-      const locked = me && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
+      const locked = me && !me.needsClientChoice && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
 
       // Re-read the documents payload after an upload, so the checklist reflects
       // what we now hold rather than what the page loaded with.
@@ -7608,7 +7709,7 @@
 
       // Step 2: once unlocked, load portal data (these endpoints are gated server-side).
       useEffect(() => {
-        if (!me || locked) return;
+        if (!me || locked || me.needsClientChoice) return;
         let cancelled = false;
         (async () => {
           // Messages are no longer fetched here: the Session 9 component owns
@@ -7655,6 +7756,9 @@
         );
       }
 
+      // Linked to several patients and none chosen for this sign-in yet.
+      if (me && me.needsClientChoice) return <GfcPatientPicker token={token} me={me} />;
+
       // LOCKED → render only the gate / intake. Every other area is blocked server-side too.
       if (locked) {
         return (
@@ -7664,6 +7768,7 @@
               <span className="ttl">{showIntake ? 'Enrollment' : 'My Care'}</span>
               <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
             </div>
+            {isFamily && !showIntake && <GfcPatientSwitch token={token} me={me} />}
             {showIntake && !isFamily
               ? <GfcIntakeFlow token={token} me={me} onBack={() => setShowIntake(false)}
                   onComplete={async () => { setShowIntake(false); await reloadMe(); setJustEnrolled(true); }} />
@@ -7741,6 +7846,7 @@
         <div className="gfc v2"><div className="gfc-app">
           <aside className="gfc-side">
             <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+            {isFamily && <GfcPatientSwitch token={token} me={me} />}
             {NAV.map(n => (
               <button key={n.id} className={view === n.id ? 'on' : ''} onClick={() => go(n.id)}>
                 <i className={`ti ${n.icon}`} />{n.label}{n.badge ? <span className="sn">{n.badge}</span> : null}
@@ -7773,6 +7879,7 @@
             {view === 'profile' && !readOnly && <GfcProfile token={token} onNavigate={onNavigate} isPoa={!!(me && me.isPoa)} />}
             {view === 'billing' && !readOnly && <GfcBilling token={token} onNavigate={onNavigate} returned={billingReturn} />}
             {view === 'settings' && <GfcSettings me={me} token={token} readOnly={readOnly} onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
+            {view === 'more' && isFamily && (me.linkedClients || []).length > 1 && <div className="gfc-body" style={{ paddingBottom: 0 }}><GfcPatientSwitch token={token} me={me} /></div>}
             {view === 'more' && <GfcMore items={moreItems} onNavigate={go} unread={unread} />}
             {!data && dataErr && (view === 'home' || view === 'care') && (
               <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your care information didn't load</b><span>{dataErr} Please refresh the page to try again.</span></div></div></div>
@@ -8005,6 +8112,13 @@
       // Handle central /portal login (no slug) - show login page or admin view
       if (!slug) {
         if (!token || !user) {
+          // A notice's link names which patient it is about (?for=<id>) and
+          // which tab (#messages). Sign-in drops both, so they wait in this
+          // tab until the portal opens again.
+          try {
+            const f = new URLSearchParams(window.location.search).get('for');
+            if (f) sessionStorage.setItem('gfc_portal_for', JSON.stringify({ for: f, hash: window.location.hash || '' }));
+          } catch (_) { /* storage blocked: the picker still works */ }
           // One sign-in page for everyone (owner, 2026-10-12): /login routes
           // each role to its own destination, the portal included.
           window.location.replace('/login');

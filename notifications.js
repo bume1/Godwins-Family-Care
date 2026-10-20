@@ -54,6 +54,7 @@ const { renderGfcEmail } = require('./emailTemplates');
 // "Your visit" opening is load-bearing (see sendToClientSide) and it is tested
 // where the rule is declared.
 const reminders = require('./visitReminders');
+const familyLinks = require('./familyLinks');   // POA is per patient; one family account can cover several
 
 // Roles that receive staff-side PHC notices. Mirrors ENROLLMENT_STAFF_ROLES in
 // server.js — passed in rather than restated, so the two cannot drift.
@@ -76,6 +77,16 @@ function createNotifier(deps) {
   const portalUrlFor = async (client) => {
     const base = await getAppBaseUrl();
     return `${base}/portal${client && client.slug ? `/${client.slug}` : ''}`;
+  };
+
+  // A POA can be linked to several patients and opens one at a time
+  // (familyLinks.js), so their button names WHICH patient: /portal?for=<id>
+  // switches to that patient on arrival. The id is an opaque record id, not
+  // a name. The patient's own button is unchanged.
+  const ctaForRecipient = (url, client, actingFor) => {
+    if (!actingFor || !client) return url;
+    const base = String(url).replace(/\/portal(\/.*)?$/, '');
+    return `${base}/portal?for=${encodeURIComponent(client.id)}`;
   };
 
   const firstNameOf = (user) =>
@@ -102,8 +113,11 @@ function createNotifier(deps) {
     if (!client) return { client: null, recipients: [] };
     const recipients = [];
     if (client.email) recipients.push({ user: client, actingFor: null });
-    for (const u of users) {
-      if (u && u.role === familyRole && u.familyIsPoa && u.familyOfClientId === clientId && u.email) {
+    // POA is per patient (familyLinks.js): a family account linked to several
+    // patients hears only about the ones it is POA for. A placeholder login
+    // has no inbox.
+    for (const { user: u } of familyLinks.familyFor(users, clientId, { poaOnly: true, activeOnly: false })) {
+      if (u.role === familyRole && u.email && !familyLinks.isPlaceholderEmail(u.email)) {
         recipients.push({ user: u, actingFor: client });
       }
     }
@@ -188,7 +202,7 @@ function createNotifier(deps) {
           // carry it. Staff type this field freely, so it is treated as PHI.
           callout: rejected && detail && reason ? reason : null,
           calloutLabel: 'Why we need it again',
-          ctaUrl: url, ctaLabel: 'Open your portal',
+          ctaUrl: ctaForRecipient(url, client, actingFor), ctaLabel: 'Open your portal',
           relatedEntityId: `${uploadId}:${decision}`, relatedEntityType: 'document',
           actorId, phi: detail
         });
@@ -334,7 +348,7 @@ function createNotifier(deps) {
               (m, what) => `${actingFor.name}'s ${what}`))
           : paragraphs,
         fields, callout, calloutLabel,
-        ctaUrl: (cta && cta.url) || url,
+        ctaUrl: (cta && cta.url) || ctaForRecipient(url, client, actingFor),
         ctaLabel: (cta && cta.label) || 'Open your portal',
         relatedEntityId: entityId, relatedEntityType: entityType || 'appointment',
         actorId, phi: true
@@ -550,7 +564,7 @@ function createNotifier(deps) {
           // circumstances, so they ride only on a transport that may carry it.
           callout: detail && count ? list.join(' · ') : null,
           calloutLabel: 'What we need',
-          ctaUrl: url, ctaLabel: 'Open your portal',
+          ctaUrl: ctaForRecipient(url, client, actingFor), ctaLabel: 'Open your portal',
           // A reminder is a deliberate second ask, so it must not be collapsed
           // into the original request by the queue's duplicate check.
           relatedEntityId: `${client.id}:docs:${isReminder ? 'remind' : 'request'}:${(rows || []).map(r => r && r.id).filter(Boolean).sort().join(',')}`,
@@ -624,7 +638,7 @@ function createNotifier(deps) {
                'The list is waiting in your secure portal. For privacy we do not put the details in email.'],
           callout: detail && count ? list.join(' · ') : null,
           calloutLabel: 'What still needs you',
-          ctaUrl: url, ctaLabel: 'Open your portal',
+          ctaUrl: ctaForRecipient(url, client, actingFor), ctaLabel: 'Open your portal',
           relatedEntityId: `${client.id}:followup:${list.slice().sort().join(',')}`,
           relatedEntityType: 'enrollment',
           actorId, phi: detail
@@ -831,7 +845,7 @@ function createNotifier(deps) {
           subject: overridden ? 'Your enrollment is approved' : 'Your enrollment is complete',
           headline: overridden ? 'Your enrollment is approved' : 'Your enrollment is complete',
           paragraphs,
-          ctaUrl: url, ctaLabel: 'Open your portal',
+          ctaUrl: ctaForRecipient(url, client, actingFor), ctaLabel: 'Open your portal',
           relatedEntityId: `${client.id}:enrolled`,
           relatedEntityType: 'enrollment',
           actorId, phi: false
@@ -1104,6 +1118,8 @@ function createNotifier(deps) {
   }
 
   return {
+    // who hears about a client: the client and the POA of THAT client
+    clientSideRecipients, ctaForRecipient,
     // private home care
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,

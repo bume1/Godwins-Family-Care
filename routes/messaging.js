@@ -36,6 +36,7 @@ const links = require('../appLinks');   // where each person actually goes
 const msg = require('../messagingRepository');
 const caregiverRepo = require('../caregiverRepository');
 const nf = require('../public/note-format.js');   // the message formatting: plain text for escalations and previews
+const familyLinks = require('../familyLinks');   // POA is per patient; one family account can cover several
 const quoSms = require('../quoSms');   // Care Team messages by text (owner, 2026-10-15)
 const chartComms = require('../chartCommunications');   // calls into the chart (owner, 2026-10-19)
 
@@ -88,7 +89,9 @@ module.exports = function createMessagingRoutes(deps) {
   const isActingPoa = async (user, client) => {
     if (!user || user.role !== ROLES.FAMILY || !client) return false;
     const fresh = await freshUser(user.id);
-    return !!(fresh && fresh.familyIsPoa && fresh.familyOfClientId === client.id);
+    // POA is per patient (familyLinks.js), so it is asked of THIS client, never
+    // read off the stored mirror fields, which describe only the first link.
+    return familyLinks.isPoaFor(fresh, client.id);
   };
 
   // Is this client one the acting user may message about? Session 6 owns the
@@ -141,7 +144,7 @@ module.exports = function createMessagingRoutes(deps) {
     // team for that patient").
     if (wants.includes(msg.ROLE.CASE_MANAGER)) msg.caseManagerIds(client).forEach(add);
     if (wants.includes(msg.ROLE.FAMILY) && client) {
-      users.filter(u => u.role === ROLES.FAMILY && u.familyOfClientId === client.id).forEach(u => add(u.id));
+      familyLinks.familyFor(users, client.id, { activeOnly: false }).forEach(f => add(f.user.id));
     }
     if (wants.includes(msg.ROLE.ADMIN)) {
       users.filter(u => u.role === ROLES.ADMIN).forEach(u => add(u.id));
@@ -156,9 +159,7 @@ module.exports = function createMessagingRoutes(deps) {
   };
 
   // The client's designated POAs, from the FRESH user list.
-  const poaIdsFor = (users, client) => users
-    .filter(u => u && u.role === ROLES.FAMILY && u.familyIsPoa && u.familyOfClientId === client.id)
-    .map(u => u.id);
+  const poaIdsFor = (users, client) => familyLinks.familyFor(users, client.id, { poaOnly: true, activeOnly: false }).map(f => f.user.id);
 
   const publicThread = (t, me) => ({
     id: t.id,
@@ -400,7 +401,7 @@ module.exports = function createMessagingRoutes(deps) {
           const out = { ...publicMessage(m), mine: m.from_user_id === req.user.id };
           if (!m.from_role_label && m.from_role !== 'POA') {
             const u = everyone.find(x => x && x.id === m.from_user_id);
-            if (u) out.fromRoleLabel = msg.personLabel(u);
+            if (u) out.fromRoleLabel = msg.personLabel(u, thread.client_id);
           }
           return out;
         }),
@@ -418,7 +419,7 @@ module.exports = function createMessagingRoutes(deps) {
         // does not. Names and what each person is; nothing else.
         people: (thread.participant_ids || []).map(id => {
           const u = everyone.find(x => x && x.id === id);
-          return u ? { id: u.id, name: u.name || u.email || 'Unknown', label: msg.personLabel(u), you: u.id === req.user.id } : null;
+          return u ? { id: u.id, name: u.name || u.email || 'Unknown', label: msg.personLabel(u, thread.client_id), you: u.id === req.user.id } : null;
         }).filter(Boolean),
         // The yellow "Patient sees this" badge, and on a Care Update who answers.
         patientFacing: msg.isPatientFacing(thread),
@@ -686,7 +687,7 @@ module.exports = function createMessagingRoutes(deps) {
       };
 
       // Is the patient side on it, and who answers them (owner, 2026-10-16)?
-      const familyIds = client ? users.filter(u => u && u.role === ROLES.FAMILY && u.familyOfClientId === client.id).map(u => u.id) : [];
+      const familyIds = client ? familyLinks.familyFor(users, client.id, { activeOnly: false }).map(f => f.user.id) : [];
       thread.patient_facing = !!client && thread.participant_ids.some(id => id === client.id || familyIds.includes(id));
       const starterRole = msg.actorRole(req.user);
       if (channelId === 'care_update' && !isPoa && starterRole && !msg.CLIENT_SIDE_ROLES.includes(starterRole) && starterRole !== msg.ROLE.ADMIN) {
@@ -994,7 +995,10 @@ module.exports = function createMessagingRoutes(deps) {
       body: message.body,
       format: message.body_format,
       attachmentCount: (message.attachments || []).length,
-      portalUrl: `${base}${links.PATHS.PORTAL_MESSAGES}`,
+      // A family member linked to several patients lands on this thread's.
+      portalUrl: u.role === ROLES.FAMILY && thread.client_id
+        ? `${base}${links.PATHS.PORTAL}?for=${encodeURIComponent(thread.client_id)}#messages`
+        : `${base}${links.PATHS.PORTAL_MESSAGES}`,
       first: !(u.smsOptIn && u.smsOptIn.firstTextAt)
     });
     const row = {
@@ -1133,6 +1137,27 @@ module.exports = function createMessagingRoutes(deps) {
     return { hit: hits.find(h => !h.isPoa) || hits[0] };
   }
 
+  // A reply from a POA who is POA for SEVERAL patients (familyLinks.js) names
+  // one person and more than one patient. It goes to the patient whose
+  // conversation we last texted that person about, within a week: that is the
+  // conversation they are answering. With no such text it stays ambiguous and
+  // is never guessed. Two DIFFERENT people on one number are never resolved
+  // this way.
+  const REPLY_CONTEXT_MS = 7 * 24 * 3600 * 1000;
+  async function resolveTextReply(phone, users) {
+    const who = resolveTexter(phone, users);
+    if (who.hit || who.outcome !== 'ambiguous_number') return who;
+    const hits = quoSms.matchPhone(phone, users);
+    const people = [...new Set(hits.map(h => h.user.id))];
+    if (people.length !== 1) return who;
+    const since = Date.now() - REPLY_CONTEXT_MS;
+    const last = (await readRows('sms_outbox'))
+      .filter(r => r && r.user_id === people[0] && r.status === 'sent' && Date.parse(r.sent_at || r.created_at) >= since && hits.some(h => h.client.id === r.client_id))
+      .sort((a, b) => String(b.sent_at || b.created_at).localeCompare(String(a.sent_at || a.created_at)))[0];
+    if (!last) return who;
+    return { hit: hits.find(h => h.client.id === last.client_id) };
+  }
+
   // ==========================================================================
   // Calls on the office line become calls waiting to be documented (owner,
   // 2026-10-19). Only an ANSWERED call with a number that belongs to one
@@ -1209,7 +1234,8 @@ module.exports = function createMessagingRoutes(deps) {
     if (ev.direction === 'incoming') {
       const kw = quoSms.keyword(ev.body);
       if (kw === 'stop' || kw === 'start') {
-        const hits = quoSms.matchPhone(ev.patientPhone, users);
+        // A POA for two patients matches twice; their opt-out is one setting.
+        const hits = quoSms.matchPhone(ev.patientPhone, users).filter((h, i, all) => all.findIndex(x => x.user.id === h.user.id) === i);
         let changed = 0;
         for (const h of hits) {
           const u = users.find(x => x.id === h.user.id);
@@ -1228,7 +1254,7 @@ module.exports = function createMessagingRoutes(deps) {
         }
         return record(kw === 'stop' ? 'opted_out' : 'opted_in', { changed });
       }
-      const who = resolveTexter(ev.patientPhone, users);
+      const who = await resolveTextReply(ev.patientPhone, users);
       if (!who.hit) return record(who.outcome);
       const { user, client, isPoa } = who.hit;
       const sender = msg.senderIdentity(user, { client, isPoa });
@@ -1360,7 +1386,13 @@ module.exports = function createMessagingRoutes(deps) {
             subject: fromStaff ? 'A new message from your care team' : 'A new message in your conversation',
             body: (fromStaff ? 'Your care team has sent you a message.' : 'There is a new message in your conversation.')
               + ' Sign in to your portal to read it. For privacy we do not put messages in email.',
-            ctaUrl: links.PATHS.PORTAL_MESSAGES, ctaLabel: 'Open your messages'
+            // A family member may be linked to several patients and opens one
+            // at a time (familyLinks.js): their button names which, by record
+            // id, so it lands on THIS conversation's patient.
+            ctaUrl: u.role === ROLES.FAMILY && thread.client_id
+              ? `${links.PATHS.PORTAL}?for=${encodeURIComponent(thread.client_id)}#messages`
+              : links.PATHS.PORTAL_MESSAGES,
+            ctaLabel: 'Open your messages'
           },
           { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });
         continue;

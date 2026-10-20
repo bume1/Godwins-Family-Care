@@ -25,7 +25,8 @@
 // ============================================================================
 
 const nf = require('./public/note-format.js');   // the six-shape message formatting, one source for editor, server and screen
-const accountTypes = require('./accountTypes');   // what kind of account someone is, for the label in a chat
+const accountTypes = require('./accountTypes');
+const familyLinks = require('./familyLinks');   // POA is per patient; one family account can cover several   // what kind of account someone is, for the label in a chat
 
 const ROLE = Object.freeze({
   CLIENT: 'client',
@@ -423,10 +424,10 @@ function audienceFor(channelId, { user, client, users, isPoa = false } = {}) {
       .map(u => ({ id: u.id, name: u.name || u.email || 'Team member', what: what(u) }))
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
-  const family = list.filter(u => active(u) && u.role === 'family' && u.familyOfClientId === client.id);
+  const family = familyLinks.familyFor(list, client.id);
   const side = [{ id: client.id, name: client.name || 'Patient', what: 'Patient' }]
-    .concat(family.filter(u => ch.choosesRecipients ? !!u.familyIsPoa : true)
-      .map(u => ({ id: u.id, name: u.name || u.email || 'Family', what: u.familyIsPoa ? 'POA' : 'Family' })));
+    .concat(family.filter(f => ch.choosesRecipients ? f.link.isPoa : true)
+      .map(f => ({ id: f.user.id, name: f.user.name || f.user.email || 'Family', what: f.link.isPoa ? 'POA' : 'Family' })));
   return side.concat(careTeamMembers(client, users)).filter(m => !user || m.id !== user.id);
 }
 
@@ -831,10 +832,12 @@ const PERSON_LABELS = Object.freeze({
   lmsw: 'Case manager (LMSW)', coordinator: 'Care coordinator', caregiver: 'Caregiver',
   client: 'Patient', family: 'Family'
 });
-function personLabel(u) {
+// `clientId` names the patient the conversation is about: a family account can
+// be POA for one patient and plain family for another (familyLinks.js).
+function personLabel(u, clientId = null) {
   if (!u) return 'Unknown';
   const type = accountTypes.accountTypeOf(u);
-  if (type === 'family') return u.familyIsPoa ? 'POA' : 'Family';
+  if (type === 'family') return (clientId ? familyLinks.isPoaFor(u, clientId) : u.familyIsPoa) ? 'POA' : 'Family';
   if (type && PERSON_LABELS[type]) return PERSON_LABELS[type];
   // A record that maps onto no type yet (an admin still has to choose one).
   if (u.hasClinicalAccess) return 'Clinician';

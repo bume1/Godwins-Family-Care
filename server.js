@@ -71,6 +71,7 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 const clinicalRoles = require('./clinicalRoles');
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
+const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
 const chartComms = require('./chartCommunications'); // calls and messages into the chart (2026-10-19)
@@ -2413,6 +2414,17 @@ const authenticateToken = async (req, res, next) => {
       // Determine if user is a manager (has limited admin access)
       const isManager = freshUser.isManager || false;
 
+      // A family account linked to several patients works on one at a time.
+      // The page names the patient it is showing; if that is not the one this
+      // sign-in has open, it is a stale tab and must not read or write.
+      const familyActive = freshUser.role === config.ROLES.FAMILY
+        ? familyLinks.resolveActive({ user: freshUser, sessionActiveId: sess.row.activeClientId, headerId: req.headers['x-gfc-client'] })
+        : { link: null, needsChoice: false, mismatch: false };
+      const familyLinkIds = familyLinks.linksOf(freshUser).map(l => l.clientId);
+      if (familyActive.mismatch) {
+        return res.status(409).json({ error: 'You switched to another patient in a different tab. This page will reload.', code: 'ACTIVE_CLIENT_CHANGED' });
+      }
+
       req.user = {
         id: freshUser.id,
         email: freshUser.email,
@@ -2448,11 +2460,15 @@ const authenticateToken = async (req, res, next) => {
         serviceLine: freshUser.serviceLine || null,
         consents: freshUser.consents || {},
         careTeam: freshUser.careTeam || null,
-        // Family role: the client whose record this family member is authorized to view
-        familyOfClientId: freshUser.familyOfClientId || (freshUser.role === config.ROLES.FAMILY ? (freshUser.assignedClients || [])[0] : null) || null,
-        // Designated Power of Attorney (family role) — client-equivalent portal
-        // access; acting gates wired in Session 4.3
-        familyIsPoa: freshUser.familyIsPoa || false,
+        // Family role: the ONE patient this request is about, and whether this
+        // person is POA for that patient. A family account can be linked to
+        // several patients (familyLinks.js); the one in use is chosen per
+        // sign-in and kept on the session row, and is copied here so every
+        // request-scoped reader keeps reading these two fields.
+        familyOfClientId: familyActive.link ? familyActive.link.clientId : null,
+        familyIsPoa: familyActive.link ? familyActive.link.isPoa : false,
+        familyLinkIds: familyLinkIds,
+        needsClientChoice: familyActive.needsChoice,
         // Session 4.8: the credential every clinical capability is decided
         // from. Read from the FRESH user record, never the token, so a role an
         // admin narrowed this morning takes effect on the next request rather
@@ -2854,6 +2870,11 @@ const requireEnrolledClient = async (req, res, next) => {
     }
 
     if (role === config.ROLES.FAMILY) {
+      // Linked to several patients and none chosen yet for this sign-in. A
+      // permission code, not an AUTH_ one: nobody is signed out for it.
+      if (req.user.needsClientChoice) {
+        return res.status(403).json({ error: 'Choose which patient\u2019s portal to open.', code: 'CLIENT_CHOICE_REQUIRED' });
+      }
       const client = await resolveGfcClientRecord(req.user);
       if (!client) {
         return res.status(403).json({ error: 'No authorized client on file for this account.', code: 'NO_CLIENT_LINK' });
@@ -3039,15 +3060,16 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin or Manager access required' });
     }
     const {
-      email, password, name, practiceName, isNewClient, assignedProjects, logo,
+      name, practiceName, isNewClient, assignedProjects, logo,
       hasImplementationsAccess,
       assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      accountType, managerClinicalAccess
+      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail
     } = req.body;
+    let { email, password } = req.body;
 
     // THE ACCOUNT TYPE DECIDES role, isManager and clinicalRole (owner,
     // 2026-10-15). When the form sends one, it overrides whatever those three
@@ -3066,16 +3088,37 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Managers can only create client users' });
     }
 
+    // A patient whose POA handles everything may have no email of their own
+    // (owner, 2026-10-20). They get a placeholder login nobody can use, the
+    // same as offline onboarding, and the POA signs in with their own account.
+    const newUserId = uuidv4();
+    const placeholderLogin = noEmail === true && role === config.ROLES.CLIENT;
+    if (placeholderLogin) {
+      email = familyLinks.placeholderEmailFor('client', newUserId);
+      password = uuidv4() + uuidv4();
+    }
+    email = String(email || '').trim();
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'Email, password, and name are required' });
     }
     const users = await getUsers();
-    if (users.find(u => u.email === email)) {
-      return res.status(400).json({ error: 'User already exists with this email' });
+    // Case-blind, because sign-in is: "Ann@x.com" and "ann@x.com" are one
+    // login, and the second account would never be reachable.
+    if (users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase())) {
+      return res.status(400).json({ error: 'User already exists with this email', code: 'EMAIL_IN_USE' });
+    }
+    // Which patients a family account is linked to, POA per patient.
+    let createLinks = null;
+    if (role === config.ROLES.FAMILY) {
+      const input = Array.isArray(familyLinksInput) ? familyLinksInput
+        : (familyOfClientId ? [{ clientId: familyOfClientId, isPoa: familyIsPoa === true }] : []);
+      const norm = familyLinks.normalizeLinksInput(input, { users, actorId: req.user.id });
+      if (norm.error) return res.status(400).json({ error: norm.error, code: norm.code });
+      createLinks = norm.links;
     }
     const hashedPassword = await bcrypt.hash(password, config.BCRYPT_SALT_ROUNDS);
     const newUser = {
-      id: uuidv4(),
+      id: newUserId,
       email,
       name,
       password: hashedPassword,
@@ -3215,18 +3258,16 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       newUser.assignedClients = assignedClients || [];
     }
 
-    // Family / authorized contact: the client (user id) this account is linked
-    // to — drives the ROI-family portal gate (resolveGfcClientRecord).
-    if (role === config.ROLES.FAMILY && familyOfClientId !== undefined) {
-      newUser.familyOfClientId = familyOfClientId || null;
+    // Family / authorized contact: the patients this account is linked to,
+    // each with its own POA tick (familyLinks.js). An admin ticks POA only
+    // after verifying the POA document on file; it grants client-equivalent
+    // portal access for THAT patient, and POA actions always log under the
+    // POA's own name. applyLinks also keeps familyOfClientId / familyIsPoa
+    // mirroring the first link for older readers.
+    if (role === config.ROLES.FAMILY && createLinks) {
+      familyLinks.applyLinks(newUser, createLinks);
     }
-    // Designated Power of Attorney (owner decision 08/2026): admin sets this
-    // only after verifying the POA document on file. Grants client-equivalent
-    // portal access; the acting gates (co-sign, messaging, clinical read) are
-    // wired in Session 4.3 — POA actions always log under the POA's own name.
-    if (role === config.ROLES.FAMILY && familyIsPoa !== undefined) {
-      newUser.familyIsPoa = !!familyIsPoa;
-    }
+    if (placeholderLogin) newUser.noLogin = true;
 
     // User/team member fields
     if (role === config.ROLES.USER) {
@@ -3238,8 +3279,9 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     await db.set('users', users);
     invalidateUsersCache();
 
-    // Send welcome email with login credentials (fire-and-forget, non-blocking)
-    if (shouldSendWelcome !== false) {
+    // Send welcome email with login credentials (fire-and-forget, non-blocking).
+    // A placeholder login has no inbox and no usable password.
+    if (shouldSendWelcome !== false && !placeholderLogin) {
       sendWelcomeEmail(newUser, password).catch(err =>
         console.error('Welcome email error (non-fatal):', err)
       );
@@ -3610,6 +3652,8 @@ app.post('/api/auth/login', async (req, res) => {
       openEmrProviderId: user.openEmrProviderId || null,
       familyOfClientId: user.familyOfClientId || null,
       familyIsPoa: user.familyIsPoa || false,
+      // A family account linked to several patients chooses one in the portal.
+      familyLinkCount: familyLinks.linksOf(user).length,
       // Password reset flag
       requirePasswordChange: user.requirePasswordChange || false
     };
@@ -4080,6 +4124,10 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       careTeam: u.careTeam || null,
       familyOfClientId: u.familyOfClientId || null,
       familyIsPoa: u.familyIsPoa || false,
+      familyLinks: familyLinks.linksOf(u),
+      noLogin: familyLinks.isPlaceholderEmail(u.email),
+      loginHeldByPoa: !!u.loginHeldByPoa,
+      poaCutover: u.poaCutover || null,
       openEmrProviderId: u.openEmrProviderId || null,
       npi: u.npi || null,
       // Session 4.10 — returned for the same reason clinicalRole is: a field the
@@ -4167,11 +4215,38 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      resetPassword, accountType, managerClinicalAccess
+      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+
+    // Checked before anything is written. Sign-in finds a person by email,
+    // case-blind, so a second account on the same address could never sign in.
+    if (email && String(email).trim().toLowerCase() !== String(users[idx].email || '').toLowerCase() &&
+        users.some((u, i) => i !== idx && u.email && u.email.toLowerCase() === String(email).trim().toLowerCase())) {
+      return res.status(409).json({ error: 'Another account already uses that email address.', code: 'EMAIL_IN_USE' });
+    }
+    // Which patients a family account is linked to, POA per patient. The list
+    // replaces the single linked-client field; an older caller sending only
+    // that field still edits the first link.
+    let editLinks = null;
+    const targetRole = (accountType && accountTypes.isValidType(accountType)) ? accountTypes.fieldsFor(accountType, { managerClinicalAccess }).role : (req.body.role || users[idx].role);
+    if (targetRole === config.ROLES.FAMILY) {
+      const previous = familyLinks.linksOf(users[idx]);
+      let input;
+      if (Array.isArray(familyLinksInput)) input = familyLinksInput;
+      else if (familyOfClientId !== undefined || familyIsPoa !== undefined) {
+        const first = previous[0] || {};
+        const cid = familyOfClientId !== undefined ? familyOfClientId : first.clientId;
+        input = cid ? [{ ...first, clientId: cid, isPoa: familyIsPoa !== undefined ? familyIsPoa === true : !!first.isPoa }, ...previous.slice(1).filter(l => l.clientId !== String(cid))] : previous.slice(1);
+      }
+      if (input !== undefined) {
+        const norm = familyLinks.normalizeLinksInput(input, { users, actorId: req.user.id, previous });
+        if (norm.error) return res.status(400).json({ error: norm.error, code: norm.code });
+        editLinks = { previous, next: norm.links };
+      }
+    }
 
     // THE ACCOUNT TYPE DECIDES role, isManager and clinicalRole (owner,
     // 2026-10-15), so the form cannot save a combination that disagrees with
@@ -4221,7 +4296,10 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     const oldPracticeName = users[idx].practiceName;
 
     if (name) users[idx].name = name;
-    if (email) users[idx].email = email;
+    if (email) {
+      users[idx].email = String(email).trim();
+      if (!familyLinks.isPlaceholderEmail(users[idx].email)) users[idx].noLogin = false;
+    }
     if (role) users[idx].role = role;
     // A password resets the account only when the caller says so. A browser
     // autofilling the edit form must never reset someone's password.
@@ -4348,11 +4426,27 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       users[idx].enrollmentStatus = enrollmentStatus;
     }
     if (careTeam !== undefined) users[idx].careTeam = careTeam;
-    // Family / authorized contact → linked client (user id); drives the
-    // ROI-family portal gate (resolveGfcClientRecord).
-    if (familyOfClientId !== undefined) users[idx].familyOfClientId = familyOfClientId || null;
-    // Designated Power of Attorney (admin-verified; see create route note)
-    if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
+    // A patient's login that their POA has been using (owner, 2026-10-20).
+    // A note for the office, and what shows the "move this login" action; it
+    // changes nothing about who may sign in.
+    if (loginHeldByPoa !== undefined && users[idx].role === config.ROLES.CLIENT) users[idx].loginHeldByPoa = loginHeldByPoa === true;
+    // Family / authorized contact → the linked patients, each with its own
+    // admin-verified POA tick (familyLinks.js). Each change is logged per
+    // patient. Nobody is signed out: the links are read fresh on every
+    // request, so a removed patient closes on the next click.
+    if (editLinks) {
+      familyLinks.applyLinks(users[idx], editLinks.next);
+      const before = new Map(editLinks.previous.map(l => [l.clientId, l]));
+      const after = new Map(editLinks.next.map(l => [l.clientId, l]));
+      for (const [cid, l] of after) {
+        const was = before.get(cid);
+        if (!was) { await logActivity(req.user.id, req.user.name || req.user.email, 'family_link_added', 'client', cid, { familyUserId: users[idx].id, isPoa: l.isPoa }); }
+        else if (!!was.isPoa !== !!l.isPoa) { await logActivity(req.user.id, req.user.name || req.user.email, l.isPoa ? 'family_poa_set' : 'family_poa_cleared', 'client', cid, { familyUserId: users[idx].id }); }
+      }
+      for (const cid of before.keys()) {
+        if (!after.has(cid)) { await logActivity(req.user.id, req.user.name || req.user.email, 'family_link_removed', 'client', cid, { familyUserId: users[idx].id }); }
+      }
+    }
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
     // Caregiver pay (owner request, 2026-09-13). Normalized through
@@ -6583,6 +6677,27 @@ async function migrateAccountTypes() {
   return { changed: changed.length, needsReview: needsReview.length };
 }
 
+// ── Family links (owner, 2026-10-20) ─────────────────────────────────────
+// Writes `familyLinks` onto every family account that still carries only the
+// single linked-client field. Readers do not depend on it (linksOf reads the
+// old shape), but the admin form edits the list, so the list should exist.
+// Idempotent: an account that already has the list is left alone.
+async function migrateFamilyLinks() {
+  const users = await getUsers();
+  let changed = 0;
+  for (const u of users) {
+    if (!u || u.role !== config.ROLES.FAMILY || Array.isArray(u.familyLinks)) continue;
+    familyLinks.applyLinks(u, familyLinks.linksOf(u));
+    changed++;
+  }
+  if (changed) {
+    await db.set('users', users);
+    invalidateUsersCache();
+    console.log(`[family] ${changed} family account${changed === 1 ? '' : 's'} given a linked-patient list.`);
+  }
+  return { changed };
+}
+
 // ── Session 4.10: seed the return fax number, ONLY IF UNSET ───────────────
 //
 // The requisition's "Return results to:" line. The owner-confirmed value is
@@ -7112,12 +7227,49 @@ const getClientVisits = async (client) => {
 // confirms the migration on the deployed store. Deleting the source in the
 // same change that reads it is how a migration becomes unverifiable.
 
+// The patients a family account is linked to, for the picker and switcher:
+// a name and whether this person is POA for them. Nothing clinical, and a
+// patient account that was removed or deactivated is left out.
+const familyLinkedClientsFor = async (reqUser) => {
+  const users = await getUsers();
+  const fresh = users.find(u => u.id === reqUser.id);
+  return familyLinks.linksOf(fresh).map(l => {
+    const c = users.find(u => u && u.id === l.clientId && u.role === config.ROLES.CLIENT && (u.accountStatus || 'active') !== 'inactive');
+    return c ? { id: c.id, name: c.preferredName || c.name || 'Patient', isPoa: l.isPoa, active: l.clientId === reqUser.familyOfClientId } : null;
+  }).filter(Boolean);
+};
+
+// Choose which linked patient this sign-in is working on. Stored on the
+// session row, so every later request (and every tab) follows it.
+app.post('/api/gfc/active-client', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== config.ROLES.FAMILY) return res.status(403).json({ error: 'Only a family account chooses a patient.', code: 'FAMILY_ONLY' });
+    const clientId = String((req.body || {}).clientId || '');
+    const linked = await familyLinkedClientsFor(req.user);
+    const target = linked.find(c => c.id === clientId);
+    if (!target) return res.status(403).json({ error: 'You are not linked to that patient.', code: 'CLIENT_NOT_LINKED' });
+    await sessions.setActiveClient(req.session.id, clientId);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'family_client_switched', 'client', clientId, { isPoa: target.isPoa });
+    res.json({ ok: true, activeClientId: clientId });
+  } catch (error) {
+    console.error('Active client error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // /api/gfc/me — NOT gated. The portal calls this first to decide whether to
 // render the intake flow (gate) or the unlocked portal.
 app.get('/api/gfc/me', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== config.ROLES.CLIENT && req.user.role !== config.ROLES.FAMILY) {
       return res.status(403).json({ error: 'Client or family access required' });
+    }
+    // A family account linked to several patients picks one per sign-in.
+    // The list carries names and the POA flag only; everything else waits
+    // until a patient is chosen and the full gate runs.
+    const linked = req.user.role === config.ROLES.FAMILY ? await familyLinkedClientsFor(req.user) : null;
+    if (req.user.needsClientChoice) {
+      return res.json({ role: req.user.role, isFamily: true, name: req.user.name, needsClientChoice: true, linkedClients: linked, activeClientId: null });
     }
     const client = await resolveGfcClientRecord(req.user);
     if (!client) {
@@ -7144,7 +7296,10 @@ app.get('/api/gfc/me', authenticateToken, async (req, res) => {
         : { available: false, audience: null, code: access.code, reason: access.error },
       // Sharing settings are the client's (or POA's) to see and edit
       sharing: (req.user.role === config.ROLES.CLIENT || acting.isPoa) ? patientRead.normalizeSharing(client.sharing) : undefined,
-      ...snapshot
+      ...snapshot,
+      needsClientChoice: false,
+      linkedClients: linked,
+      activeClientId: req.user.role === config.ROLES.FAMILY ? client.id : null
     });
   } catch (error) {
     console.error('GFC me error:', error);
@@ -8671,9 +8826,10 @@ app.get('/api/gfc/family', authenticateToken, requireEnrolledClient, async (req,
     const canManage = req.user.role === config.ROLES.CLIENT || acting.isPoa;
     const users = await getUsers();
     const sharing = patientRead.normalizeSharing(client.sharing);
-    const people = users
-      .filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId || '') === String(client.id) && u.accountStatus !== 'inactive')
-      .map(u => ({ id: u.id, name: u.name, relationship: u.familyRelationship || null, isPoa: !!u.familyIsPoa, access: familyInvites.accessSummary(u, sharing), isYou: u.id === req.user.id }));
+    // POA and relationship come from the link to THIS patient: the same person
+    // can be POA for one parent and plain family for the other.
+    const people = familyLinks.familyFor(users, client.id)
+      .map(({ user: u, link }) => ({ id: u.id, name: u.name, relationship: link.relationship || null, isPoa: link.isPoa, access: familyInvites.accessSummary({ familyIsPoa: link.isPoa }, sharing), isYou: u.id === req.user.id }));
     // Plain family see who else has access, but not the invites or their emails.
     const invites = canManage
       ? ((await db.get('family_invites')) || []).filter(i => i && i.clientId === client.id && i.status !== 'cancelled' && i.status !== 'approved').map(familyInvites.publicInvite)
@@ -15156,15 +15312,22 @@ const notifyStatement = async (clientId) => {
     const users = await getUsers();
     const client = users.find(u => u && u.id === clientId);
     if (!client) return;
-    const to = [client, ...users.filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId) === String(clientId) && u.familyIsPoa && u.accountStatus !== 'inactive')]
-      .map(u => u.email).filter(e => e && !/@placeholder\.local$/i.test(e));
-    const htmlBody = emailTemplates.renderGfcEmail({
-      headline: 'You have a new statement',
-      paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
-      ctaUrl: `${await getAppBaseUrl()}/portal`, ctaLabel: 'View my statement'
-    }).html;
-    for (const e of [...new Set(to)]) {
-      sendEmail(e, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+    // The patient, and the POA of THIS patient (familyLinks.js). A POA's
+    // button names which patient (?for=<id>), since they may help several.
+    const base = await getAppBaseUrl();
+    const to = [{ email: client.email, url: `${base}/portal` },
+      ...familyLinks.familyFor(users, clientId, { poaOnly: true }).map(f => ({ email: f.user.email, url: `${base}/portal?for=${encodeURIComponent(clientId)}` }))]
+      .filter(r => r.email && !familyLinks.isPlaceholderEmail(r.email));
+    const seen = new Set();
+    for (const r of to) {
+      if (seen.has(r.email.toLowerCase())) continue;
+      seen.add(r.email.toLowerCase());
+      const htmlBody = emailTemplates.renderGfcEmail({
+        headline: 'You have a new statement',
+        paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
+        ctaUrl: r.url, ctaLabel: 'View my statement'
+      }).html;
+      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
         .catch(err => console.error('Statement email error (non-fatal):', err.message));
     }
   } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
@@ -18867,6 +19030,100 @@ app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireEnrollme
   }
 });
 
+// ── Moving a patient's login to their POA (owner, 2026-10-20) ─────────────
+// POAs had been signing in with the patient's own account, so everything they
+// signed or sent reads as the patient. This moves that login (email, password
+// hash, MFA) onto a family account with a POA link, and gives the patient a
+// placeholder login. The POA keeps signing in exactly as before; from then on
+// what they do reads "<POA> as POA for <patient>". Nothing already recorded is
+// rewritten. Super Admin only, and the admin types the patient's name to
+// confirm, because the patient's own sign-in stops working.
+//
+// The app cannot tell for sure which logins are really the POA's, so it only
+// suggests: an admin flags a login, or picks from the list below.
+app.get('/api/gfc/admin/clients/possible-poa-logins', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const rows = users.filter(u => u && u.role === config.ROLES.CLIENT && (u.accountStatus || 'active') !== 'inactive' && !familyLinks.isPlaceholderEmail(u.email))
+      .map(u => ({ id: u.id, name: u.name, flagged: !!u.loginHeldByPoa, reasons: familyLinks.possiblePoaLoginReasons(u), poaOnFile: familyLinks.familyFor(users, u.id, { poaOnly: true }).map(f => ({ id: f.user.id, name: f.user.name })) }))
+      .filter(r => r.flagged || r.reasons.length)
+      .sort((a, b) => (b.flagged - a.flagged) || String(a.name).localeCompare(String(b.name)));
+    res.json({ clients: rows });
+  } catch (error) {
+    console.error('Possible POA logins error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/clients/:clientId/poa-cutover', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const mode = body.mode === 'link_existing' ? 'link_existing' : 'move';
+    const users = await getUsers();
+    const cIdx = users.findIndex(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (cIdx === -1) return res.status(404).json({ error: 'Patient not found.', code: 'POA_CUTOVER_NOT_A_CLIENT' });
+    const client = users[cIdx];
+    const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!norm(body.confirmName) || norm(body.confirmName) !== norm(client.name)) {
+      return res.status(400).json({ error: 'Type the patient\u2019s name exactly to confirm.', code: 'POA_CUTOVER_CONFIRM' });
+    }
+    const tIdx = body.targetFamilyId ? users.findIndex(u => u && u.id === String(body.targetFamilyId)) : -1;
+    if (body.targetFamilyId && tIdx === -1) return res.status(404).json({ error: 'That POA account was not found.', code: 'POA_CUTOVER_TARGET_NOT_FOUND' });
+    const target = tIdx === -1 ? null : users[tIdx];
+    const at = new Date().toISOString();
+    const newFamilyId = uuidv4();
+    const plan = familyLinks.planPoaCutover({
+      client, target, mode,
+      newFamily: target ? null : {
+        id: newFamilyId, name: String(body.name || '').trim(), phone: body.phone ? String(body.phone).trim() : null,
+        accountType: 'family', accountStatus: 'active', source: 'poa_cutover',
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at
+      },
+      clientPlaceholderEmail: familyLinks.placeholderEmailFor('client', client.id),
+      clientPasswordHash: await bcrypt.hash(uuidv4() + uuidv4(), config.BCRYPT_SALT_ROUNDS),
+      actorId: req.user.id, at,
+      relationship: body.relationship ? String(body.relationship).trim().slice(0, 80) : null
+    });
+    if (plan.error) return res.status(409).json({ error: plan.error, code: plan.code });
+
+    let familyId;
+    if (plan.familyIsNew) {
+      const fam = { id: newFamilyId, name: String(body.name || '').trim(), phone: body.phone ? String(body.phone).trim() : null, role: config.ROLES.FAMILY,
+        accountType: 'family', accountStatus: 'active', source: 'poa_cutover',
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at, ...plan.familyPatch };
+      users.push(fam);
+      familyId = fam.id;
+    } else {
+      Object.assign(users[tIdx], plan.familyPatch);
+      familyId = users[tIdx].id;
+    }
+    Object.assign(users[cIdx], plan.clientPatch, {
+      noLogin: true, loginHeldByPoa: false,
+      poaCutover: { at, by: { id: req.user.id, name: req.user.name || req.user.email }, familyUserId: familyId, mode, movedFields: plan.movedFields, note: body.note ? String(body.note).slice(0, 500) : null }
+    });
+    await db.set('users', users);
+    invalidateUsersCache();
+
+    // The patient's old sign-in is gone: end its sessions and any password
+    // reset that would act on it. The POA signs in again, as themselves.
+    await sessions.revokeAllForUser(client.id, 'login_moved_to_poa');
+    const resetLinks = (await db.get('password_reset_links')) || [];
+    if (resetLinks.some(l => l && l.userId === client.id)) await db.set('password_reset_links', resetLinks.filter(l => l && l.userId !== client.id));
+    const resetReqs = (await db.get('password_reset_requests')) || [];
+    if (resetReqs.some(r => r && r.userId === client.id && r.status === 'pending')) {
+      await db.set('password_reset_requests', resetReqs.map(r => (r && r.userId === client.id && r.status === 'pending') ? { ...r, status: 'cancelled', cancelledReason: 'login_moved_to_poa' } : r));
+    }
+    // The activity row names who and which accounts, never the address.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'poa_login_cutover', 'client', client.id, { familyUserId: familyId, mode, familyIsNew: plan.familyIsNew });
+    res.json({ ok: true, mode, clientId: client.id, familyUserId: familyId, familyIsNew: plan.familyIsNew });
+  } catch (error) {
+    console.error('POA cutover error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Family invites waiting on staff (portal redesign, 2026-10-12). Staff read;
 // an ADMIN decides, because approving creates an account. Approving makes a
 // plain family account linked to this client and emails its sign-in details.
@@ -18898,9 +19155,33 @@ app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', 
       const users = await getUsers();
       const row = invites[i];
       // Checked again at approval: an account may have been made since the ask.
-      if (users.some(u => u && String(u.email || '').toLowerCase() === row.email)) {
+      // A family account on that email is linked to this patient as well (one
+      // login, several patients); any other kind of account is refused.
+      const existing = users.find(u => u && String(u.email || '').toLowerCase() === row.email);
+      if (existing && existing.role !== config.ROLES.FAMILY) {
         return res.status(409).json({ error: 'An account with that email already exists. Link it on the user form instead.', code: 'INVITE_EMAIL_IN_USE' });
       }
+      if (existing) {
+        // Never POA, whatever the ask said: that is the admin's call once the
+        // document is verified, on the user form.
+        familyLinks.upsertLink(existing, { clientId: req.params.clientId, isPoa: familyLinks.isPoaFor(existing, req.params.clientId), relationship: row.relationship, addedAt: at, addedBy: req.user.id, via: 'invite' });
+        existing.invitedThrough = existing.invitedThrough || row.id;
+        await db.set('users', users);
+        invalidateUsersCache();
+        const htmlBody = emailTemplates.renderGfcEmail({
+          greeting: String(existing.name || '').split(' ')[0],
+          headline: 'You have been given access to another portal',
+          paragraphs: ['Our office has added another person\u2019s portal to your Godwins Family Care sign-in. Sign in as usual and choose whose portal to open.'],
+          ctaUrl: `${await getAppBaseUrl()}/login`, ctaLabel: 'Sign in'
+        }).html;
+        sendEmail(existing.email, 'You have been given access to another portal', 'Our office has added another person\u2019s portal to your Godwins Family Care sign-in. Sign in as usual and choose whose portal to open.', { htmlBody })
+          .catch(err => console.error('Family link email error (non-fatal):', err.message));
+        newUser = existing;
+      }
+    }
+    if (decision === 'approved' && !newUser) {
+      const users = await getUsers();
+      const row = invites[i];
       const plain = generateTempPassword({ email: row.email });
       newUser = {
         id: uuidv4(), email: row.email, name: row.name,
@@ -18910,6 +19191,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', 
         isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
         createdAt: at
       };
+      familyLinks.applyLinks(newUser, familyLinks.linksOf(newUser));
       users.push(newUser);
       await db.set('users', users);
       invalidateUsersCache();
@@ -28800,6 +29082,11 @@ app.listen(PORT, () => {
       await migrateAccountTypes();
     } catch (err) {
       console.error('Account-type migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateFamilyLinks();
+    } catch (err) {
+      console.error('Family-link migration failed (non-fatal):', err.message);
     }
     try {
       await seedRequisitionReturnFax();

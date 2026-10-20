@@ -35,7 +35,7 @@ test('the edit form sends a password only when "Set a new password" is ticked', 
 
 test('on an edit the password box is not rendered until asked for, and never invites autofill', () => {
   const i = hub.indexOf('{editingUser ? (', hub.indexOf('Set a new password for this user') - 2000);
-  const block = hub.slice(i, hub.indexOf('Password *', i) + 400);
+  const block = hub.slice(i, hub.indexOf('Password {formData.noEmail', i) + 400);
   assert.match(block, /\{changePassword && \(\s*<input type="password" autoComplete="new-password"/);
   const form = hub.slice(hub.indexOf('<form onSubmit={handleSubmit} className="p-6 space-y-6">'));
   const pw = form.slice(0, form.indexOf('</form>')).match(/<input type="password"[^>]*/g) || [];

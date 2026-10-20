@@ -261,8 +261,11 @@ test('the email prompt: the patient and their POA get a PHI-free notice that ope
     for (const n of to.filter(x => x.email === 'c1@test.local' || x.email === 'poa@test.local')) {
       const text = `${n.data.subject} ${n.data.body}`;
       assert.ok(!/Juanita|Guess|Bethel|Godwins|labs|call me/i.test(text), `no name and none of the message in the email: ${text}`);
-      assert.equal(n.data.ctaUrl, links.PATHS.PORTAL_MESSAGES);
-      assert.equal(n.data.ctaUrl, '/portal#messages');
+      // The patient's link is the plain Messages link. A POA may help several
+      // patients (familyLinks.js), so theirs names which one, by record id.
+      if (n.email === 'c1@test.local') assert.equal(n.data.ctaUrl, links.PATHS.PORTAL_MESSAGES);
+      else assert.equal(n.data.ctaUrl, '/portal?for=client-1#messages');
+      assert.equal(links.routeOf(n.data.ctaUrl), '/portal', 'the link resolves to a page that exists');
       assert.match(n.data.body, /sign in to your portal/i);
     }
     assert.ok(!h.notices.some(n => n.email === 'fam@test.local'), 'non-POA family is not emailed');
@@ -275,7 +278,7 @@ test('the email prompt: the patient and their POA get a PHI-free notice that ope
     assert.deepEqual(back.map(n => n.email).sort(), ['cg@test.local', 'cm@test.local', 'fnp@test.local', 'poa@test.local'], 'the care team and the POA on the thread, not the sender');
     const toClin = back.find(n => n.email === 'fnp@test.local');
     assert.equal(toClin.data.ctaUrl, links.messagesFor(USERS().find(u => u.id === 'fnp-1')));
-    assert.equal(back.find(n => n.email === 'poa@test.local').data.ctaUrl, links.PATHS.PORTAL_MESSAGES);
+    assert.equal(back.find(n => n.email === 'poa@test.local').data.ctaUrl, '/portal?for=client-1#messages');
     // A POA designated AFTER the thread began still hears about the next message.
     const users = h.store.get('users'); users.push({ id: 'poa-2', name: 'New Agent', email: 'poa2@test.local', role: 'family', familyOfClientId: 'client-1', familyIsPoa: true }); h.store.set('users', users);
     h.notices.length = 0;
