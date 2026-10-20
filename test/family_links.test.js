@@ -204,3 +204,17 @@ test('build guard: email stays unique, case-blind, on create AND edit', () => {
   const firstWrite = edit.search(/users\[idx\]\.\w+ = /);
   assert.ok(firstWrite > 0 && edit.indexOf("code: 'EMAIL_IN_USE'") < firstWrite, 'the uniqueness check must come before anything is written');
 });
+
+test('build guard: a patient\u2019s account type cannot be changed, and a clashing email says whose it is', () => {
+  const server = read('server.js');
+  const edit = server.slice(server.indexOf("app.put('/api/users/:userId'"), server.indexOf("app.put('/api/users/:userId'") + 12000);
+  const firstWrite = edit.search(/users\[idx\]\.\w+ = /);
+  const lock = edit.indexOf("code: 'PATIENT_TYPE_LOCKED'");
+  assert.ok(lock > 0 && lock < firstWrite, 'the patient lock must refuse before anything is written');
+  assert.match(edit, /users\[idx\]\.role === config\.ROLES\.CLIENT && wantedRole && wantedRole !== config\.ROLES\.CLIENT/);
+  const create = server.slice(server.indexOf("app.post('/api/users',"), server.indexOf("app.get('/api/client-portals'"));
+  assert.match(create, /existingUser: \{ id: holder\.id, name: holder\.name \|\| null, kind \}/);
+  const hub = read('public/admin-hub.html');
+  assert.match(hub, /disabled=\{!!\(editingUser && editingUser\.role === 'client'\)\}/, 'the form locks a patient\u2019s account type too');
+  assert.match(hub, /api\.createUserDetailed\(token, formData\)/, 'the create keeps the server\u2019s details so the form can offer the next step');
+});
