@@ -158,6 +158,18 @@ const ADMIN = { id: 'admin_multi', role: config.ROLES.ADMIN, email: 'multiadmin@
   check('editing an email onto one already in use is refused (it used to save)', r.status === 409 && r.body.code === 'EMAIL_IN_USE');
   check('and nothing was changed', userById(STRANGER.id).email === STRANGER.email);
 
+  console.log('\n── A patient stays a patient ──');
+  r = await call('PUT', `/api/users/${MOM.id}`, at, { accountType: 'family' });
+  check('switching a patient to Family is refused', r.status === 409 && r.body.code === 'PATIENT_TYPE_LOCKED', JSON.stringify(r.body));
+  check('and she is still a patient', userById(MOM.id).role === 'client');
+  r = await call('PUT', `/api/users/${MOM.id}`, at, { role: 'family' });
+  check('the old role field cannot do it either', r.status === 409 && userById(MOM.id).role === 'client');
+  r = await call('POST', '/api/users', at, { name: 'Hal Husband', email: 'husband@example.test', password: 'Abcdefg1!', accountType: 'family', role: 'family', familyLinks: [{ clientId: GRAN.id, isPoa: true }] });
+  check('adding a POA on an email that is a patient\u2019s login says whose it is', r.status === 400 && r.body.existingUser && r.body.existingUser.id === GRAN.id && r.body.existingUser.kind === 'patient', JSON.stringify(r.body));
+  check('and creates nothing', !(STORE.get('users') || []).some(u => u.name === 'Hal Husband'));
+  r = await call('POST', '/api/users', at, { name: 'Dot again', email: 'DAUGHTER@example.test', password: 'Abcdefg1!', accountType: 'family', role: 'family' });
+  check('an email on a family login says so, so the patient can be added to it', r.status === 400 && r.body.existingUser && r.body.existingUser.kind === 'family' && r.body.existingUser.id === DAUGHTER.id);
+
   console.log('\n── Moving a shared login to the POA ──');
   r = await call('GET', '/api/gfc/admin/clients/possible-poa-logins', at);
   check('the possible list names Gail, with the reason', r.status === 200 && (r.body.clients || []).some(c => c.id === GRAN.id && c.reasons.length), JSON.stringify(r.body));

@@ -172,6 +172,21 @@
           body: JSON.stringify(userData)
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Like createUser, but a refusal keeps the server's details (whose
+      // account an email already belongs to) so the form can offer the next step.
+      createUserDetailed: async (token, userData) => {
+        try {
+          const r = await fetch(`${API_URL}/api/users`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(userData)
+          });
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) return { error: body.error || `HTTP error ${r.status}`, code: body.code || null, existingUser: body.existingUser || null };
+          return body;
+        } catch (err) { return { error: err.message }; }
+      },
+
       updateUser: (token, userId, userData) =>
         fetch(`${API_URL}/api/users/${userId}`, {
           method: 'PUT',
@@ -1747,13 +1762,14 @@
     // MFA) onto a family account with a POA link and gives the patient a
     // placeholder login; the POA signs in exactly as before. Module scope, so
     // its inputs keep focus as the admin types.
-    const PoaCutoverDialog = ({ token, client, users, onClose, onDone }) => {
+    const PoaCutoverDialog = ({ token, client, users, onClose, onDone, initial }) => {
       const familyUsers = users.filter(u => u.role === 'family');
+      const start = initial || {};
       const [mode, setMode] = useState('move');
       const [targetId, setTargetId] = useState('');
-      const [name, setName] = useState('');
-      const [phone, setPhone] = useState('');
-      const [relationship, setRelationship] = useState('');
+      const [name, setName] = useState(start.name || '');
+      const [phone, setPhone] = useState(start.phone || '');
+      const [relationship, setRelationship] = useState(start.relationship || '');
       const [note, setNote] = useState('');
       const [confirmName, setConfirmName] = useState('');
       const [busy, setBusy] = useState(false);
@@ -1901,6 +1917,11 @@
       // rather than forced, so the admin can also just keep managing users.
       const [justCreatedClientId, setJustCreatedClientId] = useState(null);
       const [cutoverFor, setCutoverFor] = useState(null);
+      const [cutoverInitial, setCutoverInitial] = useState(null);
+      // A create refused because the email is already someone's login: whose,
+      // and what was being created, so the form can offer the right next step.
+      const [emailClash, setEmailClash] = useState(null);
+      const [clashBusy, setClashBusy] = useState(false);
       const [activeTab, setActiveTab] = useState('list');
       const [saving, setSaving] = useState(false);
       const [showBulkReset, setShowBulkReset] = useState(false);
@@ -2055,6 +2076,7 @@
       const handleSubmit = async (e) => {
         e.preventDefault();
         setMessage('');
+        setEmailClash(null);
         setSaving(true);
         try {
           let result;
@@ -2067,7 +2089,8 @@
             }
             result = await api.updateUser(token, editingUser.id, updateData);
           } else {
-            result = await api.createUser(token, formData);
+            result = await api.createUserDetailed(token, formData);
+            if (result && result.existingUser) setEmailClash({ ...result.existingUser, form: formData });
           }
           console.log('API Result:', result);
           if (result.error) {
@@ -2388,9 +2411,9 @@
             <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
           )}
           {cutoverFor && (
-            <PoaCutoverDialog token={token} client={cutoverFor} users={users}
-              onClose={() => setCutoverFor(null)}
-              onDone={() => { setCutoverFor(null); setShowForm(false); setEditingUser(null); setFormData(defaultFormData); setMessage(`${cutoverFor.name}'s login now belongs to their POA.`); loadData(); }} />
+            <PoaCutoverDialog token={token} client={cutoverFor} users={users} initial={cutoverInitial}
+              onClose={() => { setCutoverFor(null); setCutoverInitial(null); }}
+              onDone={() => { setCutoverFor(null); setCutoverInitial(null); setShowForm(false); setEditingUser(null); setFormData(defaultFormData); setMessage(`${cutoverFor.name}'s login now belongs to their POA.`); loadData(); }} />
           )}
           {/* Session 4.8 — the reassignment queue. Clinical access stopped being
               one checkbox, and the migration could not tell an RN from an FNP,
@@ -2643,12 +2666,16 @@
                           2026-10-15). The types come from the server; the form
                           lists none of its own. */}
                       <select value={formData.accountType} required onChange={(e) => chooseAccountType(e.target.value)}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                        disabled={!!(editingUser && editingUser.role === 'client')}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary disabled:bg-gray-50">
                         <option value="">-- Choose an account type --</option>
                         {accountTypeCatalog.map(t => (
                           <option key={t.value} value={t.value}>{t.label}</option>
                         ))}
                       </select>
+                      {editingUser && editingUser.role === 'client' && (
+                        <p className="text-xs text-gray-500 mt-1">A patient's account type can't be changed: it would hide their care team and records. If their POA has been using this login, use "Move this login to the POA" under Client Settings.</p>
+                      )}
                     </div>
                   </div>
 
@@ -2986,6 +3013,10 @@
                       {!(formData.familyLinks || []).length && (
                         <p className="text-sm text-amber-700 mb-2">Not linked to any patient yet. Add at least one.</p>
                       )}
+                      {!users.some(u => u.role === 'client') && (
+                        <p className="text-sm text-amber-700 mb-2">There are no patient accounts to choose from.</p>
+                      )}
+                      <p className="text-xs text-gray-500 mb-2">Only patient accounts are listed. A patient missing here may have had their account type changed; open them and set it back to Client.</p>
                       <button type="button" className="px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
                         onClick={() => setFormData({ ...formData, familyLinks: [...(formData.familyLinks || []), { clientId: '', isPoa: false, relationship: '' }] })}>
                         Add a patient
@@ -3393,8 +3424,64 @@
                     </div>
                   )}
 
+                  {/* A refusal is shown HERE as well as at the top: the admin is at
+                      the bottom of a long form when they press Create. */}
+                  {message && message.includes('Error') && (
+                    <div className="p-3 rounded-lg bg-red-50 text-red-700 border border-red-200 text-sm">{message}</div>
+                  )}
+                  {emailClash && !editingUser && (() => {
+                    const existing = users.find(u => u.id === emailClash.id);
+                    const form = emailClash.form || {};
+                    const picked = (form.familyLinks || []).filter(l => l.clientId);
+                    const addToFamily = async () => {
+                      if (!existing) return;
+                      setClashBusy(true);
+                      const have = (existing.familyLinks || []).map(l => ({ clientId: l.clientId, isPoa: !!l.isPoa, relationship: l.relationship || '' }));
+                      const merged = [...have, ...picked.filter(l => !have.some(h => h.clientId === l.clientId))];
+                      const r = await api.updateUser(token, existing.id, { familyLinks: merged });
+                      setClashBusy(false);
+                      if (r && r.error) { setMessage(`Error: ${r.error}`); return; }
+                      setEmailClash(null); setShowForm(false); setEditingUser(null); setFormData(defaultFormData);
+                      setMessage(`Added to ${existing.name}'s existing account. They sign in as before and choose whose portal to open.`);
+                      loadData();
+                    };
+                    const moveLogin = () => {
+                      if (!existing) return;
+                      setEmailClash(null); setShowForm(false); setEditingUser(null);
+                      setCutoverInitial({ name: form.name || '', phone: form.phone || '', relationship: (picked[0] && picked[0].relationship) || '' });
+                      setCutoverFor(existing);
+                    };
+                    return (
+                      <div className="p-4 rounded-lg bg-blue-50 border border-blue-200 text-sm space-y-3">
+                        {emailClash.kind === 'family' && (
+                          <>
+                            <p><b>{emailClash.name || 'This person'}</b> already has a family login with this email. Nothing new was created.</p>
+                            <div className="flex flex-wrap gap-2">
+                              {form.role === 'family' && picked.length > 0 && (
+                                <button type="button" disabled={clashBusy} onClick={addToFamily} className="px-3 py-2 rounded-lg text-white disabled:opacity-50" style={{ backgroundColor: '#033D50' }}>
+                                  {clashBusy ? 'Adding…' : `Add ${picked.length === 1 ? 'This Patient' : 'These Patients'} to Their Account`}
+                                </button>
+                              )}
+                              {existing && <button type="button" onClick={() => { setEmailClash(null); handleEdit(existing); }} className="px-3 py-2 rounded-lg border border-blue-300 bg-white">Open Their Account</button>}
+                            </div>
+                          </>
+                        )}
+                        {emailClash.kind === 'patient' && (
+                          <>
+                            <p>This email is the login on <b>{emailClash.name || 'a patient'}</b>'s own account. Nothing new was created. If {form.name || 'this person'} is their POA and has been signing in with it, move that login to them. They keep the same email and password.</p>
+                            <div className="flex flex-wrap gap-2">
+                              {existing && <button type="button" onClick={moveLogin} className="px-3 py-2 rounded-lg text-white" style={{ backgroundColor: '#033D50' }}>Move the Login to {form.name || 'the POA'}</button>}
+                              {existing && <button type="button" onClick={() => { setEmailClash(null); handleEdit(existing); }} className="px-3 py-2 rounded-lg border border-blue-300 bg-white">Open the Patient</button>}
+                            </div>
+                          </>
+                        )}
+                        {emailClash.kind === 'other' && <p>This email is already a staff login. Use a different email.</p>}
+                      </div>
+                    );
+                  })()}
+
                   <div className="flex justify-end gap-3 pt-4 border-t sticky bottom-0 bg-white pb-2">
-                    <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); setCompetencies([]); setEmrStatus(null); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
+                    <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); setEmailClash(null); setCompetencies([]); setEmrStatus(null); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
                       Cancel
                     </button>
                     <button type="submit" disabled={saving} className="px-6 py-2.5 rounded-lg font-medium flex items-center gap-2" style={{backgroundColor: '#033D50', color: 'white'}}>

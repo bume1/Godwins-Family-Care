@@ -3104,8 +3104,18 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     const users = await getUsers();
     // Case-blind, because sign-in is: "Ann@x.com" and "ann@x.com" are one
     // login, and the second account would never be reachable.
-    if (users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase())) {
-      return res.status(400).json({ error: 'User already exists with this email', code: 'EMAIL_IN_USE' });
+    // The page is told WHOSE account it is, so it can offer the right next
+    // step instead of a dead end: a family login gets this patient added to
+    // it, and a patient's login that the POA has been using is moved to them.
+    const holder = users.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
+    if (holder) {
+      const kind = holder.role === config.ROLES.FAMILY ? 'family' : holder.role === config.ROLES.CLIENT ? 'patient' : 'other';
+      const error = kind === 'family'
+        ? `${holder.name || 'This person'} already has a family login with this email. Add the patient to their existing account instead.`
+        : kind === 'patient'
+          ? `This email is the login on ${holder.name || 'a patient'}'s own account. If ${name || 'this person'} is their POA, move that login to them instead.`
+          : 'User already exists with this email';
+      return res.status(400).json({ error, code: 'EMAIL_IN_USE', existingUser: { id: holder.id, name: holder.name || null, kind } });
     }
     // Which patients a family account is linked to, POA per patient.
     let createLinks = null;
@@ -4220,6 +4230,15 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+
+    // A patient's account stays a patient (owner, 2026-10-20). Changing it to
+    // Family or anything else hides their care team, schedule and records,
+    // and takes them off every patient list. A POA who has been using the
+    // patient's login is handled with "Move this login to the POA" instead.
+    const wantedRole = (accountType && accountTypes.isValidType(accountType)) ? accountTypes.fieldsFor(accountType, { managerClinicalAccess }).role : req.body.role;
+    if (users[idx].role === config.ROLES.CLIENT && wantedRole && wantedRole !== config.ROLES.CLIENT) {
+      return res.status(409).json({ error: 'A patient\u2019s account type cannot be changed. If their POA has been signing in with it, tick "This login is used by the patient\u2019s POA" and use "Move this login to the POA" instead.', code: 'PATIENT_TYPE_LOCKED' });
+    }
 
     // Checked before anything is written. Sign-in finds a person by email,
     // case-blind, so a second account on the same address could never sign in.
