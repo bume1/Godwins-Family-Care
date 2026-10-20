@@ -56,51 +56,96 @@ test('the summary is read as text items, capped, and Quo text never becomes a fo
   assert.ok(!/150/.test(cc.callDetail(row, 'Juanita Guess')), 'the inbox line carries no summary words');
 });
 
-test('message notes: patient-facing conversations only, one per conversation per Eastern day, closed once the day is over', () => {
+test('message notes: ONE per patient-facing conversation, kept up to date; open while it has a message today', () => {
   const threads = [
     { id: 'cu', channel: 'care_update', client_id: 'c1', participant_ids: ['f1', 'c1'], patient_facing: true },
     { id: 'team', channel: 'care_team', client_id: 'c1', participant_ids: ['f1', 'cm'], audience_chosen: true, patient_facing: false },
-    { id: 'other', channel: 'care_update', client_id: 'c2', participant_ids: ['f1', 'c2'], patient_facing: true }
+    { id: 'other', channel: 'care_update', client_id: 'c2', participant_ids: ['f1', 'c2'], patient_facing: true },
+    { id: 'cu2', channel: 'care_update', client_id: 'c1', participant_ids: ['f1', 'c1'], patient_facing: true }
   ];
-  // 11:30pm Eastern on the 18th is the 19th in UTC: it belongs to the 18th.
-  const late = '2026-10-19T03:30:00Z';
   const messages = [
-    { id: 'a', thread_id: 'cu', sent_at: '2026-10-18T14:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', from_role_label: 'Provider', body: '**hi**', body_format: 'markup' },
-    { id: 'b', thread_id: 'cu', sent_at: late, from_name: 'L', display_name: 'L as POA for J', from_role: 'POA', body: 'ok', body_format: 'plain', via: 'sms' },
-    { id: 'c', thread_id: 'cu', sent_at: '2026-10-19T15:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', body: 'today', body_format: 'plain' },
+    { id: 'a', thread_id: 'cu', sent_at: '2026-10-17T14:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', from_role_label: 'Provider', body: '**hi**', body_format: 'markup' },
+    // 11:30pm Eastern on the 18th is the 19th in UTC: it belongs to the 18th.
+    { id: 'b', thread_id: 'cu', sent_at: '2026-10-19T03:30:00Z', from_name: 'L', display_name: 'L as POA for J', from_role: 'POA', body: 'ok', body_format: 'plain', via: 'sms' },
+    { id: 'c', thread_id: 'cu2', sent_at: '2026-10-19T15:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', body: 'today', body_format: 'plain' },
     { id: 'd', thread_id: 'team', sent_at: '2026-10-18T14:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', body: 'INTERNAL', body_format: 'plain' },
     { id: 'e', thread_id: 'other', sent_at: '2026-10-18T14:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', body: 'other patient', body_format: 'plain' }
   ];
   const notes = cc.buildMessageNotes({ clientId: 'c1', threads, messages, today: '2026-10-19' });
-  assert.deepEqual(notes.map(n => n.key).sort(), ['cu:2026-10-18', 'cu:2026-10-19']);
-  const y = notes.find(n => n.key === 'cu:2026-10-18');
-  assert.equal(y.count, 2, 'the 11:30pm Eastern message is on the 18th');
-  assert.equal(y.closed, true);
-  assert.equal(notes.find(n => n.key === 'cu:2026-10-19').closed, false);
-  const text = cc.messageNoteText(y, { clientName: 'Juanita Guess' });
+  assert.deepEqual(notes.map(n => n.key).sort(), ['msg:cu', 'msg:cu2'], 'one note per conversation, not per day');
+  const cu = notes.find(n => n.key === 'msg:cu');
+  assert.equal(cu.count, 2, 'every message in the conversation');
+  assert.equal(cu.firstDate, '2026-10-17');
+  assert.equal(cu.date, '2026-10-18', 'the 11:30pm Eastern message is on the 18th');
+  assert.equal(cu.closed, true);
+  assert.equal(notes.find(n => n.key === 'msg:cu2').closed, false, 'a conversation with a message today is still open');
+  const text = cc.messageNoteText(cu, { clientName: 'Juanita Guess' });
   assert.match(text, /^MESSAGE NOTE\n/);
+  assert.match(text, /Dates: 10\/17\/2026 to 10\/18\/2026/);
   assert.match(text, /B \(Provider\)\nhi/, 'markup becomes plain text');
   assert.match(text, /L as POA for J · by text\nok/);
   assert.ok(!/INTERNAL|other patient/.test(JSON.stringify(notes)));
-  assert.match(cc.messageNoteText(y, { corrected: true }), /^MESSAGE NOTE \(CORRECTED COPY\)/);
+  assert.match(cc.messageNoteText(cu, { updated: true }), /^MESSAGE NOTE \(UPDATED COPY, replaces earlier copies\)/);
+  // It grows: the same note, a new hash.
+  const grown = cc.buildMessageNotes({ clientId: 'c1', threads, messages: messages.concat([{ id: 'f', thread_id: 'cu', sent_at: '2026-10-18T20:00:00Z', from_name: 'B', display_name: 'B', from_role: 'clinical', body: 'more', body_format: 'plain' }]), today: '2026-10-19' });
+  assert.equal(grown.filter(n => n.threadId === 'cu').length, 1);
+  assert.notEqual(grown.find(n => n.key === 'msg:cu').hash, cu.hash);
 });
 
-test('filing: closed days only, once, and again as a corrected copy when the day changed', () => {
+test('filing: closed conversations only, once, and again as an updated copy when the conversation grew or changed', () => {
   const n = (key, closed, hash, count = 1) => ({ key, closed, hash, count });
   const notes = [n('a', true, 'h1'), n('b', false, 'h2'), n('c', true, 'h3'), n('d', true, 'h4', 0)];
   const first = cc.notesToFile(notes, []);
-  assert.deepEqual(first.map(x => x.note.key), ['a', 'c'], 'today is never filed, and an empty day is not a note');
-  assert.ok(first.every(x => !x.corrected));
+  assert.deepEqual(first.map(x => x.note.key), ['a', 'c'], 'an open conversation is never filed, and an empty one is not a note');
+  assert.ok(first.every(x => !x.updated));
   const filings = [{ key: 'a', hash: 'h1', filed_at: '1' }, { key: 'c', hash: 'old', filed_at: '1' }];
   const again = cc.notesToFile(notes, filings);
   assert.deepEqual(again.map(x => x.note.key), ['c']);
-  assert.equal(again[0].corrected, true);
+  assert.equal(again[0].updated, true);
   assert.equal(cc.filingState(n('a', true, 'h1'), filings), 'filed');
   assert.equal(cc.filingState(n('c', true, 'h3'), filings), 'changed');
   assert.equal(cc.filingState(n('x', true, 'h'), filings), 'waiting');
   assert.equal(cc.filingState(n('x', false, 'h'), filings), 'open');
   // The latest filing decides.
   assert.equal(cc.notesToFile([n('c', true, 'h3')], filings.concat([{ key: 'c', hash: 'h3', filed_at: '2' }])).length, 0);
+});
+
+test('every answered call becomes a call note: who, when, how long, summary, next steps and the transcript with speakers', () => {
+  const ev = cc.readCallEvent(completed({}));
+  let row = cc.buildCallRow({ id: 'r1', ev, at: '2026-10-19T14:22:00Z', hit: { client: { id: 'c1' }, user: { id: 'p1', name: 'Luka Agent' }, isPoa: true } });
+  const tr = cc.readCallEvent({ type: 'call.transcript.completed', data: { object: { callId: 'AC1', dialogue: [
+    { identifier: '+14049136705', userId: 'US1', start: 0, content: 'GFC, this is Bethel' },
+    { identifier: '+14045550200', start: 64.5, content: '  Hi, calling about   mom ' },
+    { identifier: '+14045550200', start: 70, content: '' }
+  ] } } });
+  assert.equal(tr.callId, 'AC1');
+  assert.equal(tr.transcript.length, 2, 'an empty line is dropped');
+  row = cc.mergeTranscript(cc.mergeSummary(row, cc.readCallEvent({ type: 'call.summary.completed', data: { object: { callId: 'AC1', summary: ['Asked about BP meds'], nextSteps: ['Call back Friday'] } } })), tr);
+  const text = cc.callNoteText(row, { clientName: 'Juanita Guess' });
+  assert.match(text, /^CALL NOTE\n/);
+  assert.match(text, /Incoming call from Luka Agent \(POA for Juanita Guess\)/);
+  assert.match(text, /Length: 12 minutes/);
+  assert.match(text, /• Asked about BP meds/);
+  assert.match(text, /• Call back Friday/);
+  assert.match(text, /\[0:00\] GFC staff: GFC, this is Bethel/);
+  assert.match(text, /\[1:04\] Luka Agent \(POA for Juanita Guess\): Hi, calling about mom/, 'the speaker is named from their own number');
+  // Ready once the transcript is in; or after the wait when none comes.
+  const bare = { ...row, transcript: [] };
+  const done = Date.parse(row.completed_at);
+  assert.equal(cc.callNoteReady(row, done + 60 * 1000), true);
+  assert.equal(cc.callNoteReady(bare, done + 60 * 1000), false);
+  assert.equal(cc.callNoteReady(bare, done + cc.CALL_NOTE_WAIT_MS + 1000), true);
+  assert.equal(cc.callNoteReady({ ...row, pending_summary: true }, done + cc.CALL_NOTE_WAIT_MS * 2), false);
+  // Filed once; a later transcript files an updated copy; documenting it does not.
+  const first = cc.callNotesToFile([bare], [], done + cc.CALL_NOTE_WAIT_MS + 1000);
+  assert.equal(first.length, 1); assert.equal(first[0].key, 'call:r1'); assert.equal(first[0].updated, false);
+  const filed = [{ key: 'call:r1', hash: first[0].hash, filed_at: '1' }];
+  assert.equal(cc.callNotesToFile([{ ...bare, status: 'documented' }], filed, done + cc.CALL_NOTE_WAIT_MS + 1000).length, 0);
+  const later = cc.callNotesToFile([row], filed, done + cc.CALL_NOTE_WAIT_MS + 1000);
+  assert.equal(later.length, 1); assert.equal(later[0].updated, true);
+  assert.match(cc.callNoteText(row, { updated: true }), /^CALL NOTE \(UPDATED COPY\)/);
+  // The billable note points at it.
+  assert.match(cc.callNotePrefill(row, { clientName: 'Juanita Guess' }), /full call note, with the transcript, is on the chart Timeline/);
 });
 
 test('the inbox lists a call for whoever may document it, by name otherwise, and an opened one only for its opener', () => {
@@ -168,4 +213,14 @@ test('build: the Eastern date is used, never the UTC date', () => {
   assert.ok(!/toISOString\(\)\.slice\(0, 10\)/.test(src));
   assert.equal(cc.easternDate('2026-10-19T03:30:00Z'), '2026-10-18');
   assert.equal(gfcTime.zonedParts(new Date('2026-10-19T03:30:00Z')).isoDate, '2026-10-18');
+});
+
+test('build: the note screen fills in the encounter date and always sends it (owner, 2026-10-19)', () => {
+  const page = fs.readFileSync(path.join(root, 'public/clinical.html'), 'utf8');
+  assert.match(page, /visitDate: appointmentEid \? '' : todayYmd\(\),/, 'today by default; an appointment\'s own date otherwise');
+  assert.match(page, /visitDate: n\.visitDate \|\| prev\.visitDate,/, 'a saved note or a call draft keeps its own date');
+  assert.match(page, /const toNote = \(\) => \(\{ \.\.\.\(f\.visitDate \? \{ visitDate: f\.visitDate \} : \{\}\), \.\.\.toNoteBody\(\) \}\);/);
+  assert.match(page, /<Field label="Encounter Date">/);
+  // The server dates the encounter from the note first.
+  assert.match(serverSrc, /const date = note\.visitDate \|\| \(appointment && appointment\.pc_eventDate\) \|\| practiceToday\(\);/);
 });

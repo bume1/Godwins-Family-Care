@@ -498,7 +498,7 @@ test('the note screen saves a phone call as a follow-up-shaped note, never an H&
   // save; neither is true of a phone call.
   // `sectionsOnly` covers a phone call AND the social work types.
   assert.match(page, /const sectionsOnly = isPhone \|\|/);
-  assert.match(page, /const toNote = \(\) => \(sectionsOnly \? \{\s*kind: 'followup'/);
+  assert.match(page, /const toNoteBody = \(\) => \(sectionsOnly \? \{\s*kind: 'followup'/);
   assert.match(page, /fixedBlocks: sectionsOnly\s*\?\s*\[\]/);
   assert.match(page, /fixedBlocks: \(sectionsOnly \|\| \(visit && visit\.modality === 'phone'\)\)\s*\?\s*\[\]/);
   // And the server enforces the shape whatever the page sends.
