@@ -110,6 +110,11 @@ const SCENARIOS = {
   unpublished:  { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {}, empty: true },
   appHeld:      { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {}, empty: true,
     held: { medRecLast: { at: '2026-09-20T15:00:00Z', byName: 'Bethel Godwins' }, medications: [{ name: 'Lisinopril', dose: '10 mg', frequency: 'daily' }], intake: { allergies: 'NKDA', conditions: ['Diabetes'] } } },
+  // One family login for several patients (owner, 2026-10-20).
+  picker:       { user: { id: 'f-3', role: 'family', name: 'Dot Daughter' }, audience: 'poa', sharing: {},
+    me: { needsClientChoice: true, activeClientId: null, linkedClients: [{ id: 'c-1', name: 'Juanita', isPoa: true }, { id: 'c-9', name: 'Ray Guess', isPoa: false }] } },
+  poaTwo:       { user: { id: 'f-3', role: 'family', name: 'Dot Daughter', familyOfClientId: 'c-1', familyIsPoa: true }, audience: 'poa', sharing: {},
+    me: { activeClientId: 'c-1', linkedClients: [{ id: 'c-1', name: 'Juanita', isPoa: true, active: true }, { id: 'c-9', name: 'Ray Guess', isPoa: false }] } },
   blocked:      { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {},
     clinicalRead: { available: false, code: 'CLINICAL_CONSENT_REQUIRED', reason: 'Consent to medical treatment must be on file before clinical information can be shown.' } },
 };
@@ -137,7 +142,8 @@ const srv = http.createServer((req, res) => {
     await page.addInitScript(([t, u]) => { localStorage.setItem('portal_token', t); localStorage.setItem('portal_user', JSON.stringify(u)); }, ['tok', sc.user]);
     const me = { role: sc.user.role, isFamily: sc.user.role === 'family', isPoa: !!sc.user.familyIsPoa, name: sc.user.name, clientName: 'Juanita', clientFullName: 'Juanita Guess', slug: 'juanita-guess',
       clinicalRead: sc.clinicalRead || { available: true, audience: sc.audience, sections: R.sectionsFor(sc.audience, sc.sharing) }, sharing: sc.user.role === 'client' || sc.user.familyIsPoa ? R.normalizeSharing(sc.sharing) : undefined,
-      enrollmentStatus: 'enrolled', intakeComplete: true, roiFamilySigned: true };
+      enrollmentStatus: 'enrolled', intakeComplete: true, roiFamilySigned: true, ...(sc.me || {}) };
+    const headersSeen = new Set();
     // Third-party assets are served from local copies fetched with curl (which
     // trusts the sandbox proxy CA); certificate checking is left ON.
     await page.route(/^https:\/\/(unpkg\.com|cdn\.tailwindcss\.com|fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.jsdelivr\.net)\//, route => {
@@ -149,6 +155,7 @@ const srv = http.createServer((req, res) => {
     });
     await page.route('**/api/**', route => {
       const u = new URL(route.request().url()).pathname; const j = (b) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+      const hx = route.request().headers()['x-gfc-client']; if (hx) headersSeen.add(hx);
       if (u === '/api/gfc/me') return j(me);
       if (u === '/api/gfc/care-plan') return j({ greetingName: 'Juanita', carePlan: null, careTierLabel: null, upcomingVisits: [], recentVisits: [] });
       if (u === '/api/gfc/clinical/summary') return j(payload(sc.audience, sc.sharing, sc));
@@ -182,6 +189,7 @@ const srv = http.createServer((req, res) => {
     const S = process.env.SHOTS_DIR || null;
     const out = { name };
     out.homeText = (await page.locator("body").innerText()).slice(0, 1800);
+    out.switchCount = await page.locator('.gfc-switch').count();
     if (S) await page.screenshot({ path: `${S}/${name}-home.png`, fullPage: true });
     // go to Health
     // Redesign (10/2026): the bottom menu labels the health area Records.
@@ -199,6 +207,7 @@ const srv = http.createServer((req, res) => {
     out.resultsText = (await page.locator('body').innerText()).slice(0, 3000);
     out.pwned = await page.evaluate(() => window.__pwned === undefined ? 'not run (escaped)' : 'EXECUTED');
     out.errors = errors;
+    out.headersSeen = [...headersSeen];
     if (S) await page.screenshot({ path: `${S}/${name}-health.png`, fullPage: true });
     // Redesign (10/2026): the bottom menu labels the schedule Appts.
     const sched = page.locator('.gfc-tabs').getByText('Appts', { exact: true }).first();
@@ -266,6 +275,14 @@ const srv = http.createServer((req, res) => {
     expect('schedule: family without shared visits sees no clinical visits on the calendar', !has(F.scheduleText, /Telehealth check-in/) || R.sectionsFor('family', {}).appointments !== 'none');
     expect('results: filed under Lab and Imaging, each still saying whether it was reviewed', has(P.resultsText, /All Results/) && has(P.resultsText, /\bLab\b/) && has(P.resultsText, /Imaging/) && has(P.resultsText, /not yet reviewed/i) && has(P.resultsText, /Reviewed by Bethel Godwins/));
     expect('results: family not sharing results are told so, and see no result', !has(F.resultsText || '', /not yet reviewed/i));
+    if (OUT.picker) {
+      expect('picker: a family login linked to two patients is asked whose portal to open', /Whose portal would you like to open\?/.test(OUT.picker.homeText) && /Juanita/.test(OUT.picker.homeText) && /Ray Guess/.test(OUT.picker.homeText));
+      expect('picker: nothing of either patient is shown before a choice', !/Good (morning|afternoon|evening)|Lab results/.test(OUT.picker.homeText));
+    }
+    if (OUT.poaTwo) {
+      expect('poaTwo: the switcher is on the page', OUT.poaTwo.switchCount > 0);
+      expect('poaTwo: every API call names the patient on screen', OUT.poaTwo.headersSeen.length === 1 && OUT.poaTwo.headersSeen[0] === 'c-1');
+    }
     expect('no page errors on any audience', Object.values(OUT).every(r => r.errors.length === 0));
   }
   await browser.close(); srv.close(); process.exit(failures ? 1 : 0);

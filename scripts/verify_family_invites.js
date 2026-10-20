@@ -80,7 +80,9 @@ const CM = { id: 'cm_fam_1', role: 'caseManager', email: 'famcm@example.test', n
   r = await call('POST', '/api/gfc/family/invites', ct, { name: 'Dana again', email: 'dana@example.test', relationship: 'Child' });
   check('a second invite for the same email is refused', r.status === 409 && r.body.code === 'INVITE_DUPLICATE');
   r = await call('POST', '/api/gfc/family/invites', ct, { name: 'Cee', email: 'COUSIN@example.test', relationship: 'Other relative' });
-  check('an email that already has an account is refused', r.status === 409 && r.body.code === 'INVITE_EMAIL_IN_USE');
+  check('someone who already has access to this patient is refused', r.status === 409 && r.body.code === 'INVITE_ALREADY_LINKED');
+  r = await call('POST', '/api/gfc/family/invites', ct, { name: 'Staff', email: 'famcm@example.test', relationship: 'Friend' });
+  check('an email on a staff account is refused', r.status === 409 && r.body.code === 'INVITE_EMAIL_IN_USE');
   r = await call('POST', '/api/gfc/family/invites', ct, { name: 'X', email: 'x@example.test', relationship: 'Neighbour' });
   check('a relationship not on the list is refused by name', r.status === 400 && r.body.code === 'INVITE_RELATIONSHIP_INVALID');
 

@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const gfcTime = require('./public/gfc-time.js');
 const { ORG } = require('./public/consent-text.js');
 const nf = require('./public/note-format.js');
+const familyLinks = require('./familyLinks');   // POA is per patient; one family account can cover several
 
 const QUIET_START = 21 * 60;   // 9pm Eastern
 const QUIET_END = 8 * 60;      // 8am Eastern
@@ -89,10 +90,15 @@ function matchPhone(e164, users) {
   for (const c of clients.values()) {
     if (phonesForClient(c).includes(want)) out.push({ user: c, client: c, isPoa: false });
   }
+  // One match per patient this person is POA for: a POA for both parents
+  // texting from one phone names two patients, and the caller treats that as
+  // ambiguous rather than guessing.
   for (const u of list) {
-    if (u.role !== 'family' || !u.familyIsPoa) continue;
-    const c = clients.get(u.familyOfClientId);
-    if (c && toE164(u.phone) === want) out.push({ user: u, client: c, isPoa: true });
+    if (u.role !== 'family' || toE164(u.phone) !== want) continue;
+    for (const l of familyLinks.linksOf(u)) {
+      const c = l.isPoa ? clients.get(l.clientId) : null;
+      if (c) out.push({ user: u, client: c, isPoa: true });
+    }
   }
   return out;
 }

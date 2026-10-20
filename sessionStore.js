@@ -94,7 +94,19 @@ const createSessionStore = ({ store, idleMinutes = 15, now = () => Date.now() })
     if (row) await store.set(key(sid), { ...row, mfaVerified: true });
   };
 
-  return { create, check, revoke, revokeAllForUser, listForUser, sweep, markMfaVerified, PREFIX, idleMinutes };
+  // Which patient a family account linked to several is looking at
+  // (familyLinks.js). Kept on the session row, so every request from this
+  // sign-in carries it without the page having to remember. lastSeenAt is
+  // bumped with it so check()'s throttled touch, which writes back the copy
+  // it read, cannot overwrite the choice a moment later.
+  const setActiveClient = async (sid, clientId) => {
+    const row = await store.get(key(sid));
+    if (!row || row.revokedAt) return false;
+    await store.set(key(sid), { ...row, activeClientId: clientId || null, lastSeenAt: new Date(now()).toISOString() });
+    return true;
+  };
+
+  return { create, check, revoke, revokeAllForUser, listForUser, sweep, markMfaVerified, setActiveClient, PREFIX, idleMinutes };
 };
 
 module.exports = { createSessionStore, PREFIX, TOUCH_THROTTLE_MS };

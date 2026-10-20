@@ -195,6 +195,19 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Moving a patient's login to their POA (owner, 2026-10-20). The app
+      // only suggests which logins might be the POA's; an admin decides.
+      getPossiblePoaLogins: (token) =>
+        fetch(`${API_URL}/api/gfc/admin/clients/possible-poa-logins`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+      poaCutover: (token, clientId, body) =>
+        fetch(`${API_URL}/api/gfc/admin/clients/${clientId}/poa-cutover`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       setCompetencies: (token, userId, skilledCompetencies) =>
         fetch(`${API_URL}/api/caregiver/admin/caregivers/${userId}/competencies`, {
           method: 'PUT',
@@ -1728,6 +1741,150 @@
       window.location.href = result.destination || '/login';
     };
 
+    // ── Moving a patient's login to their POA (owner, 2026-10-20) ───────────
+    // POAs had been signing in with the patient's own account, so what they
+    // signed reads as the patient. The server moves the login (email, password,
+    // MFA) onto a family account with a POA link and gives the patient a
+    // placeholder login; the POA signs in exactly as before. Module scope, so
+    // its inputs keep focus as the admin types.
+    const PoaCutoverDialog = ({ token, client, users, onClose, onDone }) => {
+      const familyUsers = users.filter(u => u.role === 'family');
+      const [mode, setMode] = useState('move');
+      const [targetId, setTargetId] = useState('');
+      const [name, setName] = useState('');
+      const [phone, setPhone] = useState('');
+      const [relationship, setRelationship] = useState('');
+      const [note, setNote] = useState('');
+      const [confirmName, setConfirmName] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      // A placeholder family account (no login of its own) can take the login;
+      // one with its own login can only be linked, never merged.
+      const noLoginFamily = familyUsers.filter(u => u.noLogin);
+      const withLoginFamily = familyUsers.filter(u => !u.noLogin);
+      const submit = async () => {
+        setBusy(true); setError('');
+        const body = { mode, confirmName, note, relationship };
+        if (targetId) body.targetFamilyId = targetId;
+        else { body.name = name; body.phone = phone; }
+        const r = await api.poaCutover(token, client.id, body);
+        setBusy(false);
+        if (r.error) { setError(r.error); return; }
+        onDone(r);
+      };
+      return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-lg font-bold text-accent mb-2">Move {client.name}'s login to their POA</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              The POA keeps signing in with the same email and password. From now on, what they sign or send reads as them, acting as POA for {client.name}.
+              {' '}{client.name}'s own sign-in stops working. Nothing already signed is changed.
+            </p>
+            <div className="space-y-2 mb-4">
+              <label className="flex items-start gap-2 text-sm">
+                <input type="radio" className="mt-1" checked={mode === 'move'} onChange={() => { setMode('move'); setTargetId(''); }} />
+                <span><span className="font-medium">Move the login to the POA.</span> Use this when the POA has no account of their own yet.</span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input type="radio" className="mt-1" checked={mode === 'link_existing'} onChange={() => { setMode('link_existing'); setTargetId(''); }} />
+                <span><span className="font-medium">The POA already has their own login.</span> Link {client.name} to it and retire this one. They then sign in with their own login only.</span>
+              </label>
+            </div>
+            {mode === 'move' ? (
+              <div className="space-y-3 mb-4">
+                {noLoginFamily.length > 0 && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">POA account</label>
+                    <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+                      <option value="">Create a new POA account</option>
+                      {noLoginFamily.map(u => <option key={u.id} value={u.id}>{u.name} (no login yet)</option>)}
+                    </select>
+                  </div>
+                )}
+                {!targetId && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">POA's name *</label>
+                      <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">POA's phone</label>
+                      <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">The POA's existing account *</label>
+                <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+                  <option value="">Choose…</option>
+                  {withLoginFamily.map(u => <option key={u.id} value={u.id}>{u.name} ({u.email})</option>)}
+                </select>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship</label>
+                <input type="text" value={relationship} placeholder="e.g. Husband" onChange={(e) => setRelationship(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
+                <input type="text" value={note} onChange={(e) => setNote(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
+              </div>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">Only do this once the POA document is verified on file. The POA will be signed out once and signs back in as usual.</p>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Type the patient's name to confirm</label>
+            <input type="text" value={confirmName} placeholder={client.name} onChange={(e) => setConfirmName(e.target.value)} className="w-full px-3 py-2 border rounded-lg mb-3" />
+            {error && <p className="text-sm text-red-700 mb-3">{error}</p>}
+            <div className="flex gap-3">
+              <button type="button" disabled={busy} onClick={submit} className="flex-1 px-4 py-2.5 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 font-medium">
+                {busy ? 'Moving…' : 'Move Login'}
+              </button>
+              <button type="button" onClick={onClose} className="px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium">Cancel</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // The app cannot tell for sure which patient logins are really the POA's,
+    // so this only suggests, and says why. Nothing is ever moved on its own.
+    const PossiblePoaLogins = ({ token, users, onOpen }) => {
+      const [rows, setRows] = useState(null);
+      const [open, setOpen] = useState(false);
+      useEffect(() => {
+        let live = true;
+        api.getPossiblePoaLogins(token).then(r => { if (live) setRows(r && Array.isArray(r.clients) ? r.clients : []); });
+        return () => { live = false; };
+      }, [token, users.length]);
+      if (!rows || !rows.length) return null;
+      const flagged = rows.filter(r => r.flagged).length;
+      return (
+        <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl">
+          <button type="button" onClick={() => setOpen(!open)} className="w-full text-left">
+            <p className="font-semibold text-blue-900">
+              {rows.length} patient login{rows.length === 1 ? '' : 's'} may be used by a POA{flagged ? ` (${flagged} flagged)` : ''} {open ? '▴' : '▾'}
+            </p>
+            <p className="text-sm text-blue-800 mt-1">When a POA signs in as the patient, what they sign reads as the patient. Open each one to check and, if so, move the login to the POA.</p>
+          </button>
+          {open && (
+            <div className="mt-3 space-y-2">
+              {rows.map(r => (
+                <div key={r.id} className="flex items-start justify-between gap-3 bg-white border border-blue-200 rounded-lg p-3">
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{r.name}{r.flagged ? ' · flagged' : ''}</p>
+                    <ul className="text-xs text-gray-600 mt-1 list-disc ml-4">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
+                  </div>
+                  <button type="button" onClick={() => onOpen(r.id)} className="px-3 py-1.5 text-sm bg-white border border-blue-300 text-blue-900 rounded-lg hover:bg-blue-100 whitespace-nowrap">Open</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const UsersPage = ({ token, isSuperAdmin }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
@@ -1743,6 +1900,7 @@
       // Enrollment is the natural next step after adding a client — offered
       // rather than forced, so the admin can also just keep managing users.
       const [justCreatedClientId, setJustCreatedClientId] = useState(null);
+      const [cutoverFor, setCutoverFor] = useState(null);
       const [activeTab, setActiveTab] = useState('list');
       const [saving, setSaving] = useState(false);
       const [showBulkReset, setShowBulkReset] = useState(false);
@@ -1766,8 +1924,13 @@
         // GFC extended fields
         licenseLevel: '', hasClinicalAccess: false, clinicalRole: '', enrollmentStatus: 'intake_pending',
         careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [] },
-        familyOfClientId: '', // family role: the client (user id) this contact is linked to
-        familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
+        // family role: every patient this person is linked to, each with its
+        // own POA tick (owner, 2026-10-20). One login can cover several.
+        familyLinks: [],
+        // client role: no email of their own; the server makes a placeholder
+        // login and the POA signs in with their own account.
+        noEmail: false,
+        loginHeldByPoa: false,
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
         npi: '', // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
         // ── Session 4.10 ── WHAT this prescriber is, and what they are
@@ -1975,8 +2138,9 @@
           clinicalRoleAutoAssigned: !!user.clinicalRoleAutoAssigned,
           enrollmentStatus: user.enrollmentStatus || 'intake_pending',
           careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [], ...(user.careTeam || {}) },
-          familyOfClientId: user.familyOfClientId || '',
-          familyIsPoa: user.familyIsPoa || false,
+          familyLinks: Array.isArray(user.familyLinks) ? user.familyLinks.map(l => ({ clientId: l.clientId, isPoa: !!l.isPoa, relationship: l.relationship || '' })) : [],
+          noEmail: false,
+          loginHeldByPoa: !!user.loginHeldByPoa,
           openEmrProviderId: user.openEmrProviderId || '',
           npi: user.npi || '',
           // Session 4.10 — round-tripped for the same reason clinicalRole is: a
@@ -2220,6 +2384,14 @@
 
       return (
         <div className="space-y-6">
+          {isSuperAdmin && (
+            <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
+          )}
+          {cutoverFor && (
+            <PoaCutoverDialog token={token} client={cutoverFor} users={users}
+              onClose={() => setCutoverFor(null)}
+              onDone={() => { setCutoverFor(null); setShowForm(false); setEditingUser(null); setFormData(defaultFormData); setMessage(`${cutoverFor.name}'s login now belongs to their POA.`); loadData(); }} />
+          )}
           {/* Session 4.8 — the reassignment queue. Clinical access stopped being
               one checkbox, and the migration could not tell an RN from an FNP,
               so it mapped everyone who had access to PROVIDER. That preserves
@@ -2413,9 +2585,21 @@
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Email *</label>
-                      <input type="email" autoComplete="off" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Email {formData.noEmail ? '' : '*'}</label>
+                      {editingUser && editingUser.noLogin ? (
+                        <p className="px-4 py-2 border rounded-lg bg-gray-50 text-sm text-gray-500">No login (placeholder). Their POA signs in with their own account.</p>
+                      ) : (
+                        <input type="email" autoComplete="off" value={formData.noEmail ? '' : formData.email} disabled={formData.noEmail}
+                          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary disabled:bg-gray-50" required={!formData.noEmail} />
+                      )}
+                      {!editingUser && formData.role === 'client' && (
+                        <label className="flex items-start gap-2 mt-2 text-xs text-gray-600">
+                          <input type="checkbox" className="mt-0.5" checked={!!formData.noEmail}
+                            onChange={(e) => setFormData({ ...formData, noEmail: e.target.checked, email: '', password: '' })} />
+                          <span>No email for this patient. Their POA or family member will sign in with their own account instead. No welcome email is sent.</span>
+                        </label>
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
@@ -2446,10 +2630,11 @@
                       </div>
                     ) : (
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
-                        <input type="password" autoComplete="new-password" value={formData.password}
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Password {formData.noEmail ? '' : '*'}</label>
+                        <input type="password" autoComplete="new-password" value={formData.noEmail ? '' : formData.password} disabled={formData.noEmail}
                           onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
+                          placeholder={formData.noEmail ? 'Not needed' : ''}
+                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary disabled:bg-gray-50" required={!formData.noEmail} />
                       </div>
                     )}
                     <div>
@@ -2757,30 +2942,54 @@
                     </div>
                   )}
 
-                  {/* Family / authorized contact: linked client (drives the ROI-family portal gate) */}
+                  {/* Family / authorized contact: the patients this person is linked
+                      to, each with its own POA tick (owner, 2026-10-20). One login
+                      covers all of them; the portal asks whose to open. */}
                   {formData.role === 'family' && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Family / Authorized Contact Settings</h3>
-                      <p className="text-sm text-gray-500 mb-3">Link this contact to their client. The family portal stays locked until that client's ROI — Family consent is signed (no override).</p>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Linked client *</label>
-                        <select value={formData.familyOfClientId} onChange={(e) => setFormData({ ...formData, familyOfClientId: e.target.value })}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required>
-                          <option value="">Select a client…</option>
-                          {users.filter(u => u.role === 'client').map(u => (
-                            <option key={u.id} value={u.id}>{u.name || u.practiceName || u.email}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="mt-3 flex items-start gap-3 p-3 bg-amber-50 rounded-lg">
-                        <input type="checkbox" id="familyIsPoa" checked={formData.familyIsPoa || false}
-                          onChange={(e) => setFormData({ ...formData, familyIsPoa: e.target.checked })}
-                          className="w-5 h-5 mt-0.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500" />
-                        <div>
-                          <label htmlFor="familyIsPoa" className="text-sm font-medium text-gray-700">Designated Power of Attorney</label>
-                          <p className="text-xs text-gray-500 mt-0.5">Only check after verifying the POA document on file. Grants this contact client-equivalent portal access — care plan and clinical details, and (once enabled in the portal) acting on the client's behalf. All POA activity is logged under their own name.</p>
+                      <p className="text-sm text-gray-500 mb-3">Link this person to every patient they help with. Each patient's portal stays locked until that patient's ROI — Family consent is signed (no override).</p>
+                      {(formData.familyLinks || []).map((link, i) => (
+                        <div key={i} className="mb-3 p-3 border rounded-lg">
+                          <div className="flex gap-2 items-start">
+                            <div className="flex-1">
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Linked patient {i === 0 ? '*' : ''}</label>
+                              <select value={link.clientId} required
+                                onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, clientId: e.target.value } : l) })}
+                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                                <option value="">Select a patient…</option>
+                                {users.filter(u => u.role === 'client' && (u.id === link.clientId || !(formData.familyLinks || []).some(l => l.clientId === u.id))).map(u => (
+                                  <option key={u.id} value={u.id}>{u.name || u.practiceName || u.email}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="w-40">
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Relationship</label>
+                              <input type="text" value={link.relationship || ''} placeholder="e.g. Daughter"
+                                onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, relationship: e.target.value } : l) })}
+                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
+                            </div>
+                            <button type="button" className="mt-7 px-3 py-2 text-sm text-red-700 hover:bg-red-50 rounded-lg"
+                              onClick={() => setFormData({ ...formData, familyLinks: formData.familyLinks.filter((_, j) => j !== i) })}>Remove</button>
+                          </div>
+                          <div className="mt-3 flex items-start gap-3 p-3 bg-amber-50 rounded-lg">
+                            <input type="checkbox" id={`familyIsPoa-${i}`} checked={!!link.isPoa}
+                              onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, isPoa: e.target.checked } : l) })}
+                              className="w-5 h-5 mt-0.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500" />
+                            <div>
+                              <label htmlFor={`familyIsPoa-${i}`} className="text-sm font-medium text-gray-700">Designated Power of Attorney for this patient</label>
+                              <p className="text-xs text-gray-500 mt-0.5">Only check after verifying the POA document on file. Grants patient-level portal access for this patient — care plan and clinical details, and acting on their behalf. All POA activity is logged under this person's own name.</p>
+                            </div>
+                          </div>
                         </div>
-                      </div>
+                      ))}
+                      {!(formData.familyLinks || []).length && (
+                        <p className="text-sm text-amber-700 mb-2">Not linked to any patient yet. Add at least one.</p>
+                      )}
+                      <button type="button" className="px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
+                        onClick={() => setFormData({ ...formData, familyLinks: [...(formData.familyLinks || []), { clientId: '', isPoa: false, relationship: '' }] })}>
+                        Add a patient
+                      </button>
                     </div>
                   )}
 
@@ -2899,6 +3108,30 @@
                   {formData.role === 'client' && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Client Settings</h3>
+
+                      {/* A login the patient's POA has been using (owner,
+                          2026-10-20). What they signed reads as the patient, so
+                          the office moves the login onto the POA's own account. */}
+                      {editingUser && !editingUser.noLogin && (
+                        <div className="mb-4 p-4 bg-blue-50 rounded-xl">
+                          <label className="flex items-start gap-2 text-sm text-gray-700">
+                            <input type="checkbox" className="mt-0.5" checked={!!formData.loginHeldByPoa}
+                              onChange={(e) => setFormData({ ...formData, loginHeldByPoa: e.target.checked })} />
+                            <span><span className="font-medium">This login is used by the patient's POA</span>, not the patient. Anything signed or sent with it reads as the patient.</span>
+                          </label>
+                          {(formData.loginHeldByPoa || editingUser.loginHeldByPoa) && (
+                            <button type="button" onClick={() => setCutoverFor(editingUser)}
+                              className="mt-3 px-3 py-2 text-sm bg-primary text-white rounded-lg hover:opacity-90">
+                              Move this login to the POA…
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {editingUser && editingUser.poaCutover && (
+                        <p className="mb-4 text-xs text-gray-600 p-3 bg-gray-50 rounded-lg">
+                          This patient's login was moved to their POA on {new Date(editingUser.poaCutover.at).toLocaleDateString()} by {(editingUser.poaCutover.by && editingUser.poaCutover.by.name) || 'an admin'}. Before then, entries made with it read as the patient.
+                        </p>
+                      )}
 
                       {/* The agreed BILLED rate (owner request, 2026-09-13).
                           The financial agreement and the home care service agreement

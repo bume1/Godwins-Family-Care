@@ -14,6 +14,8 @@
 // staff know to ask for the document. It never sets familyIsPoa.
 // ============================================================================
 
+const familyLinks = require('./familyLinks');
+
 const RELATIONSHIPS = Object.freeze(['Spouse or partner', 'Child', 'Parent', 'Sibling', 'Grandchild', 'Other relative', 'Friend', 'Other']);
 const STATUSES = Object.freeze(['pending', 'approved', 'declined', 'cancelled']);
 const NAME_MAX = 120;
@@ -36,9 +38,16 @@ function normalizeInvite(body) {
 }
 
 // Refuse an invite that would collide with an account or another open ask.
+// Someone who already has a FAMILY account (for another patient) can be
+// invited: approving links this patient to their existing login rather than
+// making a second account on the same email (familyLinks.js).
 function checkInvite(value, { users, invites, clientId }) {
   const email = value.email;
-  if ((users || []).some(u => u && String(u.email || '').toLowerCase() === email)) {
+  const existing = (users || []).find(u => u && String(u.email || '').toLowerCase() === email);
+  if (existing && existing.role === 'family' && familyLinks.isFamilyOf(existing, clientId)) {
+    return { error: 'That person already has access to your portal.', code: 'INVITE_ALREADY_LINKED' };
+  }
+  if (existing && existing.role !== 'family') {
     return { error: 'Someone already has an account with that email. Call the office and we will link it for you.', code: 'INVITE_EMAIL_IN_USE' };
   }
   if ((invites || []).some(i => i && i.clientId === clientId && i.status === 'pending' && i.email === email)) {
