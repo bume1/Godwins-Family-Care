@@ -218,3 +218,10 @@ test('build guard: a patient\u2019s account type cannot be changed, and a clashi
   assert.match(hub, /disabled=\{!!\(editingUser && editingUser\.role === 'client'\)\}/, 'the form locks a patient\u2019s account type too');
   assert.match(hub, /api\.createUserDetailed\(token, formData\)/, 'the create keeps the server\u2019s details so the form can offer the next step');
 });
+
+test('build guard: an Admin Hub page error shows a message, never a blank screen', () => {
+  const hub = read('public/admin-hub.html');
+  assert.match(hub, /class PageErrorBoundary extends React\.Component/);
+  assert.match(hub, /<PageErrorBoundary resetKey=\{activePage\}>\{renderPage\(\)\}<\/PageErrorBoundary>/, 'every page is wrapped');
+  assert.match(hub, /<PageErrorBoundary quiet>\s*<PossiblePoaLogins/, 'the suggestion panel cannot take User Management down');
+});
