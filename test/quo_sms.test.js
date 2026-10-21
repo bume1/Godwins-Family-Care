@@ -259,3 +259,26 @@ test('a failed send is retried and then gives up; a turned-off switch cancels a 
     assert.equal(stored(h, 'sms_outbox')[0].status, 'cancelled');
   } finally { h.close(); }
 });
+
+test('2026-10-21: QUO_WEBHOOK_SECRET may hold one signing key per Quo webhook; any one of them verifies', () => {
+  const crypto = require('crypto');
+  const q = require('../quoSms');
+  const k1 = Buffer.from('calls-key').toString('base64');
+  const k2 = Buffer.from('messages-key').toString('base64');
+  const raw = JSON.stringify({ type: 'call.completed' });
+  const sign = (key) => { const ts = Date.now(); return `hmac;1;${ts};` + crypto.createHmac('sha256', Buffer.from(key, 'base64')).update(ts + '.' + raw).digest('base64'); };
+  const before = process.env.QUO_WEBHOOK_SECRET;
+  try {
+    process.env.QUO_WEBHOOK_SECRET = ` ${k1}, ${k2} `;
+    assert.deepEqual(q.webhookSecrets(), [k1, k2]);
+    assert.equal(q.verifyAnySignature(raw, sign(k1), q.webhookSecrets()), true);
+    assert.equal(q.verifyAnySignature(raw, sign(k2), q.webhookSecrets()), true);
+    assert.equal(q.verifyAnySignature(raw, sign(Buffer.from('other').toString('base64')), q.webhookSecrets()), false);
+    assert.equal(q.status().receiving, true);
+    process.env.QUO_WEBHOOK_SECRET = '';
+    assert.deepEqual(q.webhookSecrets(), []);
+    assert.equal(q.status().receiving, false);
+  } finally {
+    if (before === undefined) delete process.env.QUO_WEBHOOK_SECRET; else process.env.QUO_WEBHOOK_SECRET = before;
+  }
+});
