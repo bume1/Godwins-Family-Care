@@ -115,6 +115,9 @@ const SCENARIOS = {
     me: { needsClientChoice: true, activeClientId: null, linkedClients: [{ id: 'c-1', name: 'Juanita', isPoa: true }, { id: 'c-9', name: 'Ray Guess', isPoa: false }] } },
   poaTwo:       { user: { id: 'f-3', role: 'family', name: 'Dot Daughter', familyOfClientId: 'c-1', familyIsPoa: true }, audience: 'poa', sharing: {},
     me: { activeClientId: 'c-1', linkedClients: [{ id: 'c-1', name: 'Juanita', isPoa: true, active: true }, { id: 'c-9', name: 'Ray Guess', isPoa: false }] } },
+  // A POA enrolling a patient who has not done intake, with no family release signed (owner, 2026-10-21).
+  poaIntake:    { user: { id: 'f-4', role: 'family', name: 'Stephanie Hendricks', familyOfClientId: 'c-1', familyIsPoa: true }, audience: 'poa', sharing: {},
+    me: { enrollmentStatus: 'intake_pending', intakeComplete: false, roiFamilySigned: false, activeClientId: 'c-1', linkedClients: [{ id: 'c-1', name: 'Juanita', isPoa: true, active: true }] } },
   blocked:      { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {},
     clinicalRead: { available: false, code: 'CLINICAL_CONSENT_REQUIRED', reason: 'Consent to medical treatment must be on file before clinical information can be shown.' } },
 };
@@ -278,6 +281,10 @@ const srv = http.createServer((req, res) => {
     if (OUT.picker) {
       expect('picker: a family login linked to two patients is asked whose portal to open', /Whose portal would you like to open\?/.test(OUT.picker.homeText) && /Juanita/.test(OUT.picker.homeText) && /Ray Guess/.test(OUT.picker.homeText));
       expect('picker: nothing of either patient is shown before a choice', !/Good (morning|afternoon|evening)|Lab results/.test(OUT.picker.homeText));
+    }
+    if (OUT.poaIntake) {
+      expect('poaIntake: a POA gets the intake gate, not the family lock', /Begin Intake/.test(OUT.poaIntake.homeText) && !/Family access is locked/.test(OUT.poaIntake.homeText));
+      expect('poaIntake: it says they are completing it as POA', /as their POA/.test(OUT.poaIntake.homeText) && /Welcome, Stephanie/.test(OUT.poaIntake.homeText));
     }
     if (OUT.poaTwo) {
       expect('poaTwo: the switcher is on the page', OUT.poaTwo.switchCount > 0);

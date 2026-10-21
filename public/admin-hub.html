@@ -1756,6 +1756,27 @@
       window.location.href = result.destination || '/login';
     };
 
+    // A page that hits an error while drawing used to blank the whole Admin Hub
+    // with no clue why (owner report, 2026-10-21). This shows what failed and
+    // keeps the menu working. `quiet` hides a non-essential panel instead.
+    class PageErrorBoundary extends React.Component {
+      constructor(props) { super(props); this.state = { error: null }; }
+      static getDerivedStateFromError(error) { return { error }; }
+      componentDidCatch(error, info) { console.error('[admin-hub] page error:', error, info && info.componentStack); }
+      componentDidUpdate(prev) { if (prev.resetKey !== this.props.resetKey && this.state.error) this.setState({ error: null }); }
+      render() {
+        if (!this.state.error) return this.props.children;
+        if (this.props.quiet) return null;
+        return (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-800">
+            <p className="font-semibold">This page could not be shown.</p>
+            <p className="text-sm mt-1">Refresh to try again. If it keeps happening, send this message to support:</p>
+            <pre className="text-xs mt-3 whitespace-pre-wrap break-words">{String((this.state.error && (this.state.error.stack || this.state.error.message)) || this.state.error).slice(0, 1500)}</pre>
+          </div>
+        );
+      }
+    }
+
     // ── Moving a patient's login to their POA (owner, 2026-10-20) ───────────
     // POAs had been signing in with the patient's own account, so what they
     // signed reads as the patient. The server moves the login (email, password,
@@ -1871,7 +1892,11 @@
       const [open, setOpen] = useState(false);
       useEffect(() => {
         let live = true;
-        api.getPossiblePoaLogins(token).then(r => { if (live) setRows(r && Array.isArray(r.clients) ? r.clients : []); });
+        api.getPossiblePoaLogins(token).then(r => {
+          if (!live) return;
+          const list = r && Array.isArray(r.clients) ? r.clients : [];
+          setRows(list.filter(x => x && x.id).map(x => ({ id: String(x.id), name: typeof x.name === 'string' ? x.name : 'Patient', flagged: !!x.flagged, reasons: Array.isArray(x.reasons) ? x.reasons.map(String) : [] })));
+        }).catch(() => { if (live) setRows([]); });
         return () => { live = false; };
       }, [token, users.length]);
       if (!rows || !rows.length) return null;
@@ -2400,7 +2425,9 @@
       };
 
       const filteredUsers = users.filter(user => {
-        const matchesSearch = user.name?.toLowerCase().includes(searchTerm.toLowerCase()) || user.email?.toLowerCase().includes(searchTerm.toLowerCase());
+        // String(): one record with a malformed name must not blank the whole list.
+        const q = String(searchTerm || '').toLowerCase();
+        const matchesSearch = String(user.name || '').toLowerCase().includes(q) || String(user.email || '').toLowerCase().includes(q);
         const matchesRole = roleFilter === 'all' || user.role === roleFilter || false;
         return matchesSearch && matchesRole;
       });
@@ -2408,7 +2435,9 @@
       return (
         <div className="space-y-6">
           {isSuperAdmin && (
-            <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
+            <PageErrorBoundary quiet>
+              <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
+            </PageErrorBoundary>
           )}
           {cutoverFor && (
             <PoaCutoverDialog token={token} client={cutoverFor} users={users} initial={cutoverInitial}
@@ -5227,7 +5256,7 @@
             <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-8" />
             <div className="w-6"></div>
           </div>
-          <main className="lg:ml-72 p-4 lg:p-8">{renderPage()}</main>
+          <main className="lg:ml-72 p-4 lg:p-8"><PageErrorBoundary resetKey={activePage}>{renderPage()}</PageErrorBoundary></main>
         </div>
       );
     };

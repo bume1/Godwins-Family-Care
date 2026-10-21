@@ -562,6 +562,9 @@ const normalizeNpi = (v) => {
 // opted out of email.
 const recipientMayBeEmailed = async (recipientUserId, recipientEmail) => {
   if (!recipientEmail) return { ok: false, reason: 'no email address on file' };
+  // A placeholder login (offline onboarding, a patient whose POA signs in for
+  // them) is an address nobody reads. One check here covers every notice.
+  if (familyLinks.isPlaceholderEmail(recipientEmail)) return { ok: false, reason: 'placeholder login, no inbox' };
   if (!recipientUserId) return { ok: true };
   try {
     const users = await getUsers();
@@ -2880,6 +2883,16 @@ const requireEnrolledClient = async (req, res, next) => {
         return res.status(403).json({ error: 'No authorized client on file for this account.', code: 'NO_CLIENT_LINK' });
       }
       const roiFamily = (client.consents || {}).roiFamily;
+      // A designated POA is the patient's personal representative and stands
+      // in for them (owner, 2026-10-21; it was flagged as open in 4.3). They
+      // are gated like the patient: on intake, never on the family release,
+      // which is the patient's permission for OTHER family to see their care.
+      if (req.user.familyIsPoa) {
+        if ((client.enrollmentStatus || 'intake_pending') === 'intake_pending') {
+          return res.status(403).json({ error: 'Enrollment is not complete. Finish intake and required consents to unlock this portal.', code: 'INTAKE_REQUIRED' });
+        }
+        return next();
+      }
       // Accept signed OR signed_offline (paper-signed ROI is equally valid — Scope B1).
       if (!isConsentSatisfied(roiFamily)) {
         return res.status(403).json({
@@ -2901,10 +2914,29 @@ const requireEnrolledClient = async (req, res, next) => {
 // Intake-scoped access — only the client themselves runs Stage 2 enrollment,
 // regardless of enrollmentStatus (this is what the gate sends them to). Family
 // and staff never submit a client's intake. Default-deny.
+// The patient's own tasks: intake, consents, uploads, record releases. The
+// patient, or a POA acting for them (owner, 2026-10-21): a patient whose POA
+// handles everything may have no login of their own, so the POA has to be able
+// to enroll them. A POA works on the patient chosen for this sign-in
+// (familyLinks.js), and everything they sign is recorded in their own name,
+// "<POA> as POA for <patient>". Plain family cannot.
+// req.intakeClientId is the patient every one of these routes works on.
 const requireClientForIntake = (req, res, next) => {
-  if (req.user.role === config.ROLES.CLIENT) return next();
-  return res.status(403).json({ error: 'Only the client can complete enrollment intake.' });
+  if (req.user.role === config.ROLES.CLIENT) { req.intakeClientId = req.user.id; return next(); }
+  if (req.user.role === config.ROLES.FAMILY && req.user.familyIsPoa && req.user.familyOfClientId) {
+    req.intakeClientId = req.user.familyOfClientId;
+    return next();
+  }
+  if (req.user.role === config.ROLES.FAMILY && req.user.needsClientChoice) {
+    return res.status(403).json({ error: 'Choose which patient\u2019s portal to open.', code: 'CLIENT_CHOICE_REQUIRED' });
+  }
+  return res.status(403).json({ error: 'Only the client or their designated POA can do this.' });
 };
+
+// Who is signing: the patient, or "<POA> as POA for <patient>".
+const signerFor = (req, client) => (req.user.role === config.ROLES.FAMILY && req.user.familyIsPoa)
+  ? { role: 'poa', userId: req.user.id, name: req.user.name || req.user.email, actingFor: client.id, actingForName: client.name || null }
+  : null;
 
 // ============== GFC ENROLLMENT INTAKE (Stage 2) — consent registry ==============
 // THE registry lives in consentRegistry.js so the lane rules, the status
@@ -7670,7 +7702,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         label: consentLabels[k] || k,
         status: consents[k],
         signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null,
-        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null,
+        signerName: (client.consentMeta && client.consentMeta[k] && (client.consentMeta[k].signedAs || client.consentMeta[k].typedName)) || null,
         bodyVersion: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].version) || null,
         // Scope C — the client can now download the document they signed.
         copyUrl: canOpenCopy && registryTypes.has(k) ? `/api/gfc/consents/${k}.pdf` : null,
@@ -8059,7 +8091,7 @@ app.post('/api/gfc/intake/upload', authenticateToken, requireClientForIntake, as
     const sniffedType = detectFileType(buffer);
     if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
 
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
@@ -18259,7 +18291,7 @@ function decorateConsentDefs(client, serviceLine) {
 app.get('/api/gfc/intake', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
     const users = await getUsers();
-    const client = users.find(u => u.id === req.user.id) || {};
+    const client = users.find(u => u.id === (req.intakeClientId || req.user.id)) || {};
     const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
     res.json({
       enrollmentStatus: client.enrollmentStatus || 'intake_pending',
@@ -18291,7 +18323,7 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // can only refuse an answer somebody has just given.
     const rankCheck = insurance.validateRanks({ ...intake });
     if (rankCheck.error) return res.status(400).json({ error: rankCheck.error, code: rankCheck.code });
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
 
     // Normalize structured medication rows (name/dose/route/frequency/prescriber/pharmacy).
@@ -18379,7 +18411,7 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     const { type, typedName, acknowledged, optOut, choices } = req.body || {};
     if (!type) return res.status(400).json({ error: 'consent type is required' });
 
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
@@ -18445,7 +18477,7 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
 
     let signature;
     try {
-      signature = buildConsentSignature({ type, typedName, req, bodyVersion: def.bodyVersion, choices: answers });
+      signature = buildConsentSignature({ type, typedName, req, bodyVersion: def.bodyVersion, choices: answers, signer: signerFor(req, client) });
     } catch (e) {
       console.error('Consent provenance error:', e.message);
       return res.status(500).json({ error: 'Could not record the signature provenance. Nothing was saved.', code: e.code || 'CONSENT_PROVENANCE_MISSING' });
@@ -18463,7 +18495,7 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, {
-      serviceLine, bodyVersion: signature.version, choices: answers
+      serviceLine, bodyVersion: signature.version, choices: answers, clientId: client.id, actingFor: signature.signerRole === 'poa' ? client.id : null
     });
     // Staff only. A client signs up to fourteen consents in one sitting, so a
     // per-consent receipt to them would be fourteen emails; the
@@ -18486,7 +18518,32 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
 // is only a receipt that directs the client to the portal, where the signed
 // documents live (Documents tab). Safe to send pre-BAA.
 async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
-  const to = [client.email, extraRecipient].filter(Boolean);
+  // Never a placeholder login (it has no inbox). The patient's designated POAs
+  // hear about it too, each with a link that opens THIS patient's portal,
+  // since a POA may help more than one (owner, 2026-10-21).
+  const users = await getUsers().catch(() => []);
+  const poas = familyLinks.familyFor(users, client.id, { poaOnly: true })
+    .map(f => f.user.email).filter(e => e && !familyLinks.isPlaceholderEmail(e));
+  if (poas.length) {
+    const base = String(portalUrl).replace(/\/portal(\/.*)?$/, '');
+    const poaName = client.preferredName || client.name || 'Your family member';
+    const poaHtml = emailTemplates.renderGfcEmail({
+      headline: 'Enrollment complete',
+      paragraphs: [
+        `${poaName}'s enrollment with Godwins Family Care is complete. Their care plan, signed consents and documents are now available in the portal.`,
+        'For your privacy we do not put health or consent details in email. Everything lives in the portal.'
+      ],
+      ctaUrl: `${base}/portal?for=${encodeURIComponent(client.id)}`,
+      ctaLabel: 'Open the portal'
+    }).html;
+    for (const e of [...new Set(poas.map(x => x.toLowerCase()))]) {
+      sendEmail(e, 'Enrollment with Godwins Family Care is complete', `${poaName}'s enrollment is complete. Sign in to the portal to see it. For privacy we do not put health details in email.`, { htmlBody: poaHtml })
+        .catch(err => console.error('POA enrollment confirmation failed (non-fatal):', err.message));
+    }
+  }
+  const poaSet = new Set(poas.map(x => x.toLowerCase()));
+  const to = [...new Set([client.email, extraRecipient]
+    .filter(e => e && !familyLinks.isPlaceholderEmail(e) && !poaSet.has(String(e).toLowerCase())))];
   if (!to.length) return;
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const subject = 'Your Godwins Family Care enrollment is complete';
@@ -18530,7 +18587,7 @@ async function persistEnrollmentPacketToDrive(client) {
 // intake_pending → intake_complete and unlock the portal.
 app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
 
     const client = users[idx];
@@ -22904,7 +22961,7 @@ app.put('/api/gfc/prior-providers', authenticateToken, requireClientForIntake, a
   try {
     const { priorProviders } = req.body || {};
     if (!Array.isArray(priorProviders)) return res.status(400).json({ error: 'priorProviders array is required' });
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const normalized = normalizePriorProviders(priorProviders, 'manual');
     users[idx].priorProviders = normalized;
@@ -22936,7 +22993,7 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     const sniffedType = detectFileType(buffer);
     if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
 
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
@@ -23005,7 +23062,9 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     if (expiration.error) fieldErrors.expiration_date = expiration.error;
 
     const printedName = roiRepo.cleanText(b.printedName, 120);
-    const relationship = roiRepo.cleanText(b.relationship, 120);
+    // A POA signing a release states their authority on it (45 CFR 164.508).
+    const relationship = roiRepo.cleanText(b.relationship, 120) ||
+      ((req.user.role === config.ROLES.FAMILY && req.user.familyIsPoa) ? 'Power of Attorney' : '');
 
     // Server-side 45 CFR 164.508 element validation.
     const validation = roiRepo.validateAuthorizationElements({
@@ -23018,7 +23077,7 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     });
     Object.assign(fieldErrors, validation.errors);
 
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 

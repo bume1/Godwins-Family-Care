@@ -218,3 +218,44 @@ test('build guard: a patient\u2019s account type cannot be changed, and a clashi
   assert.match(hub, /disabled=\{!!\(editingUser && editingUser\.role === 'client'\)\}/, 'the form locks a patient\u2019s account type too');
   assert.match(hub, /api\.createUserDetailed\(token, formData\)/, 'the create keeps the server\u2019s details so the form can offer the next step');
 });
+
+test('build guard: an Admin Hub page error shows a message, never a blank screen', () => {
+  const hub = read('public/admin-hub.html');
+  assert.match(hub, /class PageErrorBoundary extends React\.Component/);
+  assert.match(hub, /<PageErrorBoundary resetKey=\{activePage\}>\{renderPage\(\)\}<\/PageErrorBoundary>/, 'every page is wrapped');
+  assert.match(hub, /<PageErrorBoundary quiet>\s*<PossiblePoaLogins/, 'the suggestion panel cannot take User Management down');
+});
+
+test('a POA signs in their own name: "<POA> as POA for <patient>"', () => {
+  const reg = require('../consentRegistry');
+  const req = { headers: { 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: '10.0.0.1' }, ip: '203.0.113.9' };
+  const hashIp = (x) => x ? 'h:' + x : null;
+  const poa = reg.buildConsentSignature({ type: 'npp', typedName: 'Stephanie Hendricks', req, hashIp,
+    signer: { role: 'poa', userId: 'steph', name: 'Stephanie Hendricks', actingFor: 'joe', actingForName: 'Joseph Hendricks' } });
+  assert.strictEqual(poa.signedAs, 'Stephanie Hendricks as POA for Joseph Hendricks');
+  assert.strictEqual(poa.signerRole, 'poa');
+  assert.strictEqual(poa.signedById, 'steph');
+  assert.strictEqual(poa.actingFor, 'joe');
+  const self = reg.buildConsentSignature({ type: 'npp', typedName: 'Joseph Hendricks', req, hashIp });
+  assert.ok(!('signedAs' in self) && !('signerRole' in self), 'the patient signing for themselves carries no POA stamp');
+  const pdf = read('pdf-generator.js');
+  assert.match(pdf, /sigRow\('Electronically signed by', meta\.signedAs \|\| meta\.typedName/, 'the signed consent PDF names the POA');
+  assert.match(pdf, /Signed by \$\{m\.signedAs \|\| m\.typedName/, 'the enrollment packet names the POA');
+});
+
+test('build guard: a POA can do the patient’s own tasks, and the routes work on the patient', () => {
+  const server = read('server.js');
+  const gate = server.slice(server.indexOf('const requireClientForIntake'), server.indexOf('const signerFor'));
+  assert.match(gate, /req\.user\.familyIsPoa && req\.user\.familyOfClientId/);
+  assert.match(gate, /req\.intakeClientId = req\.user\.familyOfClientId/);
+  assert.doesNotMatch(server, /loadClientForMutation\(req\.user\.id\)/, 'an intake route still looks the patient up by the signed-in user');
+  assert.match(server, /signer: signerFor\(req, client\)/, 'consents carry the POA');
+  // A POA is gated on intake like the patient, never on the family release.
+  const enrolled = server.slice(server.indexOf('const requireEnrolledClient'), server.indexOf('const requireEnrolledClient') + 4000);
+  assert.ok(enrolled.indexOf('if (req.user.familyIsPoa)') > 0 && enrolled.indexOf('if (req.user.familyIsPoa)') < enrolled.indexOf('ROI_FAMILY_REQUIRED'));
+  // No notice goes to a placeholder login.
+  assert.match(server, /if \(familyLinks\.isPlaceholderEmail\(recipientEmail\)\) return \{ ok: false/);
+  const portal = read('public/portal.html');
+  assert.match(portal, /showIntake && \(!isFamily \|\| isPoa\)/);
+  assert.match(portal, /\(isFamily && !isPoa\) \? !me\.roiFamilySigned/);
+});

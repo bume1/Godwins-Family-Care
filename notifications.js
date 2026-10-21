@@ -112,7 +112,9 @@ function createNotifier(deps) {
     const client = users.find(u => u && u.id === clientId && u.role === clientRole);
     if (!client) return { client: null, recipients: [] };
     const recipients = [];
-    if (client.email) recipients.push({ user: client, actingFor: null });
+    // A patient with no login of their own (placeholder email) has no inbox;
+    // their POA below hears about it instead.
+    if (client.email && !familyLinks.isPlaceholderEmail(client.email)) recipients.push({ user: client, actingFor: null });
     // POA is per patient (familyLinks.js): a family account linked to several
     // patients hears only about the ones it is POA for. A placeholder login
     // has no inbox.

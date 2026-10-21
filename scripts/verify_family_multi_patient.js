@@ -64,7 +64,10 @@ const ADMIN = { id: 'admin_multi', role: config.ROLES.ADMIN, email: 'multiadmin@
   // A patient whose husband has been signing in as her.
   const GRAN = { id: 'client_gran', role: config.ROLES.CLIENT, email: 'husband@example.test', password: await bcrypt.hash('Shared!Pass1', 4), name: 'Gail Gran', slug: 'gail', serviceLine: 'PHC', enrollmentStatus: 'enrolled', consents: { roiFamily: 'signed' }, intake: { decisionMaker: { name: 'Hal Husband' } } };
   const AUNT = { id: 'client_aunt', role: config.ROLES.CLIENT, email: 'son-old@example.test', password: await bcrypt.hash('x', 4), name: 'Ada Aunt', slug: 'ada', serviceLine: 'PHC', enrollmentStatus: 'enrolled', consents: { roiFamily: 'signed' }, intake: {} };
-  STORE.set('users', [MOM, DAD, STRANGER, DAUGHTER, OLDSHAPE, ADMIN, GRAN, AUNT]);
+  const JOE = { id: 'client_joe', role: config.ROLES.CLIENT, email: 'client+client_joe@placeholder.local', name: 'Joseph Hendricks', slug: 'joe', serviceLine: 'PHC', enrollmentStatus: 'intake_pending', consents: {}, intake: {} };
+  const STEPH = { id: 'fam_steph', role: config.ROLES.FAMILY, email: 'steph@example.test', name: 'Stephanie Hendricks', familyLinks: [{ clientId: JOE.id, isPoa: true }] };
+  const COUSIN = { id: 'fam_cousin', role: config.ROLES.FAMILY, email: 'cuz@example.test', name: 'Cee Cousin', familyLinks: [{ clientId: JOE.id, isPoa: false }] };
+  STORE.set('users', [MOM, DAD, STRANGER, DAUGHTER, OLDSHAPE, ADMIN, GRAN, AUNT, JOE, STEPH, COUSIN]);
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 2500));
   const at = tok(ADMIN);
@@ -207,6 +210,34 @@ const ADMIN = { id: 'admin_multi', role: config.ROLES.ADMIN, email: 'multiadmin@
   check('the aunt’s old login is retired', /@placeholder\.local$/.test(userById(AUNT.id).email));
   r = await call('GET', '/api/gfc/me', tok(d3));
   check('with three patients the portal asks whose to open', r.body.needsClientChoice === true && r.body.linkedClients.length === 3);
+
+  console.log('\n── A POA enrolls a patient who has no login of their own ──');
+  // Joe has not done intake and nobody has signed his family release (seeded at the top).
+  const st = tok(STEPH), cz = tok(COUSIN);
+  r = await call('GET', '/api/gfc/me', st);
+  check('the POA sees the patient, as POA', r.status === 200 && r.body.isPoa === true && r.body.enrollmentStatus === 'intake_pending', JSON.stringify(r.body).slice(0, 200));
+  r = await call('GET', '/api/gfc/care-plan', st);
+  check('the POA is gated on intake, not on the family release', r.status === 403 && r.body.code === 'INTAKE_REQUIRED', JSON.stringify(r.body));
+  r = await call('GET', '/api/gfc/care-plan', cz);
+  check('plain family is still gated on the family release', r.status === 403 && r.body.code === 'ROI_FAMILY_REQUIRED');
+  r = await call('GET', '/api/gfc/intake', st);
+  check('the POA opens the patient\u2019s intake', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  r = await call('GET', '/api/gfc/intake', cz);
+  check('plain family cannot', r.status === 403);
+  r = await call('POST', '/api/gfc/intake', st, { intake: { firstName: 'Joseph', lastName: 'Hendricks' } });
+  check('the POA saves intake answers onto the patient', r.status === 200 && (userById(JOE.id).intake || {}).firstName === 'Joseph', JSON.stringify(r.body).slice(0, 200));
+  check('and nothing lands on the POA\u2019s own account', !userById(STEPH.id).intake);
+  r = await call('POST', '/api/gfc/consents', st, { type: 'npp', typedName: 'Stephanie Hendricks', acknowledged: true });
+  const npp = (userById(JOE.id).consentMeta || {}).npp || {};
+  check('the POA signs a consent for the patient', r.status === 200 && (userById(JOE.id).consents || {}).npp === 'signed', JSON.stringify(r.body).slice(0, 200));
+  check('it reads "Stephanie Hendricks as POA for Joseph Hendricks"', npp.signedAs === 'Stephanie Hendricks as POA for Joseph Hendricks' && npp.signerRole === 'poa' && npp.signedById === STEPH.id, JSON.stringify(npp));
+  r = await call('POST', '/api/gfc/consents', cz, { type: 'npp', typedName: 'Cee Cousin', acknowledged: true });
+  check('plain family cannot sign', r.status === 403);
+  r = await call('GET', '/api/gfc/admin/clients/possible-poa-logins', at);
+  check('a POA signing as POA does not flag the patient as a shared login', !(r.body.clients || []).some(c => c.id === JOE.id));
+  await call('PUT', `/api/users/${JOE.id}`, at, { enrollmentStatus: 'intake_complete' });
+  r = await call('GET', '/api/gfc/care-plan', st);
+  check('once intake is done the POA is in, with no family release signed', r.status === 200 && r.body.audience === 'poa', JSON.stringify(r.body).slice(0, 200));
 
   console.log('\n── Who may do this ──');
   r = await call('POST', `/api/gfc/admin/clients/${MOM.id}/poa-cutover`, dt, { mode: 'move', name: 'X', confirmName: MOM.name });

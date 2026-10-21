@@ -1348,7 +1348,8 @@ module.exports = function createMessagingRoutes(deps) {
     for (const id of recipients) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
-      if (!u || !u.email) continue;
+      // A placeholder login (a patient whose POA signs in for them) has no inbox.
+      if (!u || !u.email || familyLinks.isPlaceholderEmail(u.email)) continue;
       // Admin sees Direct threads but is not emailed about them (owner, 2026-10-15).
       if (thread.channel === 'direct_care' && u.role === ROLES.ADMIN) continue;
       // A family member who is no longer the client's designated POA was on the

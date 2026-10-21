@@ -222,6 +222,8 @@ function possiblePoaLoginReasons(client) {
   const name = str(client.name).toLowerCase().replace(/[^a-z]/g, '');
   const meta = client.consentMeta || {};
   for (const k of Object.keys(meta)) {
+    // A POA signing as POA is recorded as such; that is the right path, not a sign of a shared login.
+    if (meta[k] && meta[k].signerRole === 'poa') continue;
     const typed = str(meta[k] && meta[k].typedName).toLowerCase().replace(/[^a-z]/g, '');
     if (typed && name && typed !== name) { reasons.push('A consent was signed with a different name.'); break; }
   }
