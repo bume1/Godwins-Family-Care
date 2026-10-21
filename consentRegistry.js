@@ -152,7 +152,15 @@ const ipChainFrom = (req) => {
 // record without provenance — Scope E1 found a consent recorded as signed with
 // no timestamp and no IP, and a rule that lives in one function cannot be
 // forgotten at a second call site.
-function buildConsentSignature({ type, typedName, req, bodyVersion, choices, provenance, hashIp }) {
+// `signer` is set when a designated POA signs for the patient (owner,
+// 2026-10-21): { role: 'poa', userId, name, actingFor, actingForName }. The
+// record then reads "<POA> as POA for <patient>" everywhere it is shown, and
+// never presents the patient as the person who signed.
+const signedAsLine = (signer, typedName) => signer && signer.role === 'poa'
+  ? `${String(typedName || signer.name || '').trim()} as POA for ${signer.actingForName || 'the client'}`
+  : null;
+
+function buildConsentSignature({ type, typedName, req, bodyVersion, choices, provenance, hashIp, signer }) {
   const signedAt = new Date().toISOString();
   const rawIp = clientIpFrom(req);
   const ipHash = hashIp(rawIp);
@@ -173,7 +181,13 @@ function buildConsentSignature({ type, typedName, req, bodyVersion, choices, pro
     // text forever, not whatever the current wording happens to be (Scope C).
     version: bodyVersion || consentText.currentVersion(type) || consentText.CURRENT_VERSION,
     choices: choices || {},
-    provenance: provenance || 'in_app'
+    provenance: provenance || 'in_app',
+    ...(signer && signer.role === 'poa' ? {
+      signerRole: 'poa',
+      signedById: signer.userId || null,
+      actingFor: signer.actingFor || null,
+      signedAs: signedAsLine(signer, typedName)
+    } : {})
   };
 }
 
@@ -239,6 +253,7 @@ function applyServiceLineChange(client, nextLine, actor) {
 const titleForType = (type) => (GFC_CONSENT_DEFS.find(d => d.type === type) || {}).title || type;
 
 module.exports = {
+  signedAsLine,
   GFC_CONSENT_DEFS,
   consentDefsForServiceLine,
   requiredConsentTypes,

@@ -4102,7 +4102,11 @@
 
     // The enrollment gate screen — shown until intake + required consents are done.
     const GfcGate = ({ me, onStartIntake }) => {
-      const isFamily = me.isFamily;
+      // A designated POA enrolls the patient (owner, 2026-10-21), so they get
+      // the intake gate, not the family lock. Plain family still wait on the
+      // family Release of Information.
+      const isPoa = !!me.isPoa;
+      const isFamily = me.isFamily && !isPoa;
       const firstName = (me.clientName || 'there').split(' ')[0];
       // Consent checklist state derived from the server-stored per-type consent statuses.
       const c = me.consents || {};
@@ -4128,8 +4132,8 @@
             </React.Fragment>
           ) : (
             <React.Fragment>
-              <h2 className="disp">Welcome, {firstName}</h2>
-              <p className="sub">Let's finish setting up your care.</p>
+              <h2 className="disp">Welcome, {isPoa ? String(me.name || 'there').split(' ')[0] : firstName}</h2>
+              <p className="sub">{isPoa ? `Let's finish setting up ${firstName}'s care. You're completing this as their POA, and everything you sign is recorded in your name.` : "Let's finish setting up your care."}</p>
               <div className="lockcard">
                 <i className="ti ti-lock" />
                 <div><b>Your portal is locked</b><span>Finish enrollment to open your care plan, visits, and messages.</span></div>
@@ -4468,7 +4472,7 @@
     // e-signature. A consent the server has marked un-presentable (today: a
     // financial agreement with no agreed rate in it) shows what is missing and
     // offers no signature control at all.
-    const ConsentCard = ({ def, status, meta, onSign, signedName, token, form, onSaveEdits }) => {
+    const ConsentCard = ({ def, status, meta, onSign, signedName, token, form, onSaveEdits, poaFor }) => {
       const [name, setName] = useState((meta && meta.typedName) || signedName || '');
       const [ack, setAck] = useState(false);
       const [busy, setBusy] = useState(false);
@@ -4526,6 +4530,7 @@
               ) : (
                 <div className="sig">
                   <input className="sigline" placeholder="Type your full name to sign" value={name} onChange={e => setName(e.target.value)} />
+                  {poaFor && <p className="micro" style={{ margin: '4px 0 0' }}>You are signing as POA for {poaFor}. The record will read “{name.trim() || 'your name'} as POA for {poaFor}”.</p>}
                   <div className={`ack ${ack ? 'on' : ''}`} onClick={() => setAck(!ack)}>
                     <span className="ck">{ack && <i className="ti ti-check" />}</span>
                     <span>By typing my name above and checking this box, I electronically sign the {def.title} ({new Date().toLocaleDateString()}).</span>
@@ -4599,6 +4604,9 @@
     };
 
     const GfcIntakeFlow = ({ token, me, onBack, onComplete }) => {
+      // Set when a designated POA is enrolling the patient: every signature
+      // reads "<POA> as POA for <patient>" (owner, 2026-10-21).
+      const poaFor = me && me.isPoa ? (me.clientFullName || me.clientName || 'the patient') : null;
       const [loaded, setLoaded] = useState(false);
       const [serviceLine, setServiceLine] = useState(me.serviceLine || 'PHC');
       // B1 A1: a Medicare number that does not look right is SAVED and flagged.
@@ -5174,7 +5182,7 @@
                       <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
                     </div>
                   )}
-                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={poaFor ? me.name : form.primaryContact?.name} poaFor={poaFor} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
                 </React.Fragment>
               ))}
             </React.Fragment>
@@ -5186,7 +5194,7 @@
               <p className="sub">These enroll you in medical care: visits, examination, diagnosis, prescribing, and chronic disease management by a nurse practitioner who comes to your home. It is a different service from personal home care, delivered by different people under a different license.</p>
               <p className="sub"><b>{stageSignedCount(medicalDefs)}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
               {medicalDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={poaFor ? me.name : form.primaryContact?.name} poaFor={poaFor} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
               ))}
             </React.Fragment>
           )}
@@ -7694,7 +7702,8 @@
       // the reason. A tab that silently is not there reads as "no health data".
       // PHC-only clients never see it (schema §6).
       const clinicalBlocked = !!(me && me.clinicalRead && !me.clinicalRead.available && me.clinicalRead.code && me.clinicalRead.code !== 'CLINICAL_NOT_ON_LINE');
-      const locked = me && !me.needsClientChoice && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
+      // A POA is gated like the patient: on intake, never on the family release.
+      const locked = me && !me.needsClientChoice && ((isFamily && !isPoa) ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
 
       // Re-read the documents payload after an upload, so the checklist reflects
       // what we now hold rather than what the page loaded with.
@@ -7769,7 +7778,7 @@
               <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
             </div>
             {isFamily && !showIntake && <GfcPatientSwitch token={token} me={me} />}
-            {showIntake && !isFamily
+            {showIntake && (!isFamily || isPoa)
               ? <GfcIntakeFlow token={token} me={me} onBack={() => setShowIntake(false)}
                   onComplete={async () => { setShowIntake(false); await reloadMe(); setJustEnrolled(true); }} />
               : <GfcGate me={me} onStartIntake={() => setShowIntake(true)} />}
@@ -7780,7 +7789,7 @@
       // One-time nudge right after enrollment completes — offers the full
       // Transfer-of-Care ROI immediately rather than leaving it to be
       // discovered later in Documents (Session 3.4).
-      if (justEnrolled && !isFamily) {
+      if (justEnrolled && (!isFamily || isPoa)) {
         return (
           <div className="gfc"><div className="gfc-shell">
             <div className="gfc-hdr"><span className="ttl">Welcome</span><button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button></div>
@@ -7798,7 +7807,7 @@
       }
 
       // Transfer-of-Care ROI overlay — takes over the shell (client-only, Session 3.4).
-      if (showTransferRoi && !isFamily) {
+      if (showTransferRoi && (!isFamily || isPoa)) {
         return (
           <div className="gfc"><div className="gfc-shell">
             <div className="gfc-hdr">
@@ -7874,7 +7883,7 @@
             {/* Uploads, the share link and the record release are client-only on the
                 server (requireClientForIntake), so a POA got a button that always
                 answered 403. On this tab every family login, POA included, reads. */}
-            {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
+            {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily && !isPoa} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
             {view === 'family' && <GfcFamily token={token} />}
             {view === 'profile' && !readOnly && <GfcProfile token={token} onNavigate={onNavigate} isPoa={!!(me && me.isPoa)} />}
             {view === 'billing' && !readOnly && <GfcBilling token={token} onNavigate={onNavigate} returned={billingReturn} />}

@@ -93,8 +93,10 @@ test('portal signed-consents list: only executed consents, and a copy link only 
   assert.match(pf, /open: s\.copyUrl \? \{ type: 'pdf', url: s\.copyUrl \} : null/);
 });
 
-test('portal documents: family and POA get no client-only upload controls', () => {
-  assert.match(portal, /view === 'documents' && <GfcDocuments docs=\{docs\} readOnly=\{!!isFamily\}/);
+// Repointed 2026-10-21: a designated POA now does the patient's own tasks,
+// uploads included (owner), and the server lets them. Plain family still read.
+test('portal documents: plain family get no client-only upload controls; a POA does', () => {
+  assert.match(portal, /view === 'documents' && <GfcDocuments docs=\{docs\} readOnly=\{!!isFamily && !isPoa\}/);
 });
 
 test('portal: files stored on this app are fetched with the login token', () => {

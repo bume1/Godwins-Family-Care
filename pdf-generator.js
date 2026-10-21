@@ -721,7 +721,7 @@ async function generateEnrollmentPacketPDF(client, options = {}) {
           if (status === 'na') detail = 'Declined / not applicable — opt-out recorded' + (m.recordedAt ? ` on ${new Date(m.recordedAt).toLocaleString('en-US')}` : '');
           else if (status === 'optin_recorded') detail = 'Preference recorded — this option is not live, so nothing was signed' + (m.recordedAt ? ` (${new Date(m.recordedAt).toLocaleString('en-US')})` : '');
           else if (status === 'signed_offline') detail = `Signed on paper${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleDateString('en-US')}` : ''} · recorded by staff`;
-          else detail = `Signed by ${m.typedName || name}${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleString('en-US')}` : ''}${m.ipHash ? `  ·  verification ${String(m.ipHash).slice(0, 12)}` : ''}`;
+          else detail = `Signed by ${m.signedAs || m.typedName || name}${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleString('en-US')}` : ''}${m.ipHash ? `  ·  verification ${String(m.ipHash).slice(0, 12)}` : ''}`;
           doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica').text(detail, 50, y, { width: 512 });
           y += 12;
           if (m.version) {
@@ -957,7 +957,8 @@ async function generateConsentPDF(client, consentType, opts = {}) {
         rule('Date recorded', L + 320, 192);
         doc.y += 40;
       } else if (status === 'signed') {
-        sigRow('Electronically signed by', meta.typedName || clientLabel);
+        // A POA signing for the client is named as such, never as the client.
+        sigRow('Electronically signed by', meta.signedAs || meta.typedName || clientLabel);
         sigRow('Signed', meta.signedAt ? new Date(meta.signedAt).toLocaleString('en-US') : 'Not recorded');
         // The raw address is never retained; a truncated salted hash is enough
         // to tie this signature to its capture without holding PII.
