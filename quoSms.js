@@ -59,7 +59,7 @@ function status() {
   if (!fromNumber()) missing.push('QUO_FROM_NUMBER');
   return {
     sending: missing.length === 0,
-    receiving: !!process.env.QUO_WEBHOOK_SECRET,
+    receiving: webhookSecrets().length > 0,
     from: fromNumber(),
     missing: missing.concat(process.env.QUO_WEBHOOK_SECRET ? [] : ['QUO_WEBHOOK_SECRET'])
   };
@@ -171,6 +171,17 @@ function verifySignature(rawBody, header, secret, now = Date.now()) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// Quo gives each webhook its own signing key, and calls, messages, summaries
+// and transcripts may be separate webhooks (owner testing, 2026-10-21). So
+// QUO_WEBHOOK_SECRET may hold several keys, separated by commas; a request is
+// accepted when it checks against any one of them.
+function webhookSecrets() {
+  return String(process.env.QUO_WEBHOOK_SECRET || '').split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+}
+function verifyAnySignature(rawBody, header, secrets, now = Date.now()) {
+  return (secrets || []).some(s => verifySignature(rawBody, header, s, now));
+}
+
 // ---- The Quo API -------------------------------------------------------------------
 // One call: send a text from the office line. The key is sent as Quo expects
 // (the bare key in Authorization). Returns Quo's message id, which is how the
@@ -224,5 +235,5 @@ module.exports = {
   QUIET_START, QUIET_END, MAX_TEXT_BODY,
   toE164, prettyPhone, fromNumber, status,
   phonesForClient, phoneForUser, matchPhone, textsOn,
-  outgoingText, quietUntil, keyword, verifySignature, createClient, readEvent
+  outgoingText, quietUntil, keyword, verifySignature, webhookSecrets, verifyAnySignature, createClient, readEvent
 };

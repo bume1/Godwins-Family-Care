@@ -1316,11 +1316,11 @@ module.exports = function createMessagingRoutes(deps) {
   // anything it signed, even an event we do not use, so it does not retry.
   router.post('/api/webhooks/quo', async (req, res) => {
     try {
-      const secret = process.env.QUO_WEBHOOK_SECRET;
+      const secrets = quoSms.webhookSecrets();
       const header = req.headers['openphone-signature'] || req.headers['quo-signature'];
       const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}));
-      if (!secret) return res.status(503).json({ error: 'Texting is not set up.', code: 'SMS_NOT_CONFIGURED' });
-      if (!quoSms.verifySignature(raw, header, secret)) return res.status(401).json({ error: 'bad signature' });
+      if (!secrets.length) return res.status(503).json({ error: 'The Quo webhook is not set up: QUO_WEBHOOK_SECRET is missing on the server.', code: 'SMS_NOT_CONFIGURED' });
+      if (!quoSms.verifyAnySignature(raw, header, secrets)) return res.status(401).json({ error: 'bad signature: the signing key does not match QUO_WEBHOOK_SECRET', code: 'QUO_BAD_SIGNATURE' });
       let evt;
       try { evt = JSON.parse(raw.toString('utf8')); } catch (_) { return res.status(400).json({ error: 'bad body' }); }
       const result = await handleQuoEvent(evt);
