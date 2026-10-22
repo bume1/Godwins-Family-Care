@@ -281,14 +281,25 @@ test('Pathway B: an assignment is accepted or declined, and a decline reopens it
   assert.ok(sched.canTransitionShift('assigned', 'open'), 'decline returns it to the open pool');
 });
 
-test('work only starts from confirmed and only ends by completing', () => {
+test('work only starts from confirmed, and ends by completing or by the office ending it', () => {
+  // REPOINTED 2026-10-22, not deleted. This asserted `in_progress` could ONLY
+  // go to `completed`, which is the rule the owner asked to change: admin and
+  // manager now need to be able to take a visit under way off the board. What
+  // it was really protecting survives below — work cannot start from an
+  // unconfirmed shift, and an in-progress shift can never go BACKWARDS.
   assert.ok(sched.canTransitionShift('confirmed', 'in_progress'));
   assert.ok(!sched.canTransitionShift('open', 'in_progress'), 'you cannot clock in on an unconfirmed shift');
   assert.ok(!sched.canTransitionShift('claimed', 'in_progress'));
   assert.ok(!sched.canTransitionShift('assigned', 'in_progress'));
-  assert.ok(sched.canTransitionShift('in_progress', 'completed'));
-  assert.deepStrictEqual(sched.SHIFT_TRANSITIONS.in_progress, ['completed'],
-    'an in-progress shift can only be completed');
+  assert.ok(sched.canTransitionShift('in_progress', 'completed'), 'the caregiver clocks out');
+  assert.ok(sched.canTransitionShift('in_progress', 'cancelled'), 'the office ends the visit');
+
+  // A visit under way never goes backwards onto the board.
+  for (const back of ['open', 'claimed', 'assigned', 'confirmed']) {
+    assert.ok(!sched.canTransitionShift('in_progress', back), `in_progress → ${back} must stay refused`);
+  }
+  assert.deepStrictEqual(sched.SHIFT_TRANSITIONS.in_progress.slice().sort(), ['cancelled', 'completed'],
+    'exactly two ways out of a visit under way, and no more');
 });
 
 test('terminal states are terminal', () => {

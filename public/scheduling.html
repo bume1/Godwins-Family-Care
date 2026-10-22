@@ -460,6 +460,29 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
           </button>
         </div>
       )}
+
+      {/* A visit under way is ENDED, not cancelled, and it says so — the
+          caregiver is in the client's home with their clock running, and the
+          button stops that clock. Calling it "Cancel Shift" would read as
+          taking a future visit off the board, which is a different decision
+          from sending somebody home mid-visit. The sentence below says what
+          actually happens, because the hours are the thing anybody pressing
+          this worries about. */}
+      {s.status === 'in_progress' && (
+        <div className="btns" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          <div className="muted" style={{ fontSize: 13 }}>
+            {(s.caregiverName || 'The caregiver')} is clocked in. Ending the visit clocks them
+            out now, keeps the hours they have worked, and tells them.
+          </div>
+          <div className="btns">
+            <input placeholder="Reason (required to end this visit)" value={reason}
+              onChange={e => setReason(e.target.value)} style={{ maxWidth: 300 }} />
+            <button className="btn danger" disabled={!reason.trim()} onClick={() => act(s.id, 'cancel', { reason })}>
+              End Visit
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
