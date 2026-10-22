@@ -176,7 +176,7 @@ const SHIFT_TRANSITIONS = Object.freeze({
   claimed: ['confirmed', 'open', 'cancelled'],       // admin approves / declines
   assigned: ['confirmed', 'open', 'cancelled'],      // caregiver accepts / declines
   confirmed: ['in_progress', 'open', 'cancelled'],   // clock in / released / cancelled
-  in_progress: ['completed'],                        // clock out only
+  in_progress: ['completed', 'cancelled'],           // clock out / office ends it
   completed: [],
   cancelled: []
 });
@@ -192,8 +192,15 @@ function transitionRefusal(from, to) {
   if (canTransitionShift(from, to)) return null;
   if (from === 'completed') return { code: 'SHIFT_COMPLETED', message: 'That shift is finished and cannot change.' };
   if (from === 'cancelled') return { code: 'SHIFT_CANCELLED', message: 'That shift was cancelled.' };
-  if (from === 'in_progress' && to !== 'completed') {
-    return { code: 'SHIFT_IN_PROGRESS', message: 'That shift is under way. It can only be completed by clocking out.' };
+  if (from === 'in_progress') {
+    // Cancelled is legal now (the office can call off a visit under way), so
+    // this only fires for the genuinely illegal targets — and it must not go
+    // on claiming that clocking out is the only way, which was true until
+    // 2026-10-22 and is the sentence the owner was reading.
+    return {
+      code: 'SHIFT_IN_PROGRESS',
+      message: 'That shift is under way. It can be completed by clocking out, or ended by the office.'
+    };
   }
   if (to === 'confirmed' && from === 'open') {
     return { code: 'SHIFT_NOT_TAKEN', message: 'Nobody has claimed or been assigned that shift yet.' };
@@ -505,7 +512,19 @@ const TIME_LOG_FLAGS = Object.freeze([
   // phone, a forgotten tap, an unscheduled visit. It is a FLAG, not a quiet
   // row: these hours are attested by an administrator, not observed by the
   // app, and payroll and an audit both need to be able to tell the two apart.
-  'manual_entry'
+  'manual_entry',
+  // The OFFICE stopped this clock, not the caregiver. A visit called off part
+  // way through — the client went to hospital, the caregiver clocked into the
+  // wrong client, a family sent them home — still has real hours on it, and
+  // those hours are paid. Payroll and supervision both have to be able to tell
+  // a clock an administrator stopped from one a caregiver stopped themselves:
+  // they are different facts about who was present and who decided.
+  'ended_by_office',
+  // Ended with no visit log filed. The office is never BLOCKED from calling
+  // off a visit by documentation a caregiver may never file, but an undocumented
+  // visit is not allowed to disappear quietly either — this is what supervision
+  // chases.
+  'no_visit_log'
 ]);
 
 // Flags for a clock-in. A flag is a signal to admin, never a refusal.
@@ -1083,6 +1102,65 @@ function findOpenChangeRequest(rows, shiftId) {
 // The geofence verdicts, `no_clock_out`, `manual_entry` and `admin_edited` are
 // OBSERVATIONS. Where somebody stood is not a function of what the calendar
 // said, so an edit never rewrites them.
+// ---- The office ends a visit that is under way ----------------------------
+// Owner request, 2026-10-22: admin and manager need to be able to take a shift
+// off the board, or adjust it, while a caregiver is clocked in on it.
+//
+// ⚠️ STOPPING THE CLOCK IS NOT A SIDE EFFECT HERE — IT IS THE WHOLE
+// CORRECTNESS OF IT. Cancelling an in-progress shift without closing its time
+// log leaves the caregiver clocked in on a cancelled shift with NO WAY OUT:
+// the clock-out route requires `status === 'in_progress'`, so it would refuse
+// them for ever, the open log would never get a `total_minutes`, and the hours
+// they actually worked would vanish from payroll. So the cancel and the
+// clock-out are one act.
+//
+// Three rules, and each is a thing somebody loses money or trust over:
+//
+//   1. THE HOURS WORKED ARE A FACT AND THEY SURVIVE. `clock_in_at` is never
+//      touched and `total_minutes` is computed to the moment the office ended
+//      it. Care that was given gets paid whatever the paperwork says — the
+//      same rule that keeps clock-in and clock-out outside every gate in this
+//      system.
+//   2. NO `early_clock_out`. The caregiver did not leave early; somebody at
+//      the office stopped their clock. Awarding it is a mark on their record
+//      they did not earn, which is exactly why a corrected schedule re-derives
+//      these flags rather than keeping them.
+//   3. IT IS NEVER MISTAKEN FOR A CAREGIVER'S OWN CLOCK-OUT. `ended_by_office`
+//      plus who, when and why ride on the row, because "the caregiver went
+//      home" and "the office called the visit off" are different facts and
+//      payroll reads this row, not the shift.
+//
+// Pure: it returns the fields to write and touches nothing, so both doors (the
+// single cancel and the bulk remove) can share one writer rather than keeping
+// two copies of a rule that must not drift.
+function closeOfficeEndedLog(log, { at, reason, byId, byName, documented } = {}) {
+  if (!log) return null;
+  const endedAt = at || new Date().toISOString();
+
+  // Geofence verdicts are OBSERVATIONS of where somebody stood and are never
+  // rewritten. `early_clock_out` is dropped: see rule 2.
+  const kept = (Array.isArray(log.flags) ? log.flags : []).filter(f => f !== 'early_clock_out');
+  const flags = kept.slice();
+  if (!flags.includes('ended_by_office')) flags.push('ended_by_office');
+  if (!documented && !flags.includes('no_visit_log')) flags.push('no_visit_log');
+
+  return {
+    clock_out_at: endedAt,
+    // The caregiver's own clock-out records where they were standing. Nobody
+    // was standing anywhere when the office pressed a button, so claiming a
+    // location would be inventing one.
+    clock_out_gps: null,
+    clock_out_geofence: { verdict: 'unverifiable', reason: 'The office ended this visit; no clock-out location was taken.' },
+    total_minutes: totalMinutes(log.clock_in_at, endedAt),
+    flags,
+    ended_by_office: true,
+    ended_by_office_at: endedAt,
+    ended_by_office_id: byId || null,
+    ended_by_office_name: byName || null,
+    ended_by_office_reason: String(reason || '').slice(0, 1000)
+  };
+}
+
 const SCHEDULE_DERIVED_FLAGS = Object.freeze(['late_clock_in', 'early_clock_out', 'late_clock_out']);
 
 function rederiveScheduleFlags(log, shift, graceMinutes = DEFAULT_GRACE_MINUTES) {
@@ -1102,7 +1180,12 @@ function rederiveScheduleFlags(log, shift, graceMinutes = DEFAULT_GRACE_MINUTES)
 
   if (isFinite(start) && isFinite(inAt) && inAt > start + graceMinutes * 60000) derived.push('late_clock_in');
   if (isFinite(end) && isFinite(outAt)) {
-    if (outAt < end - graceMinutes * 60000) derived.push('early_clock_out');
+    // An OFFICE-ENDED visit never earns `early_clock_out`, here either. The
+    // clock was stopped for the caregiver, so re-deriving it from a corrected
+    // schedule would quietly put back the mark `closeOfficeEndedLog` removed —
+    // and a schedule correction is exactly when that would happen.
+    const officeEnded = !!(log && log.ended_by_office);
+    if (!officeEnded && outAt < end - graceMinutes * 60000) derived.push('early_clock_out');
     if (outAt > end + graceMinutes * 60000) derived.push('late_clock_out');
   }
   // Order is preserved so a diff of the row reads as a change of substance
@@ -1362,7 +1445,7 @@ module.exports = {
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
-  SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags,
+  SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags, closeOfficeEndedLog,
   CHANGE_REQUEST_KINDS, CHANGE_REQUEST_STATUSES, CHANGE_REQUEST_NOTICE_MINUTES,
   REQUESTABLE_SHIFT_STATUSES, KINDS_BY_SHIFT_STATUS, kindsFor,
   canRequestShiftChange, validateChangeRequest,

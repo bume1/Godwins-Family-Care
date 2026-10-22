@@ -971,6 +971,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const deleted = [];
       const refused = [];
       const removeIds = new Set();
+      const endedInProgress = [];
 
       for (const id of ids) {
         const row = rows.find(r => r && r.id === id);
@@ -998,12 +999,27 @@ module.exports = function createSchedulingRoutes(deps) {
           continue;
         }
 
+        // A shift under way is cancellable now (owner request, 2026-10-22) and
+        // its open clock has to be stopped in the same act — see
+        // `endOfficeVisit`. Read before the status is overwritten.
+        const wasInProgress = row.status === 'in_progress';
+
         row.status = 'cancelled';
         row.cancelled_at = nowIso();
         row.cancel_reason = reason.slice(0, 1000);
-        cancelled.push({ shiftId: row.id, start: row.start, end: row.end, clientName: row.client_name, caregiverName: row.caregiver_name });
+
+        let endedLog = null;
+        if (wasInProgress) endedLog = await endOfficeVisit({ shift: row, reason, actor: req.user });
+
+        cancelled.push({
+          shiftId: row.id, start: row.start, end: row.end, clientName: row.client_name,
+          caregiverName: row.caregiver_name,
+          endedInProgress: wasInProgress,
+          hoursKept: endedLog ? sched.minutesToHours(endedLog.total_minutes) : null
+        });
+        if (wasInProgress) endedInProgress.push(row.id);
         await logActivity(req.user.id, req.user.name || req.user.email, 'shift_cancelled', 'shift', row.id,
-          { clientId: row.client_id, reason, bulk: true, role: req.user.role });
+          { clientId: row.client_id, reason, bulk: true, role: req.user.role, endedInProgress: wasInProgress });
       }
 
       if (cancelled.length === 0 && deleted.length === 0) {
@@ -1016,10 +1032,22 @@ module.exports = function createSchedulingRoutes(deps) {
       // A caregiver who was holding one of these needs to know, and they need
       // ONE message rather than one per shift. A deleted row had nobody on it
       // by definition, so nothing is sent for those.
+      // A visit the office ENDED under way gets its own message instead, because
+      // "your clock has been stopped and your hours are kept" is a different
+      // thing to say from "these shifts are off your schedule", and the person
+      // is standing in the client's home right now.
+      for (const shiftId of endedInProgress) {
+        const row = rows.find(r => r.id === shiftId);
+        if (!row) continue;
+        const logs = await readRows('time_logs');
+        const log = logs.find(l => l && String(l.shift_id) === String(shiftId) && l.ended_by_office) || null;
+        await notifyOfficeEnded(row, log, reason, req.user);
+      }
+
       const byCaregiver = new Map();
       cancelled.forEach(c => {
         const row = rows.find(r => r.id === c.shiftId);
-        if (row && row.caregiver_id) {
+        if (row && row.caregiver_id && !endedInProgress.includes(row.id)) {
           if (!byCaregiver.has(row.caregiver_id)) byCaregiver.set(row.caregiver_id, []);
           byCaregiver.get(row.caregiver_id).push(row);
         }
@@ -1040,6 +1068,7 @@ module.exports = function createSchedulingRoutes(deps) {
         cancelled, deleted, refused,
         message: [
           cancelled.length ? `${cancelled.length} cancelled` : '',
+          endedInProgress.length ? `${endedInProgress.length} ended while under way (caregivers clocked out and told)` : '',
           deleted.length ? `${deleted.length} removed (never claimed by anyone)` : '',
           refused.length ? `${refused.length} left alone` : ''
         ].filter(Boolean).join(', ') + '.'
@@ -1636,18 +1665,114 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // ---- The office ends a visit that is under way ---------------------------
+  // Owner request, 2026-10-22: admin and manager need to be able to take an
+  // in-progress shift off the board, not only adjust its time.
+  //
+  // ⚠️ STOPPING THE CLOCK IS THE WHOLE CORRECTNESS OF IT, not a tidy-up after.
+  // Clock-out requires `status === 'in_progress'`, so cancelling the shift
+  // WITHOUT closing its time log leaves the caregiver clocked in on a cancelled
+  // shift with no way out: the route refuses them for ever, the log never gets
+  // a `total_minutes`, and the hours they actually worked never reach payroll.
+  // So the cancel and the clock-out are one act, through ONE writer, called by
+  // the single cancel and the bulk remove alike — two copies of this rule is
+  // how one door starts losing hours the other keeps.
+  //
+  // THE VISIT-LOG GATE DELIBERATELY DOES NOT APPLY HERE. A caregiver cannot
+  // clock out until they have documented the visit; the OFFICE is never blocked
+  // by documentation somebody else may never file — the client has gone to
+  // hospital and the shift has to come off the board now. The undocumented
+  // visit is not allowed to vanish quietly either, so it is flagged
+  // (`no_visit_log`) for supervision to chase.
+  //
+  // Returns the closed log, or null when there was no open clock to stop.
+  const endOfficeVisit = async ({ shift, reason, actor, at }) => {
+    const logs = await readRows('time_logs');
+    const li = logs.findIndex(l => l && String(l.shift_id) === String(shift.id) && !l.clock_out_at);
+    if (li === -1) return null;
+    const open = logs[li];
+
+    // Same three-way match the caregiver's own clock-out uses: this shift, this
+    // caregiver, this client. A log filed by somebody else never counts as this
+    // visit being documented.
+    const visitLogs = await readRows('caregiver_visit_logs');
+    const documented = visitLogs.some(v =>
+      v && String(v.shift_id) === String(shift.id) &&
+      String(v.caregiver_id) === String(open.caregiver_id) &&
+      String(v.client_id) === String(shift.client_id));
+
+    const closed = sched.closeOfficeEndedLog(open, {
+      at: at || nowIso(), reason,
+      byId: actor.id, byName: actor.name || actor.email,
+      documented
+    });
+    logs[li] = { ...open, ...closed };
+    await db.set('time_logs', logs);
+
+    await logActivity(actor.id, actor.name || actor.email, 'time_log_ended_by_office', 'time_log', logs[li].id,
+      {
+        role: actor.role, shiftId: shift.id, clientId: shift.client_id,
+        caregiverId: open.caregiver_id, totalMinutes: logs[li].total_minutes,
+        flags: logs[li].flags, reason
+      });
+
+    return logs[li];
+  };
+
+  // The caregiver is standing in the client's home with their clock stopped
+  // from under them, so they are told at once — and told their hours are kept,
+  // because that is the first thing anybody worries about.
+  const notifyOfficeEnded = async (shift, log, reason, actor) => {
+    if (!shift.caregiver_id) return;
+    const holder = await freshUser(shift.caregiver_id);
+    if (!holder || !holder.email) return;
+    const hours = log && log.total_minutes
+      ? `The ${sched.minutesToHours(log.total_minutes)} hours you were clocked in for are recorded and will be paid.`
+      : 'Your clocked hours are recorded.';
+    await queueNotification('shift_cancelled', holder.id, holder.email, holder.name,
+      {
+        subject: `Visit ended by the office — ${shift.client_name}`,
+        body: `${actor.name || 'The office'} ended your visit for ${shift.client_name} (${time.fmtDateTime(shift.start)}) and has clocked you out. Reason: ${reason} ${hours} You do not need to clock out yourself.`,
+        ctaUrl: links.shiftFor(), ctaLabel: 'View your schedule'
+      },
+      { relatedEntityId: `${shift.id}:office-ended`, relatedEntityType: 'shift', createdBy: actor.id });
+  };
+
   // Admin cancels a shift.
   router.post('/api/scheduling/shifts/:id/cancel', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const reason = String((req.body || {}).reason || '').trim();
       if (!reason) return res.status(400).json({ error: 'Say why the shift is cancelled.', code: 'CANCEL_REASON_REQUIRED' });
+
+      // Read the status BEFORE the transition: `moveShift` has overwritten it by
+      // the time it returns, and whether a clock needs stopping is a fact about
+      // the shift as it stood.
+      const beforeRows = await readRows('shifts');
+      const beforeRow = beforeRows.find(r => r && r.id === req.params.id);
+      const wasInProgress = !!beforeRow && beforeRow.status === 'in_progress';
+
       const result = await moveShift({ shiftId: req.params.id, to: 'cancelled', actor: req.user });
       if (result.error) return res.status(result.error.status).json(result.error.body);
       const rows = await readRows('shifts');
       const idx = rows.findIndex(r => r.id === req.params.id);
       rows[idx].cancel_reason = reason.slice(0, 1000);
       await db.set('shifts', rows);
-      res.json({ shift: publicShift(rows[idx]) });
+
+      let endedLog = null;
+      if (wasInProgress) {
+        endedLog = await endOfficeVisit({ shift: rows[idx], reason, actor: req.user });
+        await notifyOfficeEnded(rows[idx], endedLog, reason, req.user);
+      }
+
+      res.json({
+        shift: publicShift(rows[idx]),
+        timeLog: endedLog ? publicTimeLog(endedLog) : null,
+        message: wasInProgress
+          ? (endedLog
+            ? `Visit ended and ${rows[idx].caregiver_name || 'the caregiver'} clocked out at ${sched.minutesToHours(endedLog.total_minutes)} hours. They have been told.`
+            : 'Shift cancelled. There was no open clock-in to stop.')
+          : 'Shift cancelled.'
+      });
     } catch (error) {
       console.error('Shift cancel error:', error);
       res.status(500).json({ error: 'Server error' });

@@ -69,6 +69,18 @@ const SHIFTS = [
 ];
 const IN_OCT = ['s-conf-1002', 's-done-1003', 's-clam-1004', 's-canc-1005'];
 
+// Section H's own fixture — ONE visit under way (owner request, 2026-10-22:
+// "give admin and manager the option of deleting shifts or adjusting shifts
+// that are in progress for caregivers"). Kept separate rather than added to
+// SHIFTS above, so the counted assertions in A–F keep meaning what they say.
+const LIVE_SHIFTS = [{
+  id: 's-live', status: 'in_progress', clientName: 'Margaret Whitfield',
+  start: at('2026-10-22', '09:00'), end: at('2026-10-22', '13:00'),
+  requiredLicenseLevel: 'cna', levelRequirementLabel: 'CNA and above',
+  poolVisibility: 'all_eligible', caregiverName: 'Danielle Carter'
+}];
+let activeShifts = SHIFTS;   // swapped for section H
+
 const posted = [];   // every POST body the page sends
 
 (async () => {
@@ -111,7 +123,7 @@ const posted = [];   // every POST body the page sends
       // coordinates. A fake missing what production supplies exercises a
       // different function — the probe's first run proved it by crashing here.
       body.json = { caregivers: [], clients: [], access: { manageSchedule: true, managePay: true, manageLocations: true } };
-    else if (url.pathname.endsWith('/shifts')) body.json = { shifts: SHIFTS };
+    else if (url.pathname.endsWith('/shifts')) body.json = { shifts: activeShifts };
     else if (url.pathname.endsWith('/shift-requests')) body.json = { shiftRequests: [] };
     else if (url.pathname.endsWith('/availability')) body.json = { availability: [] };
     else if (url.pathname.includes('time-logs')) body.json = { timeLogs: [], totalHours: 0 };
@@ -192,11 +204,58 @@ const posted = [];   // every POST body the page sends
   ok('F3 and never a shift outside the date range',
     !sent.includes('s-open-0901') && !sent.includes('s-open-1106'), JSON.stringify(sent));
 
+  // --- H. A visit UNDER WAY can be ended from the board -------------------
+  // Before this change the cancel control was gated
+  // ['open','claimed','assigned','confirmed'], so an in-progress shift had NO
+  // removal control on the screen at all — which is the half of the owner's ask
+  // that was actually missing. esbuild compiling the page proves the JSX parses;
+  // only rendering it proves the button is there and says the right thing.
+  activeShifts = LIVE_SHIFTS;
+  posted.length = 0;
+  await page.goto(`${base}/scheduling`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.calhdr', { timeout: 15000 });
+  await page.click('button:has-text("List")');
+  await page.waitForTimeout(200);
+  const liveRow = page.locator('.row', { hasText: 'Margaret Whitfield' }).first();
+  ok('H1 the in-progress shift is on the board', await liveRow.count() === 1);
+
+  ok('H2 it offers End Visit', (await liveRow.locator('button:has-text("End Visit")').count()) === 1);
+  ok('H3 it does NOT say "Cancel Shift" — that reads as a future visit coming off the board',
+    (await liveRow.locator('button:has-text("Cancel Shift")').count()) === 0);
+  ok('H4 it still offers Edit Shift, which already worked',
+    (await liveRow.locator('button:has-text("Edit Shift")').count()) === 1);
+
+  const warn = await liveRow.innerText();
+  ok('H5 the screen says the caregiver is clocked in', /Danielle Carter is clocked in/.test(warn), warn.slice(0, 220));
+  ok('H6 ...and that their hours are kept', /keeps the hours they have worked/.test(warn));
+  ok('H7 ...and that they are told', /tells them/.test(warn));
+
+  const endBtn = liveRow.locator('button:has-text("End Visit")');
+  ok('H8 End Visit will not fire without a reason', await endBtn.isDisabled());
+  await liveRow.locator('input[placeholder*="required to end this visit"]').fill('Client taken to hospital');
+  await page.waitForTimeout(120);
+  ok('H9 ...and enables once there is one', !(await endBtn.isDisabled()));
+
+  await endBtn.click();
+  await page.waitForTimeout(400);
+  if (process.env.GFC_LIVE_SHOT) {
+    await liveRow.screenshot({ path: process.env.GFC_LIVE_SHOT });
+    console.log(`  shot  ${process.env.GFC_LIVE_SHOT}`);
+  }
+  const ended = posted.find(p => p.path.endsWith('/s-live/cancel'));
+  ok('H10 it posts to the cancel route with the reason', !!ended && ended.body.reason === 'Client taken to hospital',
+    JSON.stringify(ended));
+
   ok('G1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
 
   // A picture of the bar, for whoever reported it. Off unless asked for, so an
   // ordinary run writes nothing.
   if (process.env.GFC_PROBE_SHOT) {
+    activeShifts = SHIFTS;
+    await page.goto(`${base}/scheduling`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('.calhdr', { timeout: 15000 });
+    await page.click('button:has-text("List")');
+    await page.waitForTimeout(200);
     await page.locator('.fbar label:has-text("Completed") input').check();
     await page.locator('.fbar label:has-text("Cancelled") input').check();
     await selectAll.check();
