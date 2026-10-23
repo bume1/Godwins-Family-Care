@@ -9177,7 +9177,7 @@
                           <td className="text-stone-600">{p.careTierLabel || p.careTier || '—'}</td>
                           <td className="text-[12.5px]">
                             {p.openEmrPatientId
-                              ? <span className="text-emerald-700"><i className="ti ti-link mr-1" />Linked</span>
+                              ? <span className="text-emerald-700"><i className="ti ti-link mr-1" />{p.mrn ? `MRN ${p.mrn}` : 'Linked'}</span>
                               : <span className="text-stone-400">Not linked</span>}
                           </td>
                           <td><span className={`pill ${st.cls}`}>{st.label}</span></td>

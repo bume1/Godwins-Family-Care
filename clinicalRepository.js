@@ -2839,6 +2839,17 @@ const summarizePayerForBanner = (client, { today } = {}) => {
 // `careTierLabel` is PASSED IN, not derived: the label lives in server.js and
 // this module is pure. Reaching for it here compiles and then throws a
 // ReferenceError the first time a chart is opened.
+// OpenEMR's record number for a patient: pubpid (the "Patient ID" OpenEMR
+// prints on the chart) when it is set, else the internal pid, which is unique
+// on the instance. Null when neither came back — never invented.
+const recordNumberOf = (row) => {
+  const r = row || {};
+  const pub = String(r.pubpid == null ? '' : r.pubpid).trim();
+  if (pub) return pub;
+  const pid = String(r.pid == null ? '' : r.pid).trim();
+  return /^\d+$/.test(pid) && pid !== '0' ? pid : null;
+};
+
 const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitAt, today, careTierLabel }) => {
   const c = client || {};
   const intake = c.intake || {};
@@ -2913,6 +2924,7 @@ module.exports = {
   hasHomeVisitNotes,
   summarizePayerForBanner,
   buildPatientBanner,
+  recordNumberOf,
   TIMELINE_KINDS,
   buildTimeline,
   timelineDate,
