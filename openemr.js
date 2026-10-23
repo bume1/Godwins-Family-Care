@@ -258,6 +258,17 @@ const forActor = (actor) => {
     async getPatient(puuid) {
       return fhirGet(`Patient/${encodeURIComponent(puuid)}`, 'Patient', puuid);
     },
+    // The chart's own record number. The standard API row carries both the
+    // internal pid and pubpid (the "Patient ID" OpenEMR shows on the chart);
+    // FHIR does not reliably expose either, so this reads the standard row.
+    async getRecordNumber(puuid) {
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}`) });
+      const row = unwrapApi(expectOk(res, 'read patient (record number)'));
+      logEmrAccess(actor, 'read', 'patient', puuid, { field: 'record_number' });
+      const r = Array.isArray(row) ? row[0] || null : row || null;
+      if (r && r.id != null) pidCache.set(puuid, r.id);
+      return { pid: r && r.id != null ? r.id : null, pubpid: r ? r.pubpid : null };
+    },
     async getProblems(puuid) {
       return bundleResources(await fhirGet(`Condition?patient=${encodeURIComponent(puuid)}`, 'Condition', puuid));
     },

@@ -9139,7 +9139,7 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async 
     const users = await getUsers();
     const rows = users
       .filter(u => u.role === config.ROLES.CLIENT && isClinicalServiceLine(u.serviceLine))
-      .filter(u => !q || String(u.name || '').toLowerCase().includes(q) || String(u.preferredName || '').toLowerCase().includes(q))
+      .filter(u => !q || String(u.name || '').toLowerCase().includes(q) || String(u.preferredName || '').toLowerCase().includes(q) || String(u.openEmrRecordNumber || '').toLowerCase() === q)
       .map(u => ({
         id: u.id,
         name: u.name,
@@ -9150,6 +9150,8 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async 
         careTierLabel: careTierLabelFor(u.careTier),
         enrollmentStatus: u.enrollmentStatus || 'intake_pending',
         openEmrPatientId: u.openEmrPatientId || null,
+        // OpenEMR's record number, read at link time or first chart open.
+        mrn: (u.openEmrPatientId && u.openEmrRecordNumber) || null,
         // Where this patient is seen. Drives the encounter's facility and the
         // POS on their claim; surfaced so an admin can see who is unassigned.
         openEmrFacilityId: u.openEmrFacilityId || null,
@@ -9254,9 +9256,14 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
     // read again; the visits publish afresh, and the chart on the next refresh.
     const relinkedAway = !!(client.openEmrPatientId && String(client.openEmrPatientId) !== String(puuid));
     users[idx].openEmrPatientId = puuid;
+    if (users[idx].openEmrRecordNumberFor !== puuid) {
+      delete users[idx].openEmrRecordNumber;
+      delete users[idx].openEmrRecordNumberFor;
+    }
     await db.set('users', users);
     invalidateUsersCache();
     if (relinkedAway) await dropPublishedForClient(client.id);
+    const openEmrRecordNumber = await ensureRecordNumber(users[idx], req.user);
     await logActivity(req.user.id, req.user.name || req.user.email, 'emr_patient_linked', 'client', client.id, {
       openEmrPatientId: puuid, created: !(req.body && req.body.openEmrPatientId),
       confirmedDistinct: !!(req.body && req.body.confirmDistinct && !req.body.openEmrPatientId)
@@ -9270,13 +9277,43 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
     // chart to file into — the catch-up pass, run exactly once at link time.
     const documentsFiling = await backfillEmrFilingForClient(client.id, req.user);
 
-    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, carePlanFiling, documentsFiling });
+    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, openEmrRecordNumber, carePlanFiling, documentsFiling });
   } catch (error) {
     console.error('Clinical link error:', error);
     const status = error.status === 404 ? 400 : 502;
     res.status(status).json({ error: error.status === 404 ? 'No OpenEMR patient with that id' : `OpenEMR error: ${error.message}` });
   }
 });
+
+// The patient's OpenEMR record number (MRN) on the app record. Read once per
+// linked chart and kept, so the banner, packet and lists show the same number
+// OpenEMR prints. Keyed to the uuid it was read for: a relink reads it again.
+// Best-effort and never throws — a chart that cannot be read shows no MRN
+// rather than a guessed one, and the chart itself still opens.
+const ensureRecordNumber = async (client, actor) => {
+  if (!client || !client.openEmrPatientId || !openemr.isConfigured()) return client && client.openEmrRecordNumber || null;
+  if (client.openEmrRecordNumber && client.openEmrRecordNumberFor === client.openEmrPatientId) return client.openEmrRecordNumber;
+  try {
+    const row = await openemr.forActor(actor).getRecordNumber(client.openEmrPatientId);
+    const mrn = clinicalRepo.recordNumberOf(row);
+    if (!mrn) return null;
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === client.id);
+    if (idx !== -1 && users[idx].openEmrPatientId === client.openEmrPatientId) {
+      users[idx].openEmrRecordNumber = mrn;
+      users[idx].openEmrRecordNumberFor = client.openEmrPatientId;
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
+    client.openEmrRecordNumber = mrn;
+    client.openEmrRecordNumberFor = client.openEmrPatientId;
+    return mrn;
+  } catch (e) {
+    console.warn('OpenEMR record number read failed:', e && e.message);
+    return null;
+  }
+};
+
 
 // GET /api/clinical/patients/:clientId/chart — demographics from the app
 // record; problems, allergies, meds, encounters, care plan, documents, vitals
@@ -9550,6 +9587,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     const encounterRows = encounters.status === 'fulfilled'
       ? withoutDeleted(encounters.value.map(clinicalRepo.summarizeEncounter), deletedEnc) : [];
     const bannerFacility = await facilityPromise;
+    await ensureRecordNumber(client, req.user);
     const banner = clinicalRepo.buildPatientBanner({
       client, linked: true, emrAllergies,
       facility: bannerFacility,
@@ -16156,6 +16194,7 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
         ? { ok: true, rows: clinicalRepo.summarizeVitalObservations(vitals.value) }
         : take(vitals, clinicalRepo.summarizeVitalObservation);
       lastVitals = vitalsTake.ok && vitalsTake.rows.length ? vitalsTake.rows[vitalsTake.rows.length - 1] : null;
+      await ensureRecordNumber(client, req.user);
       banner = clinicalRepo.buildPatientBanner({
         client, linked: true, emrAllergies: take(allergies, clinicalRepo.summarizeAllergy),
         facility: null, lastVisitAt, today: practiceToday(),
