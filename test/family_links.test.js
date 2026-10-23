@@ -259,3 +259,27 @@ test('build guard: a POA can do the patient’s own tasks, and the routes work o
   assert.match(portal, /showIntake && \(!isFamily \|\| isPoa\)/);
   assert.match(portal, /\(isFamily && !isPoa\) \? !me\.roiFamilySigned/);
 });
+
+test('the record-release receipt: the POA is greeted by their own name and the patient is not told about "your records" by someone else', () => {
+  const legacy = require('../legacySync');
+  const toPoa = legacy.buildPatientEmailHtml('Stephanie Hendricks', { forSomeoneElse: true });
+  assert.match(toPoa, /Stephanie/);
+  assert.doesNotMatch(toPoa, /your records/i);
+  assert.match(toPoa, /The signed Authorization to Obtain Medical Records was received/);
+  const toPatient = legacy.buildPatientEmailHtml('Patrick Bell');
+  assert.match(toPatient, /Patrick/);
+  assert.match(toPatient, /your records/);
+  assert.match(legacy.patientReceiptText('Stephanie Hendricks', { forSomeoneElse: true }), /^Hi Stephanie,/);
+});
+
+test('no email is ever sent to a placeholder login', async () => {
+  const email = require('../email');
+  const r = await email.sendEmail('client+abc@placeholder.local', 'S', 'B');
+  assert.strictEqual(r.skipped, true);
+  assert.strictEqual(r.reason, 'placeholder address');
+  const server = read('server.js');
+  const roi = server.slice(server.indexOf('async function dispatchRoiNotifications'), server.indexOf('const roiPatientIdentity'));
+  assert.match(roi, /familyLinks\.isPlaceholderEmail\(e\)/, 'the release receipt skips placeholder logins');
+  assert.match(roi, /if \(signer && signer\.role === config\.ROLES\.FAMILY\) add\(signer\.email, signer\.name, true\)/, 'the POA who signed hears about it');
+  assert.ok((server.match(/signer: req\.user \}\)/g) || []).length >= 2, 'both release routes pass who signed');
+});

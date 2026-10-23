@@ -22821,7 +22821,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/enrollment-packet.zip', authenticat
 // Shared side-effect dispatcher: legacy sheet log + admin email (PDFs attached)
 // + patient/submitter confirmation (no PDFs). All best-effort and non-fatal;
 // gated by config.PARALLEL_LEGACY_SYNC. NEVER attaches PHI to patient email.
-async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments }) {
+async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, signer = null }) {
   if (!config.PARALLEL_LEGACY_SYNC) return;
   const clientName = client.preferredName || client.name || 'Client';
   // Sheet key: the client's legacy intake token if present, else a stable portal key.
@@ -22852,17 +22852,32 @@ async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pd
   } catch (e) { console.error('[ROI] admin email failed (non-fatal):', e.message); }
 
   // Patient + submitter confirmation — plain receipt, NEVER any PDF/PHI.
+  // One message per real inbox, each greeted by name (owner, 2026-10-23): the
+  // patient if they have a login of their own, the person who signed it (a
+  // POA), the patient's other POAs and the primary contact. A placeholder
+  // login has no inbox and is never sent to. Only the patient is told "your
+  // records"; everyone else gets wording that names nobody.
   try {
-    const recipients = [client.email, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)]
-      .filter(Boolean)
-      .filter((v, i, a) => a.indexOf(v) === i);
-    if (recipients.length) {
+    const users = await getUsers().catch(() => []);
+    const pc = (client.intake && client.intake.primaryContact) || {};
+    const list = [];
+    const add = (email, name, forSomeoneElse) => {
+      const e = String(email || '').trim();
+      if (!e || familyLinks.isPlaceholderEmail(e)) return;
+      if (list.some(r => r.email.toLowerCase() === e.toLowerCase())) return;
+      list.push({ email: e, name: name || null, forSomeoneElse });
+    };
+    add(client.email, clientName, false);
+    if (signer && signer.role === config.ROLES.FAMILY) add(signer.email, signer.name, true);
+    familyLinks.familyFor(users, client.id, { poaOnly: true }).forEach(f => add(f.user.email, f.user.name, true));
+    add(pc.email, pc.name, true);
+    for (const r of list) {
       await sendEmail(
-        recipients,
+        r.email,
         'We received your authorization form — Godwins Family Care',
-        `Hi,\n\nYour signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records and will be in touch with next steps.\n\n— Godwins Family Care`,
-        { htmlBody: legacySync.buildPatientEmailHtml(clientName) }
-      );
+        legacySync.patientReceiptText(r.name, { forSomeoneElse: r.forSomeoneElse }),
+        { htmlBody: legacySync.buildPatientEmailHtml(r.name, { forSomeoneElse: r.forSomeoneElse }) }
+      ).catch(err => console.error('[ROI] patient email failed (non-fatal):', err.message));
     }
   } catch (e) { console.error('[ROI] patient email failed (non-fatal):', e.message); }
 }
@@ -23062,7 +23077,7 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_uploaded', 'consent_event', event.id, { source: 'portal_upload' });
 
     // Parallel legacy sync (no PDF attachment — this is the client's own scan).
-    dispatchRoiNotifications({ client, event, fileNames: storedName, fileUrls: driveUrl || '', pdfAttachments: [] })
+    dispatchRoiNotifications({ client, event, fileNames: storedName, fileUrls: driveUrl || '', pdfAttachments: [], signer: req.user })
       .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
 
     res.json({ message: 'Authorization uploaded', eventId: event.id, driveUrl });
@@ -23218,7 +23233,7 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmation.
     // The confirmation goes only to addresses already on file, never to one
     // supplied in the request.
-    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments })
+    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, signer: req.user })
       .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
 
     const missingFax = providers.filter(p => !p.fax).map(p => p.provider_name);
