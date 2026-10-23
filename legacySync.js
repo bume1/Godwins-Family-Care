@@ -143,17 +143,24 @@ function buildAdminEmailHtml(clientName, tokenOrKey, fileNames, fileUrls) {
 }
 
 // ── Patient confirmation email (mirror of buildPatientEmail; no PDF attached) ──
-function buildPatientEmailHtml(patientName) {
-  const first = (patientName || '').split(' ')[0] || null;
+// `forSomeoneElse` is a POA or contact receiving it about the patient: they
+// are greeted by their OWN name and never told "your records", and the
+// patient is not named (owner, 2026-10-23).
+const PATIENT_RECEIPT = 'Your signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records from your provider and will be in touch with next steps.';
+const OTHER_RECEIPT = 'The signed Authorization to Obtain Medical Records was received. Our care team will use it to request the records from the provider and will be in touch with next steps.';
+function buildPatientEmailHtml(recipientName, { forSomeoneElse = false } = {}) {
+  const first = (recipientName || '').split(' ')[0] || null;
   return renderGfcEmail({
     greeting: first,
-    headline: 'We received your form',
+    headline: forSomeoneElse ? 'We received the authorization form' : 'We received your form',
     paragraphs: [
-      'Your signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records from your provider and will be in touch with next steps.',
+      forSomeoneElse ? OTHER_RECEIPT : PATIENT_RECEIPT,
       'Please reach out any time if you have questions.'
     ]
   }).html;
 }
+const patientReceiptText = (recipientName, { forSomeoneElse = false } = {}) =>
+  `Hi${recipientName ? ` ${String(recipientName).split(' ')[0]}` : ''},\n\n${forSomeoneElse ? OTHER_RECEIPT : PATIENT_RECEIPT}\n\n— Godwins Family Care`;
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -162,5 +169,6 @@ function esc(s) {
 module.exports = {
   logRoiToSheet,
   buildAdminEmailHtml,
-  buildPatientEmailHtml
+  buildPatientEmailHtml,
+  patientReceiptText
 };
