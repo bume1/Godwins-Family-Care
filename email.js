@@ -381,7 +381,19 @@ function setupHintFor(error) {
  * refused outright otherwise — it is never downgraded to a non-PHI version
  * silently, because the caller is the only place that knows what to cut.
  */
+// A placeholder login (client+<id>@placeholder.local: a patient whose POA
+// signs in for them, or offline onboarding) is an address nobody reads. It is
+// dropped here, at the one place every email passes through, so no caller can
+// send to one by forgetting to check (owner, 2026-10-23).
+const isPlaceholderAddress = (a) => /@placeholder\.local\s*>?\s*$/i.test(String(a || '').trim());
+
 async function sendEmail(to, subject, body, options = {}) {
+  const list = (Array.isArray(to) ? to : [to]).filter(a => a && !isPlaceholderAddress(a));
+  if (!list.length) {
+    console.log('[EMAIL] Skipped: only placeholder addresses, no inbox.');
+    return { success: false, skipped: true, reason: 'placeholder address', transport: 'none' };
+  }
+  to = Array.isArray(to) ? list : list[0];
   const t = resolveTransport();
   if (!t.configured) {
     return { success: false, error: `Email not configured: ${t.reason}`, transport: 'none' };
@@ -525,6 +537,7 @@ async function sendBatchEmails(emailPayloads) {
 }
 
 module.exports = {
+  isPlaceholderAddress,
   sendEmail, sendBulkEmail, sendBatchEmails,
   transportStatus, resetTransportCache,
   // exported for tests
