@@ -283,3 +283,16 @@ test('no email is ever sent to a placeholder login', async () => {
   assert.match(roi, /if \(signer && signer\.role === config\.ROLES\.FAMILY\) add\(signer\.email, signer\.name, true\)/, 'the POA who signed hears about it');
   assert.ok((server.match(/signer: req\.user \}\)/g) || []).length >= 2, 'both release routes pass who signed');
 });
+
+test('messages: wherever the patient is on a conversation, their POA is too', () => {
+  const msg = require('../messagingRepository');
+  const poa = { id: 'steph', role: 'family', familyOfClientId: 'joe', familyIsPoa: true };
+  const client = { id: 'joe', role: 'client' };
+  const chosenWithPatient = { id: 't1', channel: 'support', client_id: 'joe', audience_chosen: true, participant_ids: ['adm', 'joe'] };
+  const chosenWithoutPatient = { id: 't2', channel: 'support', client_id: 'joe', audience_chosen: true, participant_ids: ['adm', 'cm'] };
+  assert.strictEqual(msg.threadVisibility(poa, chosenWithPatient, { client, isPoa: true }).visible, true, 'the office chose the patient, so the POA reads it');
+  assert.strictEqual(msg.threadVisibility(poa, chosenWithoutPatient, { client, isPoa: true }).visible, false, 'a message the office sent to staff only stays theirs');
+  assert.strictEqual(msg.threadVisibility({ ...poa, familyIsPoa: false }, chosenWithPatient, { client, isPoa: false }).visible, false, 'plain family are not let in');
+  const routes = read('routes/messaging.js');
+  assert.match(routes, /if \(threadClient && recipients\.has\(threadClient\.id\)\) \{\s*poaIdsFor\(users, threadClient\)\.forEach\(id => recipients\.add\(id\)\);/, 'the email follows the patient on every channel');
+});

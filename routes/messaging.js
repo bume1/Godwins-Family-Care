@@ -1341,9 +1341,17 @@ module.exports = function createMessagingRoutes(deps) {
     const recipients = new Set(thread.participant_ids || []);
     // A POA designated AFTER the thread began, or a clinician's own POA
     // recipients, are read fresh: the participant list on the row is a snapshot.
+    const threadClient = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
     if (channel && channel.includesPoa && !thread.audience_chosen) {
-      const client = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
-      if (client) poaIdsFor(users, client).forEach(id => recipients.add(id));
+      if (threadClient) poaIdsFor(users, threadClient).forEach(id => recipients.add(id));
+    }
+    // A POA stands in for the patient (owner, 2026-10-26): on ANY channel where
+    // the patient is told about a message, their designated POAs are told too,
+    // read fresh so a POA added later still hears. Without this a patient
+    // with no login of their own (placeholder email) had nobody told at all
+    // on Direct, Clinical Escalation or Support.
+    if (threadClient && recipients.has(threadClient.id)) {
+      poaIdsFor(users, threadClient).forEach(id => recipients.add(id));
     }
     for (const id of recipients) {
       if (id === senderId) continue;

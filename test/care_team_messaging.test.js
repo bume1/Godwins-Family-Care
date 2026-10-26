@@ -805,7 +805,7 @@ test('2026-10-15: the office starts Support to whoever it chooses', async () => 
   } finally { h.close(); }
 });
 
-test('2026-10-15: Support is one-to-one — a patient\'s goes to the office only, not their family', async () => {
+test('2026-10-15: Support is one-to-one — a patient\'s goes to the office (and their POA, 2026-10-26), not other family', async () => {
   const h = await boot();
   try {
     const users = h.store.get('users');
@@ -815,9 +815,12 @@ test('2026-10-15: Support is one-to-one — a patient\'s goes to the office only
     const t = rows(h, 'message_threads')[0];
     assert.deepEqual([...t.participant_ids].sort(), ['admin-1', 'client-1', 'mgr-1']);
     assert.equal(t.audience_chosen, true);
-    for (const who of ['fam-1', 'poa-1', 'fnp-1', 'cm-1', 'cg-1']) {
+    for (const who of ['fam-1', 'fnp-1', 'cm-1', 'cg-1']) {
       assert.equal((await h.call(who, 'GET', `/api/messaging/threads/${t.id}`)).status, 403, `${who} does not see the patient's Support`);
     }
+    // Owner, 2026-10-26: a POA stands in for the patient on every channel,
+    // Support included, so they read the patient's Support (plain family do not).
+    assert.equal((await h.call('poa-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'the POA reads the patient\'s Support');
     // A clinician's Support tagged with a client is still one-to-one.
     await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'About her referral' } });
     const t2 = rows(h, 'message_threads')[1];
