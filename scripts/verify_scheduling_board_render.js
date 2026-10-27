@@ -80,6 +80,13 @@ const LIVE_SHIFTS = [{
   poolVisibility: 'all_eligible', caregiverName: 'Danielle Carter'
 }];
 let activeShifts = SHIFTS;   // swapped for section H
+let coordinatorMode = false; // flipped for section I
+const AVAIL = [{
+  id: 'av1', caregiverId: 'cg1', caregiverName: 'Danielle Carter', effectiveFrom: '2026-11-10',
+  windows: [{ day: 'Mon', start: '09:00', end: '17:00' }], blackoutDates: [], status: 'submitted',
+  current: true, enteredOnBehalf: true, enteredByName: 'Care Coordinator',
+  entryNote: 'Rang in: no longer free Tuesdays'
+}];
 
 const posted = [];   // every POST body the page sends
 
@@ -118,6 +125,27 @@ const posted = [];   // every POST body the page sends
       try { posted.push({ path: url.pathname, body: JSON.parse(req.postData() || '{}') }); } catch (e) { /* empty */ }
       return route.fulfill({ status: 200, contentType: 'application/json',
         body: JSON.stringify({ message: 'Done.', updated: ['x'], unchanged: [], refused: [], cancelled: [], deleted: [] }) });
+    }
+    // Section I plays a care coordinator: the manager roster 403s for them, and
+    // the page must still load rather than showing the denied screen.
+    if (coordinatorMode && url.pathname === '/api/scheduling/caregivers') {
+      return route.fulfill({ status: 403, contentType: 'application/json',
+        body: JSON.stringify({ error: 'An administrator or a manager schedules shifts.', code: 'SCHEDULE_MANAGER_ONLY' }) });
+    }
+    if (url.pathname === '/api/scheduling/availability/caregivers') {
+      return route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ caregivers: [
+          { id: 'cg1', name: 'Danielle Carter', licenseLabel: 'CNA' },
+          { id: 'cg2', name: 'Tasha Green', licenseLabel: 'LPN' }
+        ] }) });
+    }
+    if (url.pathname === '/api/scheduling/availability') {
+      return route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          availability: AVAIL,
+          rules: { leadDays: 14, changeLeadDays: 1 },
+          access: { recordForOthers: coordinatorMode }
+        }) });
     }
     if (url.pathname.endsWith('/caregivers')) // `clients` is NOT optional: the tab strip counts the ones with no
       // coordinates. A fake missing what production supplies exercises a
@@ -245,6 +273,47 @@ const posted = [];   // every POST body the page sends
   const ended = posted.find(p => p.path.endsWith('/s-live/cancel'));
   ok('H10 it posts to the cancel route with the reason', !!ended && ended.body.reason === 'Client taken to hospital',
     JSON.stringify(ended));
+
+  // --- I. The care coordinator's screen -----------------------------------
+  // Owner request, 2026-10-27. A coordinator is refused the manager roster on
+  // purpose (it carries clients and geofence coordinates), so the risk is that
+  // the page simply denies them. It must load the one tab they may use.
+  coordinatorMode = true;
+  activeShifts = [];
+  posted.length = 0;
+  await page.goto(`${base}/scheduling`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(400);
+
+  const denied = await page.locator('text=/not have access|denied/i').count();
+  ok('I1 the page loads for a coordinator rather than denying them', denied === 0);
+
+  const tabs = await page.locator('.tabs button, nav button').allInnerTexts().catch(() => []);
+  const tabText = tabs.join(' | ');
+  ok('I2 only the Availability tab is offered', /Availability/.test(tabText) && !/Master calendar|Post a shift/.test(tabText), tabText);
+
+  const body = await page.locator('body').innerText();
+  ok('I3 the record form is there', /Record a change for a caregiver/.test(body));
+  ok('I4 it says the row stays the caregiver\'s own', /the caregiver's own availability/i.test(body));
+  ok('I5 it says shifts already held are untouched', /touches a shift they already hold/i.test(body));
+  ok('I6 the floors are the SERVED ones, not a hardcoded 30', /at least 14 days ahead/.test(body) && !/at least 30 days/.test(body), body.slice(0, 300));
+  ok('I7 a row recorded by the office says so', /Recorded by Care Coordinator/.test(body));
+
+  const recBtn = page.locator('button:has-text("Record Availability")');
+  ok('I8 Record is disabled until a caregiver and a date are chosen', await recBtn.isDisabled());
+  await page.locator('select').first().selectOption('cg1');
+  await page.locator('input[type="date"]').first().fill('2026-11-20');
+  await page.waitForTimeout(150);
+  ok('I9 ...and enables once they are', !(await recBtn.isDisabled()));
+  await recBtn.click();
+  await page.waitForTimeout(400);
+  const rec = posted.find(p => p.path === '/api/scheduling/availability');
+  ok('I10 it posts the caregiver it was told to record for',
+    !!rec && rec.body.caregiverId === 'cg1' && rec.body.effectiveFrom === '2026-11-20', JSON.stringify(rec && rec.body));
+
+  if (process.env.GFC_COORD_SHOT) {
+    await page.screenshot({ path: process.env.GFC_COORD_SHOT, fullPage: true });
+    console.log(`  shot  ${process.env.GFC_COORD_SHOT}`);
+  }
 
   ok('G1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
 
