@@ -120,6 +120,59 @@ module.exports = function createSchedulingRoutes(deps) {
     });
   };
 
+  // ---- Who may RECORD availability for somebody else ----------------------
+  // Owner decision, 2026-10-27: a caregiver rings the office to say their
+  // Tuesdays have changed, and the coordinator records it. Until now nobody on
+  // staff could touch availability at all — admin, manager and the care
+  // coordinator were all refused, and an admin could only mark a submission
+  // "reviewed". So a phoned-in change lived in somebody's memory.
+  //
+  // ⚠️ THE COORDINATOR RECORDS IT; THEY DO NOT BECOME ITS AUTHOR. The row stays
+  // the CAREGIVER'S availability — their id, their name, their licence level —
+  // and carries who keyed it in beside that. "The caregiver said this" and "the
+  // office recorded this on their behalf" are different facts, and the second
+  // one is what a caregiver needs to see to correct it if the office misheard.
+  //
+  // Deliberately NOT managers: the owner picked the coordinator-and-admin
+  // option over the wider one that included them. One predicate to widen if
+  // that changes.
+  const isAvailabilityRecorder = (u) =>
+    !!u && (u.role === ROLES.ADMIN || u.role === ROLES.CASE_MANAGER);
+
+  // MIDDLEWARE, not a check inside the handler, and that is deliberate. The
+  // route sweep in test/scheduling.test.js proves every /api/scheduling route
+  // carries a role guard by reading the route's own signature — gating inside
+  // the body is invisible to it, and it caught exactly that here. Adding this
+  // route to the sweep's exception list would have been the wrong fix: the
+  // exception is for READS that branch by audience, and this is a write.
+  //
+  // Posting your own availability is unchanged (caregivers and clinicians).
+  // Posting somebody else's needs the recorder role. `req.body` is already
+  // parsed by the time middleware runs, so the two cases can be told apart
+  // here rather than later.
+  // The office side of availability: admin, manager, or the care coordinator.
+  // Middleware for the same reason as the writer below — a role check inside a
+  // handler is invisible to the route sweep that proves none is missing.
+  const requireAvailabilityOffice = (req, res, next) => {
+    if (isAvailabilityRecorder(req.user) || isScheduleManager(req.user)) return next();
+    return res.status(403).json({
+      error: 'An administrator or a care coordinator records availability.',
+      code: 'AVAILABILITY_RECORDER_ONLY'
+    });
+  };
+
+  const requireAvailabilityWriter = (req, res, next) => {
+    const asked = String((req.body || {}).caregiverId || '').trim();
+    if (asked && asked !== req.user.id) {
+      if (isAvailabilityRecorder(req.user)) return next();
+      return res.status(403).json({
+        error: 'An administrator or a care coordinator records availability for someone else.',
+        code: 'AVAILABILITY_RECORDER_ONLY'
+      });
+    }
+    return requireSchedulable(req, res, next);
+  };
+
   // Who may submit availability and hold a shift: caregivers, and clinicians
   // (the brief says "caregivers and clinicians submit availability").
   const isSchedulable = (u) => cg.isCaregiver(u) || !!(u && u.hasClinicalAccess);
@@ -188,11 +241,46 @@ module.exports = function createSchedulingRoutes(deps) {
   // AVAILABILITY
   // ==========================================================================
 
-  // POST /api/scheduling/availability — the 30-day rule is enforced HERE, so a
-  // direct API call is refused exactly as the form is.
-  router.post('/api/scheduling/availability', authenticateToken, requireSchedulable, async (req, res) => {
+  // POST /api/scheduling/availability — the lead-time rule is enforced HERE, so
+  // a direct API call is refused exactly as the form is.
+  //
+  // A caregiver posts their own. A coordinator or admin posts somebody else's
+  // by naming `caregiverId` — see `isAvailabilityRecorder`. Availability stays
+  // APPEND-ONLY either way: a change is a new row and the newest is the one in
+  // force (the GET answers that once, for both screens). What somebody said in
+  // August must still be readable in October, which is also what makes a
+  // misheard phone call recoverable rather than destructive.
+  router.post('/api/scheduling/availability', authenticateToken, requireAvailabilityWriter, async (req, res) => {
     try {
-      const { valid, errors, clean } = sched.validateAvailability(req.body);
+      const body = req.body || {};
+      const askedFor = String(body.caregiverId || '').trim();
+      const onBehalf = !!askedFor && askedFor !== req.user.id;
+
+      // Whose availability this is. Resolved from the user record, never from
+      // the body beyond the id, so the office cannot key a name or a licence
+      // level that disagrees with the roster.
+      let subject = req.user;
+      if (onBehalf) {
+        const all = await getUsers();
+        subject = all.find(u => u && u.id === askedFor) || null;
+        if (!subject) {
+          return res.status(404).json({ error: 'That caregiver is not on file.', code: 'CAREGIVER_NOT_FOUND' });
+        }
+        if (!isSchedulable(subject)) {
+          return res.status(400).json({
+            error: 'That person is not set up to work shifts, so they have no availability to record.',
+            code: 'CAREGIVER_NOT_SCHEDULABLE'
+          });
+        }
+      }
+
+      const rows = await readRows('caregiver_availability');
+      // A CHANGE is availability for somebody who already has some on file, and
+      // it gets the shorter floor. Asked of the store rather than of the caller,
+      // so a body claiming to be a change cannot buy itself a nearer date.
+      const isChange = rows.some(r => r && String(r.caregiver_id) === String(subject.id));
+
+      const { valid, errors, clean } = sched.validateAvailability(body, new Date(), { isChange });
       if (!valid) {
         const lead = errors.find(e => e.code === 'AVAILABILITY_LEAD_TIME');
         return res.status(400).json({
@@ -202,12 +290,11 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
-      const rows = await readRows('caregiver_availability');
       const row = {
         id: uuidv4(),
-        caregiver_id: req.user.id,
-        caregiver_name: req.user.name || req.user.email,
-        license_level: req.user.licenseLevel || null,
+        caregiver_id: subject.id,
+        caregiver_name: subject.name || subject.email,
+        license_level: subject.licenseLevel || null,
         effective_from: clean.effectiveFrom,
         windows: clean.windows,
         blackout_dates: clean.blackoutDates,
@@ -218,13 +305,27 @@ module.exports = function createSchedulingRoutes(deps) {
         status: 'submitted',
         submitted_at: nowIso(),
         reviewed_at: null,
-        reviewed_by_name: null
+        reviewed_by_name: null,
+        // Who keyed it in. Null when the caregiver posted their own, so the two
+        // cases stay distinguishable rather than every row naming somebody.
+        entered_by_id: onBehalf ? req.user.id : null,
+        entered_by_name: onBehalf ? (req.user.name || req.user.email) : null,
+        entered_on_behalf: onBehalf,
+        // Why the office is recording it, kept because a caregiver reading back
+        // a change they did not type needs to know where it came from.
+        entry_note: onBehalf ? String(body.entryNote || '').trim().slice(0, 500) : null
       };
       rows.push(row);
       await db.set('caregiver_availability', rows);
 
-      await logActivity(req.user.id, row.caregiver_name, 'availability_submitted', 'availability', row.id,
-        { role: req.user.role, effectiveFrom: row.effective_from, windows: row.windows.length });
+      await logActivity(req.user.id, row.caregiver_name,
+        onBehalf ? 'availability_recorded_for_caregiver' : 'availability_submitted',
+        'availability', row.id,
+        {
+          role: req.user.role, effectiveFrom: row.effective_from,
+          windows: row.windows.length, isChange, onBehalf,
+          caregiverId: onBehalf ? subject.id : undefined
+        });
 
       res.json({ availability: publicAvailability(row) });
     } catch (error) {
@@ -233,15 +334,21 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // GET /api/scheduling/availability — own rows; admin sees everyone's.
+  // GET /api/scheduling/availability — own rows; the office sees everyone's.
+  //
+  // A care coordinator reads it too (2026-10-27). They may record a change on a
+  // caregiver's behalf, and a door that writes but cannot read is half a door:
+  // there would be no way to see the availability being corrected, or to check
+  // afterwards that what was keyed in is what the caregiver meant.
   router.get('/api/scheduling/availability', authenticateToken, async (req, res) => {
     try {
-      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
+      const officeWide = isScheduleManager(req.user) || isAvailabilityRecorder(req.user);
+      if (!officeWide && !isSchedulable(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('caregiver_availability');
-      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
-      if (isScheduleManager(req.user) && req.query.caregiverId) {
+      let mine = officeWide ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      if (officeWide && req.query.caregiverId) {
         mine = mine.filter(r => r.caregiver_id === String(req.query.caregiverId));
       }
       mine = mine.slice().sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
@@ -263,10 +370,44 @@ module.exports = function createSchedulingRoutes(deps) {
         availability: mine.slice(0, 200).map(r => ({
           ...publicAvailability(r),
           current: newestPerCaregiver.get(String(r.caregiver_id)) === r.id
-        }))
+        })),
+        // THE FLOORS ARE SERVED, NOT RESTATED. Both screens printed "at least 30
+        // days" as a literal beside a server rule they could not see, and the
+        // rule has two values now. A page that names a rule of its own drifts
+        // from the validator that enforces it, silently — the lesson the intake
+        // field catalog and the competency list already bought here.
+        rules: {
+          leadDays: sched.AVAILABILITY_LEAD_DAYS,
+          changeLeadDays: sched.AVAILABILITY_CHANGE_LEAD_DAYS
+        },
+        access: { recordForOthers: isAvailabilityRecorder(req.user) }
       });
     } catch (error) {
       console.error('Availability list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/availability/caregivers — just enough to pick somebody.
+  //
+  // Deliberately NOT `/api/scheduling/caregivers`, which a care coordinator is
+  // refused: that one also carries the CLIENT roster with geofence coordinates,
+  // and widening it to open an availability screen would hand over client data
+  // nobody asked to share. This is an allow-list of three fields — who they
+  // are, and what licence sits beside their name — so the screen can exist
+  // without the access decision that would come with the wider read.
+  router.get('/api/scheduling/availability/caregivers', authenticateToken, requireAvailabilityOffice, async (req, res) => {
+    try {
+      const users = await getUsers();
+      res.json({
+        caregivers: users.filter(isSchedulable).map(u => ({
+          id: u.id,
+          name: u.name || u.email,
+          licenseLabel: cg.LICENSE_LABELS[cg.normalizeLevel(u.licenseLevel)] || null
+        })).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      });
+    } catch (error) {
+      console.error('Availability caregivers error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -2934,7 +3075,12 @@ module.exports = function createSchedulingRoutes(deps) {
     licenseLevel: r.license_level, effectiveFrom: r.effective_from,
     windows: r.windows, blackoutDates: r.blackout_dates, note: r.note,
     status: r.status, submittedAt: r.submitted_at,
-    reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name
+    reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name,
+    // Said plainly on both screens: a caregiver must be able to tell a change
+    // they made from one the office recorded for them.
+    enteredOnBehalf: !!r.entered_on_behalf,
+    enteredByName: r.entered_by_name || null,
+    entryNote: r.entry_note || null
   });
 
   const publicShift = (r) => r && ({

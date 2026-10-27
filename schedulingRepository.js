@@ -25,10 +25,29 @@ const cg = require('./caregiverRepository');
 const practiceTime = require('./public/gfc-time');   // every time read or shown is Eastern
 
 // ---- Availability ----------------------------------------------------------
-// Caregivers and clinicians submit availability at least 30 days in advance so
-// admin can build a schedule from it. Enforced here (and therefore server-side
-// at the route), never only in the form.
-const AVAILABILITY_LEAD_DAYS = 30;
+// ---- How far ahead availability has to start -------------------------------
+// Owner decision, 2026-10-27, replacing a single 30-day rule that made
+// availability effectively uneditable: "make it 2 weeks then let a caregiver
+// change existing availability on short notice."
+//
+// TWO FLOORS, because they answer two different questions. A FIRST submission
+// is what admin builds a schedule from, so it needs real notice. CHANGING
+// availability already on file is somebody telling us their life changed —
+// refusing that does not keep them available on a Tuesday, it just means we
+// find out when they decline the shift.
+//
+// ⚠️ THIS IS SAFE ONLY BECAUSE AVAILABILITY DOES NOT RELEASE SHIFTS. Changing
+// it never touches a shift the caregiver already holds: `availabilityCoversShift`
+// has no caller on any route, so a confirmed shift stays confirmed and getting
+// out of a specific one is still the change-request route, with its own notice
+// minimum and the office number when that window has passed. Availability is
+// forward planning; a shift is a commitment. If a later session wires
+// availability into holding or keeping a shift, these floors have to be
+// revisited at the same time.
+const AVAILABILITY_LEAD_DAYS = 14;
+
+// Changing what is already on file. One constant: the office can move it.
+const AVAILABILITY_CHANGE_LEAD_DAYS = 1;
 
 const DAYS = Object.freeze(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
 
@@ -67,18 +86,27 @@ function daysUntil(effectiveFrom, now = new Date()) {
 // Validates an availability submission. Returns { valid, errors, clean }.
 // Errors are specific: an admin reading the log should know which window was
 // wrong, not merely that "availability was invalid".
-function validateAvailability(input, now = new Date()) {
+// `isChange` means this caregiver already has availability on file, so the
+// shorter floor applies. The CALLER establishes that from the store rather than
+// this function reading it, which keeps the rule pure and testable both ways.
+function validateAvailability(input, now = new Date(), { isChange = false } = {}) {
   const body = input && typeof input === 'object' ? input : {};
   const errors = [];
+  const required = isChange ? AVAILABILITY_CHANGE_LEAD_DAYS : AVAILABILITY_LEAD_DAYS;
 
   const lead = daysUntil(body.effectiveFrom, now);
   if (lead === null) {
     errors.push({ field: 'effectiveFrom', code: 'EFFECTIVE_FROM_INVALID', message: 'Give the date this availability starts, as YYYY-MM-DD.' });
-  } else if (lead < AVAILABILITY_LEAD_DAYS) {
+  } else if (lead < required) {
+    // The refusal names the floor that was actually applied. One message for
+    // both would send a caregiver changing next week's hours to read a rule
+    // about new submissions and conclude the app is simply wrong.
     errors.push({
       field: 'effectiveFrom', code: 'AVAILABILITY_LEAD_TIME',
-      message: `Availability is submitted at least ${AVAILABILITY_LEAD_DAYS} days ahead. That date is ${lead} day${lead === 1 ? '' : 's'} out.`,
-      daysOut: lead, required: AVAILABILITY_LEAD_DAYS
+      message: isChange
+        ? `A change to your availability starts at least ${required} day${required === 1 ? '' : 's'} ahead. That date is ${lead} day${lead === 1 ? '' : 's'} out.`
+        : `Availability is submitted at least ${required} days ahead. That date is ${lead} day${lead === 1 ? '' : 's'} out.`,
+      daysOut: lead, required, isChange
     });
   }
 
@@ -1441,7 +1469,7 @@ function buildBulkEditBody(shift, input) {
 
 module.exports = {
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
-  validateAvailability, availabilityCoversShift,
+  validateAvailability, availabilityCoversShift, AVAILABILITY_CHANGE_LEAD_DAYS,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,

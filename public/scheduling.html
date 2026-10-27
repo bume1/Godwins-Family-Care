@@ -1070,6 +1070,12 @@ const App = () => {
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
   const [availability, setAvailability] = useState([]);
+  // The floors are the SERVER'S, read back rather than restated here: this page
+  // printed "at least 30 days" as a literal for a month after the rule moved.
+  const [availRules, setAvailRules] = useState(null);
+  const [canRecordAvail, setCanRecordAvail] = useState(false);
+  const [availRoster, setAvailRoster] = useState([]);
+  const [rec, setRec] = useState({ caregiverId: '', effectiveFrom: '', day: 'Mon', start: '09:00', end: '17:00', note: '' });
   const [changeRequests, setChangeRequests] = useState([]);
   const [timeLogs, setTimeLogs] = useState([]);
   const [totals, setTotals] = useState({ hours: null });
@@ -1110,19 +1116,32 @@ const App = () => {
   const [denied, setDenied] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [r, s, q, a, t, c] = await Promise.all([
-      api('/api/scheduling/caregivers'),
+    const [r, s, q, a, t, c, ar] = await Promise.all([
+      // A CARE COORDINATOR IS REFUSED THIS ONE, on purpose: it carries the
+      // client roster with geofence coordinates. They still need a screen to
+      // record availability on, so a 403 here is not the end of the page — it
+      // falls through to the narrow availability roster below and the page
+      // renders the one tab they may use. Any OTHER failure still denies.
+      api('/api/scheduling/caregivers').catch(e => (e.status === 403 ? null : Promise.reject(e))),
       api('/api/scheduling/shifts').catch(() => ({ shifts: [] })),
       api('/api/scheduling/shift-requests').catch(() => ({ shiftRequests: [] })),
       api('/api/scheduling/availability').catch(() => ({ availability: [] })),
       api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] })),
-      api('/api/scheduling/change-requests').catch(() => ({ requests: [] }))
+      api('/api/scheduling/change-requests').catch(() => ({ requests: [] })),
+      api('/api/scheduling/availability/caregivers').catch(() => ({ caregivers: [] }))
     ]);
-    setRoster(r);
+    const roster0 = r || { caregivers: [], clients: [], access: null };
+    setRoster(roster0);
+    // No manager roster means availability is the only thing this viewer may
+    // work on, so every other tab is withheld rather than shown and erroring.
     if (r && r.access) setAccess(r.access);
+    else setAccess({ manageSchedule: false, managePay: false, manageLocations: false, availabilityOnly: true });
+    setAvailRoster((ar && ar.caregivers) || []);
     setShifts(s.shifts || []);
     setRequests(q.shiftRequests || []);
     setAvailability(a.availability || []);
+    setAvailRules(a.rules || null);
+    setCanRecordAvail(!!(a.access && a.access.recordForOthers));
     setTimeLogs(t.timeLogs || []);
     setTotals({ hours: t.totalHours });
     setChangeRequests(c.requests || []);
@@ -1273,7 +1292,13 @@ const App = () => {
     );
   }
 
-  const TABS = [
+  // ⚠️ A TAB STRIP OF ONE IS NOT A SELECTED TAB. The page opens on `calendar`,
+  // so withholding every other tab from a coordinator left the strip showing
+  // "Availability" and the body rendering nothing at all — found by rendering
+  // the page, not by reading it. The one tab on offer is the one shown.
+  const shownTab = access.availabilityOnly ? 'availability' : tab;
+
+  const TABS = access.availabilityOnly ? [{ id: 'availability', label: 'Availability' }] : [
     { id: 'calendar', label: 'Master calendar' },
     { id: 'post', label: 'Post a shift' },
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
@@ -1302,19 +1327,19 @@ const App = () => {
 
         <div className="tabs">
           {TABS.map(t => (
-            <button key={t.id} className={`tab ${tab === t.id ? 'on' : ''}`}
+            <button key={t.id} className={`tab ${shownTab === t.id ? 'on' : ''}`}
               onClick={() => { setTab(t.id); setErr(''); setOk(''); }}>{t.label}</button>
           ))}
         </div>
 
-        {tab === 'post' && (
+        {shownTab === 'post' && (
           <div>
             <PostShift roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />
             <BulkPost roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />
           </div>
         )}
 
-        {tab === 'calendar' && (
+        {shownTab === 'calendar' && (
           <div>
             {pending.length > 0 && (
               <div className="card">
@@ -1526,7 +1551,7 @@ const App = () => {
           </div>
         )}
 
-        {tab === 'requests' && (
+        {shownTab === 'requests' && (
           <div className="card">
             <h2>Client shift requests</h2>
             <p className="sub">
@@ -1553,10 +1578,66 @@ const App = () => {
           </div>
         )}
 
-        {tab === 'availability' && (
+        {shownTab === 'availability' && canRecordAvail && (
+          <div className="card">
+            <h2>Record a change for a caregiver</h2>
+            <p className="sub">
+              For a change phoned in to the office. It is filed as <b>the caregiver's own availability</b> with
+              your name beside it as the person who recorded it, so they can see it and correct it if you
+              misheard. Nothing you enter here touches a shift they already hold — to move or release one of
+              those, use the shift itself.
+            </p>
+            <div className="btns" style={{ flexWrap: 'wrap' }}>
+              <select value={rec.caregiverId} onChange={e => setRec({ ...rec, caregiverId: e.target.value })} style={{ minWidth: 220 }}>
+                <option value="">Which caregiver…</option>
+                {availRoster.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}{c.licenseLabel ? ` — ${c.licenseLabel}` : ''}</option>
+                ))}
+              </select>
+              <input type="date" value={rec.effectiveFrom}
+                onChange={e => setRec({ ...rec, effectiveFrom: e.target.value })} title="Starts from" />
+              <select value={rec.day} onChange={e => setRec({ ...rec, day: e.target.value })}>
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input type="time" value={rec.start} onChange={e => setRec({ ...rec, start: e.target.value })} />
+              <input type="time" value={rec.end} onChange={e => setRec({ ...rec, end: e.target.value })} />
+            </div>
+            <div className="btns" style={{ flexWrap: 'wrap' }}>
+              <input placeholder="What they told you (optional)" value={rec.note}
+                onChange={e => setRec({ ...rec, note: e.target.value })} style={{ minWidth: 320 }} />
+              <button className="btn gold"
+                disabled={!rec.caregiverId || !rec.effectiveFrom}
+                onClick={async () => {
+                  // The server decides which floor applies and refuses what it
+                  // will not take; this only sends what was typed.
+                  const r = await api('/api/scheduling/availability', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      caregiverId: rec.caregiverId,
+                      effectiveFrom: rec.effectiveFrom,
+                      windows: [{ day: rec.day, start: rec.start, end: rec.end }],
+                      entryNote: rec.note
+                    })
+                  });
+                  if (r) {
+                    setRec({ ...rec, effectiveFrom: '', note: '' });
+                    setOk('Recorded. The caregiver sees it as recorded by you.');
+                    await refresh();
+                  }
+                }}>Record Availability</button>
+            </div>
+          </div>
+        )}
+
+        {shownTab === 'availability' && (
           <div className="card">
             <h2>Submitted availability</h2>
-            <p className="sub">Availability is submitted at least 30 days ahead. Post schedules from it.</p>
+            <p className="sub">
+              {availRules
+                ? `A first submission starts at least ${availRules.leadDays} days ahead; a change to availability already on file can start ${availRules.changeLeadDays === 1 ? 'the next day' : `${availRules.changeLeadDays} days ahead`}.`
+                : 'Availability is submitted ahead of time.'}
+              {' '}Post schedules from the one in force.
+            </p>
             {availability.length === 0
               ? <Empty icon="calendar-plus">Nothing submitted yet.</Empty>
               : availability.map(a => (
@@ -1572,6 +1653,12 @@ const App = () => {
                     {' '}<span className={`chip ${a.current ? 'confirmed' : ''}`}>{a.current ? 'In force' : 'Superseded'}</span>
                   </div>
                   <div className="mu">{(a.windows || []).map(w => `${w.day} ${fmtClock(w.start)}–${fmtClock(w.end)}`).join(' · ')}</div>
+                  {/* "The caregiver said this" and "the office recorded it for
+                      them" are different facts, and the office reading this
+                      list needs to know which it is looking at. */}
+                  {a.enteredOnBehalf && (
+                    <div className="mu">Recorded by {a.enteredByName || 'the office'}{a.entryNote ? ` — ${a.entryNote}` : ''}</div>
+                  )}
                   {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.join(', ')}</div>}
                   {a.status !== 'reviewed' && (
                     <div className="btns">
@@ -1586,7 +1673,7 @@ const App = () => {
           </div>
         )}
 
-        {tab === 'changes' && (
+        {shownTab === 'changes' && (
           <div className="card">
             <h2>Shift change requests</h2>
             <p className="sub">
@@ -1654,7 +1741,7 @@ const App = () => {
           </div>
         )}
 
-        {tab === 'time' && (
+        {shownTab === 'time' && (
           <div>
             <div className="card">
               <h2>Time &amp; payroll</h2>
@@ -1702,7 +1789,7 @@ const App = () => {
           </div>
         )}
 
-        {tab === 'locations' && (
+        {shownTab === 'locations' && (
           <ClientLocations roster={roster} onSaved={refresh} setErr={setErr} setOk={setOk} />
         )}
       </div>

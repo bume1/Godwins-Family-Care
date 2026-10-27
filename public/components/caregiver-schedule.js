@@ -50,7 +50,25 @@
   'use strict';
 
   var API = global.location.origin;
-  var LEAD_DAYS = 30;                    // mirrors AVAILABILITY_LEAD_DAYS
+  // FALLBACKS ONLY. The real floors are served on the availability list
+  // (`rules.leadDays` / `rules.changeLeadDays`) and stored on state, because a
+  // number printed here beside a rule the server owns is a number that drifts —
+  // this file said 30 for a month after the server moved. These are what shows
+  // if that read fails, and they are deliberately the STRICTER pair: a screen
+  // that guesses low would invite a submission the server then refuses.
+  var LEAD_DAYS = 14;                    // mirrors AVAILABILITY_LEAD_DAYS
+  var CHANGE_LEAD_DAYS = 1;              // mirrors AVAILABILITY_CHANGE_LEAD_DAYS
+
+  // Which floor applies to THIS caregiver: changing availability already on
+  // file is the short-notice case. Asked of what the server sent back, the same
+  // question the route asks of the store, so the form offers exactly the dates
+  // the route will accept.
+  function leadDaysFor(state) {
+    var r = (state && state.availabilityRules) || {};
+    var first = typeof r.leadDays === 'number' ? r.leadDays : LEAD_DAYS;
+    var change = typeof r.changeLeadDays === 'number' ? r.changeLeadDays : CHANGE_LEAD_DAYS;
+    return (state && state.availability && state.availability.length) ? change : first;
+  }
   // Mirrors CLOCK_IN_WINDOW_MINUTES. The SERVER is what enforces it; this only
   // decides whether the button is offered, so the two disagreeing costs a
   // clear refusal rather than an unenforced rule.
@@ -423,11 +441,23 @@
   }
 
   function renderAvailability(state) {
-    var earliest = new Date(Date.now() + LEAD_DAYS * 86400000).toISOString().slice(0, 10);
-    var html = '<div class="gcard"><h3>Submit availability</h3>' +
-      '<p class="gmu" style="margin-bottom:10px">Availability is submitted at least ' + LEAD_DAYS +
-      ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '. ' +
-      'Submitting again replaces what you have now — the office works from your most recent one.</p>' +
+    var lead = leadDaysFor(state);
+    var changing = !!(state.availability && state.availability.length);
+    var earliest = new Date(Date.now() + lead * 86400000).toISOString().slice(0, 10);
+    var html = '<div class="gcard"><h3>' + (changing ? 'Change your availability' : 'Submit availability') + '</h3>' +
+      '<p class="gmu" style="margin-bottom:10px">' +
+      (changing
+        // Somebody updating what they already told us is telling us their life
+        // changed. Leading with the 14-day rule here reads as a refusal of the
+        // thing they came to do.
+        ? 'You can change this at short notice — the earliest it can start is ' + esc(earliest) + '. ' +
+          'Your new answer replaces the one before it; the office works from your most recent one. ' +
+          '<strong>Shifts you have already accepted do not change.</strong> To move or hand back one of those, ' +
+          'use Request a change on the shift itself.'
+        : 'Availability is submitted at least ' + lead +
+          ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '. ' +
+          'Submitting again replaces what you have now — the office works from your most recent one.') +
+      '</p>' +
       '<div class="gfield"><label>Starts from</label>' +
       '<input type="date" id="gfcs-eff" min="' + esc(earliest) + '" value="' + esc(state.draft.effectiveFrom || earliest) + '"></div>';
 
@@ -458,6 +488,13 @@
           '<div class="gmu">' + (a.windows || []).map(function (w) {
             return esc(w.day + ' ' + fmtClock(w.start) + '–' + fmtClock(w.end));
           }).join(' · ') + '</div>' +
+          // Recorded by the office rather than typed by the caregiver. Said
+          // plainly, because a caregiver reading back hours they did not enter
+          // has to know where they came from to correct a mishearing.
+          (a.enteredOnBehalf
+            ? '<div class="gmu">Recorded for you by ' + esc(a.enteredByName || 'the office') +
+              (a.entryNote ? ' — ' + esc(a.entryNote) : '') + '</div>'
+            : '') +
           '<div class="gmu"><span class="gchip' + (a.status === 'reviewed' ? ' ok' : '') + '">' + esc(titleize(a.status)) + '</span>' +
             // Which one is actually in force. Submitting again does not erase
             // what you said before — it supersedes it — and without saying so
@@ -694,6 +731,7 @@
       state.offers = mine.filter(function (s) { return s.status === 'assigned'; });
       state.open = r[1].shifts || [];
       state.availability = r[2].availability || [];
+      state.availabilityRules = r[2].rules || null;
       state.timeLogs = r[3].timeLogs || [];
       state.totalHours = r[3].totalHours;
       state.changeRequests = (r[4] && r[4].requests) || [];
@@ -717,7 +755,7 @@
     if (!options.authToken) throw new Error('caregiver-schedule: authToken is required');
     injectCss();
 
-    var earliest = new Date(Date.now() + LEAD_DAYS * 86400000).toISOString().slice(0, 10);
+    var earliest = new Date(Date.now() + leadDaysFor(state) * 86400000).toISOString().slice(0, 10);
     var state = {
       elementId: elementId,
       caregiverId: options.caregiverId || null,
@@ -730,7 +768,7 @@
       tab: options.initialTab || 'schedule',
       loading: true,
       error: '', notice: '',
-      mine: [], offers: [], open: [], availability: [], timeLogs: [], totalHours: null,
+      mine: [], offers: [], open: [], availability: [], availabilityRules: null, timeLogs: [], totalHours: null,
       asking: null, changeRequests: [],
       draft: { effectiveFrom: earliest, windows: [{ day: 'Mon', start: '09:00', end: '17:00' }], blackoutDates: [] }
     };
