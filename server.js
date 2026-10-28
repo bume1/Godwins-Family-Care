@@ -4357,6 +4357,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     let passwordWasReset = false;
     const passwordIgnored = !!password && resetPassword !== true;
     if (password && resetPassword === true) {
+      const refusal = placeholderResetRefusal(users, users[idx]);
+      if (refusal) return res.status(409).json(refusal);
       users[idx].password = await bcrypt.hash(password, config.BCRYPT_SALT_ROUNDS);
       users[idx].requirePasswordChange = true;
       users[idx].lastPasswordReset = new Date().toISOString();
@@ -28156,6 +28158,44 @@ app.get('/api/changelog', async (req, res) => {
 
 // ============== PASSWORD MANAGEMENT ==============
 
+// A placeholder login (offline onboarding, or a patient whose POA signs in
+// with their own account) has no inbox and nobody signs in with it. Resetting
+// its password would email a link nowhere, and handing the patient's password
+// to the POA would put the POA back to signing in AS the patient, which the
+// POA cutover (2026-10-20) ended. So the reset is refused, and the refusal
+// names the account to reset instead (owner, 2026-10-28).
+function placeholderResetRefusal(users, user) {
+  if (!user || !familyLinks.isPlaceholderEmail(user.email)) return null;
+  const poas = user.role === config.ROLES.CLIENT
+    ? familyLinks.familyFor(users, user.id, { poaOnly: true }).map(f => f.user.name || f.user.email).filter(Boolean)
+    : [];
+  const who = poas.length
+    ? `${poas.join(' and ')} ${poas.length === 1 ? 'signs' : 'sign'} in with their own account. Reset that account's password instead.`
+    : 'Add a real email address to this account first, then reset the password.';
+  return {
+    error: `Nobody signs in with this login, so a reset would reach no one. ${who}`,
+    code: 'RESET_PLACEHOLDER_LOGIN',
+    poas
+  };
+}
+
+// Tells the person their password changed, so a change they did not make is
+// noticed. Sent whatever their email preferences: this is a security notice.
+// Carries no link, so a forwarded copy gives nobody a way in.
+async function sendPasswordChangedEmail(user) {
+  if (!user || !user.email || familyLinks.isPlaceholderEmail(user.email)) return;
+  const name = (user.preferredName || user.name || 'there').split(' ')[0];
+  const when = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' });
+  const paragraphs = [
+    `The password for your ${config.BRAND.COMPANY_NAME} account was changed on ${when} (Eastern).`,
+    'If you made this change, there is nothing else to do.',
+    `If you did not, call us right away on ${consentText.ORG.phone} so we can lock the account.`
+  ];
+  const htmlBody = emailTemplates.renderGfcEmail({ greeting: name, headline: 'Your password was changed', paragraphs }).html;
+  const text = `Hi ${name},\n\n${paragraphs.join('\n\n')}`;
+  return sendEmail(user.email, `Your ${config.BRAND.COMPANY_NAME} password was changed`, text, { htmlBody });
+}
+
 // Generate cryptographically random temp password
 function generateTempPassword(user) {
   const crypto = require('crypto');
@@ -28223,6 +28263,11 @@ app.post('/api/admin/bulk-password-reset', authenticateToken, requireAdmin, asyn
         continue;
       }
       if (userType === 'specific' && (!specificUserIds || !specificUserIds.includes(user.id))) {
+        continue;
+      }
+
+      if (placeholderResetRefusal(users, user)) {
+        results.skipped.push({ email: user.email, reason: 'Nobody signs in with this login (placeholder)' });
         continue;
       }
 
@@ -28304,6 +28349,8 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
     }
 
     const user = users[userIndex];
+    const refusal = placeholderResetRefusal(users, user);
+    if (refusal) return res.status(409).json(refusal);
 
     // Use custom password or generate temp password
     const newPassword = customPassword || generateTempPassword(user);
@@ -28921,6 +28968,9 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     // Session 5.3: a changed password ends every OTHER session for this user.
     await sessions.revokeAllForUser(user.id, 'password_changed', { exceptSid: req.session && req.session.id });
     invalidateUsersCache();
+
+    sendPasswordChangedEmail(users[userIndex])
+      .catch(err => console.error('Password changed email failed (non-fatal):', err.message));
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {

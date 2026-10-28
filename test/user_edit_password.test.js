@@ -20,7 +20,9 @@ const putRoute = (() => {
 })();
 
 test('the server resets a password only when the request says resetPassword: true', () => {
-  assert.match(putRoute, /if \(password && resetPassword === true\) \{\s*users\[idx\]\.password = await bcrypt\.hash/);
+  // A placeholder login is refused first (test/password_reset_notices.test.js);
+  // nothing else may stand between the explicit flag and the hash.
+  assert.match(putRoute, /if \(password && resetPassword === true\) \{\s*(?:const refusal = placeholderResetRefusal\(users, users\[idx\]\);\s*if \(refusal\) return res\.status\(409\)\.json\(refusal\);\s*)?users\[idx\]\.password = await bcrypt\.hash/);
   assert.doesNotMatch(putRoute, /if \(password\) \{/, 'a bare password must not reset the account');
   assert.match(putRoute, /passwordIgnored/, 'an ignored password is reported back, not silent');
 });
