@@ -179,7 +179,7 @@ cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
 2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
 bcee864f9cf7cc35d3cd61686b65be0437002298ead3c284750e523c385125b2  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
-9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a  src/RestControllers/GfcChargeRestController.php
+1804907525a724a772dacc170bc61da47a3108018913ceb81ef765b06a818667  src/RestControllers/GfcChargeRestController.php
 e5365547054b85076b96cd5a2095504884a18ba81e1d0d51fea7bebd505a97c6  src/RestControllers/GfcDocumentRestController.php
 SUMS
 ```
@@ -361,7 +361,7 @@ B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
 sudo curl -fsSL -o src/RestControllers/GfcDocumentRestController.php "$B/src/RestControllers/GfcDocumentRestController.php"
 sha256sum src/RestControllers/GfcChargeRestController.php
-#   expect 9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a
+#   expect 1804907525a724a772dacc170bc61da47a3108018913ceb81ef765b06a818667
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
 ```
 
@@ -462,7 +462,19 @@ and stored something nobody could open.
 
 ---
 
-## Update 2026-10-28 — the code catalog read, needs a re-fetch and one rebuild
+## Update 2026-10-28 — the code catalog read and charge pricing, needs a re-fetch and one rebuild
+
+**Charge pricing.** A charge posted with no fee used to land at **$0.00**. It now
+resolves the price the way the Fee Sheet does: the `prices` row for the code's
+`codes` id at the patient's price level (`patient_data.pricelevel`, else the
+default on the `pricelevel` list, else `standard`), times units. A line with a
+modifier and no priced row for that modifier uses the base code's price. The
+response carries `fee_used`, `fee_source` (`price_table`, `base_code_fallback`,
+`posted` or `none`), `unit_price` and `price_level`. A code with no price at all
+still posts at $0.00 with `fee_source: none`, and the app flags it on the
+coding queue. **Charges already in Billing Manager are not repriced**; correct
+those by hand.
+
 
 The app now caches the practice's billable CPT and HCPCS codes from OpenEMR
 instead of keeping any list of its own. That needs one new mode on the existing
@@ -476,7 +488,7 @@ cd /opt/openemr/gfc-patch
 B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
 sha256sum -c <<'SUMS'
-9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a  src/RestControllers/GfcChargeRestController.php
+1804907525a724a772dacc170bc61da47a3108018913ceb81ef765b06a818667  src/RestControllers/GfcChargeRestController.php
 SUMS
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
 ```

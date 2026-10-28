@@ -1888,6 +1888,28 @@ const buildChargePayloads = (record, { providerId, visit } = {}) => {
   }));
 };
 
+// One posted charge line as the app remembers it. `fee` is what OpenEMR says
+// it used (fee_used, from the 6B controller since 2026-10-28), or null when
+// the response did not say: an older controller, or a row with no fee field.
+// Null is "not known", never $0.
+const postedChargeEntry = (payload, row) => {
+  const raw = row && (row.fee_used != null ? row.fee_used : row.fee);
+  const fee = raw == null || raw === '' || !Number.isFinite(Number(raw)) ? null : Number(raw);
+  return {
+    id: row && row.id != null ? String(row.id) : null,
+    code: payload.code, codeType: payload.code_type,
+    modifier: payload.modifier || '',
+    fee, feeSource: (row && row.fee_source) || null
+  };
+};
+// The posted lines that reached Billing Manager at $0. A $0 charge should be
+// visible, never silent (owner, 2026-10-28).
+const zeroFeeCharges = (record) =>
+  ((record && record.postedCharges) || []).filter(c => c && c.fee === 0);
+const zeroFeeWarning = (lines) => lines.length
+  ? `${lines.map(c => c.code).join(', ')} posted to Billing Manager at $0.00: OpenEMR has no price for ${lines.length === 1 ? 'that code' : 'those codes'} at this patient's price level. Set the price in OpenEMR's fee schedule and correct the line in Billing Manager.`
+  : null;
+
 // ---- NCCI/MUE bundling check (sign-time gate) ----
 //
 // Two CMS reference tables decide whether two codes on one encounter may be
@@ -3001,6 +3023,9 @@ module.exports = {
   resolveBillingFacility,
   BILLING_FACILITY_UNRESOLVED,
   buildChargePayloads,
+  postedChargeEntry,
+  zeroFeeCharges,
+  zeroFeeWarning,
   // NCCI/MUE sign-time bundling check
   NCCI_STALE_DAYS, NCCI_UNBUNDLING_MODIFIERS,
   normalizeNcciSourceVersion,

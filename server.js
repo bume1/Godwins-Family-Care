@@ -11703,12 +11703,14 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
   try {
     for (const payload of payloads) {
       const row = await emr.postCharge(client.openEmrPatientId, encounterUuid, payload);
-      posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
+      posted.push(clinicalRepo.postedChargeEntry(payload, row));
     }
     record.chargesPosted = true;
     record.chargeError = null;
     record.postedCharges = posted;
     record.chargesPostedAt = new Date().toISOString();
+    const zeroWarn = clinicalRepo.zeroFeeWarning(clinicalRepo.zeroFeeCharges(record));
+    if (zeroWarn) warnings.push(zeroWarn);
   } catch (e) {
     record.chargesPosted = false;
     record.chargeError = e.message.slice(0, 300);
@@ -17448,7 +17450,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     try {
       for (const payload of payloads) {
         const row = await ctx.emr.postCharge(ctx.client.openEmrPatientId, ctx.encounterUuid, payload);
-        posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
+        posted.push(clinicalRepo.postedChargeEntry(payload, row));
       }
     } catch (e) {
       const record = { ...ctx.record, postedCharges: posted, chargesPosted: false, chargeError: e.message.slice(0, 300) };
@@ -17460,7 +17462,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     await logActivity(req.user.id, req.user.name || req.user.email, 'charges_reposted', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, posted: payloads.map(p => p.code), providerId: String(providerId)
     });
-    res.json({ message: `Posted ${payloads.length} charge line(s) to Billing Manager`, posted, record });
+    const zeroWarn = clinicalRepo.zeroFeeWarning(clinicalRepo.zeroFeeCharges(record));
+    res.json({ message: `Posted ${payloads.length} charge line(s) to Billing Manager`, posted, record, warnings: zeroWarn ? [zeroWarn] : [] });
   } catch (error) {
     console.error('Charge repost error:', error);
     res.status(502).json({ error: `Re-post failed: ${error.message}` });
@@ -18082,7 +18085,8 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         rows.push({ encounterUuid: String(r.id), clientId: app.clientId, patientName: app.name, date: s.start, reason: record ? record.reason : s.type, provider: s.provider,
           state: encounterStateOf(record, att), diagnosisCount: record ? record.diagnoses.length : 0, serviceCount: record ? record.services.length : 0,
           renderingProvider: record ? record.renderingProvider : null, signedAt: att ? att.signedAt : null,
-          billingStatus: clinicalRepo.deriveBillingStatus(record, att) });
+          billingStatus: clinicalRepo.deriveBillingStatus(record, att),
+          zeroFeeCharges: clinicalRepo.zeroFeeCharges(record).map(c => ({ code: c.code, modifier: c.modifier || '' })) });
       }
     } else {
       // EMR feed unavailable — degrade to what the app already knows
@@ -18090,7 +18094,8 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         const att = attByUuid.get(record.encounterUuid) || null;
         rows.push({ encounterUuid: record.encounterUuid, clientId: record.clientId, patientName: null, date: record.date, reason: record.reason, provider: null,
           state: encounterStateOf(record, att), diagnosisCount: record.diagnoses.length, serviceCount: record.services.length, renderingProvider: record.renderingProvider, signedAt: att ? att.signedAt : null,
-          billingStatus: clinicalRepo.deriveBillingStatus(record, att) });
+          billingStatus: clinicalRepo.deriveBillingStatus(record, att),
+          zeroFeeCharges: clinicalRepo.zeroFeeCharges(record).map(c => ({ code: c.code, modifier: c.modifier || '' })) });
       }
     }
     // "Awaiting billing" is signed by the clinician and not yet submitted
@@ -18106,7 +18111,11 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
       .sort((a, b) => filter === 'awaiting_billing'
         ? String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))
         : String(b.date || '').localeCompare(String(a.date || '')));
-    res.json({ filter, encounters: filtered, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
+    // Every encounter with a line that posted at $0, whatever the filter, so a
+    // $0 charge is never hidden behind the wrong tab.
+    const zeroFee = rows.filter(r => !voided.has(String(r.encounterUuid)) && r.zeroFeeCharges && r.zeroFeeCharges.length)
+      .map(r => ({ encounterUuid: r.encounterUuid, clientId: r.clientId, patientName: r.patientName, date: r.date, codes: r.zeroFeeCharges.map(c => c.code) }));
+    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });
