@@ -218,8 +218,13 @@ async function main(opts = {}) {
   console.log(`\nNCCI/MUE loader — targeting ${label} (say --quarter=YYYYQN if that is wrong)\n`);
 
   const clinicalSettings = (await db.get('clinical_settings')) || {};
-  const favorites = (Array.isArray(clinicalSettings.serviceCodeFavorites) && clinicalSettings.serviceCodeFavorites.length)
-    ? clinicalSettings.serviceCodeFavorites : clinicalRepo.DEFAULT_SERVICE_CODE_FAVORITES;
+  // The practice's codes come from OpenEMR's catalog as cached by the app
+  // (codeCatalog.js), plus any admin favorites. There is no built-in list.
+  const cachedCatalog = (await db.get('openemr_code_catalog')) || {};
+  const favorites = [
+    ...(Array.isArray(clinicalSettings.serviceCodeFavorites) ? clinicalSettings.serviceCodeFavorites : []),
+    ...(Array.isArray(cachedCatalog.codes) ? cachedCatalog.codes.map(c => ({ code: c.code })) : [])
+  ];
   const codeUsage = (await db.get('clinical_code_usage')) || [];
   const encounterBillingRows = (await db.get('encounter_billing')) || [];
   const codeSet = deriveGfcCodeUniverse({ serviceCodeFavorites: favorites, codeUsage, encounterBillingRows });

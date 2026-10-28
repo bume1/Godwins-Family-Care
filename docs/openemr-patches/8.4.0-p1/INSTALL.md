@@ -179,7 +179,7 @@ cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
 2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
 bcee864f9cf7cc35d3cd61686b65be0437002298ead3c284750e523c385125b2  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
-4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317  src/RestControllers/GfcChargeRestController.php
+9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a  src/RestControllers/GfcChargeRestController.php
 e5365547054b85076b96cd5a2095504884a18ba81e1d0d51fea7bebd505a97c6  src/RestControllers/GfcDocumentRestController.php
 SUMS
 ```
@@ -361,7 +361,7 @@ B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
 sudo curl -fsSL -o src/RestControllers/GfcDocumentRestController.php "$B/src/RestControllers/GfcDocumentRestController.php"
 sha256sum src/RestControllers/GfcChargeRestController.php
-#   expect 4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317
+#   expect 9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
 ```
 
@@ -461,6 +461,31 @@ the whole reason this was invisible for weeks is that the upload answered `200`
 and stored something nobody could open.
 
 ---
+
+## Update 2026-10-28 — the code catalog read, needs a re-fetch and one rebuild
+
+The app now caches the practice's billable CPT and HCPCS codes from OpenEMR
+instead of keeping any list of its own. That needs one new mode on the existing
+`GET /api/codes` route: `?catalog=1` returns every row of the `codes` table for
+CPT4 and HCPCS, with its modifier, both labels and its `active` flag. No fee is
+returned. Same route, same scope (`user/codes.read`), same ACL, so **no OAuth or
+client change**. Only the controller changed.
+
+```
+cd /opt/openemr/gfc-patch
+B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
+sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
+sha256sum -c <<'SUMS'
+9e2a690ac6cec978c39eb65329e75237512e5074a74e249aa291efa7bedf974a  src/RestControllers/GfcChargeRestController.php
+SUMS
+cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
+```
+
+Confirm it inside the container with the `docker compose exec … sha256sum` step
+above. **Until this is deployed the app cannot load the catalog**: the old
+controller answers `?catalog=1` with "A search term of at least 2 characters is
+required", and the admin hub says exactly that rather than falling back to a
+list of its own.
 
 ## Acceptance — ✅ passed 2026-09-06, 17/17
 

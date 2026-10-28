@@ -415,6 +415,15 @@ class GfcChargeRestController
         require_once(__DIR__ . '/../../custom/code_types.inc.php');
         global $code_types;
 
+        // ?catalog=1 is a different question: not "what matches this term" but
+        // "every billable code this practice has entered". It reads the
+        // manually entered `codes` table directly, because that is where
+        // CPT4 and HCPCS live (OpenEMR ships neither; the practice keys them
+        // into the fee schedule). See listCatalog() below.
+        if (!empty($query['catalog'])) {
+            return $this->listCatalog($query, $code_types);
+        }
+
         $result = new ProcessingResult();
         $search = trim((string)($query['search'] ?? ''));
         if (strlen($search) < 2) {
@@ -486,6 +495,67 @@ class GfcChargeRestController
             return $ax <=> $bx;
         });
 
+        $result->setData($rows);
+        return $result;
+    }
+
+    /**
+     * GET /api/codes?catalog=1[&type=CPT4|HCPCS]
+     *
+     * The practice's billable code catalog, for the app to cache (2026-10-28):
+     * OpenEMR is the single source of truth for which CPT and HCPCS codes
+     * exist, and the app keeps none of its own. Every row is returned with its
+     * `active` flag, inactive rows included, so the app can tell a code that
+     * was switched off from one that was never entered — two different
+     * problems with two different fixes. The app offers active rows only.
+     *
+     * No fee is returned. The catalog is codes and labels; prices stay
+     * OpenEMR's business.
+     */
+    private function listCatalog(array $query, array $code_types): ProcessingResult
+    {
+        $result = new ProcessingResult();
+        $allowed = ['CPT4', 'HCPCS'];
+        $type = strtoupper(trim((string)($query['type'] ?? '')));
+        if ($type !== '' && !in_array($type, $allowed, true)) {
+            $result->setValidationMessages(['type' => ['The catalog covers CPT4 and HCPCS only']]);
+            return $result;
+        }
+        $types = [];
+        foreach ($type !== '' ? [$type] : $allowed as $t) {
+            if (!empty($code_types[$t]) && !empty($code_types[$t]['active'])) {
+                $types[] = $t;
+            }
+        }
+        if (empty($types)) {
+            $result->setValidationMessages(['type' => ['Neither CPT4 nor HCPCS is an active code type on this instance']]);
+            return $result;
+        }
+        $cap = 5000;
+        $marks = implode(',', array_fill(0, count($types), '?'));
+        $res = sqlStatement(
+            "SELECT c.code, c.modifier, c.code_text, c.code_text_short, c.active, ct.ct_key AS code_type "
+            . "FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type "
+            . "WHERE ct.ct_key IN ($marks) ORDER BY ct.ct_key, c.code, c.modifier LIMIT " . ($cap + 1),
+            $types
+        );
+        $rows = [];
+        while ($row = sqlFetchArray($res)) {
+            $rows[] = [
+                'code' => (string)$row['code'],
+                'modifier' => (string)($row['modifier'] ?? ''),
+                'code_text' => (string)($row['code_text'] ?? ''),
+                'code_text_short' => (string)($row['code_text_short'] ?? ''),
+                'code_type' => (string)$row['code_type'],
+                'active' => (int)($row['active'] ?? 0),
+            ];
+        }
+        // More rows than the cap is reported, never silently cut: a truncated
+        // catalog would make real codes look missing.
+        if (count($rows) > $cap) {
+            $result->setValidationMessages(['catalog' => ["More than $cap codes; the catalog route needs paging"]]);
+            return $result;
+        }
         $result->setData($rows);
         return $result;
     }

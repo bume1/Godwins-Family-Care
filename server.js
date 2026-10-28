@@ -69,6 +69,7 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // vocabulary lives there rather than in config.js for the same reason the
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
+const codeCatalog = require('./codeCatalog');           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
@@ -149,6 +150,7 @@ try {
   throw err;
 }
 const db = dataStore.createStore();
+const codeCatalogService = codeCatalog.createCodeCatalog({ db, openemr });
 console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (production, inside the BAA boundary)' : ' (non-production)'}`);
 // Transfer-of-Care ROI repository (Session 3.4) — three KV collections
 // (consent_events / consent_provider_authorizations / consent_records_categories)
@@ -229,7 +231,29 @@ app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
 app.use(audit.contextMiddleware);
 app.use(audit.phiAccessMiddleware);
 // Liveness for the load balancer. Names the adapter, never a secret.
-app.get('/healthz', (req, res) => res.json({ ok: true, store: db.adapter, uptimeSeconds: Math.round(process.uptime()), production: process.env.NODE_ENV === 'production' }));
+// The code catalog check rides along as `checks.codeCatalog` but does NOT
+// change this status: the load balancer reads it, and loading the catalog
+// needs a signed-in person (no system login), so a 503 here on a fresh deploy
+// would take the app out of rotation with nobody able to sign in to fix it.
+// The failing check is /healthz/code-catalog.
+const codeCatalogHealth = async () => {
+  try {
+    const st = await codeCatalogService.status();
+    return { ok: st.ok, loaded: st.loaded, stale: st.stale, fetchedAt: st.fetchedAt, problems: st.problems.map(p => p.message) };
+  } catch (e) {
+    return { ok: false, loaded: false, stale: true, fetchedAt: null, problems: [`Could not read the cached code catalog: ${String(e.message).slice(0, 120)}`] };
+  }
+};
+app.get('/healthz', async (req, res) => res.json({
+  ok: true, store: db.adapter, uptimeSeconds: Math.round(process.uptime()), production: process.env.NODE_ENV === 'production',
+  checks: { codeCatalog: await codeCatalogHealth() }
+}));
+// Fails (503) when the catalog has never loaded or a rule list names a code
+// OpenEMR does not hold active. Each problem names the code and the file.
+app.get('/healthz/code-catalog', async (req, res) => {
+  const c = await codeCatalogHealth();
+  res.status(c.ok ? 200 : 503).json(c);
+});
 
 // Static file options with no-cache headers for development
 const staticOptions = {
@@ -11402,10 +11426,12 @@ const getRequisitionSettings = async () => {
 
 const getClinicalSettings = async () => {
   const stored = (await db.get('clinical_settings')) || {};
+  // No built-in default: OpenEMR owns the catalog (2026-10-28). An unset list
+  // is empty, and the picker offers the catalog itself instead.
   const favorites = Array.isArray(stored.serviceCodeFavorites)
     ? clinicalRepo.sanitizeServiceFavorites(stored.serviceCodeFavorites)
-    : [...clinicalRepo.DEFAULT_SERVICE_CODE_FAVORITES];
-  return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'default' };
+    : [];
+  return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'none' };
 };
 
 // The NCCI/MUE sign-time gate's reference data. Read fresh on every sign
@@ -11938,6 +11964,39 @@ const refuseIfClosed = (ctx, res) => {
 // ── Settings ──────────────────────────────────────────────────────────────
 // GET: billing identity + service-code favorites (+ the caller's own NPI so
 // the UI can warn before a real encounter). PUT (admin only): edit them.
+// ── OpenEMR code catalog (2026-10-28) ──────────────────────────────────────
+// OpenEMR's `codes` table is the single source of truth for CPT4 and HCPCS.
+// These two routes are the admin hub's view of the cached copy: how old it is,
+// whether the last refresh failed and why, and any rule-list code OpenEMR does
+// not hold active. A refresh runs with the admin's OWN OpenEMR session.
+const codeCatalogView = async () => {
+  const [st, record] = await Promise.all([codeCatalogService.status(), codeCatalogService.load()]);
+  return { ...st, staleAfterHours: codeCatalog.STALE_AFTER_MS / 36e5, codes: codeCatalog.isLoaded(record) ? record.codes : [] };
+};
+app.get('/api/admin/code-catalog', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    codeCatalogService.refreshIfStale(req.user).catch(() => {});
+    res.json(await codeCatalogView());
+  } catch (error) {
+    console.error('Code catalog status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.post('/api/admin/code-catalog/refresh', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(409).json({ error: 'OpenEMR is not configured on this server.', code: 'EMR_NOT_CONFIGURED', ...(await codeCatalogView()) });
+    const out = await codeCatalogService.refresh(req.user, { trigger: 'manual' });
+    await logActivity(req.user.id, req.user.name, 'code_catalog_refreshed', 'system', 'openemr_code_catalog',
+      { ok: out.ok, activeCount: out.status.activeCount, problems: out.status.problems.length });
+    const view = await codeCatalogView();
+    if (!out.ok) return res.status(502).json({ error: `OpenEMR could not be read: ${out.error}. The cached catalog is still in use.`, code: 'CODE_CATALOG_REFRESH_FAILED', ...view });
+    res.json(view);
+  } catch (error) {
+    console.error('Code catalog refresh error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const [payer, settings, requisition] = await Promise.all([getPayerCredentialing(), getClinicalSettings(), getRequisitionSettings()]);
@@ -12063,6 +12122,7 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
     // explicitly so the notice below can describe the search without anyone
     // having to re-derive it from the `sources` map.
     let emrMatches = 0;
+    let catalogState = null;
     const push = (r) => { if (r.code && !seen.has(r.code)) { seen.add(r.code); results.push(r); } };
     const matches = (r) => !ql || String(r.code).toLowerCase().startsWith(ql.replace(/\./g, '')) || String(r.code).toLowerCase().startsWith(ql) || String(r.description || r.label || '').toLowerCase().includes(ql);
     const sources = {};
@@ -12093,28 +12153,52 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
       const typed = clinicalRepo.normalizeIcd10(q);
       if (typed && !seen.has(typed)) push({ code: typed, description: '', source: 'typed', unverified: true });
     } else {
+      // Every service code offered here must exist and be active in OpenEMR's
+      // catalog (codeCatalog.js, 2026-10-28). A clinician's own history, the
+      // practice favorites and a typed code are all filtered through it, so a
+      // code switched off in OpenEMR stops being offered on the next refresh.
+      // With no catalog cached yet, only OpenEMR's own live rows marked active
+      // are offered: nothing from the app's side can be verified.
       const settings = await getClinicalSettings();
+      const catalog = await codeCatalogService.load();
+      codeCatalogService.refreshIfStale(req.user).catch(() => {});
+      const catalogLoaded = codeCatalog.isLoaded(catalog);
+      catalogState = { loaded: catalogLoaded, fetchedAt: catalogLoaded ? catalog.fetchedAt : null, stale: codeCatalog.isStale(catalog) };
+      const offered = (code) => catalogLoaded && codeCatalog.isOffered(catalog, code);
+      const catalogLabel = (code) => { const e = codeCatalog.entryFor(catalog, code); return e ? (e.shortLabel || e.longLabel) : ''; };
+      const offer = (r) => { if (offered(r.code)) push({ ...r, label: r.label || catalogLabel(r.code) }); };
       const favs = [...clinicalRepo.rankFavorites(usage, req.user.id, 'CPT4', 30), ...clinicalRepo.rankFavorites(usage, req.user.id, 'HCPCS', 30)];
       sources.favorites = favs.length;
       const practice = new Map(settings.serviceCodeFavorites.map(f => [f.code, f]));
-      favs.filter(matches).forEach(f => push({ code: f.code, codeType: clinicalRepo.classifyServiceCode(f.code).codeType, label: (practice.get(f.code) || {}).label || f.description || '', source: 'favorite', count: f.count }));
+      favs.filter(matches).forEach(f => offer({ code: f.code, codeType: clinicalRepo.classifyServiceCode(f.code).codeType, label: (practice.get(f.code) || {}).label || '', source: 'favorite', count: f.count }));
       sources.practiceFavorites = settings.serviceCodeFavorites.length;
-      settings.serviceCodeFavorites.filter(matches).forEach(f => push({ ...f, source: 'practice' }));
+      settings.serviceCodeFavorites.filter(matches).forEach(f => offer({ ...f, source: 'practice' }));
+      const fromCatalog = codeCatalog.offeredEntries(catalog).map(e => ({ code: e.code, codeType: e.codeType, label: e.shortLabel || e.longLabel, source: 'catalog' }));
+      sources.catalog = fromCatalog.length;
+      fromCatalog.filter(matches).forEach(offer);
       for (const t of ['CPT4', 'HCPCS']) {
         const tbl = await searchEmrCodes(req.user, t, q);
         sources[`codeTable${t}`] = tbl.rows.length;
         emrMatches += tbl.rows.length;
-        tbl.rows.forEach(r => push({ code: r.code, codeType: t, label: r.code_text || '', source: 'openemr' }));
+        tbl.rows.forEach(r => {
+          const row = { code: String(r.code || '').toUpperCase(), codeType: t, label: r.code_text || '', source: 'openemr' };
+          if (catalogLoaded) offer(row);
+          else if (Number(r.active) === 1 && !clinicalRoles.isNotOfferedServiceCode(row.code)) push(row);
+        });
       }
       const typed = clinicalRepo.classifyServiceCode(q);
-      if (typed && !seen.has(typed.code)) push({ ...typed, label: '', source: 'typed', unverified: true });
+      if (typed && !seen.has(typed.code)) offer({ ...typed, label: '', source: 'typed' });
     }
     res.json({
-      set, q, results, sources,
+      set, q, results, sources, catalog: catalogState,
       // The notice describes THIS search, never the state of a code set. See
       // searchEmrCodes above for why the app no longer infers the second from
       // the first.
-      notice: emrMatches > 0
+      notice: (set === 'SERVICE' && catalogState && !catalogState.loaded)
+        ? 'The app has no cached copy of OpenEMR\'s code catalog yet, so only codes OpenEMR\'s own search returns as active are offered. An administrator can refresh the catalog from the admin hub.'
+        : (set === 'SERVICE')
+          ? 'Service codes come from OpenEMR\'s code catalog only. A code is offered while OpenEMR holds it active; the app keeps no code list of its own.'
+          : emrMatches > 0
         ? 'Results come from OpenEMR only — its code tables, this patient\'s problem list, your own prior selections, and the practice favorites. The app keeps no code list of its own.'
         : 'No match in OpenEMR\'s code tables for this term. Results shown come from this patient\'s problem list, your own prior selections and the practice favorites; a code typed in full is format-checked here and resolved by OpenEMR on read-back. If OpenEMR never matches any term, an administrator should check that the code set is installed under Administration → Other → External Data Loads.'
     });
@@ -13122,11 +13206,11 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     const { client, emr, record, encounterUuid } = ctx;
     const canBill = clinicalRoles.canSubmitBilling(req.user);
     const billingStatus = clinicalRepo.deriveBillingStatus(record, ctx.attestation);
-    const [emrRowR, notesR, cands, settings, payer, usage, ncci] = await Promise.all([
+    const [emrRowR, notesR, cands, settings, payer, usage, ncci, catalog] = await Promise.all([
       emr.getEncounterRow(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
       emr.getSoapNotes(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
       loadDxCandidates(emr, client, encounterUuid),
-      getClinicalSettings(), getPayerCredentialing(), loadRows('clinical_code_usage'), getNcciTables()
+      getClinicalSettings(), getPayerCredentialing(), loadRows('clinical_code_usage'), getNcciTables(), codeCatalogService.load()
     ]);
     const emrRow = emrRowR.ok ? emrRowR.v : null;
     // The narrative note is read by the sid the app recorded at write time.
@@ -13262,9 +13346,13 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       candidates, candidatesError: cands.error,
       favorites: {
         icd10: clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 15),
-        services: [...clinicalRepo.rankFavorites(usage, req.user.id, 'CPT4', 15), ...clinicalRepo.rankFavorites(usage, req.user.id, 'HCPCS', 15)],
-        practiceServices: settings.serviceCodeFavorites
+        // Offered only while OpenEMR's catalog holds the code active. With no
+        // admin favorites set, the practice list IS the catalog.
+        services: [...clinicalRepo.rankFavorites(usage, req.user.id, 'CPT4', 15), ...clinicalRepo.rankFavorites(usage, req.user.id, 'HCPCS', 15)]
+          .filter(f => codeCatalog.isOffered(catalog, f.code)),
+        practiceServices: codeCatalog.practiceServices(settings.serviceCodeFavorites, catalog)
       },
+      codeCatalog: { loaded: codeCatalog.isLoaded(catalog), fetchedAt: codeCatalog.isLoaded(catalog) ? catalog.fetchedAt : null, stale: codeCatalog.isStale(catalog) },
       billingNpiUsed: payer.billing_npi_used, billingNpiSource: payer.source,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null },
       warnings: [...attestationWarnings, ...(record.structuredNoteError ? [`GFC structured note not synced to OpenEMR: ${record.structuredNoteError}`] : [])],
@@ -13379,6 +13467,28 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
         return res.status(403).json({
           error: clinicalRoles.serviceCodeRefusal(req.user, badCodes),
           code: 'CLINICAL_CODE_SET', codes: badCodes, clinicalRole: clinicalRoles.resolveClinicalRole(req.user)
+        });
+      }
+    }
+    // OpenEMR owns the code catalog (2026-10-28). A service code ADDED on this
+    // save must be active there and one GFC offers; codes already on the
+    // encounter are left alone so re-saving an older visit still works.
+    const priorSvc = new Set((before.services || []).map(x => x.code));
+    const addedSvc = (record.services || []).map(x => x.code).filter(c => !priorSvc.has(c));
+    if (addedSvc.length) {
+      const catalog = await codeCatalogService.load();
+      const notOffered = addedSvc.filter(c => clinicalRoles.isNotOfferedServiceCode(c));
+      if (notOffered.length) {
+        return res.status(400).json({ error: `${notOffered.join(', ')} is outside the services this practice offers and cannot be billed here.`, code: 'SVC_NOT_OFFERED', codes: notOffered });
+      }
+      if (!codeCatalog.isLoaded(catalog)) {
+        return res.status(409).json({ error: 'The app has no cached copy of OpenEMR\'s code catalog yet, so this code cannot be checked. An administrator can refresh the catalog from the admin hub.', code: 'CODE_CATALOG_UNAVAILABLE' });
+      }
+      const notActive = addedSvc.filter(c => !codeCatalog.isOffered(catalog, c));
+      if (notActive.length) {
+        return res.status(400).json({
+          error: `${notActive.join(', ')} is not an active code in OpenEMR's catalog. Add or activate it in OpenEMR's fee schedule, then refresh the catalog from the admin hub.`,
+          code: 'SVC_NOT_IN_CATALOG', codes: notActive, catalogFetchedAt: catalog.fetchedAt
         });
       }
     }
@@ -29113,6 +29223,15 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled promise rejection:', reason);
 });
+
+// Rule lists in source (clinicalRoles.js) are checked against the cached
+// OpenEMR catalog at every boot. A code that is missing or inactive there is
+// logged by code and file; /healthz/code-catalog fails until it is fixed.
+codeCatalogService.status().then(st => {
+  if (!st.loaded) console.error('[code-catalog] No OpenEMR code catalog is cached yet. An admin can load it from the admin hub; until then no service code can be checked.');
+  else if (st.stale) console.error(`[code-catalog] The cached OpenEMR code catalog is stale (fetched ${st.fetchedAt}).`);
+  st.problems.forEach(p => console.error(`[code-catalog] ${p.message}`));
+}).catch(e => console.error('[code-catalog] Could not read the cached catalog at boot:', e.message));
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);

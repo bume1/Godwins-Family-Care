@@ -241,9 +241,17 @@ const BEHAVIORAL_HEALTH_SERVICE_CODES = Object.freeze([
   '90846', '90847', '90849', '90853',             // family / group psychotherapy
   '96127',                                        // brief emotional/behavioural assessment
   '96156', '96158', '96159', '96164', '96165', '96167', '96168', // health behaviour assessment/intervention
-  'G0177', 'G0409', 'G0410',                      // HCPCS BH services
   'H0031', 'H0032', 'H0034', 'H0038'              // HCPCS behavioural health
 ]);
+// Codes GFC never offers, whatever OpenEMR's catalog holds (owner, 2026-10-28):
+// partial hospitalization and CORF services, out of scope for this practice.
+// They are kept out of every picker and refused if posted. This is policy, so
+// it stays in source; it is NOT checked against the catalog, because these
+// codes being absent from OpenEMR is the expected state.
+const NOT_OFFERED_SERVICE_CODES = Object.freeze(['G0177', 'G0409', 'G0410']);
+const isNotOfferedServiceCode = (code) =>
+  NOT_OFFERED_SERVICE_CODES.includes(String(code || '').trim().toUpperCase());
+
 // E/M is a range rather than a list; naming it lets the refusal say WHY.
 const isEvaluationAndManagementCode = (code) => {
   const s = String(code || '').trim().toUpperCase();
@@ -663,6 +671,8 @@ module.exports = {
   canClinicalRead, isCoordinator, canDocumentClinically,
   canClinicalWrite,
   BEHAVIORAL_HEALTH_SERVICE_CODES,
+  NOT_OFFERED_SERVICE_CODES,
+  isNotOfferedServiceCode,
   isEvaluationAndManagementCode,
   isBehavioralHealthCode,
   disallowedServiceCodesFor,

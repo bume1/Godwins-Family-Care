@@ -1079,16 +1079,11 @@ const normalizeNpiValue = (v) => {
   return d.length === 10 ? d : null;
 };
 
-// Default SERVICE-code favorites (spec §2.2): the home-visit E/M range GFC
-// bills. Code NUMBERS only, grouped by family — the AMA descriptors are
-// copyrighted and live in OpenEMR's fee schedule, not here. Admin-editable
-// (clinical_settings.serviceCodeFavorites) — this only seeds an empty list.
-// 99343 is omitted: it was deleted in the 2023 E/M revision; an admin can add
-// it back if the billing consultant says otherwise.
-const DEFAULT_SERVICE_CODE_FAVORITES = Object.freeze([
-  ...['99341', '99342', '99344', '99345'].map(code => ({ code, codeType: 'CPT4', label: 'Home visit · new patient' })),
-  ...['99347', '99348', '99349', '99350'].map(code => ({ code, codeType: 'CPT4', label: 'Home visit · established patient' }))
-]);
+// Practice SERVICE-code favorites (spec §2.2) are admin-set
+// (clinical_settings.serviceCodeFavorites) and there is no built-in default:
+// the app keeps no code list (owner, 2026-10-28). With no favorites set, the
+// picker offers OpenEMR's own catalog (codeCatalog.js). A favorite is only
+// shown while the catalog holds it active.
 const sanitizeServiceFavorites = (list) => {
   const out = []; const seen = new Set();
   for (const item of Array.isArray(list) ? list : []) {
@@ -2969,7 +2964,6 @@ module.exports = {
   normalizeIcd10,
   classifyServiceCode,
   normalizeNpiValue,
-  DEFAULT_SERVICE_CODE_FAVORITES,
   sanitizeServiceFavorites,
   actorStamp,
   actorRecord,

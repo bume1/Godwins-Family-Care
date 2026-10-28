@@ -115,9 +115,8 @@ async function main(opts = {}) {
     db.get('clinical_code_usage'),
     db.get('encounter_billing')
   ]);
-  const favorites = (settings && Array.isArray(settings.serviceCodeFavorites) && settings.serviceCodeFavorites.length)
-    ? settings.serviceCodeFavorites
-    : require(path.join(__dirname, '..', 'clinicalRepository')).DEFAULT_SERVICE_CODE_FAVORITES;
+  // No built-in fallback list: OpenEMR owns the code catalog (2026-10-28).
+  const favorites = (settings && Array.isArray(settings.serviceCodeFavorites)) ? settings.serviceCodeFavorites : [];
 
   const rows = aggregateBillingCodes({ favorites, usageRows: usageRows || [], billingRows: billingRows || [] });
 
