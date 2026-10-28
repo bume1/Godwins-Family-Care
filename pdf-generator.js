@@ -867,6 +867,22 @@ function renderConsentBody(doc, blocks, renderData, geom) {
  * @param {boolean} opts.internal         staff copy — prints the internal review banner
  * @returns {Promise<Buffer>}
  */
+// The client record each copy of a consent is rendered from. Only the
+// provider Release of Information splits: one copy per named prior provider,
+// the same office listed twice (spelling, case) counted once.
+function consentProviderCopies(consentType, client) {
+  if (consentType !== 'roiProvider') return [client];
+  const seen = new Set();
+  const list = (Array.isArray(client.priorProviders) ? client.priorProviders : []).filter(pp => {
+    const key = String((pp && pp.name) || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (list.length < 2) return [client];
+  return list.map(pp => ({ ...client, priorProviders: [pp] }));
+}
+
 async function generateConsentPDF(client, consentType, opts = {}) {
   return new Promise((resolve, reject) => {
     try {
@@ -880,9 +896,12 @@ async function generateConsentPDF(client, consentType, opts = {}) {
       const title = def.title || consentText.titleFor(consentType);
       const clientLabel = consentRender.clientName(client) || 'Client';
 
-      const renderData = consentRender.resolveForConsent(consentText, consentType, client);
-      // A blank copy shows every election unmarked, for the client to tick by hand.
-      renderData.__choices = opts.blank ? {} : (meta.choices || {});
+      // The Release of Information to providers prints ONE PAGE PER PROVIDER
+      // (owner, 2026-10-28), as its own wording says ("Complete one page for
+      // each provider"): each copy names only the provider it goes to, so a
+      // page faxed to one office never lists the others. Every other consent,
+      // and a provider release with one or no provider, is a single copy.
+      const copies = consentProviderCopies(consentType, client);
 
       const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
       const chunks = [];
@@ -891,6 +910,12 @@ async function generateConsentPDF(client, consentType, opts = {}) {
       doc.on('error', reject);
 
       const L = 50, W = 512;
+
+      copies.forEach((copyClient, copyIdx) => {
+      if (copyIdx > 0) doc.addPage();
+      const renderData = consentRender.resolveForConsent(consentText, consentType, copyClient);
+      // A blank copy shows every election unmarked, for the client to tick by hand.
+      renderData.__choices = opts.blank ? {} : (meta.choices || {});
 
       doc.fontSize(17).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text('Godwins Family Care', L, 40);
       doc.fontSize(11.5).fillColor(GFC_COLORS.gold).font('Helvetica-Bold').text(title, L, 63, { width: W });
@@ -981,6 +1006,7 @@ async function generateConsentPDF(client, consentType, opts = {}) {
         .text(`${consentText.ORG.name} · ${consentText.ORG.address} · ${consentText.ORG.phone}. Generated ${new Date().toLocaleString('en-US')}. ` + (opts.blank
           ? 'Document version ' + version + '. Once signed and returned, this consent is recorded against your file and a copy is available in your portal.'
           : 'This is your copy of the document you signed; keep it with your records.'), L, doc.y, { width: W });
+      });
 
       doc.end();
     } catch (err) {
@@ -2558,6 +2584,7 @@ module.exports = {
   generateFaceSheetPDF,
   renderConsentBody,
   generateProviderROIPDF,
+  consentProviderCopies,
   roiText,
   roiDate,
   generateVisitLogPDF,
