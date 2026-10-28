@@ -145,6 +145,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // time an admin or manager reads it. Clinicians' own OpenEMR logins cannot
   // read facilities (owner, 2026-09-29), so a visit a clinician creates takes
   // its place of service from this copy. Org config, not PHI.
+  { key: 'openemr_code_catalog', phi: false, owner: 'code-catalog', note: 'CPT4/HCPCS codes as last read from OpenEMR — the app keeps no catalog of its own' },
   { key: 'openemr_facility_snapshot', phi: false, owner: 'billing-split', note: 'facility id/name/POS as last read by admin or manager — the POS source for clinician-created visits' },
   // NCCI/MUE sign-time bundling check. CMS reference data only — never a
   // patient's own information — so it is deliberately NOT PHI, the same

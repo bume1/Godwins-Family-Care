@@ -772,6 +772,36 @@ const forActor = (actor) => {
       return unwrapApi(data) || [];
     },
 
+    // The practice's whole CPT4/HCPCS catalog (2026-10-28), via the 6B
+    // route's ?catalog=1 mode. Unlike a search, an error here is NOT folded
+    // into an empty list: an empty catalog would make every code look
+    // missing, so the caller must be able to tell "no rows" from "no answer".
+    // An older controller answers with a "search term" validation map, which
+    // is detected here by name so the admin is told to redeploy the patch.
+    async listCodeCatalog({ type } = {}) {
+      const q = new URLSearchParams({ catalog: '1' });
+      if (type) q.set('type', String(type).toUpperCase());
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`codes?${q.toString()}`) });
+      if (res.status === 404) {
+        const e = new Error('OpenEMR has no codes route. The Phase 6B patch is not installed.');
+        e.code = 'CODE_CATALOG_ROUTE_MISSING';
+        throw e;
+      }
+      // A validation map can come back on a 200 or a 400 depending on the
+      // response helper, so it is read before the status check either way.
+      const v = res.data && typeof res.data === 'object' && (res.data.validationErrors || res.data.validation_errors);
+      if (v && typeof v === 'object' && Object.keys(v).length) {
+        const e = new Error(v.search
+          ? 'The OpenEMR codes route is the older version with no catalog mode. Redeploy the 6B patch (INSTALL.md, Update 2026-10-28).'
+          : `OpenEMR refused the catalog read: ${JSON.stringify(v).slice(0, 200)}`);
+        e.code = v.search ? 'CODE_CATALOG_ROUTE_OUTDATED' : 'CODE_CATALOG_REFUSED';
+        throw e;
+      }
+      const data = expectOk(res, 'read code catalog');
+      logEmrAccess(actor, 'read', 'codes', null, { catalog: true, type: type || 'CPT4+HCPCS' });
+      return unwrapApi(data) || [];
+    },
+
     // Signed PDFs and received records → OpenEMR patient Documents.
     //
     // 8.4 CHANGE (verified live 2026-09-06): this route is keyed by NUMERIC pid.

@@ -9038,6 +9038,17 @@
             ))}
           </div>
           {err && <div className="card p-4 text-red-600 text-sm mb-3">{err}</div>}
+          {data && (data.zeroFee || []).length > 0 && (
+            <div className="card !bg-amber-50 border-amber-300 p-3 text-[12.5px] text-amber-900 mb-3">
+              <div className="font-semibold mb-1">Charges posted at $0.00</div>
+              <div className="mb-1.5">OpenEMR had no price for these codes at the patient's price level. Set the price in OpenEMR's fee schedule, then correct the line in Billing Manager.</div>
+              {data.zeroFee.map(z => (
+                <button type="button" key={z.encounterUuid} onClick={() => onOpenEncounter(z.clientId, z.encounterUuid)} className="block text-left underline">
+                  {z.codes.join(', ')} · {z.patientName || 'Patient'}{z.date ? ` · ${fmtDate(z.date)}` : ''} · encounter {String(z.encounterUuid).slice(0, 8)}
+                </button>
+              ))}
+            </div>
+          )}
           {data && data.degraded && <div className="card !bg-amber-50 border-amber-200 p-3 text-[12.5px] text-amber-800 mb-3">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''}. Showing encounters the app has recorded.</div>}
           <div className="card overflow-hidden">
             {!err && !data && <p className="text-sm text-stone-500 px-5 py-6">Loading encounters from OpenEMR…</p>}
@@ -9050,6 +9061,7 @@
                   <div className="text-[14px] font-semibold text-primary truncate">{e.patientName || 'Patient'} · {e.reason}</div>
                   <div className="text-[12.5px] text-stone-500 truncate">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`, e.signedAt && `signed ${fmtTs(e.signedAt)}`].filter(Boolean).join(' · ')}</div>
                 </div>
+                {(e.zeroFeeCharges || []).length > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 whitespace-nowrap">$0 charge: {e.zeroFeeCharges.map(c => c.code).join(', ')}</span>}
                 <EncStateChip state={e.state} />
                 <i className="ti ti-chevron-right text-stone-300" />
               </button>

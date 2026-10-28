@@ -151,6 +151,19 @@
         fetch(`${API_URL}/api/admin/ai/status`, {
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
+      // OpenEMR's code catalog as the app last cached it (2026-10-28). Admin
+      // only server-side; a refused read renders nothing.
+      getCodeCatalog: (token) =>
+        fetch(`${API_URL}/api/admin/code-catalog`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+      // A failed refresh still answers with the cached view, so the body is
+      // read whatever the status: the panel must show the old catalog AND why
+      // the refresh failed.
+      refreshCodeCatalog: (token) =>
+        fetch(`${API_URL}/api/admin/code-catalog/refresh`, {
+          method: 'POST', headers: { 'Authorization': `Bearer ${token}` }
+        }).then(r => r.json().catch(() => ({ error: `HTTP error ${r.status}` }))).catch(err => ({ error: err.message })),
       recheckAi: (token) =>
         fetch(`${API_URL}/api/admin/ai/recheck`, {
           method: 'POST', headers: { 'Authorization': `Bearer ${token}` }
@@ -759,6 +772,56 @@
     // the page restates no role rule of its own. "Run test" is the owner's
     // only proof of the Google side: everything else here can be true while
     // Google still refuses the identity.
+    // The billing code catalog. OpenEMR owns it; the app shows how old its
+    // cached copy is and never hides a stale or failed one. No dismiss button:
+    // the banner clears when the catalog is fresh and every rule-list code is
+    // active in OpenEMR.
+    const CodeCatalogPanel = ({ token }) => {
+      const [view, setView] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      useEffect(() => { api.getCodeCatalog(token).then(d => { if (d && d.loaded !== undefined) setView(d); }); }, [token]);
+      if (!view) return null;
+      const refresh = async () => {
+        setBusy(true); setErr('');
+        const d = await api.refreshCodeCatalog(token);
+        if (d && d.loaded !== undefined) setView(d);
+        if (d && d.error) setErr(d.error);
+        setBusy(false);
+      };
+      const when = view.fetchedAt ? new Date(view.fetchedAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : null;
+      const last = view.lastAttempt;
+      const warn = !view.loaded || view.stale || (view.problems || []).length > 0 || (last && !last.ok);
+      return (
+        <div className={`p-4 rounded-xl border ${warn ? 'bg-amber-50 border-amber-300' : 'bg-white border-gray-200'}`}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className={`font-semibold ${warn ? 'text-amber-900' : 'text-gray-900'}`}>
+                {!view.loaded ? 'Billing code catalog not loaded' : view.stale ? 'Billing code catalog is stale' : 'Billing code catalog'}
+              </p>
+              <p className={`text-sm mt-1 ${warn ? 'text-amber-800' : 'text-gray-600'}`}>
+                {view.loaded
+                  ? `${view.activeCount} active CPT and HCPCS codes from OpenEMR, last refreshed ${when}.`
+                  : 'The app has never read OpenEMR\'s code catalog, so no service code can be checked or offered from the app\'s side.'}
+                {view.loaded && view.stale ? ` That is more than ${view.staleAfterHours} hours ago; the cached copy is still in use.` : ''}
+              </p>
+              {last && !last.ok && (
+                <p className="text-sm text-amber-800 mt-1">Last refresh failed {new Date(last.at).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}: {last.error}</p>
+              )}
+              {(view.problems || []).map(p => (
+                <p key={`${p.file}:${p.code}`} className="text-sm text-amber-900 mt-1">{p.message}</p>
+              ))}
+              {err && <p className="text-sm text-red-700 mt-1">{err}</p>}
+            </div>
+            <button onClick={refresh} disabled={busy}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold bg-primary-600 text-white disabled:opacity-50">
+              {busy ? 'Refreshing…' : 'Refresh Catalog'}
+            </button>
+          </div>
+        </div>
+      );
+    };
+
     const AiSetupPanel = ({ token }) => {
       const [st, setSt] = useState(null);
       const [busy, setBusy] = useState(null);
@@ -996,6 +1059,7 @@
               if the server refuses the status read, so this page restates no
               role rule of its own. */}
           <AiSetupPanel token={token} />
+          <CodeCatalogPanel token={token} />
           {/* Dynamic Banner Header */}
           <div className="relative rounded-2xl overflow-hidden shadow-lg" style={{minHeight: '200px'}}>
             <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-admin.webp)', backgroundPosition: 'center 18%'}}></div>

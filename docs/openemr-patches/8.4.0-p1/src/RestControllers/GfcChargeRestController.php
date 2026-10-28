@@ -101,12 +101,31 @@ class GfcChargeRestController
             $units = 1;
         }
 
-        $fee = $data['fee'] ?? '0.00';
-        if (!is_numeric($fee)) {
-            $result->setValidationMessages(['fee' => ['fee must be numeric']]);
-            return $result;
+        $modifier = trim((string)($data['modifier'] ?? ''));
+
+        // The fee (2026-10-28). A posted fee is used as given. With none, the
+        // price is resolved the way the Fee Sheet resolves it: the prices row
+        // for this code's `codes` id at the patient's price level, times
+        // units. It used to default to 0.00, so every charge the app posted
+        // reached Billing Manager at $0. A code with no price at all still
+        // posts at 0.00, but the response says so (fee_source "none") and the
+        // app shows it on the coding queue.
+        $posted = $data['fee'] ?? null;
+        if ($posted !== null && $posted !== '') {
+            if (!is_numeric($posted)) {
+                $result->setValidationMessages(['fee' => ['fee must be numeric']]);
+                return $result;
+            }
+            $price = [
+                'fee' => sprintf('%01.2f', (float)$posted),
+                'unit_price' => null,
+                'price_level' => self::patientPriceLevel($pid),
+                'source' => 'posted',
+            ];
+        } else {
+            $price = self::resolveFee($pid, $codeType, $code, $modifier, $units);
         }
-        $fee = sprintf('%01.2f', (float)$fee);
+        $fee = $price['fee'];
 
         // Diagnosis pointers. OpenEMR stores billing.justify as colon-separated
         // entries, each optionally "TYPE|CODE" — Claim::diagIndexArray() splits
@@ -147,14 +166,14 @@ class GfcChargeRestController
             $pid,
             (string)((int)($data['authorized'] ?? 1)),
             $providerId,
-            trim((string)($data['modifier'] ?? '')),
+            $modifier,
             $units,
             $fee,
             (string)($data['ndc_info'] ?? ''),
             $justify,
             0,
             (string)($data['notecodes'] ?? ''),
-            (string)($data['pricelevel'] ?? ''),
+            (string)$price['price_level'],
             (string)($data['revenue_code'] ?? ''),
             (string)($data['payer_id'] ?? '0')
         );
@@ -165,8 +184,83 @@ class GfcChargeRestController
         }
 
         $row = sqlQuery("SELECT * FROM billing WHERE id = ?", [$billingId]);
-        $result->addData($row ?: ['id' => $billingId]);
+        $row = $row ?: ['id' => $billingId];
+        // The fee that was used, and where it came from, so the caller can see
+        // a $0 charge rather than discover it in Billing Manager.
+        $row['fee_used'] = $fee;
+        $row['fee_source'] = $price['source'];
+        $row['unit_price'] = $price['unit_price'];
+        $row['price_level'] = $price['price_level'];
+        $result->addData($row);
         return $result;
+    }
+
+    /**
+     * The patient's price level, as the Fee Sheet reads it: patient_data.pricelevel,
+     * else the default option on the `pricelevel` list, else "standard".
+     */
+    public static function patientPriceLevel(int $pid): string
+    {
+        $pd = sqlQuery("SELECT pricelevel FROM patient_data WHERE pid = ?", [$pid]);
+        $level = trim((string)($pd['pricelevel'] ?? ''));
+        if ($level !== '') {
+            return $level;
+        }
+        $def = sqlQuery(
+            "SELECT option_id FROM list_options WHERE list_id = 'pricelevel' AND activity = 1 "
+            . "ORDER BY is_default DESC, seq ASC LIMIT 1"
+        );
+        $level = trim((string)($def['option_id'] ?? ''));
+        return $level !== '' ? $level : 'standard';
+    }
+
+    /** The prices row for one `codes` row at one level, or null when none exists. */
+    private static function priceFor(string $codeType, string $code, string $modifier, string $level): ?float
+    {
+        $codeRow = sqlQuery(
+            "SELECT c.id FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type "
+            . "WHERE ct.ct_key = ? AND c.code = ? AND c.modifier = ? ORDER BY c.active DESC, c.id ASC LIMIT 1",
+            [$codeType, $code, $modifier]
+        );
+        if (empty($codeRow['id'])) {
+            return null;
+        }
+        $priceRow = sqlQuery(
+            "SELECT pr_price FROM prices WHERE pr_id = ? AND pr_selector = '' AND pr_level = ?",
+            [(int)$codeRow['id'], $level]
+        );
+        if (empty($priceRow) || !isset($priceRow['pr_price']) || !is_numeric($priceRow['pr_price'])) {
+            return null;
+        }
+        return (float)$priceRow['pr_price'];
+    }
+
+    /**
+     * Resolve a charge's fee the way the Fee Sheet does: the price of this
+     * code's `codes` row at the patient's price level, times units. A line with
+     * a modifier and no priced row for that modifier falls back to the base
+     * code's price (the `codes` row with no modifier). Source is one of
+     * price_table, base_code_fallback or none.
+     */
+    public static function resolveFee(int $pid, string $codeType, string $code, string $modifier, int $units): array
+    {
+        $level = self::patientPriceLevel($pid);
+        $units = max(1, $units);
+        $source = 'price_table';
+        $unit = self::priceFor($codeType, $code, $modifier, $level);
+        if ($unit === null && $modifier !== '') {
+            $unit = self::priceFor($codeType, $code, '', $level);
+            $source = 'base_code_fallback';
+        }
+        if ($unit === null) {
+            return ['fee' => '0.00', 'unit_price' => null, 'price_level' => $level, 'source' => 'none'];
+        }
+        return [
+            'fee' => sprintf('%01.2f', $unit * $units),
+            'unit_price' => sprintf('%01.2f', $unit),
+            'price_level' => $level,
+            'source' => $source,
+        ];
     }
 
     /**
@@ -415,6 +509,15 @@ class GfcChargeRestController
         require_once(__DIR__ . '/../../custom/code_types.inc.php');
         global $code_types;
 
+        // ?catalog=1 is a different question: not "what matches this term" but
+        // "every billable code this practice has entered". It reads the
+        // manually entered `codes` table directly, because that is where
+        // CPT4 and HCPCS live (OpenEMR ships neither; the practice keys them
+        // into the fee schedule). See listCatalog() below.
+        if (!empty($query['catalog'])) {
+            return $this->listCatalog($query, $code_types);
+        }
+
         $result = new ProcessingResult();
         $search = trim((string)($query['search'] ?? ''));
         if (strlen($search) < 2) {
@@ -486,6 +589,67 @@ class GfcChargeRestController
             return $ax <=> $bx;
         });
 
+        $result->setData($rows);
+        return $result;
+    }
+
+    /**
+     * GET /api/codes?catalog=1[&type=CPT4|HCPCS]
+     *
+     * The practice's billable code catalog, for the app to cache (2026-10-28):
+     * OpenEMR is the single source of truth for which CPT and HCPCS codes
+     * exist, and the app keeps none of its own. Every row is returned with its
+     * `active` flag, inactive rows included, so the app can tell a code that
+     * was switched off from one that was never entered — two different
+     * problems with two different fixes. The app offers active rows only.
+     *
+     * No fee is returned. The catalog is codes and labels; prices stay
+     * OpenEMR's business.
+     */
+    private function listCatalog(array $query, array $code_types): ProcessingResult
+    {
+        $result = new ProcessingResult();
+        $allowed = ['CPT4', 'HCPCS'];
+        $type = strtoupper(trim((string)($query['type'] ?? '')));
+        if ($type !== '' && !in_array($type, $allowed, true)) {
+            $result->setValidationMessages(['type' => ['The catalog covers CPT4 and HCPCS only']]);
+            return $result;
+        }
+        $types = [];
+        foreach ($type !== '' ? [$type] : $allowed as $t) {
+            if (!empty($code_types[$t]) && !empty($code_types[$t]['active'])) {
+                $types[] = $t;
+            }
+        }
+        if (empty($types)) {
+            $result->setValidationMessages(['type' => ['Neither CPT4 nor HCPCS is an active code type on this instance']]);
+            return $result;
+        }
+        $cap = 5000;
+        $marks = implode(',', array_fill(0, count($types), '?'));
+        $res = sqlStatement(
+            "SELECT c.code, c.modifier, c.code_text, c.code_text_short, c.active, ct.ct_key AS code_type "
+            . "FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type "
+            . "WHERE ct.ct_key IN ($marks) ORDER BY ct.ct_key, c.code, c.modifier LIMIT " . ($cap + 1),
+            $types
+        );
+        $rows = [];
+        while ($row = sqlFetchArray($res)) {
+            $rows[] = [
+                'code' => (string)$row['code'],
+                'modifier' => (string)($row['modifier'] ?? ''),
+                'code_text' => (string)($row['code_text'] ?? ''),
+                'code_text_short' => (string)($row['code_text_short'] ?? ''),
+                'code_type' => (string)$row['code_type'],
+                'active' => (int)($row['active'] ?? 0),
+            ];
+        }
+        // More rows than the cap is reported, never silently cut: a truncated
+        // catalog would make real codes look missing.
+        if (count($rows) > $cap) {
+            $result->setValidationMessages(['catalog' => ["More than $cap codes; the catalog route needs paging"]]);
+            return $result;
+        }
         $result->setData($rows);
         return $result;
     }
