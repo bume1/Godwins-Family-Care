@@ -243,3 +243,14 @@ test('the link\'s release routes exist, take no session, and never read the pati
   assert.ok(/app\.post\('\/api\/gfc\/transfer-roi\/submit'[^]*?handleRoiSubmit\(req, res,/.test(server));
   assert.ok(/app\.post\('\/api\/gfc\/transfer-roi\/upload'[^]*?handleRoiUpload\(req, res,/.test(server));
 });
+
+test('the link page and the reset page show the office main line, the same one the consents print', () => {
+  const fs = require('fs'); const path = require('path');
+  const { ORG } = require('../public/consent-text');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'upload-link.html'), 'utf8');
+  assert.ok(page.includes(`const OFFICE_PHONE = '${ORG.phone}';`), 'the upload link page must show ORG.phone');
+  for (const f of ['upload-link.html', 'password-reset.html']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
+    assert.doesNotMatch(src, /365-8378|3658378|913-4582/, `${f} still carries an old office number`);
+  }
+});

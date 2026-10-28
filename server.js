@@ -7992,7 +7992,7 @@ async function renderConsentPdf(client, consentType, opts = {}) {
   }
   const meta = (client.consentMeta || {})[consentType] || {};
   const pdf = await pdfGenerator.generateConsentPDF(client, consentType, {
-    def, status, meta, blank: !!opts.blank, internal: !opts.blank && opts.audience === 'staff'
+    def, status, meta, blank: !!opts.blank
   });
   const prefix = opts.blank ? 'FOR-SIGNATURE-' : '';
   return { pdf, fileName: `${prefix}${def.title.replace(/[^A-Za-z0-9]+/g, '-')}-${consentFileSlug(client)}.pdf`, status, version: meta.version || def.bodyVersion };
@@ -8007,7 +8007,7 @@ async function buildEnrollmentPacketZip(client, opts = {}) {
   // The summary first, so the archive opens with the cover sheet.
   entries.push({
     name: '00 - Enrollment summary.pdf',
-    data: await pdfGenerator.generateEnrollmentPacketPDF(client, { internal: opts.audience === 'staff' })
+    data: await pdfGenerator.generateEnrollmentPacketPDF(client)
   });
   let n = 1;
   for (const type of types) {

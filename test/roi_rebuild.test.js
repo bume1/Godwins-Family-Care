@@ -195,3 +195,25 @@ test('the form pre-fills only providers without a release in force', () => {
   assert.match(PORTAL, /const pre = all\.filter\(p => !p\.activeAuthorization\);/);
   assert.match(PORTAL, /Request Again/);
 });
+
+// ── The enrollment consent's copy: one per provider (owner, 2026-10-28) ──
+test('the provider Release of Information copy splits into one copy per named provider', () => {
+  const pdfGen = require('../pdf-generator');
+  const client = { id: 'c', name: 'A B', priorProviders: [{ name: 'Northside Hospital' }, { name: 'Piedmont Clinic' }, { name: 'northside  hospital' }, { name: '' }] };
+  const copies = pdfGen.consentProviderCopies('roiProvider', client);
+  assert.equal(copies.length, 2, 'two real providers, the duplicate spelling and the blank row dropped');
+  assert.deepEqual(copies.map(c => c.priorProviders.map(p => p.name)), [['Northside Hospital'], ['Piedmont Clinic']], 'each copy names only its own provider');
+  assert.equal(pdfGen.consentProviderCopies('roiProvider', { ...client, priorProviders: [{ name: 'Solo' }] }).length, 1);
+  assert.equal(pdfGen.consentProviderCopies('npp', client).length, 1, 'no other consent splits');
+});
+
+test('the rendered copy for two providers is exactly twice the one-provider copy', async () => {
+  const pdfGen = require('../pdf-generator');
+  const { PDFDocument } = require('pdf-lib');
+  const meta = { signedAt: '2026-10-28T15:00:00Z', typedName: 'A B' };
+  const base = { id: 'c', name: 'A B', intake: { dob: '1950-03-04' } };
+  const one = await pdfGen.generateConsentPDF({ ...base, priorProviders: [{ name: 'Solo Clinic' }] }, 'roiProvider', { status: 'signed', meta });
+  const two = await pdfGen.generateConsentPDF({ ...base, priorProviders: [{ name: 'Northside Hospital' }, { name: 'Piedmont Clinic' }] }, 'roiProvider', { status: 'signed', meta });
+  const pages = async (b) => (await PDFDocument.load(b)).getPageCount();
+  assert.equal(await pages(two), 2 * (await pages(one)));
+});

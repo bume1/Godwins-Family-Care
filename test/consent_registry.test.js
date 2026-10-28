@@ -439,15 +439,11 @@ test('the consent registry endpoint is staff-gated and serves the whole list', (
 
 // ── The client's copy is the client's (Scope E2) ─────────────────────
 
-test('the internal review banner never renders on a client-facing packet', () => {
+test('no PDF carries the review or test-data banner, staff copies included (owner, 2026-10-28)', () => {
   const pdfSrc = fs.readFileSync(path.join(root, 'pdf-generator.js'), 'utf8');
-  const banner = pdfSrc.split('\n').filter(l => l.includes('counsel'));
-  // Every mention must be inside an `options.internal` branch or a comment.
-  const rendered = banner.filter(l => l.includes('.text(') );
-  rendered.forEach(l => {
-    assert.ok(l.includes('INTERNAL COPY'), `client-facing banner still present: ${l.trim().slice(0, 80)}`);
-  });
-  assert.ok(pdfSrc.includes('if (options && options.internal)'), 'the packet banner is gated on the staff audience');
+  const drawn = pdfSrc.split('\n').filter(l => l.includes('.text(') && /INTERNAL COPY|Test data|counsel/i.test(l));
+  assert.deepEqual(drawn, [], 'a PDF still draws the banner');
+  assert.doesNotMatch(serverSrc, /internal: !opts\.blank|internal: opts\.audience/, 'a caller still asks for the banner');
   const portalSrc = fs.readFileSync(path.join(root, 'public', 'portal.html'), 'utf8');
   assert.equal(/Working draft — pending counsel/.test(portalSrc), false, 'and off the client portal too');
 });

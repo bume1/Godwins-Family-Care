@@ -36,6 +36,11 @@
     // back beyond a first name, a last initial and which documents are
     // still owed. See uploadLinks.js for what makes that safe.
     const MAX_FILE_BYTES = 10 * 1024 * 1024;
+    // The office main line, the same one the consents print (ORG.phone in
+    // consent-text.js). Written once here because this page also shows it on
+    // a dead or turned-off link, where the server sends nothing back.
+    const OFFICE_PHONE = '404-913-6705';
+    const OFFICE_TEL = 'tel:+14049136705';
 
     function fileToDataUrl(file) {
       return new Promise((resolve, reject) => {
@@ -525,7 +530,7 @@
                 <h1 className="text-white text-xl font-bold tracking-tight">Godwins Family Care</h1>
                 <p className="text-blue-200 text-xs mt-0.5">Send a document — no account needed</p>
               </div>
-              <span className="text-blue-200 text-sm hidden sm:block">(888) 365-8378</span>
+              <a href={OFFICE_TEL} className="text-blue-200 text-sm hidden sm:block">{OFFICE_PHONE}</a>
             </div>
           </header>
 
@@ -568,7 +573,7 @@
                   </div>
 
                   <p className="text-center text-xs text-gray-400 px-4">
-                    Sending something not on this list, or need help? Call the office at (404) 913-4582.
+                    Sending something not on this list, or need help? Call the office at <a href={OFFICE_TEL} className="underline">{OFFICE_PHONE}</a>.
                   </p>
                 </div>
               )}
@@ -582,7 +587,7 @@
                   </div>
                   <h2 className="text-gray-900 font-semibold text-lg mb-2">This link was turned off</h2>
                   <p className="text-gray-500 text-sm mb-6">Ask your care team for a new one.</p>
-                  <a href="tel:8883658378" className="inline-block bg-primary text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">Call (888) 365-8378</a>
+                  <a href={OFFICE_TEL} className="inline-block bg-primary text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">Call {OFFICE_PHONE}</a>
                 </div>
               )}
 
@@ -595,7 +600,7 @@
                   </div>
                   <h2 className="text-gray-900 font-semibold text-lg mb-2">This link isn't valid</h2>
                   <p className="text-gray-500 text-sm mb-6">{state === 'error' ? errorMsg : 'Double check the link, or ask your care team to send a new one.'}</p>
-                  <a href="tel:8883658378" className="inline-block bg-primary text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">Call (888) 365-8378</a>
+                  <a href={OFFICE_TEL} className="inline-block bg-primary text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">Call {OFFICE_PHONE}</a>
                 </div>
               )}
 
