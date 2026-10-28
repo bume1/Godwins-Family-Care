@@ -161,7 +161,10 @@ test('the PDF input is built from stored records: the snapshot wins, protected c
 });
 
 // ── The routes ───────────────────────────────────────────────────────────
-const submit = SERVER.slice(SERVER.indexOf("app.post('/api/gfc/transfer-roi/submit'"), SERVER.indexOf('// Get portal settings (admin configurable HubSpot embeds)'));
+// The portal route and the no-login upload link both file through ONE
+// handler (owner, 2026-10-28), so the rules below are read from it.
+const submit = SERVER.slice(SERVER.indexOf('const handleRoiSubmit = async (req, res, ctx) =>'), SERVER.indexOf("app.post('/api/gfc/transfer-roi/submit'"));
+assert.ok(submit.length > 2000, 'precondition: the shared submit handler was found');
 
 test('every PDF is rendered before anything is written', () => {
   const render = submit.indexOf('pdfGenerator.generateProviderROIPDF(');
@@ -171,7 +174,9 @@ test('every PDF is rendered before anything is written', () => {
 });
 
 test('the identity is the record\'s, and the confirmation goes only to addresses on file', () => {
-  assert.match(submit, /const \{ patient \} = roiPatientIdentity\(client, b\);/);
+  // The portal prints the record's identity; the link prints the record's
+  // name and DOB (just matched) and only the address and phone the signer typed.
+  assert.match(submit, /const \{ patient \} = ctx\.viaLink \? roiLinkPatientIdentity\(client, b\) : roiPatientIdentity\(client, b\);/);
   assert.doesNotMatch(submit, /patientName: b\.patientName/);
   assert.doesNotMatch(SERVER, /submitterEmail/);
 });

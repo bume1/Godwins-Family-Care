@@ -58,6 +58,11 @@ gdrive.uploadClientDocumentFile = async (clientName, fileName, buf, mime) => {
   DRIVE.set(id, { buf, mime, fileName });
   return { fileId: id, webViewLink: `https://drive.test/${id}`, webContentLink: null };
 };
+gdrive.uploadProviderROIFile = async (folder, fileName, buf) => {
+  const id = `roi_${DRIVE.size + 1}`;
+  DRIVE.set(id, { buf, mime: 'application/pdf', fileName });
+  return { webViewLink: `https://drive.test/${id}` };
+};
 
 const jwt = require('jsonwebtoken');
 const config = require(path.join(__dirname, '..', 'config.js'));
@@ -109,7 +114,7 @@ const CLIENT = {
   id: 'ulk_client_1', role: config.ROLES.CLIENT, email: 'juanita@example.test',
   name: 'Juanita Guess', slug: 'juanita-guess', serviceLine: 'PHC',
   enrollmentStatus: 'intake_complete', consents: {}, consentMeta: {},
-  intake: { firstName: 'Juanita', lastName: 'Guess' }
+  intake: { firstName: 'Juanita', lastName: 'Guess', dob: '1950-03-04', address: '123 Secret Lane, Atlanta, GA 30301', phone: '404-555-0000' }
 };
 // requireClientForIntake (not requireEnrolledClient) gates the upload-link
 // management routes, same as the client's own document upload — most of
@@ -300,6 +305,93 @@ const STAFF = { id: 'ulk_staff_1', role: config.ROLES.ADMIN, email: 'staff@examp
     linkRow && linkRow.channel === 'link' && linkRow.source === 'client', JSON.stringify(linkRow));
   check('status received, not accepted — an anonymous submission still gets reviewed',
     linkRow && linkRow.status === 'received');
+
+  console.log('\n── Record release (Transfer-of-Care ROI) through the link ──');
+  const roiBase = `/api/gfc/upload/${freshToken}/transfer-roi`;
+  r = await call('GET', roiBase, null);
+  check('the form info loads with no login', r.status === 200, JSON.stringify(r.body));
+  const roiInfo = JSON.stringify(r.body);
+  check('it reads nothing about the patient back — no DOB, no address, no providers',
+    !roiInfo.includes('1950') && !roiInfo.includes('Secret') && !('priorProviders' in r.body) && !('patient' in r.body), roiInfo);
+  check('it carries the record categories and who the records go to',
+    Array.isArray(r.body.recordCategories) && r.body.releaseTo && r.body.releaseTo.fax);
+
+  // A real 1x1 PNG padded past the validator's "a stroke was drawn" length (as verify_roi.js does).
+  const SIG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' + 'A'.repeat(120);
+  const roiBody = (over) => Object.assign({
+    patientName: 'Juanita Guess', patientDOB: '1950-03-04',
+    providers: [{ name: 'Northside Hospital', dept: 'Medical Records', fax: '404-555-1234' }],
+    categories: { hp: true, lab: true },
+    signatureImageB64: SIG, printedName: 'Ada Guess', relationship: 'Daughter'
+  }, over || {});
+  const eventsBefore = ((await new MemDb().get('consent_events')) || []).length;
+
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientDOB: '' }));
+  check('a blank date of birth is a field error, not a wrong guess', r.status === 400 && r.body.code === 'ROI_508_INCOMPLETE', JSON.stringify(r.body));
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientDOB: '1950-03-05' }));
+  check('a wrong date of birth is refused', r.status === 400 && r.body.code === 'ROI_LINK_IDENTITY_MISMATCH', JSON.stringify(r.body));
+  check('and the refusal does not say which part was wrong', !/birth.*wrong|name.*wrong/i.test(r.body.error));
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientName: 'Somebody Else' }));
+  check('a wrong name is refused the same way', r.status === 400 && r.body.code === 'ROI_LINK_IDENTITY_MISMATCH');
+  check('nothing was filed by any refused attempt',
+    ((await new MemDb().get('consent_events')) || []).length === eventsBefore);
+
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientDOB: '03/04/1950' }));
+  check('the right name and date of birth file the release', r.status === 200 && r.body.providerCount === 1, JSON.stringify(r.body).slice(0, 300));
+  const copies = r.body.copies || [];
+  check('the signer gets their copy back, a real PDF',
+    copies.length === 1 && Buffer.from(copies[0].pdfB64, 'base64').subarray(0, 5).toString() === '%PDF-');
+  const linkEventId = r.body.eventId;
+  const linkEvent = ((await new MemDb().get('consent_events')) || []).find(e => e.id === linkEventId);
+  check('stored as an online-form release that came through the link',
+    linkEvent && linkEvent.source === 'portal_online_form' && linkEvent.channel === 'link', JSON.stringify(linkEvent && { s: linkEvent.source, c: linkEvent.channel }));
+  check('the record\'s name and DOB print; the record\'s address and phone do NOT (only what was typed)',
+    linkEvent && linkEvent.patient_snapshot.patientName === 'Juanita Guess' && linkEvent.patient_snapshot.patientDOB === '1950-03-04'
+      && !linkEvent.patient_snapshot.patientAddress && !linkEvent.patient_snapshot.patientPhone, JSON.stringify(linkEvent && linkEvent.patient_snapshot));
+  const afterUsers = await new MemDb().get('users');
+  const afterClient = afterUsers.find(u => u.id === CLIENT.id);
+  check('the client\'s release status is now signed', afterClient.consents.roiTransfer === 'signed');
+  check('the provider joined the client\'s prior-provider list',
+    (afterClient.priorProviders || []).some(p => p.name === 'Northside Hospital'));
+
+  r = await call('GET', '/api/gfc/transfer-roi', ct);
+  check('ONE store, either door: the signed-in client sees the link release in the portal',
+    r.status === 200 && r.body.authorizations.some(a => a.providerName === 'Northside Hospital'), JSON.stringify(r.body.authorizations));
+
+  r = await call('POST', `${roiBase}/upload`, null, { fileName: 'release.png', fileDataB64: b64(PNG), patientName: 'Juanita Guess', patientDOB: '1950-03-04' });
+  check('a signed scan can be sent through the link too', r.status === 200, JSON.stringify(r.body));
+  const scanEvent = ((await new MemDb().get('consent_events')) || []).find(e => e.id === r.body.eventId);
+  check('stored as an upload that came through the link', scanEvent && scanEvent.source === 'portal_upload' && scanEvent.channel === 'link');
+  r = await call('POST', `${roiBase}/upload`, null, { fileName: 'release.png', fileDataB64: b64(PNG), patientName: 'Juanita Guess', patientDOB: '1951-01-01' });
+  check('a scan with the wrong date of birth is refused too', r.status === 400 && r.body.code === 'ROI_LINK_IDENTITY_MISMATCH');
+
+  console.log('\n── The signed-in portal release still works after the refactor ──');
+  r = await call('POST', '/api/gfc/transfer-roi/submit', ct, roiBody({ providers: [{ name: 'Piedmont Clinic', fax: '404-555-9999' }] }));
+  check('portal submit files', r.status === 200 && r.body.providerCount === 1, JSON.stringify(r.body).slice(0, 300));
+  check('and returns no inline copies (the portal has its own download)', !('copies' in r.body));
+  const portalEvent = ((await new MemDb().get('consent_events')) || []).find(e => e.id === r.body.eventId);
+  check('stored with channel portal, and the record address prints as before',
+    portalEvent && portalEvent.channel === 'portal' && /Secret Lane/.test(portalEvent.patient_snapshot.patientAddress || ''), JSON.stringify(portalEvent && portalEvent.patient_snapshot));
+
+  console.log('\n── Wrong guesses lock the link\'s release form for the day ──');
+  // Three wrong guesses so far (two on the form, one on the scan).
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientDOB: '1940-01-01' }));
+  r = await call('POST', `${roiBase}/submit`, null, roiBody({ patientDOB: '1940-01-02' }));
+  check('the fifth wrong guess is still answered as a mismatch', r.status === 400 && r.body.code === 'ROI_LINK_IDENTITY_MISMATCH', JSON.stringify(r.body));
+  r = await call('POST', `${roiBase}/submit`, null, roiBody());
+  check('after five, even the RIGHT answer is refused, so the lock cannot be used as an oracle',
+    r.status === 429 && r.body.code === 'ROI_LINK_LOCKED', JSON.stringify(r.body));
+  r = await call('POST', `/api/gfc/upload/${freshToken}`, null, { kind: 'insuranceCard', fileName: 'c.png', fileDataB64: b64(PNG) });
+  check('the lock is on the release form only; the document checklist answers as before', r.status === 429 && r.body.code === 'LINK_RATE_LIMITED');
+
+  r = await call('POST', '/api/gfc/documents/upload-link/revoke', ct);
+  r = await call('GET', roiBase, null);
+  check('a turned-off link answers 410 on the release form as well', r.status === 410);
+  r = await call('POST', `${roiBase}/submit`, null, roiBody());
+  check('and cannot file one', r.status === 410);
+
+  const roiLog = ((await new MemDb().get('activity_log')) || []).find(e => e.action === 'roi_transfer_signed' && e.details && e.details.channel === 'link');
+  check('the link release is audited and attributed to the link, not a session', roiLog && roiLog.userId === null, JSON.stringify(roiLog));
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);

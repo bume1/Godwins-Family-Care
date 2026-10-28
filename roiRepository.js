@@ -393,6 +393,10 @@ function createRepository(db) {
       // reprints the same identity even if the client record changes.
       patient_snapshot: input.patient_snapshot || null,
       source: input.source || SOURCE.ONLINE_FORM,
+      // Which door it came through: the signed-in portal, or the no-login
+      // upload link. Kept beside `source` (form vs scan) rather than folded
+      // into it, so every reader of `source` keeps working.
+      channel: input.channel === 'link' ? 'link' : 'portal',
       created_at: input.created_at || now
     };
   }

@@ -126,10 +126,372 @@
       );
     }
 
+
+    // ── Record release (Transfer-of-Care ROI) through this link
+    // (owner, 2026-10-28). The same release the portal offers after
+    // enrollment, filed the same way. Nothing about the patient is filled in
+    // here: the signer types the patient's name and date of birth and the
+    // server checks them against the file. Their signed copy comes back with
+    // the answer, because they may have no portal to fetch it from later.
+    const roiInput = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary';
+
+    function RoiField({ label, value, onChange, type = 'text', placeholder, maxLength, hint }) {
+      return (
+        <label className="block mt-3">
+          <span className="text-xs font-medium text-gray-700">{label}</span>
+          <input className={roiInput + ' mt-1'} type={type} value={value || ''} placeholder={placeholder}
+            maxLength={maxLength} onChange={e => onChange(e.target.value)} />
+          {hint && <span className="block text-[11px] text-gray-500 mt-1">{hint}</span>}
+        </label>
+      );
+    }
+
+    function RoiCheck({ on, onClick, children, disabled }) {
+      return (
+        <button type="button" onClick={disabled ? undefined : onClick}
+          className={`w-full flex items-start gap-2.5 text-left text-sm py-1.5 ${disabled ? 'cursor-default' : ''}`}>
+          <span className={`w-4 h-4 mt-0.5 rounded border flex items-center justify-center flex-shrink-0 ${on ? 'bg-primary border-primary' : 'bg-white border-gray-400'}`}>
+            {on && <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+          </span>
+          <span className="text-gray-800">{children}</span>
+        </button>
+      );
+    }
+
+    const roiFaxState = (v) => {
+      const digits = String(v || '').replace(/\D/g, '');
+      if (!digits) return 'blank';
+      return (digits.length === 10 || (digits.length === 11 && digits[0] === '1')) ? 'ok' : 'bad';
+    };
+    const roiDisplayDate = (v) => {
+      const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? `${m[2]}/${m[3]}/${m[1]}` : (v || '');
+    };
+    const blankProvider = () => ({ name: '', dept: '', address: '', phone: '', fax: '' });
+
+    function saveCopy(c) {
+      const bytes = Uint8Array.from(atob(c.pdfB64), ch => ch.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = c.fileName || 'Authorization.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+
+    async function postJson(url, body) {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data.fieldErrors ? Object.values(data.fieldErrors).join(' ') : (data.error || 'That did not go through. Please try again.');
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function RoiFlow({ token, onClose }) {
+      const [info, setInfo] = React.useState(null);
+      const [loadErr, setLoadErr] = React.useState('');
+      const [screen, setScreen] = React.useState('choice'); // choice | upload | form | success
+      const [patient, setPatient] = React.useState({ patientName: '', patientDOB: '', patientAddress: '', patientPhone: '' });
+      const [providers, setProviders] = React.useState([blankProvider()]);
+      const [cats, setCats] = React.useState({});
+      const [otherText, setOtherText] = React.useState('');
+      const [includesProtected, setIncludesProtected] = React.useState(false); // 42 CFR Part 2 — defaults FALSE
+      const [purposeOther, setPurposeOther] = React.useState(false);
+      const [purposeOtherText, setPurposeOtherText] = React.useState('');
+      const [expDate, setExpDate] = React.useState('');
+      const [expEvent, setExpEvent] = React.useState('');
+      const [printedName, setPrintedName] = React.useState('');
+      const [relationship, setRelationship] = React.useState('');
+      const [file, setFile] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [err, setErr] = React.useState('');
+      const [result, setResult] = React.useState(null);
+      const canvasRef = React.useRef(null);
+      const sig = React.useRef({ drawing: false, empty: true });
+
+      React.useEffect(() => {
+        fetch(`/api/gfc/upload/${token}/transfer-roi`)
+          .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw new Error(b.error || 'Could not open the form.'); setInfo(b); })
+          .catch(e => setLoadErr(e.message || 'Could not open the form.'));
+      }, [token]);
+
+      // Signature pad, set up when the form screen mounts.
+      React.useEffect(() => {
+        if (screen !== 'form') return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 360;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        sig.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { sig.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!sig.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); sig.current.empty = false; };
+        const up = () => { sig.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, [screen]);
+
+      const clearSig = () => {
+        const c = canvasRef.current; if (!c) return;
+        c.getContext('2d').clearRect(0, 0, c.width, c.height);
+        sig.current.empty = true;
+      };
+      const setP = (i, k, v) => setProviders(ps => ps.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
+      const maxProviders = (info && info.maxProviders) || 10;
+      const catKeys = ((info && info.recordCategories) || []).filter(k => k !== 'other');
+      const labels = (info && info.categoryLabels) || {};
+
+      const identityOk = () => {
+        if (!patient.patientName.trim() || !patient.patientDOB) { setErr("Enter the patient's full name and date of birth."); return false; }
+        return true;
+      };
+
+      const handleFile = async (f) => {
+        if (!f) return;
+        if (f.size > MAX_FILE_BYTES) { setErr('That file is larger than 10 MB.'); return; }
+        setErr('');
+        try { setFile({ name: f.name, dataB64: await fileToDataUrl(f) }); }
+        catch (e) { setErr('Could not read that file.'); }
+      };
+
+      const submitUpload = async () => {
+        setErr('');
+        if (!identityOk()) return;
+        if (!file) { setErr('Choose a file first.'); return; }
+        setBusy(true);
+        try {
+          const r = await postJson(`/api/gfc/upload/${token}/transfer-roi/upload`, {
+            fileName: file.name, fileDataB64: file.dataB64,
+            patientName: patient.patientName, patientDOB: patient.patientDOB
+          });
+          setResult(r); setScreen('success');
+        } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      };
+
+      const submitForm = async () => {
+        setErr('');
+        if (!identityOk()) return;
+        const named = providers.filter(p => (p.name || '').trim());
+        if (!named.length) { setErr('Add at least one provider.'); return; }
+        const badFax = named.find(p => roiFaxState(p.fax) === 'bad');
+        if (badFax) { setErr(`The fax number for ${badFax.name} needs 10 digits.`); return; }
+        if (!catKeys.some(k => cats[k]) && !cats.other) { setErr('Select at least one type of record.'); return; }
+        if (cats.other && !otherText.trim()) { setErr('Describe the other records you are requesting.'); return; }
+        if (purposeOther && !purposeOtherText.trim()) { setErr('Describe the other purpose, or untick it.'); return; }
+        if (sig.current.empty) { setErr('Please draw your signature.'); return; }
+        if (!printedName.trim()) { setErr('Printed name is required.'); return; }
+        const categories = {};
+        catKeys.forEach(k => { categories[k] = !!cats[k]; });
+        categories.other = !!cats.other;
+        categories.otherText = cats.other ? otherText : '';
+        setBusy(true);
+        try {
+          const r = await postJson(`/api/gfc/upload/${token}/transfer-roi/submit`, {
+            ...patient,
+            providers: named.map(p => ({ name: p.name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax })),
+            categories, includesProtected: includesProtected === true,
+            purposeTreatment: true, purposeOther: purposeOther === true, purposeOtherText: purposeOther ? purposeOtherText : '',
+            expDate, expEvent,
+            signatureImageB64: canvasRef.current.toDataURL('image/png'),
+            printedName: printedName.trim(), relationship
+          });
+          setResult(r); setScreen('success');
+        } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      };
+
+      const card = 'bg-white rounded-xl shadow-sm border border-gray-200 p-5';
+      const sectionLbl = 'text-[11px] font-semibold uppercase tracking-wide text-primary mt-5 mb-2';
+      const primaryBtn = `w-full mt-4 rounded-lg px-4 py-2.5 text-sm font-semibold text-white ${busy ? 'bg-gray-400' : 'bg-primary hover:opacity-90'}`;
+      const back = (to) => (
+        <button type="button" onClick={() => { setErr(''); to ? setScreen(to) : onClose(); }} className="text-xs text-gray-500 hover:text-gray-700 mb-2">‹ Back</button>
+      );
+
+      if (loadErr) return <div className={card}>{back(null)}<p className="text-red-600 text-sm">{loadErr}</p></div>;
+      if (!info) return <div className={card + ' text-center'}><div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto"></div></div>;
+
+      const patientBlock = (
+        <div className={card}>
+          <p className="text-sm text-gray-700">Whose records are these? Enter the patient's details exactly as they appear on their file.</p>
+          <RoiField label="Patient full name" value={patient.patientName} onChange={v => setPatient(p => ({ ...p, patientName: v }))} maxLength={120} />
+          <RoiField label="Patient date of birth" type="date" value={patient.patientDOB} onChange={v => setPatient(p => ({ ...p, patientDOB: v }))} />
+        </div>
+      );
+
+      if (screen === 'success') {
+        const copies = (result && result.copies) || [];
+        return (
+          <div className={card + ' text-center'}>
+            <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+            </div>
+            <h3 className="text-gray-900 font-semibold text-lg">Release received</h3>
+            <p className="text-gray-500 text-sm mt-1.5">Thank you. The care team will use it to request the records.</p>
+            {result && result.providerCount > 0 && (
+              <p className="text-gray-500 text-sm mt-1.5">
+                {result.providerCount === 1 ? 'One release was created' : `${result.providerCount} releases were created, one per provider`}
+                {result.expiresOn ? `, valid until ${roiDisplayDate(result.expiresOn)}.` : '.'}
+              </p>
+            )}
+            {result && Array.isArray(result.missingFax) && result.missingFax.length > 0 && (
+              <p className="text-amber-700 text-sm mt-1.5">We still need a fax number for {result.missingFax.join(', ')}. The office will look it up.</p>
+            )}
+            {copies.length > 0 && (
+              <div className="mt-4 space-y-2 text-left">
+                <p className="text-xs text-gray-600">You are entitled to a copy. Save it now, since this page won't show it again.</p>
+                {copies.map(c => (
+                  <button key={c.fileName} type="button" onClick={() => saveCopy(c)}
+                    className="w-full text-left text-sm border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
+                    Save Copy · {c.providerName}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button type="button" onClick={onClose} className="mt-5 text-sm font-semibold text-primary">Done</button>
+          </div>
+        );
+      }
+
+      if (screen === 'choice') {
+        return (
+          <div className="space-y-3">
+            {back(null)}
+            <div className={card}>
+              <h3 className="text-gray-900 font-semibold text-lg">Release records to us</h3>
+              <p className="text-gray-500 text-sm mt-1.5">To get records from a past doctor, hospital or specialist, we need a signed release. Choose how to do it.</p>
+            </div>
+            <button type="button" onClick={() => setScreen('form')} className={card + ' w-full text-left hover:border-primary'}>
+              <p className="font-semibold text-primary text-sm">Fill It Out Here</p>
+              <p className="text-gray-500 text-xs mt-1">Sign on screen. We make one release per provider.</p>
+            </button>
+            <button type="button" onClick={() => setScreen('upload')} className={card + ' w-full text-left hover:border-primary'}>
+              <p className="font-semibold text-primary text-sm">Upload a Signed Form</p>
+              <p className="text-gray-500 text-xs mt-1">Already printed and signed one? Send a photo or scan.</p>
+            </button>
+          </div>
+        );
+      }
+
+      if (screen === 'upload') {
+        return (
+          <div className="space-y-3">
+            {back('choice')}
+            {patientBlock}
+            <div className={card}>
+              <label className="block border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer">
+                <span className="text-sm font-semibold text-primary">{file ? file.name : 'Choose the signed form'}</span>
+                <span className="block text-xs text-gray-500 mt-1">PDF, JPG or PNG · up to 10 MB</span>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png,image/*" className="hidden" onChange={e => handleFile(e.target.files[0])} />
+              </label>
+              <button type="button" disabled={busy || !file} onClick={submitUpload} className={primaryBtn}>{busy ? 'Sending…' : 'Send Form'}</button>
+              {err && <p className="text-red-600 text-sm mt-2">{err}</p>}
+            </div>
+          </div>
+        );
+      }
+
+      // screen === 'form'
+      return (
+        <div className="space-y-3">
+          {back('choice')}
+          <p className={sectionLbl}>1 · Patient</p>
+          {patientBlock}
+          <div className={card}>
+            <p className="text-xs text-gray-500">Optional, but it helps the provider find the right chart.</p>
+            <RoiField label="Patient address" value={patient.patientAddress} onChange={v => setPatient(p => ({ ...p, patientAddress: v }))} maxLength={200} />
+            <RoiField label="Patient phone" type="tel" value={patient.patientPhone} onChange={v => setPatient(p => ({ ...p, patientPhone: v }))} maxLength={30} />
+          </div>
+
+          <p className={sectionLbl}>2 · Release records from</p>
+          {providers.map((p, i) => (
+            <div key={i} className={card}>
+              <div className="flex justify-between items-center">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Provider {i + 1}</span>
+                {providers.length > 1 && <button type="button" className="text-xs font-semibold text-red-700" onClick={() => setProviders(ps => ps.filter((_, x) => x !== i))}>Remove</button>}
+              </div>
+              <RoiField label="Provider or facility name" value={p.name} onChange={v => setP(i, 'name', v)} placeholder="e.g. Northside Hospital" maxLength={120} />
+              <RoiField label="Department" value={p.dept} onChange={v => setP(i, 'dept', v)} placeholder="e.g. Medical Records" maxLength={80} />
+              <RoiField label="Address" value={p.address} onChange={v => setP(i, 'address', v)} maxLength={200} />
+              <RoiField label="Phone" type="tel" value={p.phone} onChange={v => setP(i, 'phone', v)} maxLength={30} />
+              <RoiField label="Fax" type="tel" value={p.fax} onChange={v => setP(i, 'fax', v)} maxLength={30}
+                hint={roiFaxState(p.fax) === 'bad' ? 'A fax number needs 10 digits.' : (roiFaxState(p.fax) === 'blank' && p.name.trim() ? 'No fax yet. Add it if you have it.' : '')} />
+            </div>
+          ))}
+          {providers.length < maxProviders && (
+            <button type="button" onClick={() => setProviders(ps => [...ps, blankProvider()])} className="w-full text-sm font-semibold text-primary border border-gray-300 rounded-lg py-2 bg-white">Add Provider</button>
+          )}
+
+          <p className={sectionLbl}>3 · Release records to</p>
+          <div className={card + ' bg-amber-50'}>
+            <p className="font-semibold text-primary text-sm">{info.releaseTo.name}</p>
+            <p className="text-xs text-gray-600 mt-1">{info.releaseTo.address} · Tel {info.releaseTo.phone} · Fax {info.releaseTo.fax}</p>
+          </div>
+
+          <p className={sectionLbl}>4 · Records to release</p>
+          <div className={card}>
+            {catKeys.map(k => <RoiCheck key={k} on={!!cats[k]} onClick={() => setCats(c => ({ ...c, [k]: !c[k] }))}>{labels[k] || k}</RoiCheck>)}
+            <RoiCheck on={!!cats.other} onClick={() => setCats(c => ({ ...c, other: !c.other }))}>Other</RoiCheck>
+            {cats.other && <RoiField label="Other, specify" value={otherText} onChange={setOtherText} maxLength={200} />}
+            <div className="mt-3 p-3 rounded-lg bg-gray-50 border border-gray-200">
+              <p className="text-xs text-gray-600 mb-1"><b className="text-primary">Specially protected information.</b> Mental health, substance use, HIV/AIDS and genetic testing records are released <b>only</b> if you tick this box.</p>
+              <RoiCheck on={includesProtected} onClick={() => setIncludesProtected(v => !v)}>Yes, include specially protected information</RoiCheck>
+            </div>
+          </div>
+
+          <p className={sectionLbl}>5 · Purpose</p>
+          <div className={card}>
+            <RoiCheck on disabled>Treatment, care coordination and care planning</RoiCheck>
+            <RoiCheck on={purposeOther} onClick={() => setPurposeOther(v => !v)}>Other</RoiCheck>
+            {purposeOther && <RoiField label="Other purpose, specify" value={purposeOtherText} onChange={setPurposeOtherText} maxLength={200} />}
+          </div>
+
+          <p className={sectionLbl}>6 · Expiration</p>
+          <div className={card}>
+            <p className="text-xs text-gray-500">Unless revoked sooner, this release expires one year from today. You can pick an earlier date or event.</p>
+            <RoiField label="Expiration date (optional)" type="date" value={expDate} onChange={setExpDate} />
+            <RoiField label="Expiration event (optional)" value={expEvent} onChange={setExpEvent} placeholder="e.g. end of treatment" maxLength={120} />
+          </div>
+
+          <p className={sectionLbl}>7 · Your rights</p>
+          <div className={card + ' text-xs text-gray-600 leading-relaxed'}>
+            I understand that: (1) I may revoke this authorization at any time by writing to Godwins Family Care LLC, except to the extent action has already been taken in reliance on it; (2) treatment, payment, enrollment, and eligibility for benefits may not be conditioned on signing, except where the law allows; (3) information disclosed under this authorization may be re-disclosed by the recipient and may no longer be protected by federal privacy law; and (4) I am entitled to a copy of this signed authorization.
+          </div>
+
+          <p className={sectionLbl}>8 · Signature</p>
+          <div className={card}>
+            <p className="text-xs text-gray-500 mb-2">Draw your signature with your finger or mouse.</p>
+            <div className="relative border border-gray-300 rounded-lg bg-white">
+              <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+              <button type="button" onClick={clearSig} className="absolute top-1.5 right-2 text-[11px] text-gray-500 border border-gray-300 rounded px-2 bg-white">Clear</button>
+            </div>
+            <RoiField label="Printed name of person signing" value={printedName} onChange={setPrintedName} maxLength={120} />
+            <RoiField label="Relationship to patient (if not the patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" maxLength={120} />
+            <p className="text-xs text-gray-500 mt-2">Date: {new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' })}</p>
+            <button type="button" disabled={busy} onClick={submitForm} className={primaryBtn}>{busy ? 'Submitting…' : 'Submit Release'}</button>
+            {err && <p className="text-red-600 text-sm mt-2">{err}</p>}
+          </div>
+        </div>
+      );
+    }
+
     function UploadLinkPage() {
       const [state, setState] = React.useState('loading'); // loading | ready | revoked | notfound | error
       const [data, setData] = React.useState(null);
       const [errorMsg, setErrorMsg] = React.useState('');
+      const [showRoi, setShowRoi] = React.useState(false);
 
       const token = React.useMemo(() => {
         const match = window.location.pathname.match(/\/upload\/([^/]+)$/);
@@ -177,7 +539,11 @@
                 </div>
               )}
 
-              {state === 'ready' && data && (
+              {state === 'ready' && data && showRoi && (
+                <RoiFlow token={token} onClose={() => { setShowRoi(false); window.scrollTo(0, 0); }} />
+              )}
+
+              {state === 'ready' && data && !showRoi && (
                 <div className="space-y-4">
                   <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
                     <h2 className="text-gray-900 font-semibold text-lg">
@@ -192,6 +558,13 @@
                     {data.checklist.map((doc) => (
                       <DocumentRow key={doc.kind} token={token} doc={doc} onSent={markHave} />
                     ))}
+                  </div>
+
+                  <div className="bg-white rounded-xl border border-gray-200 p-4">
+                    <p className="text-gray-900 font-medium text-sm">Transferring care from another doctor or hospital?</p>
+                    <p className="text-gray-500 text-xs mt-0.5">Sign a release so we can request past records.</p>
+                    <button type="button" onClick={() => { setShowRoi(true); window.scrollTo(0, 0); }}
+                      className="mt-2.5 text-xs font-semibold rounded-lg px-3 py-2 bg-primary text-white hover:opacity-90">Sign a Record Release</button>
                   </div>
 
                   <p className="text-center text-xs text-gray-400 px-4">

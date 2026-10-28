@@ -23018,7 +23018,9 @@ app.put('/api/gfc/prior-providers', authenticateToken, requireClientForIntake, a
 // scan. Creates a consent_event (source=portal_upload) with NO provider auth rows
 // (admin classifies the scan later), writes the file to Drive, updates the
 // rollup status, and runs the parallel legacy sync.
-app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+// One handler, two doors: the signed-in portal and the no-login upload link.
+// `ctx` says which: { clientId, actor, viaLink, onAccepted }.
+const handleRoiUpload = async (req, res, ctx) => {
   try {
     const { fileName, fileDataB64 } = req.body || {};
     if (!fileName || !fileDataB64) return res.status(400).json({ error: 'fileName and fileDataB64 are required' });
@@ -23032,9 +23034,10 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     const sniffedType = detectFileType(buffer);
     if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
 
-    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
+    const { users, idx } = await loadClientForMutation(ctx.clientId);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
+    if (ctx.checkIdentity) { const refused = await ctx.checkIdentity(client); if (refused) return; }
 
     const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
     const event = await roiStore.insertConsentEvent({
@@ -23042,7 +23045,8 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
       printed_name: client.preferredName || client.name || 'Client',
       signer_ip_hash: ipHash,
       includes_protected_info: false, // unknown from a scan; classified later
-      source: roiRepo.SOURCE.UPLOAD
+      source: roiRepo.SOURCE.UPLOAD,
+      channel: ctx.viaLink ? 'link' : 'portal'
     });
 
     // Write the uploaded scan to Drive (best-effort; non-fatal in dev).
@@ -23059,7 +23063,8 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     users[idx] = client;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_uploaded', 'consent_event', event.id, { source: 'portal_upload' });
+    await logActivity(ctx.actor.id, ctx.actor.name, 'roi_transfer_uploaded', 'consent_event', event.id, { source: 'portal_upload', channel: ctx.viaLink ? 'link' : 'portal' });
+    if (ctx.onAccepted) await ctx.onAccepted();
 
     // Parallel legacy sync (no PDF attachment — this is the client's own scan).
     dispatchRoiNotifications({ client, event, fileNames: storedName, fileUrls: driveUrl || '', pdfAttachments: [] })
@@ -23070,13 +23075,20 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     console.error('GFC transfer-roi upload error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
+
+app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForIntake, (req, res) =>
+  handleRoiUpload(req, res, {
+    clientId: req.intakeClientId || req.user.id,
+    actor: { id: req.user.id, name: req.user.name || req.user.email },
+    viaLink: false
+  }));
 
 // POST /api/gfc/transfer-roi/submit — Screen 2B: the online form. One signing
 // event authorizes up to MAX_PROVIDERS_PER_SUBMISSION providers; one PDF per
 // provider. Everything is checked and every PDF is rendered BEFORE anything is
 // written, so a failure leaves no half-filed authorization behind.
-app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForIntake, async (req, res) => {
+const handleRoiSubmit = async (req, res, ctx) => {
   try {
     const b = req.body || {};
     const L = roiRepo.FIELD_LIMITS;
@@ -23103,7 +23115,7 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     const printedName = roiRepo.cleanText(b.printedName, 120);
     // A POA signing a release states their authority on it (45 CFR 164.508).
     const relationship = roiRepo.cleanText(b.relationship, 120) ||
-      ((req.user.role === config.ROLES.FAMILY && req.user.familyIsPoa) ? 'Power of Attorney' : '');
+      ((!ctx.viaLink && req.user.role === config.ROLES.FAMILY && req.user.familyIsPoa) ? 'Power of Attorney' : '');
 
     // Server-side 45 CFR 164.508 element validation.
     const validation = roiRepo.validateAuthorizationElements({
@@ -23116,13 +23128,22 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     });
     Object.assign(fieldErrors, validation.errors);
 
-    const { users, idx } = await loadClientForMutation(req.intakeClientId || req.user.id);
+    const { users, idx } = await loadClientForMutation(ctx.clientId);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
+    // Through the link the signer has just proved they know the patient's
+    // name and date of birth; anything else the record holds (address,
+    // phone) stays off the release unless they typed it, because the
+    // release is handed straight back to whoever holds the link.
+    if (ctx.checkIdentity && Object.keys(fieldErrors).length === 0) {
+      const refused = await ctx.checkIdentity(client);
+      if (refused) return;
+    }
+
     // Identity from the record. A provider cannot match a release to a chart
     // without the patient's name and date of birth, so both are required.
-    const { patient } = roiPatientIdentity(client, b);
+    const { patient } = ctx.viaLink ? roiLinkPatientIdentity(client, b) : roiPatientIdentity(client, b);
     if (!patient.patientName) fieldErrors.patientName = 'The patient\'s full name is required.';
     if (!patient.patientDOB) fieldErrors.patientDOB = 'The patient\'s date of birth is required.';
 
@@ -23145,7 +23166,8 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
       purpose_other_text: purposeOtherText || null,
       includes_protected_info: b.includesProtected === true,
       patient_snapshot: patient,
-      source: roiRepo.SOURCE.ONLINE_FORM
+      source: roiRepo.SOURCE.ONLINE_FORM,
+      channel: ctx.viaLink ? 'link' : 'portal'
     });
     const categoryRows = checkedCategories.map(c => ({ category: c, other_text: c === 'other' ? otherText : null }));
     const signedLabel = signedAt;
@@ -23211,9 +23233,11 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     users[idx] = client;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_signed', 'consent_event', event.id, {
-      source: 'portal_online_form', providerCount: authRows.length, includesProtected: event.includes_protected_info
+    await logActivity(ctx.actor.id, ctx.actor.name, 'roi_transfer_signed', 'consent_event', event.id, {
+      source: 'portal_online_form', channel: ctx.viaLink ? 'link' : 'portal',
+      providerCount: authRows.length, includesProtected: event.includes_protected_info
     });
+    if (ctx.onAccepted) await ctx.onAccepted();
 
     // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmation.
     // The confirmation goes only to addresses already on file, never to one
@@ -23224,10 +23248,149 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     const missingFax = providers.filter(p => !p.fax).map(p => p.provider_name);
     res.json({
       message: 'Authorization submitted', eventId: event.id, providerCount: authRows.length, files: fileNames,
-      expiresOn: event.expiration_date, missingFax, storageFailed
+      expiresOn: event.expiration_date, missingFax, storageFailed,
+      // A link signer has no portal to fetch a copy from later, so their
+      // copy (45 CFR 164.508(c)(4)) comes back with the answer.
+      ...(ctx.viaLink ? { copies: rendered.map(r => ({ fileName: r.fileName, providerName: r.provider.provider_name, pdfB64: r.buffer.toString('base64') })) } : {})
     });
   } catch (error) {
     console.error('GFC transfer-roi submit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForIntake, (req, res) =>
+  handleRoiSubmit(req, res, {
+    clientId: req.intakeClientId || req.user.id,
+    actor: { id: req.user.id, name: req.user.name || req.user.email },
+    viaLink: false
+  }));
+
+// ── The same release through the no-login upload link (owner, 2026-10-28).
+// Nothing about the patient is read back: no prefill, no list of providers,
+// no earlier releases. The signer types the patient's name and date of birth
+// and the server checks them against the record (uploadLinks.js). See the
+// long comment there for why each rule exists.
+const resolveUploadLink = async (req, res) => {
+  const links = (await db.get('client_upload_links')) || [];
+  const found = uploadLinks.findByToken(req.params.token, links);
+  if (!found) { res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' }); return null; }
+  if (found.revokedAt) { res.status(410).json({ error: 'This upload link has been turned off. Ask your care team for a new one.', code: 'LINK_REVOKED' }); return null; }
+  const users = await getUsers();
+  const client = users.find(u => u.id === found.clientId && u.role === config.ROLES.CLIENT);
+  if (!client) { res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' }); return null; }
+  return { link: found, client };
+};
+
+// Write one attempt stamp onto the link row, read fresh so two requests in
+// flight do not drop each other's stamp.
+const stampRoiLinkAttempt = async (linkId, kind) => {
+  const links = (await db.get('client_upload_links')) || [];
+  await db.set('client_upload_links', links.map(l => l.id === linkId ? uploadLinks.recordRoiAttempt(l, kind) : l));
+};
+
+const roiLinkRecordIdentity = (client) => {
+  const intake = client.intake || {};
+  const legal = `${intake.firstName || ''} ${intake.lastName || ''}`.trim();
+  return { dob: intake.dob, names: [client.name, client.preferredName, legal].filter(Boolean) };
+};
+
+// The release's patient block through the link: the record's name and DOB
+// (just matched), and only the address and phone the signer typed.
+const roiLinkPatientIdentity = (client, typed) => {
+  const { patient } = roiPatientIdentity(client, typed);
+  return {
+    patient: {
+      ...patient,
+      patientAddress: roiRepo.cleanText(typed && typed.patientAddress, 200),
+      patientPhone: roiRepo.cleanText(typed && typed.patientPhone, 30)
+    }
+  };
+};
+
+const roiLinkContext = (req, res, { link, client }) => ({
+  clientId: client.id,
+  actor: { id: null, name: 'Upload link (no sign-in)' },
+  viaLink: true,
+  // Runs once the request is otherwise well-formed. Answers and returns true
+  // when it refused, so the handler stops writing.
+  checkIdentity: async (record) => {
+    const b = req.body || {};
+    const typed = { name: b.patientName, dob: b.patientDOB };
+    // A blank is a form that is not finished, not a wrong guess.
+    if (!String(typed.name || '').trim() || !String(typed.dob || '').trim()) {
+      const fieldErrors = {};
+      if (!String(typed.name || '').trim()) fieldErrors.patientName = "The patient's full name is required.";
+      if (!String(typed.dob || '').trim()) fieldErrors.patientDOB = "The patient's date of birth is required.";
+      res.status(400).json({ error: 'Some required fields are missing or invalid.', code: 'ROI_508_INCOMPLETE', fieldErrors });
+      return true;
+    }
+    if (!uploadLinks.roiIdentityMatches(roiLinkRecordIdentity(record), typed)) {
+      await stampRoiLinkAttempt(link.id, 'failed');
+      await logActivity(null, 'Upload link (no sign-in)', 'roi_transfer_link_identity_refused', 'consent_event', client.id, {});
+      res.status(400).json({
+        error: "The patient's name and date of birth don't match what we have on file. Check them, or call the office.",
+        code: 'ROI_LINK_IDENTITY_MISMATCH'
+      });
+      return true;
+    }
+    return false;
+  },
+  onAccepted: () => stampRoiLinkAttempt(link.id, 'submitted')
+});
+
+const refuseBlockedRoiLink = (res, link) => {
+  const blocked = uploadLinks.roiLinkBlocked(link);
+  if (!blocked) return false;
+  res.status(429).json({
+    error: blocked === 'ROI_LINK_LOCKED'
+      ? 'Too many tries through this link today. Please try again tomorrow, or call the office.'
+      : 'Several releases were already sent through this link today. Please call the office if you need to send more.',
+    code: blocked
+  });
+  return true;
+};
+
+// What the link's form needs, and nothing about the patient beyond the
+// first name and last initial the link page already shows.
+app.get('/api/gfc/upload/:token/transfer-roi', async (req, res) => {
+  try {
+    const found = await resolveUploadLink(req, res);
+    if (!found) return;
+    const ORG = consentText.ORG;
+    res.json({
+      ...uploadLinks.identityHint(found.client.name),
+      maxProviders: roiRepo.MAX_PROVIDERS_PER_SUBMISSION,
+      recordCategories: roiRepo.RECORD_CATEGORIES,
+      categoryLabels: pdfGenerator.ROI_CATEGORY_LABELS,
+      releaseTo: { name: ORG.name, address: ORG.address, phone: ORG.phone, fax: ORG.fax }
+    });
+  } catch (error) {
+    console.error('GFC link transfer-roi get error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/upload/:token/transfer-roi/submit', async (req, res) => {
+  try {
+    const found = await resolveUploadLink(req, res);
+    if (!found) return;
+    if (refuseBlockedRoiLink(res, found.link)) return;
+    await handleRoiSubmit(req, res, roiLinkContext(req, res, found));
+  } catch (error) {
+    console.error('GFC link transfer-roi submit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/upload/:token/transfer-roi/upload', async (req, res) => {
+  try {
+    const found = await resolveUploadLink(req, res);
+    if (!found) return;
+    if (refuseBlockedRoiLink(res, found.link)) return;
+    await handleRoiUpload(req, res, roiLinkContext(req, res, found));
+  } catch (error) {
+    console.error('GFC link transfer-roi upload error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

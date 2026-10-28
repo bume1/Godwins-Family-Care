@@ -199,3 +199,47 @@ test('a per-clientId rate limit guards the public upload route', () => {
   const body = SERVER.slice(start, start + 3000);
   assert.match(body, /uploadLinks\.rateLimited\(/);
 });
+
+// ── The record release through the link (owner, 2026-10-28) ──────────────
+const ROI_RECORD = { dob: '1950-03-04', names: ['Juanita Guess', 'Nita Guess', 'Juanita M Guess'] };
+
+test('a release through the link needs the patient\'s name AND exact date of birth', () => {
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Juanita Guess', dob: '1950-03-04' }), true);
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'juanita  guess', dob: '03/04/1950' }), true, 'case, spacing and US date order do not matter');
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Nita Guess', dob: '1950-3-4' }), true, 'a preferred name on file counts');
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Juanita Guess', dob: '1950-03-05' }), false, 'one day off is a different person');
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Juanita Smith', dob: '1950-03-04' }), false, 'a different surname is refused');
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Maria Guess', dob: '1950-03-04' }), false, 'a different first name is refused');
+  assert.strictEqual(uploadLinks.roiIdentityMatches(ROI_RECORD, { name: 'Guess', dob: '1950-03-04' }), false, 'a surname alone is not enough');
+});
+
+test('a record with no date of birth on file is refused, never waved through', () => {
+  assert.strictEqual(uploadLinks.roiIdentityMatches({ dob: '', names: ['Juanita Guess'] }, { name: 'Juanita Guess', dob: '1950-03-04' }), false);
+});
+
+test('five wrong guesses lock the release form for a day; old stamps age out', () => {
+  const now = Date.parse('2026-10-28T12:00:00Z');
+  let link = { id: 'l1' };
+  for (let i = 0; i < uploadLinks.MAX_ROI_FAILED_PER_DAY - 1; i++) link = uploadLinks.recordRoiAttempt(link, 'failed', now);
+  assert.strictEqual(uploadLinks.roiLinkBlocked(link, now), null, 'four is not yet locked');
+  link = uploadLinks.recordRoiAttempt(link, 'failed', now);
+  assert.strictEqual(uploadLinks.roiLinkBlocked(link, now), 'ROI_LINK_LOCKED');
+  assert.strictEqual(uploadLinks.roiLinkBlocked(link, now + 25 * 60 * 60 * 1000), null, 'a day later it opens again');
+  let sent = { id: 'l2' };
+  for (let i = 0; i < uploadLinks.MAX_ROI_SUBMISSIONS_PER_DAY; i++) sent = uploadLinks.recordRoiAttempt(sent, 'submitted', now);
+  assert.strictEqual(uploadLinks.roiLinkBlocked(sent, now), 'ROI_LINK_RATE_LIMITED');
+  const trimmed = uploadLinks.recordRoiAttempt({ roiFailedAt: ['2026-01-01T00:00:00Z'] }, 'failed', now);
+  assert.strictEqual(trimmed.roiFailedAt.length, 1, 'stamps older than a day are dropped as new ones are written');
+});
+
+test('the link\'s release routes exist, take no session, and never read the patient back', () => {
+  const server = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  for (const r of ["app.get('/api/gfc/upload/:token/transfer-roi', async", "app.post('/api/gfc/upload/:token/transfer-roi/submit', async", "app.post('/api/gfc/upload/:token/transfer-roi/upload', async"]) {
+    assert.ok(server.includes(r), `missing or gated differently: ${r}`);
+  }
+  const get = server.slice(server.indexOf("app.get('/api/gfc/upload/:token/transfer-roi'"), server.indexOf("app.post('/api/gfc/upload/:token/transfer-roi/submit'"));
+  assert.ok(!/roiPatientIdentity|priorProviders|loadClientRoiRecords|intake\./.test(get), 'the link form info must not read the patient record back');
+  // Both doors file through ONE handler, so the two cannot drift.
+  assert.ok(/app\.post\('\/api\/gfc\/transfer-roi\/submit'[^]*?handleRoiSubmit\(req, res,/.test(server));
+  assert.ok(/app\.post\('\/api\/gfc\/transfer-roi\/upload'[^]*?handleRoiUpload\(req, res,/.test(server));
+});
