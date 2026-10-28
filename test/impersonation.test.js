@@ -112,6 +112,7 @@ test('every signature route the server registers is on the block list', () => {
     const [, method, route] = m;
     if (!signy.test(route)) continue;
     if (/^\/api\/(admin|auth\/(signup|forgot))/.test(route) || /\/api\/gfc\/admin\//.test(route)) continue; // admin-only or pre-login: a viewed account can never reach them
+    if (/^\/api\/gfc\/upload\/:token\//.test(route)) continue; // the no-login upload link reads no session at all: the signer is whoever holds the link, never a viewed account
     seen++;
     const sample = route.replace(/:[A-Za-z]+/g, 'x');
     if (!imp.blockedAction(method.toUpperCase(), sample)) missing.push(`${method.toUpperCase()} ${route}`);

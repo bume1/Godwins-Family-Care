@@ -117,8 +117,91 @@ const identityHint = (name) => {
 
 const buildUrl = (baseUrl, token) => `${baseUrl}/upload/${token}`;
 
+// ── The Transfer-of-Care record release, through the same link
+// (owner-directed, 2026-10-28: "so they can be submitted via the unique link
+// AND via the enrollment wizard").
+//
+// A release is a SIGNED document naming the patient, so the link cannot work
+// the way it does for a photo of an insurance card. Two rules keep the
+// "upload only, reads nothing back" promise above intact:
+//
+//   1. Nothing is prefilled. The signer TYPES the patient's full name and date
+//      of birth, and the server checks them against the record. A mismatch is
+//      refused with one generic sentence that never says which part was
+//      wrong, so the form cannot be used to confirm a date of birth.
+//   2. Wrong guesses are capped per link per day, so the check above cannot be
+//      walked through a calendar one date at a time.
+//
+// The signer's copy of the release is handed back in the submit response,
+// built only from what they typed plus the record's name and DOB they just
+// proved they knew. The record's address and phone never reach this page.
+
+const MAX_ROI_FAILED_PER_DAY = 5;
+const MAX_ROI_SUBMISSIONS_PER_DAY = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const inLastDay = (list, now) =>
+  (Array.isArray(list) ? list : []).filter(t => (now - new Date(t).getTime()) < DAY_MS).length;
+
+// Which of the two ceilings, if any, this link has hit. Checked BEFORE the
+// identity comparison, so a locked link answers the same way whether the
+// next guess would have been right or wrong.
+const roiLinkBlocked = (link, now = Date.now()) => {
+  if (inLastDay(link && link.roiFailedAt, now) >= MAX_ROI_FAILED_PER_DAY) return 'ROI_LINK_LOCKED';
+  if (inLastDay(link && link.roiSubmittedAt, now) >= MAX_ROI_SUBMISSIONS_PER_DAY) return 'ROI_LINK_RATE_LIMITED';
+  return null;
+};
+
+// Stamp one attempt onto the link row. Old stamps are trimmed so the row
+// does not grow forever on a link that lives for years.
+const recordRoiAttempt = (link, kind, now = Date.now()) => {
+  const key = kind === 'failed' ? 'roiFailedAt' : 'roiSubmittedAt';
+  const kept = (Array.isArray(link[key]) ? link[key] : []).filter(t => (now - new Date(t).getTime()) < DAY_MS);
+  return { ...link, [key]: [...kept, new Date(now).toISOString()] };
+};
+
+// Letters only, lower case, accents folded: "O'Brien" = "obrien", "José" = "jose".
+const foldName = (v) => String(v || '')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase().replace(/[^a-z\s-]/g, '').replace(/-/g, ' ')
+  .split(/\s+/).filter(Boolean);
+
+// Any common date shape to YYYY-MM-DD, or '' if it is not one.
+const normalizeDob = (v) => {
+  const s = String(v || '').trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  return '';
+};
+
+// Does what the signer typed name the patient on this record?
+// The date of birth must match exactly. The name must share the LAST name and
+// the FIRST name or initial, judged against every name on file (legal and
+// preferred), so "Bob Smith" for a Robert Smith whose preferred name is Bob
+// passes, while a stranger's surname does not. A record with no date of birth
+// cannot be checked, so it is refused rather than waved through.
+const roiIdentityMatches = (record, typed) => {
+  const dobOnFile = normalizeDob(record && record.dob);
+  const dobTyped = normalizeDob(typed && typed.dob);
+  if (!dobOnFile || !dobTyped || dobOnFile !== dobTyped) return false;
+  const typedParts = foldName(typed && typed.name);
+  if (typedParts.length < 2) return false;
+  const tFirst = typedParts[0];
+  const tLast = typedParts[typedParts.length - 1];
+  const names = (record && Array.isArray(record.names) ? record.names : []).map(foldName).filter(p => p.length);
+  return names.some(parts => {
+    const lastOk = parts.slice(1).includes(tLast) || parts[parts.length - 1] === tLast;
+    const firstOk = parts[0] === tFirst || (tFirst.length === 1 && parts[0][0] === tFirst);
+    return lastOk && firstOk;
+  });
+};
+
 module.exports = {
   TOKEN_BYTES, MAX_UPLOADS_PER_DAY,
   generateToken, tokensMatch, liveLinkFor, findByToken, buildLink, revoke,
-  uploadsInLast24h, rateLimited, identityHint, buildUrl
+  uploadsInLast24h, rateLimited, identityHint, buildUrl,
+  MAX_ROI_FAILED_PER_DAY, MAX_ROI_SUBMISSIONS_PER_DAY,
+  roiLinkBlocked, recordRoiAttempt, roiIdentityMatches, normalizeDob
 };
