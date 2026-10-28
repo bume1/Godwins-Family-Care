@@ -658,15 +658,9 @@ async function generateEnrollmentPacketPDF(client, options = {}) {
 
       doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica');
       doc.text(`Generated ${new Date().toLocaleString('en-US')}`, 50, 92, { align: 'right', width: 512 });
-      // Scope E2: the internal review banner ("working draft — pending counsel
-      // review") used to print here, on the CLIENT'S OWN COPY of what they
-      // signed. Our review workflow is an internal fact and it undermines the
-      // document the client is holding. It renders in the admin view only now.
-      // `internal: true` is passed by staff-facing callers.
-      if (options && options.internal) {
-        doc.fontSize(8).fillColor(GFC_COLORS.muted)
-          .text('INTERNAL COPY — consent bodies ported from the approved 09/2026 paper packets; counsel and licensure review still open. Test data until HIPAA-live.', 50, 92, { width: 380 });
-      }
+      // No review or test-data banner on any copy, staff copies included
+      // (owner, 2026-10-28): staff copies get faxed and handed to providers.
+      // The review status lives on the admin screen, never on a document.
 
       let y = 120;
       const heading = (t) => {
@@ -909,13 +903,9 @@ async function generateConsentPDF(client, consentType, opts = {}) {
         doc.fontSize(8).fillColor(GFC_COLORS.gold).font('Helvetica-Bold')
           .text('FOR SIGNATURE — this copy is not yet signed', L, 104, { width: W });
         doc.font('Helvetica');
-      } else if (opts.internal) {
-        doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique')
-          .text('INTERNAL COPY — counsel and licensure review still open. Test data until HIPAA-live.', L, 104, { width: W });
-        doc.font('Helvetica');
       }
 
-      doc.y = (opts.internal || opts.blank) ? 122 : 114;
+      doc.y = opts.blank ? 122 : 114;
       doc.x = L;
       renderConsentBody(doc, blocks, renderData, { left: L, width: W });
 
