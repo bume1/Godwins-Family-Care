@@ -3874,7 +3874,8 @@ async function notifyProviderOfArrival(provider, checkin, row) {
   const to = provider && require('./quoSms').toE164(provider.phone);
   if (to) {
     try {
-      await require('./quoSms').createClient().sendText({ to, content: vetRoster.providerText(siteLabel) });
+      // An office notice: it goes out on the main line, not the Care Team line.
+      await require('./quoSms').createClient().sendText({ to, content: vetRoster.providerText(siteLabel), from: require('./quoSms').officeNumber() });
       out.text = 'sent';
     } catch (err) { out.text = err.code === 'SMS_NOT_CONFIGURED' ? 'not_configured' : 'failed'; console.error('Veteran provider text failed:', err.message); }
   } else out.text = 'no_phone_on_file';
@@ -8982,7 +8983,7 @@ const textSettingsView = (me, client, isClient) => {
     phone: phone ? quoSms.prettyPhone(phone) : null,
     // The client's number is the one on their profile; a POA sets their own here.
     phoneFrom: isClient ? 'profile' : 'own',
-    officeNumber: quoSms.prettyPhone(quoSms.fromNumber()),
+    officeNumber: quoSms.prettyPhone(quoSms.careTeamNumber()),
     stoppedByText: !!(me && me.smsOptIn && !me.smsOptIn.enabled && me.smsOptIn.changedBy === 'text STOP')
   };
 };

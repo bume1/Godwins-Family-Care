@@ -77,7 +77,8 @@ test('server: the provider email is marked PHI and its subject is the nameless o
   assert.ok(a > 0, 'notifyProviderOfArrival not found');
   assert.match(block, /sendEmail\(provider\.email, vetRoster\.providerEmailSubject\(siteLabel\)/);
   assert.match(block, /\{ htmlBody, phi: true \}/);
-  assert.match(block, /sendText\(\{ to, content: vetRoster\.providerText\(siteLabel\) \}\)/);
+  // An office notice: it goes out on the main line, not the Care Team line.
+  assert.match(block, /sendText\(\{ to, content: vetRoster\.providerText\(siteLabel\), from: require\('\.\/quoSms'\)\.officeNumber\(\) \}\)/);
 });
 
 test('server: a provider can only add veterans to their own list', () => {

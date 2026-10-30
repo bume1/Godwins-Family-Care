@@ -179,7 +179,8 @@ test('build: calls arrive through the signed Quo webhook and nothing on that pat
   assert.ok(fn.length > 200);
   assert.ok(!/openemr|forActor/i.test(fn), 'a call never reaches OpenEMR without a clinician');
   assert.match(fn, /if \(!ev\.answered\) return record\('not_answered'\)/);
-  assert.match(fn, /if \(ev\.officePhone !== quoSms\.fromNumber\(\)\) return record\('other_line'\)/);
+  // Either GFC line (Care Team 346 or the office main line 404) is a GFC call.
+  assert.match(fn, /if \(!quoSms\.gfcLines\(\)\.includes\(ev\.officePhone\)\) return record\('other_line'\)/);
   assert.match(fn, /resolveTexter\(ev\.patientPhone/, 'the same number matching the texts use: an ambiguous number is never guessed');
 });
 

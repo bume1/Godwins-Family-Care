@@ -280,7 +280,7 @@ const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', { role: 'caseManager' });
   check('a clinician with no OpenEMR sign-in files nothing', EMR.documents.length === before);
 
   console.log('\n── 7. Texts in the patient\'s portal ──');
-  r = await hook({ type: 'message.received', data: { object: { id: 'SM-1', from: '+14045550100', to: [OFFICE], direction: 'incoming', body: 'Can someone call me back?', createdAt: new Date().toISOString() } } });
+  r = await hook({ type: 'message.received', data: { object: { id: 'SM-1', from: '+14045550100', to: ['+13462455658'], direction: 'incoming', body: 'Can someone call me back?', createdAt: new Date().toISOString() } } });
   check('a text from the patient is recorded', r.body.outcome === 'recorded', r.body);
   const pt = tok(PATIENT);
   r = await call('GET', '/api/messaging/threads', pt);

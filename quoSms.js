@@ -49,18 +49,31 @@ const prettyPhone = (e164) => {
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : String(e164 || '');
 };
 
-// The office line the texts come from. ORG.phone is the number already printed
-// on every consent, so a patient sees the same number they were given.
-const fromNumber = () => toE164(process.env.QUO_FROM_NUMBER || ORG.phone);
+// TWO GFC lines (owner, 2026-10-30):
+//  - the Care Team line, (346) 245-5658: every Care Team text, whoever in the
+//    thread wrote it, and the line a patient's reply must come back to.
+//  - the office main line, ORG.phone (404) 913-6705: texts from the office
+//    (admin, manager), such as a veteran's arrival notice to the provider.
+// Each can be overridden on the server; QUO_FROM_NUMBER is the older name for
+// the Care Team line and still works.
+const CARE_TEAM_LINE_DEFAULT = '+13462455658';
+const careTeamNumber = () => toE164(process.env.QUO_CARE_TEAM_NUMBER || process.env.QUO_FROM_NUMBER || CARE_TEAM_LINE_DEFAULT);
+const officeNumber = () => toE164(process.env.QUO_OFFICE_NUMBER || ORG.phone);
+// Kept for older callers: the Care Team line.
+const fromNumber = careTeamNumber;
+// Both GFC lines, for recognising a call or text as ours.
+const gfcLines = () => [careTeamNumber(), officeNumber()].filter(Boolean);
 
 function status() {
   const missing = [];
   if (!process.env.QUO_API_KEY) missing.push('QUO_API_KEY');
-  if (!fromNumber()) missing.push('QUO_FROM_NUMBER');
+  if (!careTeamNumber()) missing.push('QUO_CARE_TEAM_NUMBER');
   return {
     sending: missing.length === 0,
     receiving: webhookSecrets().length > 0,
-    from: fromNumber(),
+    from: careTeamNumber(),
+    careTeamLine: careTeamNumber(),
+    officeLine: officeNumber(),
     missing: missing.concat(process.env.QUO_WEBHOOK_SECRET ? [] : ['QUO_WEBHOOK_SECRET'])
   };
 }
@@ -183,16 +196,17 @@ function verifyAnySignature(rawBody, header, secrets, now = Date.now()) {
 }
 
 // ---- The Quo API -------------------------------------------------------------------
-// One call: send a text from the office line. The key is sent as Quo expects
+// One call: send a text from a GFC line. The caller names the line (`from`),
+// so no text goes out on the wrong one by default. The key is sent as Quo expects
 // (the bare key in Authorization). Returns Quo's message id, which is how the
 // webhook for our own send is recognised and not recorded twice.
 function createClient({ fetchImpl } = {}) {
   const doFetch = fetchImpl || ((...a) => fetch(...a));
   const base = () => (process.env.QUO_API_BASE || 'https://api.openphone.com/v1').replace(/\/+$/, '');
-  async function sendText({ to, content }) {
+  async function sendText({ to, content, from }) {
     const key = process.env.QUO_API_KEY;
-    const from = fromNumber();
-    if (!key || !from) { const e = new Error('Texting is not set up (QUO_API_KEY).'); e.code = 'SMS_NOT_CONFIGURED'; throw e; }
+    if (!from) { const e = new Error('No GFC line was named to send this text from.'); e.code = 'SMS_NO_FROM_LINE'; throw e; }
+    if (!key) { const e = new Error('Texting is not set up (QUO_API_KEY).'); e.code = 'SMS_NOT_CONFIGURED'; throw e; }
     const res = await doFetch(`${base()}/messages`, {
       method: 'POST',
       headers: { Authorization: key, 'Content-Type': 'application/json' },
@@ -233,7 +247,7 @@ function readEvent(evt) {
 
 module.exports = {
   QUIET_START, QUIET_END, MAX_TEXT_BODY,
-  toE164, prettyPhone, fromNumber, status,
+  toE164, prettyPhone, fromNumber, careTeamNumber, officeNumber, gfcLines, CARE_TEAM_LINE_DEFAULT, status,
   phonesForClient, phoneForUser, matchPhone, textsOn,
   outgoingText, quietUntil, keyword, verifySignature, webhookSecrets, verifyAnySignature, createClient, readEvent
 };
