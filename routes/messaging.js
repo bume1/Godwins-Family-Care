@@ -1032,7 +1032,7 @@ module.exports = function createMessagingRoutes(deps) {
     }
     row.attempts += 1;
     try {
-      const sent = await smsClient.sendText({ to: row.to, content: row.content });
+      const sent = await smsClient.sendText({ to: row.to, content: row.content, from: quoSms.careTeamNumber() });
       row.status = 'sent'; row.sent_at = nowIso(); row.quo_message_id = sent.id || null; row.error = null;
     } catch (e) {
       row.error = String(e.message || e).slice(0, 300);
@@ -1196,7 +1196,8 @@ module.exports = function createMessagingRoutes(deps) {
       await db.set('phone_calls', calls);
       return record(isSummary ? 'summary_added' : 'transcript_added', { callRowId: calls[i].id });
     }
-    if (ev.officePhone !== quoSms.fromNumber()) return record('other_line');
+    // A call on either GFC line is a GFC call with the patient.
+    if (!quoSms.gfcLines().includes(ev.officePhone)) return record('other_line');
     if (!ev.answered) return record('not_answered');
     const who = resolveTexter(ev.patientPhone, await getUsers());
     if (!who.hit) {
@@ -1222,7 +1223,8 @@ module.exports = function createMessagingRoutes(deps) {
     if (evt && /^call\./.test(String(evt.type || ''))) return handleQuoCall(evt);
     const ev = quoSms.readEvent(evt);
     if (!ev || !ev.id) return { outcome: 'ignored' };
-    if (ev.officePhone !== quoSms.fromNumber()) return { outcome: 'other_line' };
+    // Care Team replies come back to the Care Team line only.
+    if (ev.officePhone !== quoSms.careTeamNumber()) return { outcome: 'other_line' };
 
     const events = await readRows('sms_events');
     const key = `${ev.direction}:${ev.id}`;

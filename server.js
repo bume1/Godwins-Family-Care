@@ -3819,6 +3819,308 @@ app.post('/api/auth/self-signup', async (req, res) => {
   }
 });
 
+// ============== VETERANS: IME ROSTER + CLINIC CHECK-IN (owner, 2026-10-30) ==============
+// The clinic iPad at /veterans, and the roster it matches against. The rules
+// live in veteranRoster.js. A veteran signs in with name, date of birth and
+// phone (email optional); a sign-in that matches today's roster tells the
+// assigned provider by email and text. Anything else goes to the office.
+// The check-in route is public, so it is rate-limited by hashed address and
+// guarded by a hidden field.
+const vetRoster = require('./veteranRoster');
+const veteranCheckinLimited = signups.makeLimiter({ max: 30, windowMs: 3600 * 1000 });
+const VETERAN_CHECKIN_DONE = 'Thank you for signing in. We will call you back shortly.';
+// practiceToday() (Georgia's date) is declared further down, beside the DEA checks.
+const fmtVeteranTime = (iso) => new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' });
+const fmtVeteranDob = (ymd) => { const [y, m, d] = String(ymd || '').split('-'); return y ? `${m}/${d}/${y}` : ''; };
+const isVeteranProvider = (u) => !!u && patientRead.canClinicalWrite(u);
+const requireVeteranStaff = (req, res, next) => {
+  if (vetRoster.isOffice(req.user) || isVeteranProvider(req.user)) return next();
+  return res.status(403).json({ error: 'Only the office and providers manage veterans.', code: 'VETERAN_STAFF_ONLY' });
+};
+const requireVeteranOffice = (req, res, next) => {
+  if (vetRoster.isOffice(req.user)) return next();
+  return res.status(403).json({ error: 'Only an admin or manager can do this.', code: 'VETERAN_OFFICE_ONLY' });
+};
+// Who a veteran can be assigned to: active users who can write clinically.
+const veteranProviders = (users) => users.filter(u => u && u.accountStatus !== 'inactive' && isVeteranProvider(u) && u.role !== config.ROLES.ADMIN);
+
+// Tells the assigned provider. Never throws: a failed email or text must not
+// fail the veteran's sign-in. Returns what happened, for the sign-in row.
+async function notifyProviderOfArrival(provider, checkin, row) {
+  const out = { email: 'skipped', text: 'skipped' };
+  const siteLabel = vetRoster.SITES[row.site] || 'clinic';
+  const when = fmtVeteranTime(checkin.arrivedAt);
+  if (provider && provider.email) {
+    try {
+      const htmlBody = emailTemplates.renderGfcEmail({
+        greeting: String(provider.name || '').split(' ')[0] || undefined,
+        headline: 'Your veteran has arrived',
+        paragraphs: [`A veteran on your exam list signed in at the ${siteLabel} and is ready to be seen.`],
+        fields: [
+          { label: 'Name', value: `${checkin.firstName} ${checkin.lastName}` },
+          { label: 'Date of birth', value: fmtVeteranDob(row.dob) },
+          { label: 'Phone', value: checkin.phone },
+          { label: 'Email', value: checkin.email || '' },
+          { label: 'Signed in', value: when }
+        ],
+        ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL_VETERANS}`, ctaLabel: 'Open my veterans'
+      }).html;
+      await sendEmail(provider.email, vetRoster.providerEmailSubject(siteLabel),
+        `A veteran on your exam list signed in at the ${siteLabel}: ${checkin.firstName} ${checkin.lastName}, ${checkin.phone}, at ${when}.`,
+        { htmlBody, phi: true });
+      out.email = 'sent';
+    } catch (err) { out.email = 'failed'; console.error('Veteran provider email failed:', err.message); }
+  } else out.email = 'no_email_on_file';
+  const to = provider && require('./quoSms').toE164(provider.phone);
+  if (to) {
+    try {
+      // An office notice: it goes out on the main line, not the Care Team line.
+      await require('./quoSms').createClient().sendText({ to, content: vetRoster.providerText(siteLabel), from: require('./quoSms').officeNumber() });
+      out.text = 'sent';
+    } catch (err) { out.text = err.code === 'SMS_NOT_CONFIGURED' ? 'not_configured' : 'failed'; console.error('Veteran provider text failed:', err.message); }
+  } else out.text = 'no_phone_on_file';
+  return out;
+}
+
+// The office hears about a sign-in nobody could be matched to.
+function notifyOfficeOfUnmatched(checkin) {
+  const when = fmtVeteranTime(checkin.arrivedAt);
+  const why = checkin.matchState === 'ambiguous'
+    ? 'More than one veteran on today\'s list fits, so nobody was notified. Please match it in the admin hub under Veterans (IME).'
+    : 'They are not on today\'s list, so no provider was notified. Please match it in the admin hub under Veterans (IME).';
+  const htmlBody = emailTemplates.renderGfcEmail({
+    headline: 'A veteran signed in and needs matching',
+    paragraphs: ['A veteran signed in on the Savannah clinic iPad.', why],
+    fields: [{ label: 'Name', value: `${checkin.firstName} ${checkin.lastName}` }, { label: 'Date of birth', value: fmtVeteranDob(checkin.dob) },
+      { label: 'Phone', value: checkin.phone }, { label: 'Email', value: checkin.email || '' }, { label: 'Signed in', value: when }]
+  }).html;
+  sendEmail(config.ROI_ADMIN_EMAIL, 'A veteran signed in at the Savannah clinic', `A veteran signed in at the Savannah clinic: ${checkin.firstName} ${checkin.lastName}, ${checkin.phone}, at ${when}. ${why}`, { htmlBody, phi: true })
+    .catch(err => console.error('Veteran check-in office email error (non-fatal):', err.message));
+}
+
+// Marks the roster row arrived and tells its provider. Shared by a matched
+// sign-in and by the office matching one by hand.
+async function applyVeteranArrival(checkinId, rosterId, users) {
+  const roster = (await db.get('veteran_roster')) || [];
+  const ri = roster.findIndex(r => r.id === rosterId);
+  if (ri < 0) return null;
+  const checkins = (await db.get('veteran_checkins')) || [];
+  const ci = checkins.findIndex(c => c.id === checkinId);
+  if (ci < 0) return null;
+  const c = checkins[ci];
+  roster[ri] = { ...roster[ri], status: 'arrived', arrivedAt: c.arrivedAt, checkinId: c.id, arrivalPhone: c.phone, arrivalEmail: c.email || null, updatedAt: new Date().toISOString() };
+  await db.set('veteran_roster', roster);
+  const provider = users.find(u => u.id === roster[ri].providerUserId);
+  const notified = await notifyProviderOfArrival(provider, c, roster[ri]);
+  const fresh = (await db.get('veteran_checkins')) || [];
+  const fi = fresh.findIndex(x => x.id === checkinId);
+  if (fi >= 0) { fresh[fi] = { ...fresh[fi], rosterId, matchState: 'matched', providerUserId: roster[ri].providerUserId, notified }; await db.set('veteran_checkins', fresh); }
+  return { row: roster[ri], notified };
+}
+
+async function textVeteranConfirmation(checkinId, phone, matched) {
+  let outcome;
+  try {
+    const q = require('./quoSms');
+    const to = q.toE164(phone);
+    if (!to) outcome = 'no_phone';
+    else { await q.createClient().sendText({ to, content: vetRoster.veteranText(matched), from: q.officeNumber() }); outcome = 'sent'; }
+  } catch (err) {
+    outcome = err.code === 'SMS_NOT_CONFIGURED' ? 'not_configured' : 'failed';
+    console.error('Veteran confirmation text failed:', err.message);
+  }
+  try {
+    const rows = (await db.get('veteran_checkins')) || [];
+    const i = rows.findIndex(c => c.id === checkinId);
+    if (i >= 0) { rows[i] = { ...rows[i], veteranText: outcome }; await db.set('veteran_checkins', rows); }
+  } catch (err) { console.error('Veteran confirmation text record failed:', err.message); }
+  return outcome;
+}
+
+app.post('/api/veterans/check-in', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.website) return res.json({ message: VETERAN_CHECKIN_DONE });
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (veteranCheckinLimited(ipKey)) return res.status(429).json({ error: 'Too many sign-ins from this device. Please let the front desk know you are here.', code: 'VETERAN_CHECKIN_RATE_LIMITED' });
+    const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const firstName = clean(b.firstName);
+    const lastName = clean(b.lastName);
+    const dob = vetRoster.isoDate(b.dob);
+    const email = String(b.email || '').trim().toLowerCase().slice(0, 120);
+    const digits = String(b.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    const fieldErrors = {};
+    if (!firstName) fieldErrors.firstName = 'Please enter your first name.';
+    if (!lastName) fieldErrors.lastName = 'Please enter your last name.';
+    if (!dob || dob >= practiceToday() || dob < '1900-01-01') fieldErrors.dob = 'Please enter your date of birth.';
+    if (digits.length !== 10) fieldErrors.phone = 'Please enter a 10-digit phone number.';
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fieldErrors.email = 'That email does not look right. You can leave it blank.';
+    if (Object.keys(fieldErrors).length) return res.status(400).json({ error: 'Please check the highlighted fields.', code: 'VETERAN_CHECKIN_INVALID', fieldErrors });
+    const phone = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+    const today = practiceToday();
+    const roster = (await db.get('veteran_roster')) || [];
+    const m = vetRoster.matchCheckin(roster, { firstName, lastName, dob }, today);
+    const row = { id: uuidv4(), firstName, lastName, dob, phone, email: email || null, site: vetRoster.DEFAULT_SITE, status: 'arrived',
+      arrivedAt: new Date().toISOString(), examDate: today, matchState: m.state, rosterId: null, ipHash: ipKey };
+    const rows = (await db.get('veteran_checkins')) || [];
+    rows.push(row);
+    await db.set('veteran_checkins', rows);
+    await logActivity('veteran_checkin', 'Veteran check-in', 'veteran_checked_in', 'veteran_checkin', row.id, { site: row.site, matchState: m.state });
+    if (m.state === 'matched') await applyVeteranArrival(row.id, m.row.id, await getUsers());
+    else notifyOfficeOfUnmatched(row);
+    res.json({ message: VETERAN_CHECKIN_DONE });
+    // A confirmation text to the veteran, from the office main line (owner,
+    // 2026-10-30). After the reply, so the iPad never waits on it; the outcome
+    // is recorded on the sign-in, and a failure never touches the sign-in.
+    textVeteranConfirmation(row.id, phone, m.state === 'matched');
+  } catch (error) {
+    console.error('Veteran check-in error:', error);
+    res.status(500).json({ error: 'Something went wrong. Please let the front desk know you are here.' });
+  }
+});
+
+// The roster for a day. The office sees everyone's; a provider sees their own.
+app.get('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
+  try {
+    const date = vetRoster.isoDate(req.query.date) || practiceToday();
+    const users = await getUsers();
+    const office = vetRoster.isOffice(req.user);
+    const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? u.name : null; };
+    const rows = ((await db.get('veteran_roster')) || [])
+      .filter(r => !r.removedAt && r.examDate === date && (office || r.providerUserId === req.user.id))
+      .sort((a, b) => (a.lastName || '').localeCompare(b.lastName || ''))
+      .map(r => vetRoster.publicRow(r, nameOf(r.providerUserId)));
+    const providers = office
+      ? veteranProviders(users).map(u => ({ id: u.id, name: u.name, hasPhone: !!require('./quoSms').toE164(u.phone), hasEmail: !!u.email }))
+      : [{ id: req.user.id, name: req.user.name, hasPhone: !!require('./quoSms').toE164((users.find(u => u.id === req.user.id) || {}).phone), hasEmail: !!req.user.email }];
+    res.json({ date, today: practiceToday(), office, rows, providers, statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES });
+  } catch (error) {
+    console.error('Veteran roster read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
+  try {
+    const n = vetRoster.normalizeRosterInput(req.body, { today: practiceToday() });
+    if (n.error) return res.status(400).json(n);
+    const users = await getUsers();
+    // A provider adds to their own list only. The office picks the provider.
+    const providerUserId = vetRoster.isOffice(req.user) ? String((req.body || {}).providerUserId || '') : req.user.id;
+    if (!veteranProviders(users).some(u => u.id === providerUserId) && !(providerUserId === req.user.id && isVeteranProvider(req.user))) {
+      return res.status(400).json({ error: 'Please choose a provider.', code: 'VETERAN_INVALID', fieldErrors: { providerUserId: 'Please choose a provider.' } });
+    }
+    const row = { id: uuidv4(), ...n.value, providerUserId, status: 'expected', createdAt: new Date().toISOString(), createdById: req.user.id, createdByName: req.user.name || req.user.email };
+    const rows = (await db.get('veteran_roster')) || [];
+    rows.push(row);
+    await db.set('veteran_roster', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_added', 'veteran_roster', row.id, { examDate: row.examDate, providerUserId });
+    res.json({ row: vetRoster.publicRow(row, (users.find(u => u.id === providerUserId) || {}).name) });
+  } catch (error) {
+    console.error('Veteran add error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/veterans/roster/:id', authenticateToken, requireVeteranStaff, async (req, res) => {
+  try {
+    const rows = (await db.get('veteran_roster')) || [];
+    const i = rows.findIndex(r => r.id === req.params.id && !r.removedAt);
+    if (i < 0) return res.status(404).json({ error: 'Veteran not found.', code: 'VETERAN_NOT_FOUND' });
+    if (!vetRoster.canEditRow(req.user, rows[i], { isProvider: isVeteranProvider(req.user) })) return res.status(403).json({ error: 'This veteran is on another provider\'s list.', code: 'VETERAN_NOT_YOURS' });
+    const n = vetRoster.normalizeRosterInput({ ...rows[i], ...(req.body || {}) }, { today: practiceToday() });
+    if (n.error) return res.status(400).json(n);
+    let providerUserId = rows[i].providerUserId;
+    const users = await getUsers();
+    if (vetRoster.isOffice(req.user) && req.body && req.body.providerUserId) {
+      if (!veteranProviders(users).some(u => u.id === req.body.providerUserId)) return res.status(400).json({ error: 'Please choose a provider.', code: 'VETERAN_INVALID', fieldErrors: { providerUserId: 'Please choose a provider.' } });
+      providerUserId = req.body.providerUserId;
+    }
+    rows[i] = { ...rows[i], ...n.value, providerUserId, updatedAt: new Date().toISOString(), updatedById: req.user.id };
+    await db.set('veteran_roster', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_updated', 'veteran_roster', rows[i].id, { providerUserId });
+    res.json({ row: vetRoster.publicRow(rows[i], (users.find(u => u.id === providerUserId) || {}).name) });
+  } catch (error) {
+    console.error('Veteran update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Removing keeps the row (with who and when) so the record of the day survives.
+app.delete('/api/veterans/roster/:id', authenticateToken, requireVeteranStaff, async (req, res) => {
+  try {
+    const rows = (await db.get('veteran_roster')) || [];
+    const i = rows.findIndex(r => r.id === req.params.id && !r.removedAt);
+    if (i < 0) return res.status(404).json({ error: 'Veteran not found.', code: 'VETERAN_NOT_FOUND' });
+    if (!vetRoster.canEditRow(req.user, rows[i], { isProvider: isVeteranProvider(req.user) })) return res.status(403).json({ error: 'This veteran is on another provider\'s list.', code: 'VETERAN_NOT_YOURS' });
+    rows[i] = { ...rows[i], removedAt: new Date().toISOString(), removedById: req.user.id };
+    await db.set('veteran_roster', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_removed', 'veteran_roster', rows[i].id, {});
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Veteran remove error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/veterans/roster/:id/status', authenticateToken, requireVeteranStaff, async (req, res) => {
+  try {
+    const status = String((req.body || {}).status || '');
+    if (!vetRoster.SETTABLE_STATUSES.includes(status)) return res.status(400).json({ error: 'Choose Seen, No show or Expected.', code: 'VETERAN_STATUS_INVALID' });
+    const rows = (await db.get('veteran_roster')) || [];
+    const i = rows.findIndex(r => r.id === req.params.id && !r.removedAt);
+    if (i < 0) return res.status(404).json({ error: 'Veteran not found.', code: 'VETERAN_NOT_FOUND' });
+    if (!vetRoster.canEditRow(req.user, rows[i], { isProvider: isVeteranProvider(req.user) })) return res.status(403).json({ error: 'This veteran is on another provider\'s list.', code: 'VETERAN_NOT_YOURS' });
+    // Back to "expected" only undoes a no-show; a veteran who signed in stays arrived.
+    const next = status === 'expected' && rows[i].arrivedAt ? 'arrived' : status;
+    rows[i] = { ...rows[i], status: next, seenAt: next === 'seen' ? new Date().toISOString() : null, updatedAt: new Date().toISOString(), updatedById: req.user.id };
+    await db.set('veteran_roster', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_status_changed', 'veteran_roster', rows[i].id, { status: next });
+    const users = await getUsers();
+    res.json({ row: vetRoster.publicRow(rows[i], (users.find(u => u.id === rows[i].providerUserId) || {}).name) });
+  } catch (error) {
+    console.error('Veteran status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// A day's sign-ins, for the office: who matched, who did not, who was told.
+app.get('/api/veterans/checkins', authenticateToken, requireVeteranOffice, async (req, res) => {
+  try {
+    const date = vetRoster.isoDate(req.query.date) || practiceToday();
+    const rows = ((await db.get('veteran_checkins')) || [])
+      .filter(c => (c.examDate || practiceTime.zonedParts(c.arrivedAt).isoDate) === date)
+      .sort((a, b) => String(b.arrivedAt).localeCompare(String(a.arrivedAt)))
+      .map(c => ({ id: c.id, firstName: c.firstName, lastName: c.lastName, dob: c.dob || null, phone: c.phone, email: c.email || null,
+        arrivedAt: c.arrivedAt, matchState: c.matchState || 'unmatched', rosterId: c.rosterId || null, notified: c.notified || null }));
+    res.json({ date, rows });
+  } catch (error) {
+    console.error('Veteran check-ins read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The office links a sign-in nobody matched, and the provider is told then.
+app.post('/api/veterans/checkins/:id/match', authenticateToken, requireVeteranOffice, async (req, res) => {
+  try {
+    const rosterId = String((req.body || {}).rosterId || '');
+    const checkins = (await db.get('veteran_checkins')) || [];
+    const c = checkins.find(x => x.id === req.params.id);
+    if (!c) return res.status(404).json({ error: 'Sign-in not found.', code: 'VETERAN_CHECKIN_NOT_FOUND' });
+    if (c.rosterId) return res.status(409).json({ error: 'This sign-in is already matched.', code: 'VETERAN_CHECKIN_MATCHED' });
+    const roster = (await db.get('veteran_roster')) || [];
+    const r = roster.find(x => x.id === rosterId && !x.removedAt);
+    if (!r) return res.status(404).json({ error: 'Veteran not found.', code: 'VETERAN_NOT_FOUND' });
+    if (r.checkinId) return res.status(409).json({ error: 'That veteran already has a sign-in.', code: 'VETERAN_ALREADY_ARRIVED' });
+    const done = await applyVeteranArrival(c.id, r.id, await getUsers());
+    await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_checkin_matched', 'veteran_checkin', c.id, { rosterId: r.id });
+    res.json({ ok: true, notified: done && done.notified });
+  } catch (error) {
+    console.error('Veteran match error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/auth/self-signup/verify', async (req, res) => {
   try {
     const token = String((req.body && req.body.token) || '');
@@ -8704,7 +9006,7 @@ const textSettingsView = (me, client, isClient) => {
     phone: phone ? quoSms.prettyPhone(phone) : null,
     // The client's number is the one on their profile; a POA sets their own here.
     phoneFrom: isClient ? 'profile' : 'own',
-    officeNumber: quoSms.prettyPhone(quoSms.fromNumber()),
+    officeNumber: quoSms.prettyPhone(quoSms.careTeamNumber()),
     stoppedByText: !!(me && me.smsOptIn && !me.smsOptIn.enabled && me.smsOptIn.changedBy === 'text STOP')
   };
 };
@@ -29107,6 +29409,12 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
 // Unified login portal for all user types
 app.get('/login', (req, res) => {
   res.sendFile(__dirname + '/public/login.html');
+});
+
+// The clinic iPad page for veterans arriving for an IME / medical disability
+// exam (owner, 2026-10-30). Public: the veteran has no account.
+app.get('/veterans', (req, res) => {
+  res.sendFile(__dirname + '/public/veterans.html');
 });
 
 // ============== AUTHENTICATED CLIENT PORTAL ROUTES ==============

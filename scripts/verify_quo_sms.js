@@ -87,7 +87,7 @@ const RN = { id: 'rn_sms_1', role: 'user', hasClinicalAccess: true, clinicalRole
 const crypto = require('crypto');
 const sign = (raw) => { const ts = Date.now(); return `hmac;1;${ts};` + crypto.createHmac('sha256', Buffer.from(process.env.QUO_WEBHOOK_SECRET, 'base64')).update(ts + '.' + raw).digest('base64'); };
 const hook = async (evt) => { const raw = JSON.stringify(evt); const r = await fetch(`${BASE}/api/webhooks/quo`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'openphone-signature': sign(raw) }, body: raw }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
-const text = (from, body) => ({ type: 'message.received', data: { object: { id: 'AC' + Math.random().toString(36).slice(2), from, to: ['+14049136705'], direction: 'incoming', body, createdAt: new Date().toISOString() } } });
+const text = (from, body) => ({ type: 'message.received', data: { object: { id: 'AC' + Math.random().toString(36).slice(2), from, to: ['+13462455658'], direction: 'incoming', body, createdAt: new Date().toISOString() } } });
 // Quo is never called from a probe.
 global.fetch = ((real) => async (url, opts) => String(url).includes('api.openphone.com') ? { ok: true, status: 202, json: async () => ({ data: { id: 'QM-probe' } }) } : real(url, opts))(global.fetch);
 

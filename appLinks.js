@@ -36,7 +36,8 @@ const PATHS = Object.freeze({
   CAREGIVER_MORE: '/caregiver#more',        // messages + documents live here
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
   CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
-  CLINICAL_TASKS: '/clinical#queues',       // straight to Tasks → My To-Dos (`queues` is that view's key)
+  CLINICAL_TASKS: '/clinical#queues',
+  CLINICAL_VETERANS: '/clinical#veterans',  // a provider's IME veterans for today       // straight to Tasks → My To-Dos (`queues` is that view's key)
   SCHEDULING: '/scheduling',                // ADMIN shift board, not the caregiver's
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.

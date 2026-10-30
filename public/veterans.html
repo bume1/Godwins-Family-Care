@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Runs full screen when added to the iPad's home screen. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="GFC Veterans">
+  <title>Godwins Family Care — Veterans</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="apple-touch-icon" href="/brand/logo-mark.png">
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
+  <link rel="stylesheet" href="/css/gfc-auth.css">
+  <style>
+    /* The same sign-in look as the main homepage (gfc-auth.css). Only the
+       veteran prompt and the banner are this page's own. */
+    .ga .vet{margin-top:26px;padding-top:22px;border-top:1px solid var(--edge2);}
+    .ga .vet p{font-size:18px;line-height:1.4;color:var(--ink);font-weight:600;margin:0;}
+    .ga .vet .btn{font-size:18px;padding:17px;}
+    .ga .fe{font-size:13px;color:var(--danger);margin-top:5px;}
+    .ga input.bad{border-color:var(--danger);}
+    .ga .dob{display:grid;grid-template-columns:1fr 1fr 1.6fr;gap:10px;}
+    .ga .dob input{text-align:center;}
+    .ga .opt-l{font-weight:400;color:var(--mut);}
+    .ga .done{text-align:center;padding-top:10px;}
+    .ga .done .tick{width:64px;height:64px;border-radius:50%;background:#EEF5EF;border:1px solid #D3E6D7;display:flex;align-items:center;justify-content:center;margin:0 auto 18px;}
+    .ga .done p{font-size:18px;color:var(--mut);margin:10px 0 0;}
+    /* Banner: swap this one file for the veterans photo. */
+    .ga-foot.vet-banner{background:linear-gradient(to bottom,#FAF7F2 0%,rgba(250,247,242,.35) 45%,rgba(250,247,242,0) 100%),url('/banners/banner-veterans.jpg') center 40% / cover no-repeat;}
+    @media (min-width:1024px){
+      .ga-foot.vet-banner{background:linear-gradient(90deg,#FAF7F2 0%,rgba(250,247,242,0) 30%),url('/banners/banner-veterans.jpg') center / cover no-repeat;}
+    }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="ga">
+      <main class="ga-main">
+        <img class="ga-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care">
+
+        <!-- Screen 1: the homepage -->
+        <section id="s-home">
+          <h1>Welcome</h1>
+          <p class="lead">Access your care. Anytime. Anywhere.</p>
+          <div class="vet">
+            <p>Are you a US Veteran here for your Independent Medical Exam or Medical Disability Exam?</p>
+            <button type="button" class="btn navy" id="go-form">Sign In</button>
+          </div>
+          <div class="center"><a class="link" href="/login">Patients and staff, sign in here</a></div>
+        </section>
+
+        <!-- Screen 2: the sign-in form -->
+        <section id="s-form" hidden>
+          <form id="f" novalidate autocomplete="off">
+            <h1>Welcome</h1>
+            <p class="lead">Please tell us who you are and the best number to reach you.</p>
+            <div class="err" id="err" hidden></div>
+            <label class="fl" for="firstName">First name</label>
+            <input type="text" id="firstName" name="firstName" autocomplete="off" autocapitalize="words" maxlength="60">
+            <div class="fe" id="fe-firstName" hidden></div>
+            <label class="fl" for="lastName">Last name</label>
+            <input type="text" id="lastName" name="lastName" autocomplete="off" autocapitalize="words" maxlength="60">
+            <div class="fe" id="fe-lastName" hidden></div>
+            <label class="fl" for="dobM">Date of birth</label>
+            <div class="dob">
+              <input type="text" id="dobM" inputmode="numeric" maxlength="2" placeholder="MM" aria-label="Birth month" autocomplete="off">
+              <input type="text" id="dobD" inputmode="numeric" maxlength="2" placeholder="DD" aria-label="Birth day" autocomplete="off">
+              <input type="text" id="dobY" inputmode="numeric" maxlength="4" placeholder="YYYY" aria-label="Birth year" autocomplete="off">
+            </div>
+            <div class="fe" id="fe-dob" hidden></div>
+            <label class="fl" for="phone">Phone number</label>
+            <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="off" maxlength="20" placeholder="(912) 555-1234">
+            <div class="fe" id="fe-phone" hidden></div>
+            <label class="fl" for="email">Email <span class="opt-l">(optional)</span></label>
+            <input type="email" id="email" name="email" inputmode="email" autocomplete="off" autocapitalize="off" maxlength="120">
+            <div class="fe" id="fe-email" hidden></div>
+            <!-- A field people cannot see. A form filled in by a bot fills it in. -->
+            <div class="hp" aria-hidden="true"><label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+            <button type="submit" class="btn navy" id="submit">Submit</button>
+            <div class="center"><button type="button" class="link" id="back">Back</button></div>
+          </form>
+        </section>
+
+        <!-- Screen 3: thank you -->
+        <section id="s-done" hidden>
+          <div class="done">
+            <div class="tick"><svg width="30" height="30" fill="none" stroke="#2E5E45" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></div>
+            <h1>Thank you for signing in.</h1>
+            <p id="done-msg">We will call you back shortly.</p>
+            <p>Please have a seat.</p>
+          </div>
+        </section>
+      </main>
+      <div class="ga-foot vet-banner"><p>© 2026 Godwins Family Care LLC</p></div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    // A shared iPad: every screen returns to the start on its own, and the
+    // form is cleared each time, so the next veteran never sees the last one's details.
+    var DONE_RESET_MS = 12000;   // thank-you screen
+    var IDLE_RESET_MS = 90000;   // a form left half filled in
+    var $ = function (id) { return document.getElementById(id); };
+    var screens = ['s-home', 's-form', 's-done'];
+    var timer = null;
+
+    function show(id) {
+      screens.forEach(function (s) { $(s).hidden = s !== id; });
+      clearTimeout(timer);
+      if (id === 's-done') timer = setTimeout(reset, DONE_RESET_MS);
+      if (id === 's-form') { armIdle(); setTimeout(function () { $('firstName').focus(); }, 50); }
+      window.scrollTo(0, 0);
+    }
+    function armIdle() { clearTimeout(timer); timer = setTimeout(reset, IDLE_RESET_MS); }
+    function clearErrors() {
+      $('err').hidden = true;
+      ['firstName', 'lastName', 'dob', 'phone', 'email'].forEach(function (k) {
+        $('fe-' + k).hidden = true;
+        fieldInputs(k).forEach(function (el) { el.classList.remove('bad'); });
+      });
+    }
+    function fieldInputs(k) { return k === 'dob' ? [$('dobM'), $('dobD'), $('dobY')] : [$(k)]; }
+    // Month and day move on to the next box once full, as a keypad user expects.
+    [['dobM', 'dobD', 2], ['dobD', 'dobY', 2]].forEach(function (p) {
+      $(p[0]).addEventListener('input', function () {
+        this.value = this.value.replace(/\D/g, '');
+        if (this.value.length >= p[2]) $(p[1]).focus();
+      });
+    });
+    $('dobY').addEventListener('input', function () { this.value = this.value.replace(/\D/g, ''); });
+    function dobValue() {
+      var m = $('dobM').value, d = $('dobD').value, y = $('dobY').value;
+      if (!m || !d || y.length !== 4) return '';
+      return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
+    }
+    function reset() { $('f').reset(); clearErrors(); setBusy(false); show('s-home'); }
+    function setBusy(b) { $('submit').disabled = b; $('submit').textContent = b ? 'Sending…' : 'Submit'; }
+
+    $('go-form').addEventListener('click', function () { show('s-form'); });
+    $('back').addEventListener('click', reset);
+    $('f').addEventListener('input', armIdle);
+
+    $('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      clearErrors();
+      var body = {
+        firstName: $('firstName').value, lastName: $('lastName').value, dob: dobValue(),
+        phone: $('phone').value, email: $('email').value, website: $('f').website.value
+      };
+      setBusy(true);
+      fetch('/api/veterans/check-in', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) { return { ok: r.ok, d: d }; });
+      }).then(function (res) {
+        setBusy(false);
+        if (res.ok) { $('f').reset(); show('s-done'); return; }
+        var fe = res.d.fieldErrors || {};
+        Object.keys(fe).forEach(function (k) {
+          if (!$('fe-' + k)) return;
+          $('fe-' + k).textContent = fe[k]; $('fe-' + k).hidden = false;
+          fieldInputs(k).forEach(function (el) { el.classList.add('bad'); });
+        });
+        $('err').textContent = res.d.error || 'Something went wrong. Please let the front desk know you are here.';
+        $('err').hidden = false;
+      }).catch(function () {
+        setBusy(false);
+        $('err').textContent = 'We could not send that. Please check the internet connection or let the front desk know you are here.';
+        $('err').hidden = false;
+      });
+    });
+  })();
+  </script>
+</body>
+</html>

@@ -21,7 +21,9 @@ const SECRET = Buffer.from('test-signing-secret').toString('base64');
 process.env.QUO_API_KEY = 'test-key';
 process.env.QUO_WEBHOOK_SECRET = SECRET;
 delete process.env.QUO_FROM_NUMBER;
-const OFFICE = '+14049136705';
+// The Care Team line (owner, 2026-10-30): Care Team texts and their replies.
+const OFFICE = '+13462455658';
+const MAIN_LINE = '+14049136705';
 
 const USERS = () => [
   { id: 'admin-1', name: 'GFC Admin', email: 'admin@test.local', role: 'admin' },
@@ -281,4 +283,28 @@ test('2026-10-21: QUO_WEBHOOK_SECRET may hold one signing key per Quo webhook; a
   } finally {
     if (before === undefined) delete process.env.QUO_WEBHOOK_SECRET; else process.env.QUO_WEBHOOK_SECRET = before;
   }
+});
+
+test('two GFC lines: Care Team on 346, the office main line on 404, never the same', () => {
+  const q = require('../quoSms');
+  assert.equal(q.careTeamNumber(), '+13462455658');
+  assert.equal(q.officeNumber(), MAIN_LINE);
+  assert.notEqual(q.careTeamNumber(), q.officeNumber());
+  assert.deepEqual(q.gfcLines(), ['+13462455658', MAIN_LINE]);
+});
+
+test('sendText refuses to send without a named line', async () => {
+  const q = require('../quoSms');
+  let called = false;
+  const c = q.createClient({ fetchImpl: async () => { called = true; return { ok: true, json: async () => ({}) }; } });
+  const prev = process.env.QUO_API_KEY; process.env.QUO_API_KEY = 'k';
+  await assert.rejects(() => c.sendText({ to: '+14045550100', content: 'x' }), e => e.code === 'SMS_NO_FROM_LINE');
+  if (prev === undefined) delete process.env.QUO_API_KEY; else process.env.QUO_API_KEY = prev;
+  assert.equal(called, false);
+});
+
+test('a reply on the main line is not a Care Team reply', async () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.match(src, /if \(ev\.officePhone !== quoSms\.careTeamNumber\(\)\) return \{ outcome: 'other_line' \};/);
+  assert.match(src, /smsClient\.sendText\(\{ to: row\.to, content: row\.content, from: quoSms\.careTeamNumber\(\) \}\)/);
 });
