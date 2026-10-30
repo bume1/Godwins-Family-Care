@@ -29,18 +29,22 @@
     .ga .done{text-align:center;padding-top:10px;}
     .ga .done .tick{width:64px;height:64px;border-radius:50%;background:#EEF5EF;border:1px solid #D3E6D7;display:flex;align-items:center;justify-content:center;margin:0 auto 18px;}
     .ga .done p{font-size:18px;color:var(--mut);margin:10px 0 0;}
-    /* Banner: swap this one file for the veterans photo. */
-    .ga-foot.vet-banner{background:linear-gradient(to bottom,#FAF7F2 0%,rgba(250,247,242,.35) 45%,rgba(250,247,242,0) 100%),url('/banners/banner-veterans.jpg') center 40% / cover no-repeat;}
+    /* The veterans banner (owner, 2026-10-30) runs full width across the top.
+       It carries the logo and the headline itself, so the page drops its own
+       logo, and the banner is never cropped or faded. */
+    .ga.vetpage,.ga.vetpage .ga-main{flex-direction:column;}
     @media (min-width:1024px){
-      .ga-foot.vet-banner{background:linear-gradient(90deg,#FAF7F2 0%,rgba(250,247,242,0) 30%),url('/banners/banner-veterans.jpg') center / cover no-repeat;}
+      .ga.vetpage .ga-main{width:100%;max-width:520px;margin:0 auto;padding:28px 22px 24px;justify-content:flex-start;}
     }
+    .vet-hero{display:block;width:100%;height:auto;}
+    .vet-copy{text-align:center;font-size:12px;color:var(--mut);padding:14px 0 18px;margin:0;width:100%;max-width:none;align-self:stretch;}
   </style>
 </head>
 <body>
   <div id="root">
-    <div class="ga">
+    <div class="ga vetpage">
+      <img class="vet-hero" src="/banners/banner-veterans.jpg" alt="Godwins Family Care. We serve U.S. Veterans: primary care, behavioral health, VA C&amp;P exams, continuous care.">
       <main class="ga-main">
-        <img class="ga-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care">
 
         <!-- Screen 1: the homepage -->
         <section id="s-home">
@@ -95,7 +99,7 @@
           </div>
         </section>
       </main>
-      <div class="ga-foot vet-banner"><p>© 2026 Godwins Family Care LLC</p></div>
+      <p class="vet-copy">© 2026 Godwins Family Care LLC</p>
     </div>
   </div>
 
