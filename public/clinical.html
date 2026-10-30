@@ -476,6 +476,9 @@
       { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week', group: 'work' },
       { key: 'queue', tab: 'Coding', icon: 'ti-receipt', group: 'work' },
       { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation', group: 'work' },
+      // Owner, 2026-10-30: the provider's IME veterans for the day, and who has
+      // signed in on the clinic iPad. Arrival emails link here (#veterans).
+      { key: 'veterans', tab: 'Veterans', icon: 'ti-medal', group: 'work' },
       { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox', group: 'work' },
       { key: 'settings', tab: 'Settings', icon: 'ti-settings', group: 'foot' }
     ]);
@@ -7724,6 +7727,125 @@
     // number it went to are on the row: the point of this screen is that
     // somebody can pick up the phone.
     // ══════════════════════════════════════════════════════════════════════
+    // ── Veterans for independent medical exams (owner, 2026-10-30) ─────────
+    // The provider's list for a day: who the vendor is sending, who has signed
+    // in on the clinic iPad (with the number to call), and Mark Seen / No Show.
+    // An admin or manager sees every provider's list here too. Refreshes every
+    // 30 seconds so an arrival shows without a reload.
+    const VETERAN_STATUS_PILL = {
+      expected: 'bg-stone-100 text-stone-600 border-stone-200',
+      arrived: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      seen: 'bg-sky-50 text-sky-800 border-sky-200',
+      no_show: 'bg-amber-50 text-amber-800 border-amber-200'
+    };
+    const fmtYmd = (ymd) => { const [y, m, d] = String(ymd || '').split('-'); return y ? `${m}/${d}/${y}` : '—'; };
+    const VeteranAddForm = ({ date, providers, office, onAdded }) => {
+      const blank = { firstName: '', lastName: '', dob: '', examDate: date, providerUserId: '' };
+      const [f, setF] = useState(blank);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [fe, setFe] = useState({});
+      useEffect(() => { setF(x => ({ ...x, examDate: date })); }, [date]);
+      const set = (k) => (e) => setF(x => ({ ...x, [k]: e.target.value }));
+      const submit = (e) => {
+        e.preventDefault(); setBusy(true); setErr(''); setFe({});
+        authedFetch('/api/veterans/roster', { method: 'POST', body: JSON.stringify(f) })
+          .then(() => { setF({ ...blank, examDate: f.examDate, providerUserId: f.providerUserId }); onAdded(); })
+          .catch(e2 => { setErr(e2.message); setFe((e2.data && e2.data.fieldErrors) || {}); })
+          .finally(() => setBusy(false));
+      };
+      const inp = 'w-full border border-stone-300 rounded-lg px-3 py-2 text-sm';
+      return (
+        <form onSubmit={submit} className="card p-4 mb-5">
+          <h3 className="text-[15px] font-semibold text-primary mb-3">Add Veteran</h3>
+          {err && <div className="text-sm text-red-600 mb-2">{err}</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <label className="text-[12px] text-stone-600">First name<input className={inp} value={f.firstName} onChange={set('firstName')} />{fe.firstName && <span className="text-red-600">{fe.firstName}</span>}</label>
+            <label className="text-[12px] text-stone-600">Last name<input className={inp} value={f.lastName} onChange={set('lastName')} />{fe.lastName && <span className="text-red-600">{fe.lastName}</span>}</label>
+            <label className="text-[12px] text-stone-600">Date of birth<input type="date" className={inp} value={f.dob} onChange={set('dob')} />{fe.dob && <span className="text-red-600">{fe.dob}</span>}</label>
+            <label className="text-[12px] text-stone-600">Exam date<input type="date" className={inp} value={f.examDate} onChange={set('examDate')} />{fe.examDate && <span className="text-red-600">{fe.examDate}</span>}</label>
+            {office ? (
+              <label className="text-[12px] text-stone-600">Provider
+                <select className={inp} value={f.providerUserId} onChange={set('providerUserId')}>
+                  <option value="">Choose…</option>
+                  {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>{fe.providerUserId && <span className="text-red-600">{fe.providerUserId}</span>}
+              </label>
+            ) : <div className="text-[12px] text-stone-500 self-end pb-2">Added to your list.</div>}
+          </div>
+          <button className="btn mt-3" disabled={busy}>{busy ? 'Adding…' : 'Add Veteran'}</button>
+        </form>
+      );
+    };
+    const VeteransView = () => {
+      const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      const [showAdd, setShowAdd] = useState(false);
+      const load = useCallback(() => {
+        authedFetch(`/api/veterans/roster?date=${date}`).then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [date]);
+      useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+      const setStatus = (row, status) => authedFetch(`/api/veterans/roster/${row.id}/status`, { method: 'POST', body: JSON.stringify({ status }) })
+        .then(load).catch(e => setErr(e.message));
+      const remove = (row) => {
+        if (!window.confirm(`Remove ${row.firstName} ${row.lastName} from the list?`)) return;
+        authedFetch(`/api/veterans/roster/${row.id}`, { method: 'DELETE' }).then(load).catch(e => setErr(e.message));
+      };
+      const rows = (d && d.rows) || [];
+      const arrived = rows.filter(r => r.status === 'arrived').length;
+      return (
+        <div className="p-4 lg:p-7 max-w-5xl">
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <h2 className="serif text-[24px] font-semibold text-primary mr-auto">Veterans{d && !d.office ? ' · My List' : ''}</h2>
+            <input type="date" className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm" value={date} onChange={e => setDate(e.target.value)} />
+            <button className="btn ghost" onClick={() => setShowAdd(s => !s)}>{showAdd ? 'Close' : 'Add Veteran'}</button>
+          </div>
+          {err && <div className="card p-4 text-red-600 text-sm mb-4">{err}</div>}
+          {showAdd && d && <VeteranAddForm date={date} providers={d.providers || []} office={d.office} onAdded={load} />}
+          {!d && !err && <div className="card p-6 text-stone-500 text-sm">Loading…</div>}
+          {d && (
+            <>
+              <p className="text-[13px] text-stone-500 mb-2">{rows.length} on the list · {arrived} waiting now</p>
+              <div className="card overflow-hidden">
+                {rows.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">No veterans on the list for this day.</p>}
+                {rows.map(r => (
+                  <div key={r.id} className={`flex flex-wrap items-start gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0 ${r.status === 'arrived' ? 'bg-emerald-50/40' : ''}`}>
+                    <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-primary/10 text-primary"><i className="ti ti-medal text-[20px]" /></div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[15px] font-semibold text-primary">{r.firstName} {r.lastName}</span>
+                        <span className={`pill ${VETERAN_STATUS_PILL[r.status] || ''}`}>{r.statusLabel}</span>
+                      </div>
+                      <div className="text-[12.5px] text-stone-600">DOB {fmtYmd(r.dob)}{d.office && r.providerName ? ` · ${r.providerName}` : ''}</div>
+                      {r.arrivedAt && (
+                        <div className="text-[12.5px] text-stone-700 mt-0.5">
+                          Signed in {fmtTs(r.arrivedAt)}
+                          {r.arrivalPhone && <> · <a className="font-semibold text-primary underline" href={`tel:${String(r.arrivalPhone).replace(/\D/g, '')}`}>{r.arrivalPhone}</a></>}
+                          {r.arrivalEmail && <> · {r.arrivalEmail}</>}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {r.status !== 'seen' && <button className="btn !py-1 !px-3 text-xs" onClick={() => setStatus(r, 'seen')}>Mark Seen</button>}
+                      {r.status === 'expected' && <button className="btn ghost !py-1 !px-3 text-xs" onClick={() => setStatus(r, 'no_show')}>No Show</button>}
+                      {(r.status === 'seen' || r.status === 'no_show') && <button className="btn ghost !py-1 !px-3 text-xs" onClick={() => setStatus(r, 'expected')}>Undo</button>}
+                      {!r.arrivedAt && <button className="btn ghost !py-1 !px-3 text-xs" onClick={() => remove(r)}>Remove</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {d.providers && d.providers.some(p => !p.hasPhone) && (
+                <p className="text-[12px] text-stone-500 mt-2">
+                  {d.office ? 'Providers with no mobile number on file get the arrival email but not the text.' : 'Your user record has no mobile number, so arrivals come by email only. Ask an admin to add it.'}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      );
+    };
+
     const OverdueOrders = ({ onOpenChart }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
@@ -9673,6 +9795,7 @@
                 onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />
             )}
             {view === 'results' && <ResultsInbox onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
+            {view === 'veterans' && <VeteransView />}
             {view === 'overdue' && <OverdueOrders onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
             {view === 'messages' && <div className="p-4 lg:p-7"><StaffMessagesView /></div>}
             {view === 'settings' && (

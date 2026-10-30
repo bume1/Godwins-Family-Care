@@ -68,6 +68,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   // A veteran signing in at the clinic iPad for an IME / medical disability
   // exam: first and last name and a phone number. Nothing clinical.
   { key: 'veteran_checkins', phi: true, owner: 'veterans check-in 10/2026' },
+  // The IME roster: each veteran the vendor sends (name, date of birth, exam
+  // date) and the provider they are assigned to.
+  { key: 'veteran_roster', phi: true, owner: 'veterans check-in 10/2026' },
   // Which Google Calendar event mirrors which OpenEMR appointment eid.
   { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
   // Patient statements: copays and home care hours. Amounts and dates of
