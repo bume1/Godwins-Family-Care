@@ -107,6 +107,7 @@ const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example
   check('the roster row is now arrived, with the phone they gave', j.status === 'arrived' && j.arrivalPhone === '(912) 555-7777' && j.checkinId);
   const docMail = EMAILS.find(e => e.to === DOC1.email);
   check('Dana is emailed, marked PHI, with no name in the subject', docMail && docMail.phi && !/James|Brien/i.test(docMail.subject), JSON.stringify(EMAILS));
+  check('the text comes from the GFC main line', TEXTS[0] && TEXTS[0].from === '+14049136705', JSON.stringify(TEXTS[0]));
   check('Dana is texted, with no name in the text', TEXTS.length === 1 && TEXTS[0].to[0] === '+19125550101' && !/James|Brien/i.test(TEXTS[0].content), JSON.stringify(TEXTS));
   const ck = (STORE.get('veteran_checkins') || []).find(c => c.id === j.checkinId);
   check('the sign-in records the match and that both went out', ck && ck.matchState === 'matched' && ck.notified.email === 'sent' && ck.notified.text === 'sent', JSON.stringify(ck));
