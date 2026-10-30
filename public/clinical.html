@@ -7835,10 +7835,9 @@
                   </div>
                 ))}
               </div>
-              {d.providers && d.providers.some(p => !p.hasPhone) && (
-                <p className="text-[12px] text-stone-500 mt-2">
-                  {d.office ? 'Providers with no mobile number on file get the arrival email but not the text.' : 'Your user record has no mobile number, so arrivals come by email only. Ask an admin to add it.'}
-                </p>
+              {/* A provider is told about their own record only. */}
+              {!d.office && d.providers && d.providers[0] && !d.providers[0].hasPhone && (
+                <p className="text-[12px] text-stone-500 mt-2">Your user record has no mobile number, so arrivals come by email only. Ask an admin to add it.</p>
               )}
             </>
           )}

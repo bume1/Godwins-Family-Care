@@ -2020,9 +2020,10 @@
               </select>
               <button className="btn-primary text-white rounded-xl px-4 py-2 text-sm font-semibold" disabled={adding}>{adding ? 'Adding…' : 'Add Veteran'}</button>
             </div>
-            {providers.some(p => !p.hasPhone) && (
-              <p className="text-xs text-gray-500 mt-3">No mobile number on file for {providers.filter(p => !p.hasPhone).map(p => p.name).join(', ')}, so they get the arrival email but not the text. Add it under User Management.</p>
-            )}
+            {/* Only about the provider picked here, never the whole roster. */}
+            {(() => { const sel = providers.find(p => p.id === f.providerUserId); return sel && !sel.hasPhone ? (
+              <p className="text-xs text-gray-500 mt-3">{sel.name} has no mobile number on file, so they will get the arrival email but not the text. Add it under User Management.</p>
+            ) : null; })()}
           </form>
           {unmatched.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 mb-6">
