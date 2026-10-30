@@ -110,6 +110,13 @@ function publicRow(row, providerName) {
 function providerText(siteLabel) {
   return `Godwins Family Care: a veteran for your exam has signed in at the ${siteLabel || 'clinic'}. Open the GFC app to see who.`;
 }
+// The confirmation text to the veteran, from the office main line. "Your
+// provider has been notified" is only said when a provider was.
+function veteranText(matched) {
+  return matched
+    ? 'Thanks for checking in at Godwins Family Care. Your provider has been notified and will call you shortly.'
+    : 'Thanks for checking in at Godwins Family Care. Our team has your details and will call you shortly.';
+}
 function providerEmailSubject(siteLabel) {
   return `Your veteran has arrived at the ${siteLabel || 'clinic'}`;
 }
@@ -117,5 +124,5 @@ function providerEmailSubject(siteLabel) {
 module.exports = {
   STATUSES, STATUS_LABELS, SETTABLE_STATUSES, SITES, DEFAULT_SITE,
   foldName, isoDate, normalizeRosterInput, isOffice, canEditRow,
-  candidatesFor, matchCheckin, publicRow, providerText, providerEmailSubject
+  candidatesFor, matchCheckin, publicRow, providerText, veteranText, providerEmailSubject
 };

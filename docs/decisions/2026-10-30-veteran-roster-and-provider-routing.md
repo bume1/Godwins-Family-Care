@@ -42,3 +42,17 @@ Follows `2026-10-30-veterans-checkin-page.md`. The vendor gives GFC each veteran
 - A mobile number and email on each provider's user record. With no number, the provider gets the email only, and the screens say so.
 - `QUO_API_KEY` on the deployment.
 - A container rebuild.
+
+## Addendum: a confirmation text to the veteran (owner, 2026-10-30)
+- **When:** every iPad sign-in, after the screen has answered, so the iPad never waits on it.
+- **Line:** sent from the office main line (`quoSms.officeNumber()`).
+- **Wording:**
+  - Matched: "Thanks for checking in at Godwins Family Care. Your provider has been notified and will call you shortly."
+  - Unmatched or ambiguous: "...Our team has your details and will call you shortly." It never claims a provider was told when none was.
+- **Record:** the outcome is stored on the sign-in (`veteranText`). A failed text never affects the sign-in.
+- **Not repeated:** matching a sign-in by hand later does not text the veteran again.
+- **Verified:**
+  - 2 new tests
+  - 2 mutations caught: the text sent from the Care Team line, and the "notified" wording sent on an unmatched sign-in
+  - probe 28/28
+  - suite 2688, 0 failing

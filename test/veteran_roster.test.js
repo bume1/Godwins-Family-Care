@@ -85,3 +85,18 @@ test('server: a provider can only add veterans to their own list', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /const providerUserId = vetRoster\.isOffice\(req\.user\) \? String\(\(req\.body \|\| \{\}\)\.providerUserId \|\| ''\) : req\.user\.id;/);
 });
+
+test('the veteran confirmation only says the provider was notified when one was', () => {
+  assert.match(v.veteranText(true), /Your provider has been notified/);
+  assert.doesNotMatch(v.veteranText(false), /provider/i);
+  assert.match(v.veteranText(false), /will call you shortly/);
+});
+
+test('server: the veteran confirmation goes out on the office main line', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const a = src.indexOf('async function textVeteranConfirmation');
+  const block = src.slice(a, src.indexOf("app.post('/api/veterans/check-in'", a));
+  assert.ok(a > 0);
+  assert.match(block, /sendText\(\{ to, content: vetRoster\.veteranText\(matched\), from: q\.officeNumber\(\) \}\)/);
+  assert.match(src, /\n    textVeteranConfirmation\(row\.id, phone, m\.state === 'matched'\);/);
+});

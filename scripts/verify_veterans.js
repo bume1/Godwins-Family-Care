@@ -107,10 +107,14 @@ const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example
   check('the roster row is now arrived, with the phone they gave', j.status === 'arrived' && j.arrivalPhone === '(912) 555-7777' && j.checkinId);
   const docMail = EMAILS.find(e => e.to === DOC1.email);
   check('Dana is emailed, marked PHI, with no name in the subject', docMail && docMail.phi && !/James|Brien/i.test(docMail.subject), JSON.stringify(EMAILS));
-  check('the text comes from the GFC main line', TEXTS[0] && TEXTS[0].from === '+14049136705', JSON.stringify(TEXTS[0]));
-  check('Dana is texted, with no name in the text', TEXTS.length === 1 && TEXTS[0].to[0] === '+19125550101' && !/James|Brien/i.test(TEXTS[0].content), JSON.stringify(TEXTS));
+  check('the provider text comes from the GFC main line', TEXTS.find(t => t.to[0] === '+19125550101').from === '+14049136705');
+  const toDana = TEXTS.filter(t => t.to[0] === '+19125550101');
+  check('Dana is texted, with no name in the text', toDana.length === 1 && !/James|Brien/i.test(toDana[0].content), JSON.stringify(TEXTS));
+  const toJames = TEXTS.filter(t => t.to[0] === '+19125557777');
+  check('the veteran gets a confirmation from the main line saying his provider was notified',
+    toJames.length === 1 && toJames[0].from === '+14049136705' && /Your provider has been notified/.test(toJames[0].content), JSON.stringify(TEXTS));
   const ck = (STORE.get('veteran_checkins') || []).find(c => c.id === j.checkinId);
-  check('the sign-in records the match and that both went out', ck && ck.matchState === 'matched' && ck.notified.email === 'sent' && ck.notified.text === 'sent', JSON.stringify(ck));
+  check('the sign-in records the match and that every message went out', ck && ck.matchState === 'matched' && ck.notified.email === 'sent' && ck.notified.text === 'sent' && ck.veteranText === 'sent', JSON.stringify(ck));
   r = await call('GET', `/api/veterans/roster?date=${today}`, d1);
   check('Dana\'s list shows him arrived with the number to call', r.body.rows[0].status === 'arrived' && r.body.rows[0].arrivalPhone === '(912) 555-7777');
   r = await call('POST', `/api/veterans/roster/${jamesId}/status`, d1, { status: 'seen' });
@@ -121,7 +125,9 @@ const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example
   r = await call('POST', '/api/veterans/check-in', null, { firstName: 'Ann', lastName: 'Lee', dob: '1980-01-02', phone: '9125558888', email: 'ann@example.test' });
   await wait(200);
   check('a wrong DOB still gets the same thank-you', r.status === 200 && /call you back/.test(r.body.message));
-  check('nobody is texted, and the office is emailed', TEXTS.length === textsBefore && EMAILS.slice(before).some(e => e.to === config.ROI_ADMIN_EMAIL && e.phi));
+  const newTexts = TEXTS.slice(textsBefore);
+  check('no provider is texted, and the office is emailed', newTexts.every(t => t.to[0] === '+19125558888') && EMAILS.slice(before).some(e => e.to === config.ROI_ADMIN_EMAIL && e.phi), JSON.stringify(newTexts));
+  check('the veteran still gets a confirmation, without promising a provider was told', newTexts.length === 1 && !/provider/i.test(newTexts[0].content) && newTexts[0].from === '+14049136705');
   r = await call('GET', `/api/veterans/checkins?date=${today}`, at);
   const un = r.body.rows && r.body.rows.find(c => !c.rosterId);
   check('the office sees it under sign-ins to match', r.status === 200 && un && un.lastName === 'Lee' && un.email === 'ann@example.test');

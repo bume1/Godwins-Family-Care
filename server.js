@@ -3918,6 +3918,25 @@ async function applyVeteranArrival(checkinId, rosterId, users) {
   return { row: roster[ri], notified };
 }
 
+async function textVeteranConfirmation(checkinId, phone, matched) {
+  let outcome;
+  try {
+    const q = require('./quoSms');
+    const to = q.toE164(phone);
+    if (!to) outcome = 'no_phone';
+    else { await q.createClient().sendText({ to, content: vetRoster.veteranText(matched), from: q.officeNumber() }); outcome = 'sent'; }
+  } catch (err) {
+    outcome = err.code === 'SMS_NOT_CONFIGURED' ? 'not_configured' : 'failed';
+    console.error('Veteran confirmation text failed:', err.message);
+  }
+  try {
+    const rows = (await db.get('veteran_checkins')) || [];
+    const i = rows.findIndex(c => c.id === checkinId);
+    if (i >= 0) { rows[i] = { ...rows[i], veteranText: outcome }; await db.set('veteran_checkins', rows); }
+  } catch (err) { console.error('Veteran confirmation text record failed:', err.message); }
+  return outcome;
+}
+
 app.post('/api/veterans/check-in', async (req, res) => {
   try {
     const b = req.body || {};
@@ -3950,6 +3969,10 @@ app.post('/api/veterans/check-in', async (req, res) => {
     if (m.state === 'matched') await applyVeteranArrival(row.id, m.row.id, await getUsers());
     else notifyOfficeOfUnmatched(row);
     res.json({ message: VETERAN_CHECKIN_DONE });
+    // A confirmation text to the veteran, from the office main line (owner,
+    // 2026-10-30). After the reply, so the iPad never waits on it; the outcome
+    // is recorded on the sign-in, and a failure never touches the sign-in.
+    textVeteranConfirmation(row.id, phone, m.state === 'matched');
   } catch (error) {
     console.error('Veteran check-in error:', error);
     res.status(500).json({ error: 'Something went wrong. Please let the front desk know you are here.' });
