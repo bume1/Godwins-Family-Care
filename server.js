@@ -3819,6 +3819,53 @@ app.post('/api/auth/self-signup', async (req, res) => {
   }
 });
 
+// ============== VETERAN CHECK-IN (owner, 2026-10-30) ==============
+// The clinic iPad at /veterans. A veteran gives a first name, last name and
+// phone number; the row is kept and the office is emailed that they are here.
+// Routing the notice to the assigned provider by text and email is the next
+// step and is not built yet. Public, so rate-limited by hashed address and
+// guarded by a hidden field.
+const veteranCheckinLimited = signups.makeLimiter({ max: 30, windowMs: 3600 * 1000 });
+const VETERAN_CHECKIN_DONE = 'Thank you for signing in. We will call you back shortly.';
+
+app.post('/api/veterans/check-in', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.website) return res.json({ message: VETERAN_CHECKIN_DONE });
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (veteranCheckinLimited(ipKey)) return res.status(429).json({ error: 'Too many sign-ins from this device. Please let the front desk know you are here.', code: 'VETERAN_CHECKIN_RATE_LIMITED' });
+    const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const firstName = clean(b.firstName);
+    const lastName = clean(b.lastName);
+    const digits = String(b.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    const fieldErrors = {};
+    if (!firstName) fieldErrors.firstName = 'Please enter your first name.';
+    if (!lastName) fieldErrors.lastName = 'Please enter your last name.';
+    if (digits.length !== 10) fieldErrors.phone = 'Please enter a 10-digit phone number.';
+    if (Object.keys(fieldErrors).length) return res.status(400).json({ error: 'Please check the highlighted fields.', code: 'VETERAN_CHECKIN_INVALID', fieldErrors });
+    const phone = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+    const row = { id: uuidv4(), firstName, lastName, phone, site: 'savannah', status: 'arrived', arrivedAt: new Date().toISOString(), ipHash: ipKey };
+    const rows = (await db.get('veteran_checkins')) || [];
+    rows.push(row);
+    await db.set('veteran_checkins', rows);
+    await logActivity('veteran_checkin', 'Veteran check-in', 'veteran_checked_in', 'veteran_checkin', row.id, { site: row.site });
+    // The name is in the body, never the subject, and the message is marked
+    // PHI so it is refused on a transport outside the BAA.
+    const when = new Date(row.arrivedAt).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' });
+    const htmlBody = emailTemplates.renderGfcEmail({
+      headline: 'A veteran has arrived for their exam',
+      paragraphs: ['A veteran signed in on the Savannah clinic iPad and is ready to be seen.', 'Please call them back.'],
+      fields: [{ label: 'Name', value: `${firstName} ${lastName}` }, { label: 'Phone', value: phone }, { label: 'Signed in', value: when }]
+    }).html;
+    sendEmail(config.ROI_ADMIN_EMAIL, 'Veteran arrived at the Savannah clinic', `A veteran signed in at the Savannah clinic: ${firstName} ${lastName}, ${phone}, at ${when}.`, { htmlBody, phi: true })
+      .catch(err => console.error('Veteran check-in email error (non-fatal):', err.message));
+    res.json({ message: VETERAN_CHECKIN_DONE });
+  } catch (error) {
+    console.error('Veteran check-in error:', error);
+    res.status(500).json({ error: 'Something went wrong. Please let the front desk know you are here.' });
+  }
+});
+
 app.post('/api/auth/self-signup/verify', async (req, res) => {
   try {
     const token = String((req.body && req.body.token) || '');
@@ -29107,6 +29154,12 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
 // Unified login portal for all user types
 app.get('/login', (req, res) => {
   res.sendFile(__dirname + '/public/login.html');
+});
+
+// The clinic iPad page for veterans arriving for an IME / medical disability
+// exam (owner, 2026-10-30). Public: the veteran has no account.
+app.get('/veterans', (req, res) => {
+  res.sendFile(__dirname + '/public/veterans.html');
 });
 
 // ============== AUTHENTICATED CLIENT PORTAL ROUTES ==============

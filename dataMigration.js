@@ -65,6 +65,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Self sign-ups waiting on staff: a name, date of birth, address and
   // insurance details, plus a password HASH and a verify-token HASH.
   { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
+  // A veteran signing in at the clinic iPad for an IME / medical disability
+  // exam: first and last name and a phone number. Nothing clinical.
+  { key: 'veteran_checkins', phi: true, owner: 'veterans check-in 10/2026' },
   // Which Google Calendar event mirrors which OpenEMR appointment eid.
   { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
   // Patient statements: copays and home care hours. Amounts and dates of
