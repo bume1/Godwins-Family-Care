@@ -119,6 +119,18 @@ function matchPhone(e164, users) {
 // ---- Opt-in ------------------------------------------------------------------
 const textsOn = (user) => !!(user && user.smsOptIn && user.smsOptIn.enabled);
 
+// A patient or POA who texts the Care Team line has started a text
+// conversation with us, so replies go back to them by text (owner,
+// 2026-11-02: replies were reaching the portal only). Returns the new opt-in
+// record, or null to leave it alone. Someone who ever turned texts off, by STOP
+// or in the portal, is never switched back on this way.
+function optInFromIncomingText(current, at) {
+  const c = current || {};
+  if (c.enabled === true) return null;
+  if (c.enabled === false || c.stoppedAt) return null;
+  return { ...c, enabled: true, optedInAt: at, stoppedAt: null, changedBy: 'texted the care team' };
+}
+
 // ---- The wording -------------------------------------------------------------
 // The message itself (the BAA covers it), as plain text, from the person who
 // wrote it. A file is named as waiting, never sent. The first text a person
@@ -248,6 +260,6 @@ function readEvent(evt) {
 module.exports = {
   QUIET_START, QUIET_END, MAX_TEXT_BODY,
   toE164, prettyPhone, fromNumber, careTeamNumber, officeNumber, gfcLines, CARE_TEAM_LINE_DEFAULT, status,
-  phonesForClient, phoneForUser, matchPhone, textsOn,
+  phonesForClient, phoneForUser, matchPhone, textsOn, optInFromIncomingText,
   outgoingText, quietUntil, keyword, verifySignature, webhookSecrets, verifyAnySignature, createClient, readEvent
 };

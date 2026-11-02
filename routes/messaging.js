@@ -1263,6 +1263,18 @@ module.exports = function createMessagingRoutes(deps) {
       const who = await resolveTextReply(ev.patientPhone, users);
       if (!who.hit) return record(who.outcome);
       const { user, client, isPoa } = who.hit;
+      // They texted us, so the care team's replies go back by text too, unless
+      // they ever turned texts off (quoSms.optInFromIncomingText).
+      {
+        const u = users.find(x => x && x.id === user.id);
+        const next = u && quoSms.optInFromIncomingText(u.smsOptIn, nowIso());
+        if (next) {
+          u.smsOptIn = next;
+          await db.set('users', users);
+          if (typeof deps.invalidateUsersCache === 'function') deps.invalidateUsersCache();
+          await logActivity(u.id, u.name || 'texter', 'sms_opted_in', 'user', u.id, { by: 'texted first', clientId: client.id });
+        }
+      }
       const sender = msg.senderIdentity(user, { client, isPoa });
       let thread = await careTeamThreadFor(user, client, isPoa);
       if (!thread) {
