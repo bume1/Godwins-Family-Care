@@ -502,3 +502,36 @@ test('both new collections are registered for migration', () => {
   const keys = (Array.isArray(reg) ? reg : Object.values(reg || {})).map(r => r.key);
   for (const k of ['time_log_adjustment_requests', 'user_financial_change_requests']) assert.ok(keys.includes(k), k);
 });
+
+// ---------------------------------------------------------------------------
+// The screens
+// ---------------------------------------------------------------------------
+test('screens: the pay views carry no download, and the time boxes read Eastern', () => {
+  const page = read('public/scheduling.html');
+  const pv = page.slice(page.indexOf('const PayView'), page.indexOf('// ====', page.indexOf('const PayView')));
+  assert.ok(pv.length > 200, 'the read-only view exists');
+  assert.ok(!/\.csv|download|clipboard|window\.print/i.test(pv), 'no download, copy or print control in the view');
+  assert.match(page, /access\.managePay && <button className="btn gold" onClick=\{exportCsv\}>/, 'the export stays the Super Admin\'s');
+  assert.match(page, /onRequest=\{!access\.managePay && access\.manageSchedule \? requestAdjustment : null\}/);
+  // The correction box used to hold the raw UTC instant, so saving it moved a visit four hours.
+  const row = page.slice(page.indexOf('const TimeLogRow'), page.indexOf('const AdjustmentQueue'));
+  assert.ok(!/clockInAt\.slice\(0, 16\)/.test(row), 'no raw UTC slice in the time box');
+  assert.match(row, /toEasternInput\(l\.clockInAt\)/);
+  assert.match(row, /fromEasternInput\(clockInAt\)/);
+});
+
+test('screens: caregiver management reviews documents and offers no delete', () => {
+  const page = read('public/caregivers.html');
+  const docs = page.slice(page.indexOf('const Documents'), page.indexOf('// Broadcast'));
+  assert.match(docs, /\/review`/);
+  assert.ok(!/method: 'DELETE'/.test(docs), 'removing a document stays with the Super Admin');
+});
+
+test('screens: the user form is served only the types the viewer may pick, and shows held pay changes', () => {
+  const src = read('server.js');
+  const i = src.indexOf("app.get('/api/admin/clinical-roles'");
+  assert.match(src.slice(i, i + 900), /canManageAccountType\(req\.user, t\.value\)/);
+  const hub = read('public/admin-hub.html');
+  assert.match(hub, /<FinancialChangeQueue token=\{token\} requests=\{financialPending\} canDecide=\{isSuperAdmin\}/);
+  assert.match(hub, /result\.message \|\|/, 'the form says which fields were held');
+});

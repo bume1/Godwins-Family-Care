@@ -53,6 +53,11 @@ const PW = 'Probe12345!';
   ok('manager, coordinator and LMSW sign in', !!(mgr && crd && lms));
 
   console.log('\nE — user administration');
+  const cat = await call('GET', '/api/admin/clinical-roles', mgr);
+  const offered = (cat.body?.accountTypes || []).map(t => t.value).sort().join(',');
+  ok('the user form offers a manager only caregiver, client and family', cat.status === 200 && offered === 'caregiver,client,family', offered);
+  const catAdmin = await call('GET', '/api/admin/clinical-roles', admin);
+  ok('and the Super Admin all ten', (catAdmin.body?.accountTypes || []).length === 10);
   const cg = await mk(mgr, 'Danielle Carer', 'caregiver', { licenseLevel: 'cna' });
   ok('a manager creates a caregiver account', cg.r.status === 200 && cg.id, cg.r.body);
   const cl = await mk(crd, 'Juanita Client', 'client');

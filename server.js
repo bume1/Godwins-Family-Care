@@ -3064,7 +3064,14 @@ app.post('/api/auth/signup', authenticateToken, requireAdmin, async (req, res) =
 // same rule the competency catalog follows (2026-09-10): a second copy of the
 // vocabulary is a copy that drifts, and a drifting clinical role decides who
 // may prescribe. Build-enforced in test/clinical_roles.test.js.
-app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res) => {
+// A manager or care coordinator reads it too (owner, 2026-11-03), and is
+// served ONLY the account types they may pick (accountTypes.canManageAccountType).
+// The server still refuses anything else; the form just stops offering it.
+const requireUserFormReader = (req, res, next) => {
+  if (accountTypes.isHomeCareOffice(req.user)) return next();
+  return res.status(403).json({ error: 'Super Admin access required' });
+};
+app.get('/api/admin/clinical-roles', authenticateToken, requireUserFormReader, (req, res) => {
   res.json({
     roles: clinicalRoles.ALL_CLINICAL_ROLES.map(value => ({
       value,
@@ -3076,7 +3083,9 @@ app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res)
     capabilityLabels: clinicalRoles.CAPABILITY_REASONS,
     // The ONE account-type picker (owner, 2026-10-15), served so the form
     // never lists a type of its own.
-    accountTypes: accountTypes.ACCOUNT_TYPES.map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
+    accountTypes: accountTypes.ACCOUNT_TYPES
+      .filter(t => accountTypes.canManageAccountType(req.user, t.value))
+      .map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
     managerClinicalAccess: accountTypes.MANAGER_CLINICAL_ACCESS,
     defaultManagerClinicalAccess: accountTypes.DEFAULT_MANAGER_CLINICAL_ACCESS
   });

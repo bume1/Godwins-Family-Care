@@ -175,6 +175,20 @@ const easternMinutes = (iso) => {
   const p = window.GFC_TIME && window.GFC_TIME.zonedParts(iso);
   return p ? p.minutesOfDay : 0;
 };
+// A datetime-local box holds a WALL CLOCK with no zone. It is filled with the
+// time as it was in Georgia and read back as Georgia time. The old version put
+// the raw UTC instant in the box (`iso.slice(0, 16)`), so a 9am visit showed
+// 13:00, and saving it unchanged moved the visit four hours.
+const toEasternInput = (iso) => {
+  const p = iso && window.GFC_TIME && window.GFC_TIME.zonedParts(iso);
+  if (!p) return '';
+  const two = (n) => String(n).padStart(2, '0');
+  return `${p.isoDate}T${two(p.hour)}:${two(p.minute)}`;
+};
+const fromEasternInput = (v) => {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(v || ''));
+  return m && window.GFC_TIME ? window.GFC_TIME.instantFromZoned(m[1], m[2]) : null;
+};
 // A plain calendar date has no timezone of its own, so its parts are read in
 // UTC deliberately — mixing the two is how a grid loses a day at the edges.
 const dayKeyOf = (y, m, d) =>
@@ -907,11 +921,13 @@ const AddTimeEntry = ({ roster, onAdded, setErr, setOk }) => {
   );
 };
 
-const TimeLogRow = ({ l, onEdit }) => {
+const TimeLogRow = ({ l, onEdit, onRequest, pendingRequest }) => {
   const [open, setOpen] = useState(false);
-  const [clockInAt, setClockInAt] = useState(l.clockInAt ? l.clockInAt.slice(0, 16) : '');
-  const [clockOutAt, setClockOutAt] = useState(l.clockOutAt ? l.clockOutAt.slice(0, 16) : '');
+  const [clockInAt, setClockInAt] = useState(toEasternInput(l.clockInAt));
+  const [clockOutAt, setClockOutAt] = useState(toEasternInput(l.clockOutAt));
   const [reason, setReason] = useState('');
+  // The Super Admin corrects directly; a manager or care coordinator asks.
+  const act = onEdit || onRequest;
 
   return (
     <div className="row" style={{ display: 'block' }}>
@@ -932,40 +948,122 @@ const TimeLogRow = ({ l, onEdit }) => {
       {l.enteredManually && (
         <div className="mu">Entered by hand by {l.enteredByName} — {l.entryReason}</div>
       )}
-      {l.edited && <div className="mu">Edited by {l.editedByName} — {l.editReason}</div>}
-
-      {/* A time-log correction is a payroll attestation, so it stays with the
-          people who make those. No button rather than a button that 403s. */}
-      {onEdit && (
-        <div className="btns">
-          <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct Times'}</button>
+      {l.adjusted && (
+        <div className="mu">
+          Adjusted on request by {l.adjustedByName}, approved by {l.approvedByName}. Originally {fmtWhen(l.originalClockIn)} → {l.originalClockOut ? fmtWhen(l.originalClockOut) : 'still open'}
+          {l.originalHours !== null && l.originalHours !== undefined ? ` (${l.originalHours} h)` : ''}. Reason: {l.adjustmentReason}
         </div>
       )}
-      {onEdit && open && (
+      {l.edited && !l.adjusted && <div className="mu">Edited by {l.editedByName} — {l.editReason}</div>}
+      {pendingRequest && (
+        <div className="mu"><span className="chip flag">Correction Requested</span> {pendingRequest.requestedByName} asked for {fmtWhen(pendingRequest.requestedClockIn)} → {pendingRequest.requestedClockOut ? fmtWhen(pendingRequest.requestedClockOut) : 'still open'}. Waiting on the Super Admin.</div>
+      )}
+
+      {/* The Super Admin corrects a time log. A manager or care coordinator
+          requests a correction, and nothing changes until it is approved. */}
+      {act && !(onRequest && !onEdit && pendingRequest) && (
+        <div className="btns">
+          <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : (onEdit ? 'Correct Times' : 'Request Correction')}</button>
+        </div>
+      )}
+      {act && open && (
         <div style={{ marginTop: 10 }}>
           <div className="grid">
-            <div><label>Clock in</label><input type="datetime-local" value={clockInAt} onChange={e => setClockInAt(e.target.value)} /></div>
-            <div><label>Clock out</label><input type="datetime-local" value={clockOutAt} onChange={e => setClockOutAt(e.target.value)} /></div>
+            <div><label>Clock in (Eastern)</label><input type="datetime-local" value={clockInAt} onChange={e => setClockInAt(e.target.value)} /></div>
+            <div><label>Clock out (Eastern)</label><input type="datetime-local" value={clockOutAt} onChange={e => setClockOutAt(e.target.value)} /></div>
           </div>
           <div style={{ marginTop: 9 }}>
-            <label>Reason for the correction (required)</label>
+            <label>{onEdit ? 'Reason for the correction (required)' : 'Why does this time need changing? (required)'}</label>
             <input value={reason} onChange={e => setReason(e.target.value)} placeholder="Caregiver forgot to clock out" />
           </div>
           <div className="btns">
             <button className="btn" disabled={!reason.trim()} onClick={async () => {
-              await onEdit(l.id, {
-                clockInAt: clockInAt ? new Date(clockInAt).toISOString() : undefined,
-                clockOutAt: clockOutAt ? new Date(clockOutAt).toISOString() : null,
+              const body = {
+                clockInAt: clockInAt ? fromEasternInput(clockInAt) : undefined,
+                clockOutAt: clockOutAt ? fromEasternInput(clockOutAt) : null,
                 reason
-              });
-              setOpen(false); setReason('');
-            }}>Save Correction</button>
+              };
+              const done = await act(l.id, body);
+              if (done !== false) { setOpen(false); setReason(''); }
+            }}>{onEdit ? 'Save Correction' : 'Send Request'}</button>
           </div>
           <p className="mu" style={{ marginTop: 8 }}>
-            The before and after values are written to the activity log with your name.
+            {onEdit
+              ? 'The before and after values are written to the activity log with your name.'
+              : 'The Super Admin approves or declines it. The original times stay on the record either way.'}
           </p>
         </div>
       )}
+    </div>
+  );
+};
+
+// The adjustment queue. Managers and coordinators see every request so nobody
+// raises a second one; only the Super Admin decides.
+const AdjustmentQueue = ({ requests, canDecide, onDecide }) => {
+  const [notes, setNotes] = useState({});
+  const pending = requests.filter(r => r.status === 'pending');
+  const recent = requests.filter(r => r.status !== 'pending').slice(0, 10);
+  return (
+    <div className="card">
+      <h2>Time Adjustment Requests</h2>
+      {pending.length === 0
+        ? <p className="sub">Nothing waiting.</p>
+        : pending.map(r => (
+          <div key={r.id} className="row" style={{ display: 'block' }}>
+            <div><b>{r.caregiverName}</b> <span className="mu">· {r.clientName} · asked by {r.requestedByName} ({titleize(r.requestedByRole)}) {fmtWhen(r.requestedAt)}</span></div>
+            <div className="mu">Now: {fmtWhen(r.currentClockIn)} → {r.currentClockOut ? fmtWhen(r.currentClockOut) : 'still open'}</div>
+            <div className="mu">Asked for: {fmtWhen(r.requestedClockIn)} → {r.requestedClockOut ? fmtWhen(r.requestedClockOut) : 'still open'}</div>
+            <div className="mu">Reason: {r.reason}</div>
+            {canDecide && (
+              <div>
+                <input style={{ marginTop: 6 }} value={notes[r.id] || ''} placeholder="Note (optional)"
+                  onChange={e => setNotes({ ...notes, [r.id]: e.target.value })} />
+                <div className="btns">
+                  <button className="btn" onClick={() => onDecide(r.id, 'approved', notes[r.id])}>Approve</button>
+                  <button className="btn ghost" onClick={() => onDecide(r.id, 'declined', notes[r.id])}>Decline</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      {recent.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="mu"><b>Recently decided</b></div>
+          {recent.map(r => (
+            <div key={r.id} className="mu">{r.caregiverName}, {fmtWhen(r.currentClockIn)}: {titleize(r.status)} by {r.decidedByName}{r.decisionNote ? ` — ${r.decisionNote}` : ''}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Payroll and billing as READ-ONLY tables for a manager or care coordinator.
+// No download, no copy-the-table, no print-to-file: the Super Admin exports
+// the files (owner, 2026-11-03). Columns come from the server.
+const PayView = ({ title, data }) => {
+  if (!data) return null;
+  const cols = (data.columns || []).filter(c => c.key !== 'timeLogId' && c.key !== 'caregiverId');
+  return (
+    <div className="card">
+      <h2>{title}</h2>
+      {(!data.rows || data.rows.length === 0)
+        ? <p className="sub">Nothing in this range.</p>
+        : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: 13, width: '100%' }}>
+              <thead><tr>{cols.map(c => <th key={c.key} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>{c.header}</th>)}</tr></thead>
+              <tbody>
+                {data.rows.map(r => (
+                  <tr key={r.timeLogId} style={r.adjusted === 'yes' ? { background: '#fff8e6' } : null}>
+                    {cols.map(c => <td key={c.key} style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', whiteSpace: 'nowrap' }}>{r[c.key] === null || r[c.key] === undefined ? '' : String(r[c.key])}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
     </div>
   );
 };
@@ -1108,6 +1206,9 @@ const App = () => {
   // login in the browser: a role an admin narrows this morning takes effect on
   // the next request, not at the next sign-in.
   const [access, setAccess] = useState({ manageSchedule: true, managePay: true, manageLocations: true });
+  const [adjustments, setAdjustments] = useState({ requests: [], canDecide: false });
+  const [payView, setPayView] = useState(null);
+  const [billView, setBillView] = useState(null);
   const [from, setFrom] = useState(todayPlus(-14));
   const [to, setTo] = useState(todayPlus(0));
   const [err, setErr] = useState('');
@@ -1116,7 +1217,7 @@ const App = () => {
   const [denied, setDenied] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [r, s, q, a, t, c, ar] = await Promise.all([
+    const [r, s, q, a, t, c, ar, adj] = await Promise.all([
       // A CARE COORDINATOR IS REFUSED THIS ONE, on purpose: it carries the
       // client roster with geofence coordinates. They still need a screen to
       // record availability on, so a 403 here is not the end of the page — it
@@ -1128,7 +1229,8 @@ const App = () => {
       api('/api/scheduling/availability').catch(() => ({ availability: [] })),
       api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] })),
       api('/api/scheduling/change-requests').catch(() => ({ requests: [] })),
-      api('/api/scheduling/availability/caregivers').catch(() => ({ caregivers: [] }))
+      api('/api/scheduling/availability/caregivers').catch(() => ({ caregivers: [] })),
+      api('/api/scheduling/adjustment-requests').catch(() => ({ requests: [], canDecide: false }))
     ]);
     const roster0 = r || { caregivers: [], clients: [], access: null };
     setRoster(roster0);
@@ -1145,6 +1247,16 @@ const App = () => {
     setTimeLogs(t.timeLogs || []);
     setTotals({ hours: t.totalHours });
     setChangeRequests(c.requests || []);
+    setAdjustments({ requests: adj.requests || [], canDecide: !!adj.canDecide });
+    // Managers and coordinators read payroll and billing on screen; the Super
+    // Admin downloads the files instead.
+    if (r && r.access && r.access.viewPay && !r.access.exportPay) {
+      const [pv, bv] = await Promise.all([
+        api(`/api/scheduling/payroll?from=${from}&to=${to}`).catch(() => null),
+        api(`/api/scheduling/billing?from=${from}&to=${to}`).catch(() => null)
+      ]);
+      setPayView(pv); setBillView(bv);
+    } else { setPayView(null); setBillView(null); }
   }, [from, to, flaggedOnly]);
 
   useEffect(() => {
@@ -1267,6 +1379,24 @@ const App = () => {
     } catch (e) { setErr(e.message); }
   };
 
+  const requestAdjustment = async (id, body) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/scheduling/time-logs/${id}/adjustment-requests`, { method: 'POST', body: JSON.stringify(body) });
+      setOk('Sent to the Super Admin. The time does not change until they approve it.');
+      await refresh();
+    } catch (e) { setErr(e.message); return false; }
+  };
+
+  const decideAdjustment = async (id, decision, note) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/scheduling/adjustment-requests/${id}/decide`, { method: 'POST', body: JSON.stringify({ decision, note: note || '' }) });
+      setOk(decision === 'approved' ? 'Approved. The time log shows the new times and keeps the originals.' : 'Declined. The time log is unchanged.');
+      await refresh();
+    } catch (e) { setErr(e.message); }
+  };
+
   const exportCsv = () => {
     // The token rides as a query param because this is a file download, the
     // same pattern the app's other authenticated downloads use.
@@ -1304,7 +1434,7 @@ const App = () => {
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
     { id: 'availability', label: 'Availability' },
     { id: 'changes', label: `Shift changes${changeRequests.filter(r => r.status === 'pending').length ? ` (${changeRequests.filter(r => r.status === 'pending').length})` : ''}` },
-    { id: 'time', label: access.managePay ? 'Time & payroll' : 'Time logs' },
+    { id: 'time', label: `${access.managePay || access.viewPay ? 'Time & payroll' : 'Time logs'}${adjustments.requests.filter(r => r.status === 'pending').length ? ` (${adjustments.requests.filter(r => r.status === 'pending').length})` : ''}` },
     ...(access.manageLocations
       ? [{ id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }]
       : [])
@@ -1774,18 +1904,27 @@ const App = () => {
                 </div>
               ) : (
                 <div className="note">
-                  <b>Read-only.</b> You can see the hours behind the board. Correcting a time log, entering
-                  hours that were never clocked, and the payroll and billing exports are an administrator's.
+                  <b>View only.</b> You can read the hours, payroll and billing below. To fix a wrong time, use
+                  Request Correction on the time log: the Super Admin approves it. Entering hours that were never
+                  clocked and downloading the payroll and billing files stay with the Super Admin.
                 </div>
               )}
             </div>
+            {(adjustments.requests.length > 0 || adjustments.canDecide) && (
+              <AdjustmentQueue requests={adjustments.requests} canDecide={adjustments.canDecide} onDecide={decideAdjustment} />
+            )}
             <div className="card">
               <h2>Time logs</h2>
               {access.managePay && <AddTimeEntry roster={roster} onAdded={refresh} setErr={setErr} setOk={setOk} />}
               {timeLogs.length === 0
                 ? <Empty icon="clock-off">Nothing logged in this range.</Empty>
-                : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={access.managePay ? editLog : null} />)}
+                : timeLogs.map(l => <TimeLogRow key={l.id} l={l}
+                    onEdit={access.managePay ? editLog : null}
+                    onRequest={!access.managePay && access.manageSchedule ? requestAdjustment : null}
+                    pendingRequest={adjustments.requests.find(r => r.timeLogId === l.id && r.status === 'pending') || null} />)}
             </div>
+            <PayView title="Payroll (view only)" data={payView} />
+            <PayView title="Billing (view only)" data={billView} />
           </div>
         )}
 
