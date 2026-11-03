@@ -375,6 +375,22 @@ const DEFAULT_GRACE_MINUTES = 10;
 // already flagged (late_clock_in) and flagging is the right answer there.
 const CLOCK_IN_WINDOW_MINUTES = 120;
 
+// ⚠️ HOW FAR PAST ITS SCHEDULED END AN OFFICE-ENDED VISIT IS STILL TRUSTWORTHY.
+// The office ending a visit that is genuinely under way is the normal case, and
+// there "now" really is when the caregiver stopped. But a clock nobody stopped
+// stays running: a caregiver who left on Monday and forgot to clock out is
+// still "in progress" on Wednesday, and stopping that clock on Wednesday does
+// NOT mean they worked until Wednesday. Past this window nobody actually knows
+// when they left, so payroll is handed a blank and a flag instead of a number
+// somebody would otherwise pay. Two hours over a planned end is a long visit;
+// two days is a forgotten clock.
+const STALE_CLOCK_AFTER_MINUTES = 120;
+
+// The same question where there is no schedule to measure against. Nobody works
+// one continuous clocked shift longer than this, so an elapsed time past it is
+// a clock that was never stopped rather than hours somebody is owed.
+const MAX_PLAUSIBLE_SHIFT_MINUTES = 16 * 60;
+
 // Pure so the rule is testable without a shift row or a clock.
 //   { allowed, opensAt, minutesEarly }
 // A shift whose start cannot be read is ALLOWED through: that shift is broken
@@ -524,7 +540,12 @@ const TIME_LOG_FLAGS = Object.freeze([
   // off a visit by documentation a caregiver may never file, but an undocumented
   // visit is not allowed to disappear quietly either — this is what supervision
   // chases.
-  'no_visit_log'
+  'no_visit_log',
+  // The clock was still running long after the visit should have ended, so the
+  // hours could not be worked out and payroll must settle them with the
+  // caregiver. The row carries NO total: a blank is a question, a number is an
+  // answer, and the wrong one would be paid.
+  'hours_need_review'
 ]);
 
 // Flags for a clock-in. A flag is a signal to admin, never a refusal.
@@ -1130,6 +1151,28 @@ function findOpenChangeRequest(rows, shiftId) {
 //      home" and "the office called the visit off" are different facts and
 //      payroll reads this row, not the shift.
 //
+// Was this clock still running long after the visit should have finished?
+// Measured against the SHIFT'S OWN SCHEDULE, which the time log carries its own
+// copy of precisely so payroll never has to go and look it up. With no schedule
+// to measure against, an implausibly long single clock answers the same
+// question. Either way the answer decides whether the hours are a fact or a
+// question for a person.
+function isStaleClock(log, endedAt, elapsed) {
+  // ⚠️ `new Date(null)` IS THE EPOCH, AND THE EPOCH IS FINITE. Reject the
+  // empties BEFORE constructing a Date, or a log with no schedule measures
+  // itself against 1970, reads as stale at three hours, and silently drops the
+  // hours of a visit nobody did anything wrong on. This repo has paid for that
+  // trap twice already (the re-derived flags, the Eastern formatter); it is
+  // the third.
+  const se = log && log.scheduled_end;
+  const end = (se === null || se === undefined || se === '') ? NaN : new Date(se).getTime();
+  const stopped = (endedAt === null || endedAt === undefined || endedAt === '') ? NaN : new Date(endedAt).getTime();
+  if (isFinite(end) && isFinite(stopped)) {
+    return stopped > end + STALE_CLOCK_AFTER_MINUTES * 60000;
+  }
+  return typeof elapsed === 'number' && elapsed > MAX_PLAUSIBLE_SHIFT_MINUTES;
+}
+
 // Pure: it returns the fields to write and touches nothing, so both doors (the
 // single cancel and the bulk remove) can share one writer rather than keeping
 // two copies of a rule that must not drift.
@@ -1144,6 +1187,20 @@ function closeOfficeEndedLog(log, { at, reason, byId, byName, documented } = {})
   if (!flags.includes('ended_by_office')) flags.push('ended_by_office');
   if (!documented && !flags.includes('no_visit_log')) flags.push('no_visit_log');
 
+  // ⚠️ A STALE CLOCK IS NOT HOURS WORKED, and this is the guard that keeps a
+  // forgotten clock-out off somebody's pay. Rule 1 above says the hours worked
+  // survive — true when the office ends a visit that is actually happening. It
+  // is NOT true when the office is closing out a clock the caregiver left
+  // running: "now" is when an administrator pressed a button, not when the
+  // caregiver went home, and measuring to it pays days for a four-hour visit.
+  // When we cannot tell, the row carries no total at all — the rule
+  // `totalMinutes` already follows for an impossible interval, and the rule the
+  // pay-rate column follows: a blank asks payroll a question, a number answers
+  // it and would be paid.
+  const elapsed = totalMinutes(log.clock_in_at, endedAt);
+  const stale = isStaleClock(log, endedAt, elapsed);
+  if (stale && !flags.includes('hours_need_review')) flags.push('hours_need_review');
+
   return {
     clock_out_at: endedAt,
     // The caregiver's own clock-out records where they were standing. Nobody
@@ -1151,7 +1208,7 @@ function closeOfficeEndedLog(log, { at, reason, byId, byName, documented } = {})
     // location would be inventing one.
     clock_out_gps: null,
     clock_out_geofence: { verdict: 'unverifiable', reason: 'The office ended this visit; no clock-out location was taken.' },
-    total_minutes: totalMinutes(log.clock_in_at, endedAt),
+    total_minutes: stale ? null : elapsed,
     flags,
     ended_by_office: true,
     ended_by_office_at: endedAt,
@@ -1446,6 +1503,7 @@ module.exports = {
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
   SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags, closeOfficeEndedLog,
+  STALE_CLOCK_AFTER_MINUTES, MAX_PLAUSIBLE_SHIFT_MINUTES, isStaleClock,
   CHANGE_REQUEST_KINDS, CHANGE_REQUEST_STATUSES, CHANGE_REQUEST_NOTICE_MINUTES,
   REQUESTABLE_SHIFT_STATUSES, KINDS_BY_SHIFT_STATUS, kindsFor,
   canRequestShiftChange, validateChangeRequest,

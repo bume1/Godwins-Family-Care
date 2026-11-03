@@ -284,6 +284,40 @@ async function seedLiveVisit(h, { id = 's-live', documented = false, startedMins
       normal.includes('early_clock_out'), JSON.stringify(normal));
   }
 
+  console.log('\n=== G. A clock nobody stopped is not hours worked (owner report, 2026-10-22) ===');
+  {
+    // The office ends a visit the caregiver clocked into two days ago and never
+    // clocked out of. Before the fix this paid to the moment the button was
+    // pressed: 49 hours on a four-hour shift.
+    const h = harness();
+    const startedAt = new Date(Date.now() - 49 * 60 * MIN).toISOString();
+    await h.db.set('users', [{ id: 'client-1', name: 'Margaret Whitfield', role: 'client', enrollmentStatus: 'enrolled' }]);
+    await h.db.set('shifts', [{
+      id: 's-stale', client_id: 'client-1', client_name: 'Margaret Whitfield', status: 'in_progress',
+      start: startedAt, end: new Date(Date.parse(startedAt) + 4 * 60 * MIN).toISOString(),
+      required_license_level: 'cna', caregiver_id: 'cg1', caregiver_name: 'Danielle Carter',
+      confirmed_at: startedAt, started_at: startedAt
+    }]);
+    await h.db.set('time_logs', [{
+      id: 'tl-stale', shift_id: 's-stale', caregiver_id: 'cg1', caregiver_name: 'Danielle Carter',
+      client_id: 'client-1', clock_in_at: startedAt, clock_out_at: null, total_minutes: null, flags: [],
+      scheduled_start: startedAt, scheduled_end: new Date(Date.parse(startedAt) + 4 * 60 * MIN).toISOString()
+    }]);
+    await h.db.set('caregiver_visit_logs', []);
+
+    const res = await call(h.app, 'POST', '/api/scheduling/shifts/s-stale/cancel',
+      { reason: 'Caregiver never clocked out' }, 'mgr');
+    eq('G1 the office can still end it', res.status, 200);
+
+    const log = (await h.db.get('time_logs'))[0];
+    ok('G2 the clock is STOPPED, so the caregiver is not stranded', !!log.clock_out_at);
+    eq('G3 the hours are a BLANK, not 49 — payroll is asked, not told', log.total_minutes, null);
+    ok('G4 ...and never coerced to zero either', log.total_minutes !== 0);
+    ok('G5 flagged for payroll to settle', (log.flags || []).includes('hours_need_review'));
+    ok('G6 still recorded as the office ending it', (log.flags || []).includes('ended_by_office'));
+    ok('G7 the clock-in is untouched, so the visit date is still right', log.clock_in_at === startedAt);
+  }
+
   console.log(`\n${pass + fail} checks — ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch(e => { console.error('PROBE CRASHED:', e); process.exit(1); });

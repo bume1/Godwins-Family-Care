@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const sched = require('../schedulingRepository');
+const T = require('../public/gfc-time.js');
 
 const ROOT = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -275,4 +276,104 @@ test('the board offers the control, and calls it ending a visit rather than canc
     'the screen must say what actually happens to their hours');
   assert.ok(src.includes('required to end this visit'),
     'a reason is required, and the placeholder must say so for this case too');
+});
+
+// ---- A stale clock is not hours worked ------------------------------------
+// Owner report, 2026-10-22: "the payroll export ... reflecting days incorrectly
+// such as the 10/12 shift for our caregiver showing as a 10/14 shift."
+//
+// The export's date handling was right; the DATA was wrong. A caregiver clocked
+// in on 10/12 and never clocked out; the office ended the visit on 10/14, and
+// the first version of closeOfficeEndedLog measured the hours to the moment the
+// office pressed the button — 49.25 hours on a four-hour shift, with the row's
+// Clock Out reading 10/14 against a 10/12 Shift Date.
+
+test('the office ending a visit UNDER WAY still records the real hours', () => {
+  const closed = sched.closeOfficeEndedLog(
+    { clock_in_at: iso(-120 * MIN), scheduled_end: iso(120 * MIN), flags: [] },
+    { at: iso(0), reason: 'Client taken to hospital', documented: true }
+  );
+  assert.ok(closed.total_minutes >= 119 && closed.total_minutes <= 121,
+    `the normal case must keep paying the hours, got ${closed.total_minutes}`);
+  assert.ok(!closed.flags.includes('hours_need_review'));
+});
+
+test('a visit ended a little past its scheduled end still pays', () => {
+  // Running over is ordinary. Only a clock nobody stopped is in doubt.
+  const closed = sched.closeOfficeEndedLog(
+    { clock_in_at: iso(-5 * 60 * MIN), scheduled_end: iso(-30 * MIN), flags: [] },
+    { at: iso(0), reason: 'x', documented: true }
+  );
+  assert.ok(closed.total_minutes > 0, 'a 30-minute overrun is not a stale clock');
+  assert.ok(!closed.flags.includes('hours_need_review'));
+});
+
+test('⚠️ a clock still running long after the visit ended pays NOBODY days of hours', () => {
+  // The reported case, to the hour.
+  const clockIn = T.instantFromZoned('2026-10-12', '09:00');
+  const schedEnd = T.instantFromZoned('2026-10-12', '13:00');
+  const officeEnds = T.instantFromZoned('2026-10-14', '10:15');
+  const closed = sched.closeOfficeEndedLog(
+    { clock_in_at: clockIn, scheduled_end: schedEnd, clock_out_at: null, total_minutes: null, flags: [] },
+    { at: officeEnds, reason: 'Caregiver never clocked out', documented: false }
+  );
+  assert.equal(closed.total_minutes, null,
+    'nobody knows when they left, so the row carries NO total — a blank asks payroll a question');
+  assert.ok(closed.flags.includes('hours_need_review'));
+  // The clock is still STOPPED, or the caregiver is stranded in progress.
+  assert.equal(closed.clock_out_at, officeEnds);
+  // And the hours they did work are not asserted as zero either.
+  assert.notEqual(closed.total_minutes, 0);
+});
+
+test('with no schedule to measure against, only an implausible clock is stale', () => {
+  // ⚠️ THE EPOCH TRAP: `new Date(null)` is 1970 and IS finite, so an unguarded
+  // version measured a schedule-less log against 1970 and called three hours
+  // stale — dropping the hours of a visit nobody did anything wrong on.
+  const ok3h = sched.closeOfficeEndedLog(
+    { clock_in_at: iso(-3 * 60 * MIN), scheduled_end: null, flags: [] },
+    { at: iso(0), reason: 'x', documented: true }
+  );
+  assert.ok(ok3h.total_minutes >= 179 && ok3h.total_minutes <= 181,
+    `three hours with no schedule must still pay, got ${ok3h.total_minutes}`);
+  assert.ok(!ok3h.flags.includes('hours_need_review'));
+
+  for (const missing of [null, undefined, '']) {
+    const r = sched.closeOfficeEndedLog(
+      { clock_in_at: iso(-3 * 60 * MIN), scheduled_end: missing, flags: [] },
+      { at: iso(0), reason: 'x', documented: true });
+    assert.ok(r.total_minutes > 0, `scheduled_end ${JSON.stringify(missing)} must not read as 1970`);
+  }
+
+  const stale = sched.closeOfficeEndedLog(
+    { clock_in_at: iso(-49 * 60 * MIN), scheduled_end: null, flags: [] },
+    { at: iso(0), reason: 'x', documented: true }
+  );
+  assert.equal(stale.total_minutes, null, '49 hours on one clock is a clock nobody stopped');
+  assert.ok(stale.flags.includes('hours_need_review'));
+});
+
+test('isStaleClock reads the window from one declared constant', () => {
+  const end = iso(0);
+  const inAt = iso(-4 * 60 * MIN);
+  const within = new Date(Date.parse(end) + (sched.STALE_CLOCK_AFTER_MINUTES - 1) * MIN).toISOString();
+  const past = new Date(Date.parse(end) + (sched.STALE_CLOCK_AFTER_MINUTES + 1) * MIN).toISOString();
+  assert.equal(sched.isStaleClock({ clock_in_at: inAt, scheduled_end: end }, within, 100), false);
+  assert.equal(sched.isStaleClock({ clock_in_at: inAt, scheduled_end: end }, past, 100), true);
+  assert.ok(sched.STALE_CLOCK_AFTER_MINUTES > 0 && sched.MAX_PLAUSIBLE_SHIFT_MINUTES > 0);
+});
+
+test('the review flag is declared, so nothing writes an unknown flag', () => {
+  assert.ok(sched.TIME_LOG_FLAGS.includes('hours_need_review'));
+});
+
+test('payroll prints a blank for hours it cannot work out, never a number', () => {
+  // The payroll CSV computes gross from hours; a null total must reach it as a
+  // blank cell, because a zero is an answer and the wrong one.
+  const closed = sched.closeOfficeEndedLog(
+    { clock_in_at: iso(-49 * 60 * MIN), scheduled_end: iso(-45 * 60 * MIN), flags: [] },
+    { at: iso(0), reason: 'x', documented: true }
+  );
+  assert.equal(sched.minutesToHours(closed.total_minutes), null,
+    'minutesToHours must carry the blank through to the CSV, not coerce it to 0');
 });
