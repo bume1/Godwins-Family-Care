@@ -1079,16 +1079,11 @@ const normalizeNpiValue = (v) => {
   return d.length === 10 ? d : null;
 };
 
-// Default SERVICE-code favorites (spec §2.2): the home-visit E/M range GFC
-// bills. Code NUMBERS only, grouped by family — the AMA descriptors are
-// copyrighted and live in OpenEMR's fee schedule, not here. Admin-editable
-// (clinical_settings.serviceCodeFavorites) — this only seeds an empty list.
-// 99343 is omitted: it was deleted in the 2023 E/M revision; an admin can add
-// it back if the billing consultant says otherwise.
-const DEFAULT_SERVICE_CODE_FAVORITES = Object.freeze([
-  ...['99341', '99342', '99344', '99345'].map(code => ({ code, codeType: 'CPT4', label: 'Home visit · new patient' })),
-  ...['99347', '99348', '99349', '99350'].map(code => ({ code, codeType: 'CPT4', label: 'Home visit · established patient' }))
-]);
+// Practice SERVICE-code favorites (spec §2.2) are admin-set
+// (clinical_settings.serviceCodeFavorites) and there is no built-in default:
+// the app keeps no code list (owner, 2026-10-28). With no favorites set, the
+// picker offers OpenEMR's own catalog (codeCatalog.js). A favorite is only
+// shown while the catalog holds it active.
 const sanitizeServiceFavorites = (list) => {
   const out = []; const seen = new Set();
   for (const item of Array.isArray(list) ? list : []) {
@@ -1892,6 +1887,28 @@ const buildChargePayloads = (record, { providerId, visit } = {}) => {
     authorized: 1
   }));
 };
+
+// One posted charge line as the app remembers it. `fee` is what OpenEMR says
+// it used (fee_used, from the 6B controller since 2026-10-28), or null when
+// the response did not say: an older controller, or a row with no fee field.
+// Null is "not known", never $0.
+const postedChargeEntry = (payload, row) => {
+  const raw = row && (row.fee_used != null ? row.fee_used : row.fee);
+  const fee = raw == null || raw === '' || !Number.isFinite(Number(raw)) ? null : Number(raw);
+  return {
+    id: row && row.id != null ? String(row.id) : null,
+    code: payload.code, codeType: payload.code_type,
+    modifier: payload.modifier || '',
+    fee, feeSource: (row && row.fee_source) || null
+  };
+};
+// The posted lines that reached Billing Manager at $0. A $0 charge should be
+// visible, never silent (owner, 2026-10-28).
+const zeroFeeCharges = (record) =>
+  ((record && record.postedCharges) || []).filter(c => c && c.fee === 0);
+const zeroFeeWarning = (lines) => lines.length
+  ? `${lines.map(c => c.code).join(', ')} posted to Billing Manager at $0.00: OpenEMR has no price for ${lines.length === 1 ? 'that code' : 'those codes'} at this patient's price level. Set the price in OpenEMR's fee schedule and correct the line in Billing Manager.`
+  : null;
 
 // ---- NCCI/MUE bundling check (sign-time gate) ----
 //
@@ -2969,7 +2986,6 @@ module.exports = {
   normalizeIcd10,
   classifyServiceCode,
   normalizeNpiValue,
-  DEFAULT_SERVICE_CODE_FAVORITES,
   sanitizeServiceFavorites,
   actorStamp,
   actorRecord,
@@ -3007,6 +3023,9 @@ module.exports = {
   resolveBillingFacility,
   BILLING_FACILITY_UNRESOLVED,
   buildChargePayloads,
+  postedChargeEntry,
+  zeroFeeCharges,
+  zeroFeeWarning,
   // NCCI/MUE sign-time bundling check
   NCCI_STALE_DAYS, NCCI_UNBUNDLING_MODIFIERS,
   normalizeNcciSourceVersion,

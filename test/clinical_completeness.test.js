@@ -54,13 +54,8 @@ test('service codes classify as CPT or HCPCS by format only', () => {
   assert.equal(R.classifyServiceCode('9934'), null);
   assert.equal(R.classifyServiceCode('ABCDE'), null);
 });
-test('default service favorites are code numbers + family labels, not AMA descriptors', () => {
-  assert.ok(R.DEFAULT_SERVICE_CODE_FAVORITES.length >= 8);
-  for (const f of R.DEFAULT_SERVICE_CODE_FAVORITES) {
-    assert.equal(R.classifyServiceCode(f.code).codeType, 'CPT4');
-    assert.ok(f.label.length < 50, 'labels are short family names');
-  }
-  // an admin list with a bad code is dropped, never stored
+test('there is no built-in service favorites list; an admin list with a bad code is dropped', () => {
+  assert.equal(R.DEFAULT_SERVICE_CODE_FAVORITES, undefined, 'the app keeps no code catalog of its own');
   assert.deepEqual(R.sanitizeServiceFavorites([{ code: 'nope' }, { code: '99350', label: 'x' }]).map(f => f.code), ['99350']);
 });
 
