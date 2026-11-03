@@ -679,7 +679,15 @@ test('the office queue exists, and a decline there requires a reason', () => {
   assert.ok(PAGE.includes("id: 'changes'"), 'an owner item is only open once there is somewhere to do it');
   assert.ok(/change-requests\/\$\{r\.id\}\/approve/.test(PAGE));
   assert.ok(/change-requests\/\$\{r\.id\}\/decline/.test(PAGE));
-  const panel = PAGE.slice(PAGE.indexOf("{tab === 'changes' &&"), PAGE.indexOf("{tab === 'time' &&"));
+  // Anchored on the tab-body guard, which became `shownTab` on 2026-10-27 when
+  // a coordinator got a one-tab view. ⚠️ ASSERT THE ANCHORS WERE FOUND: before
+  // this, a renamed anchor made indexOf return -1 and the slice came back
+  // EMPTY, so every assertion below passed over nothing. A guard that silently
+  // grabs the wrong slice proves nothing.
+  const from = PAGE.indexOf("=== 'changes' &&");
+  const to = PAGE.indexOf("=== 'time' &&");
+  assert.ok(from > 0 && to > from, 'the change-queue panel must still be findable in the page');
+  const panel = PAGE.slice(from, to);
   assert.ok(/window\.prompt/.test(panel), 'the decline must collect the reason the API requires');
   assert.ok(/if \(note === null\) return;/.test(panel),
     'cancelling the prompt must not post an empty decline');

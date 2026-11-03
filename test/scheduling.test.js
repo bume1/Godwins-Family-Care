@@ -47,24 +47,46 @@ const plusDays = (n) => new Date(NOW.getTime() + n * 86400000).toISOString().sli
 // 1. Availability — the 30-day rule
 // ============================================================================
 
-test('SAFETY: availability fewer than 30 days out is REFUSED', () => {
-  for (const days of [0, 1, 14, 29]) {
+// REPOINTED 2026-10-27, not deleted. These pinned a single 30-day floor, which
+// the owner replaced: "make it 2 weeks then let a caregiver change existing
+// availability on short notice." The rule they protected — a floor is enforced
+// in the repository module, so the API refuses exactly what the form refuses,
+// and the refusal names the rule — did not go away. It grew a second tier, and
+// both halves are pinned here.
+test('SAFETY: a FIRST submission inside the lead time is REFUSED', () => {
+  const floor = sched.AVAILABILITY_LEAD_DAYS;
+  for (const days of [0, 1, 7, floor - 1]) {
     const r = sched.validateAvailability(
       { effectiveFrom: plusDays(days), windows: [{ day: 'Mon', start: '09:00', end: '17:00' }] }, NOW);
     assert.strictEqual(r.valid, false, `${days} days out must be refused`);
     const lead = r.errors.find(e => e.code === 'AVAILABILITY_LEAD_TIME');
     assert.ok(lead, 'the refusal names the lead-time rule');
     assert.strictEqual(lead.daysOut, days);
-    assert.strictEqual(lead.required, 30);
+    assert.strictEqual(lead.required, floor);
   }
 });
 
-test('availability exactly 30 days out is accepted; 31 too', () => {
-  for (const days of [30, 31, 90]) {
+test('SAFETY: a CHANGE still has a floor, it is just a nearer one', () => {
+  const floor = sched.AVAILABILITY_CHANGE_LEAD_DAYS;
+  const r = sched.validateAvailability(
+    { effectiveFrom: plusDays(floor - 1), windows: [{ day: 'Mon', start: '09:00', end: '17:00' }] },
+    NOW, { isChange: true });
+  assert.strictEqual(r.valid, false, 'short notice is not no notice');
+  const lead = r.errors.find(e => e.code === 'AVAILABILITY_LEAD_TIME');
+  assert.strictEqual(lead.required, floor);
+});
+
+test('availability at the floor is accepted, and further out too', () => {
+  for (const days of [sched.AVAILABILITY_LEAD_DAYS, sched.AVAILABILITY_LEAD_DAYS + 1, 90]) {
     const r = sched.validateAvailability(
       { effectiveFrom: plusDays(days), windows: [{ day: 'Mon', start: '09:00', end: '17:00' }] }, NOW);
     assert.strictEqual(r.valid, true, `${days} days out is fine: ${JSON.stringify(r.errors)}`);
   }
+  // And a change clears its own nearer floor.
+  const chg = sched.validateAvailability(
+    { effectiveFrom: plusDays(sched.AVAILABILITY_CHANGE_LEAD_DAYS), windows: [{ day: 'Mon', start: '09:00', end: '17:00' }] },
+    NOW, { isChange: true });
+  assert.strictEqual(chg.valid, true);
 });
 
 test('the lead-time boundary is measured in whole days, not by clock time', () => {
@@ -515,7 +537,12 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
   while ((m = re.exec(routeSrc)) !== null) {
     const [, method, routePath, middleware] = m;
     assert.ok(middleware.includes('authenticateToken'), `${method.toUpperCase()} ${routePath} must authenticate`);
-    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable/.test(middleware);
+    // `requireAvailabilityWriter` joined the set 2026-10-27: posting your own
+    // availability is `requireSchedulable` as before, posting somebody else's
+    // needs the recorder role, and the two are told apart in middleware so this
+    // sweep can still see the guard. The rule here did not change — every route
+    // carries one — the set of guards did.
+    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable|requireAvailabilityWriter|requireAvailabilityOffice/.test(middleware);
     // Three reads serve two audiences (admin sees all, a caregiver sees their
     // own) and branch inline. They must still branch, never return everything.
     const inlineGuarded = [
