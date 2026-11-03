@@ -186,6 +186,12 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'caregiver_availability', phi: false, owner: '7' },
   { key: 'time_logs', phi: true, owner: '7', note: 'GPS clock-in at a client address' },
   { key: 'time_log_edits', phi: true, owner: '7' },
+  // A manager's or coordinator's request to correct a time log, decided by the
+  // Super Admin (2026-11-03). PHI: it names the client the visit was for.
+  { key: 'time_log_adjustment_requests', phi: true, owner: '7' },
+  // A manager's or coordinator's request to change a pay or bill rate on a
+  // user record, decided by the Super Admin (2026-11-03). Not PHI: pay terms.
+  { key: 'user_financial_change_requests', phi: false, owner: 'core' },
   // ---- messaging (Session 9) ----
   { key: 'message_threads', phi: true, owner: '9' },
   { key: 'messages', phi: true, owner: '9' },

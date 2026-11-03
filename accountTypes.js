@@ -217,6 +217,14 @@ function hubTilesFor(u) {
   return tiles;
 }
 
+// ---- Who runs private home care day to day -------------------------------
+// Owner decision, 2026-11-03: managers and care coordinators run private home
+// care, alongside the Super Admin. One predicate, read by account type, so a
+// route never has to guess from `role` and `isManager`. An LMSW is NOT in it:
+// case management is clinical work, not the scheduling and caregiver office.
+const HOME_CARE_OFFICE_TYPES = Object.freeze([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR]);
+const isHomeCareOffice = (u) => HOME_CARE_OFFICE_TYPES.includes(accountTypeOf(u));
+
 // ---- The boot migration ----------------------------------------------------
 // Once per record, and idempotent: a record already consistent is left alone.
 //   1. The three lab-era access checkboxes are cleared on everyone. They no
@@ -271,5 +279,6 @@ module.exports = {
   MANAGER_CLINICAL_ACCESS, DEFAULT_MANAGER_CLINICAL_ACCESS, isValidManagerAccess,
   CLINICIAN_TYPES, PRIVATE_HOME_CARE, LEGACY_FLAGS,
   fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
-  landingFor, hubTilesFor, applyAccountTypeMigration
+  landingFor, hubTilesFor, applyAccountTypeMigration,
+  HOME_CARE_OFFICE_TYPES, isHomeCareOffice
 };
