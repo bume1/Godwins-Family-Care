@@ -89,10 +89,15 @@ const sign = (raw) => { const ts = Date.now(); return `hmac;1;${ts};` + crypto.c
 const hook = async (evt) => { const raw = JSON.stringify(evt); const r = await fetch(`${BASE}/api/webhooks/quo`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'openphone-signature': sign(raw) }, body: raw }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
 const text = (from, body) => ({ type: 'message.received', data: { object: { id: 'AC' + Math.random().toString(36).slice(2), from, to: ['+13462455658'], direction: 'incoming', body, createdAt: new Date().toISOString() } } });
 // Quo is never called from a probe.
-global.fetch = ((real) => async (url, opts) => String(url).includes('api.openphone.com') ? { ok: true, status: 202, json: async () => ({ data: { id: 'QM-probe' } }) } : real(url, opts))(global.fetch);
+const SENT_FROM = [];
+global.fetch = ((real) => async (url, opts) => { if (String(url).includes('api.openphone.com')) { try { SENT_FROM.push(JSON.parse(opts.body).from); } catch (_) {} return { ok: true, status: 202, json: async () => ({ data: { id: 'QM-probe' } }) }; } return real(url, opts); })(global.fetch);
 
 (async () => {
-  STORE.set('users', [CLIENT, POA, COUSIN, RN]);
+  // A patient who never touched the portal's text switch (owner, 2026-11-02).
+  const QUIET = { id: 'client_sms_2', role: config.ROLES.CLIENT, email: 'sms-quiet@example.test', name: 'Walter Quiet', slug: 'walter-sms',
+    serviceLine: 'BOTH', enrollmentStatus: 'enrolled', consents: { roiFamily: 'signed', consentToTreat: 'signed' }, consentMeta: {},
+    intake: { clientFirst: 'Walter', clientLast: 'Quiet', phone: '(770) 555-0300' }, careTeam: { assignedFNPs: ['rn_sms_1'] } };
+  STORE.set('users', [CLIENT, POA, COUSIN, RN, QUIET]);
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 2500));
   const ct = tok(CLIENT), pt = tok(POA), ft = tok(COUSIN);
@@ -135,6 +140,19 @@ global.fetch = ((real) => async (url, opts) => String(url).includes('api.openpho
   check('STOP turns the patient\'s texts off', r.body.outcome === 'opted_out' && u(CLIENT.id).smsOptIn.enabled === false);
   r = await call('GET', '/api/gfc/text-messages', ct);
   check('and the portal says it was turned off by STOP', r.body.enabled === false && r.body.stoppedByText === true);
+
+  console.log('\n── A patient who texts first gets replies by text ──');
+  r = await hook(text('+17705550300', 'Can someone call me about my dad?'));
+  check('their text is recorded', r.body.outcome === 'recorded', JSON.stringify(r.body));
+  check('texting us turned texts on for them', u(QUIET.id).smsOptIn && u(QUIET.id).smsOptIn.enabled === true && u(QUIET.id).smsOptIn.changedBy === 'texted the care team');
+  const qMsg = (STORE.get('messages') || []).find(m => m.body === 'Can someone call me about my dad?');
+  r = await call('POST', `/api/messaging/threads/${qMsg && qMsg.thread_id}/messages`, tok(RN), { body: 'Calling you in 10 minutes.' });
+  await new Promise(res => setTimeout(res, 300));
+  const qRow = (STORE.get('sms_outbox') || []).find(x => x.to === '+17705550300');
+  check('the clinician\'s reply is texted to the number they texted from', r.status === 200 && qRow && ['sent', 'waiting'].includes(qRow.status) && /Reply STOP/.test(qRow.content), JSON.stringify(qRow));
+  check('and it goes from the Care Team line', !qRow || qRow.status !== 'sent' || SENT_FROM.includes('+13462455658'), JSON.stringify(SENT_FROM));
+  r = await hook(text('+14045550100', 'Hello again'));
+  check('a patient who sent STOP and texts again stays off', u(CLIENT.id).smsOptIn.enabled === false);
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);

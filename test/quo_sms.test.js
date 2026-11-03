@@ -308,3 +308,24 @@ test('a reply on the main line is not a Care Team reply', async () => {
   assert.match(src, /if \(ev\.officePhone !== quoSms\.careTeamNumber\(\)\) return \{ outcome: 'other_line' \};/);
   assert.match(src, /smsClient\.sendText\(\{ to: row\.to, content: row\.content, from: quoSms\.careTeamNumber\(\) \}\)/);
 });
+
+test('texting the care team turns texts on, but never undoes a STOP or a portal switch-off', () => {
+  const q = require('../quoSms');
+  const at = '2026-11-02T12:00:00.000Z';
+  assert.deepEqual(q.optInFromIncomingText(undefined, at), { enabled: true, optedInAt: at, stoppedAt: null, changedBy: 'texted the care team' });
+  assert.equal(q.optInFromIncomingText({ enabled: true, optedInAt: 'x' }, at), null);
+  assert.equal(q.optInFromIncomingText({ enabled: false, stoppedAt: 'y', changedBy: 'text STOP' }, at), null);
+  assert.equal(q.optInFromIncomingText({ enabled: false, changedBy: 'portal' }, at), null);
+  assert.equal(q.optInFromIncomingText({ stoppedAt: 'y' }, at), null);
+  // A record holding only the first-text stamp is still "never chose".
+  assert.equal(q.optInFromIncomingText({ firstTextAt: 'z' }, at).enabled, true);
+});
+
+test('the webhook applies it to the person who texted, before the message is recorded', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  const a = src.indexOf('const who = await resolveTextReply(ev.patientPhone, users);');
+  const b = src.indexOf('const sender = msg.senderIdentity(user, { client, isPoa });', a);
+  assert.ok(a > 0 && b > a);
+  assert.match(src.slice(a, b), /quoSms\.optInFromIncomingText\(u\.smsOptIn, nowIso\(\)\)/);
+  assert.match(src.slice(a, b), /await db\.set\('users', users\)/);
+});
