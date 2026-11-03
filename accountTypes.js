@@ -225,6 +225,92 @@ function hubTilesFor(u) {
 const HOME_CARE_OFFICE_TYPES = Object.freeze([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR]);
 const isHomeCareOffice = (u) => HOME_CARE_OFFICE_TYPES.includes(accountTypeOf(u));
 
+// ---- Who may create and edit which accounts ------------------------------
+// Owner decision, 2026-11-03: managers and care coordinators take over
+// onboarding, so they create and edit the people they manage. That must never
+// become a way to raise anyone's access, their own included.
+//
+// E1: a manager or coordinator manages CAREGIVER, CLIENT and FAMILY accounts
+//     and nothing else. Clinician accounts stay with the Super Admin: they
+//     carry NPI, DEA and credentialing that feed billing.
+// E2: they never create or edit a staff account, never change an account to
+//     a staff type, never change their own account, and never set the access
+//     fields (role, isManager, clinicalRole, hasClinicalAccess, accountType)
+//     to anything outside E1.
+//
+// This is the ONE predicate every route that writes a user calls. Anybody it
+// does not recognise is refused, so a route added later fails closed.
+const OFFICE_MANAGEABLE_TYPES = Object.freeze([TYPES.CAREGIVER, TYPES.CLIENT, TYPES.FAMILY]);
+const OFFICE_MANAGEABLE_ROLES = Object.freeze(['vendor', 'client', 'family']);
+
+function canManageAccountType(actor, targetType) {
+  const a = accountTypeOf(actor);
+  if (a === TYPES.ADMIN) return true;
+  if (a === TYPES.MANAGER || a === TYPES.COORDINATOR) return OFFICE_MANAGEABLE_TYPES.includes(String(targetType || ''));
+  return false;
+}
+
+// The access fields a body may carry, and the staff-only credential fields
+// that mean nothing on a caregiver, client or family record.
+const ACCESS_FIELDS = Object.freeze(['role', 'isManager', 'clinicalRole', 'hasClinicalAccess', 'accountType', 'managerClinicalAccess']);
+const CREDENTIAL_FIELDS = Object.freeze(['npi', 'prescriberCredential', 'deaNumber', 'deaSchedules', 'deaExpiresAt',
+  'medicareEnrollment', 'openEmrProviderId', 'hasImplementationsAccess']);
+const blank = (v) => v === undefined || v === null || v === '' || v === false ||
+  (Array.isArray(v) && v.length === 0) ||
+  (v && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every(blank));
+
+const SUPER_ADMIN_MANAGES = 'A Super Admin manages staff and clinical accounts. A manager or care coordinator can add and edit caregivers, clients and family contacts.';
+
+// Decide one user write. `existing` is the stored record (null on create).
+// Returns { ok: true, body } with the body cleaned of empty staff-only keys,
+// or { ok: false, status, code, error } naming the reason.
+function checkUserWrite(actor, { existing, body }) {
+  const b = { ...(body || {}) };
+  const a = accountTypeOf(actor);
+  if (a === TYPES.ADMIN) return { ok: true, body: b };
+  if (a !== TYPES.MANAGER && a !== TYPES.COORDINATOR) {
+    return { ok: false, status: 403, code: 'USER_ADMIN_FORBIDDEN', error: 'Only a Super Admin, a manager or a care coordinator manages accounts.' };
+  }
+  if (existing && actor && String(existing.id) === String(actor.id)) {
+    return { ok: false, status: 403, code: 'USER_SELF_EDIT_FORBIDDEN',
+      error: 'You cannot change your own account type, status or permissions. Ask a Super Admin.' };
+  }
+  if (existing && !canManageAccountType(actor, accountTypeOf(existing))) {
+    return { ok: false, status: 403, code: 'USER_TYPE_NOT_MANAGEABLE', error: SUPER_ADMIN_MANAGES };
+  }
+  // What the body asks the account to BE.
+  if (!blank(b.accountType) && !canManageAccountType(actor, b.accountType)) {
+    return { ok: false, status: 403, code: 'USER_TYPE_NOT_MANAGEABLE', error: SUPER_ADMIN_MANAGES };
+  }
+  if (!blank(b.role) && !OFFICE_MANAGEABLE_ROLES.includes(String(b.role))) {
+    return { ok: false, status: 403, code: 'USER_TYPE_NOT_MANAGEABLE', error: SUPER_ADMIN_MANAGES };
+  }
+  for (const f of ['isManager', 'clinicalRole', 'hasClinicalAccess', 'managerClinicalAccess']) {
+    if (!blank(b[f])) {
+      return { ok: false, status: 403, code: 'USER_ACCESS_FIELD_FORBIDDEN',
+        error: `${SUPER_ADMIN_MANAGES} (${f} cannot be set here.)` };
+    }
+  }
+  for (const f of CREDENTIAL_FIELDS) {
+    if (!blank(b[f])) {
+      return { ok: false, status: 403, code: 'USER_CREDENTIAL_FIELD_FORBIDDEN',
+        error: `${SUPER_ADMIN_MANAGES} (${f} is a clinical credential.)` };
+    }
+  }
+  // On create, an account with no type of its own is refused rather than left
+  // to default to a staff role.
+  if (!existing && blank(b.accountType) && blank(b.role)) {
+    return { ok: false, status: 400, code: 'ACCOUNT_TYPE_REQUIRED', error: 'Choose Caregiver, Client or Family / Authorized Contact.' };
+  }
+  // Empty staff-only keys are dropped, so a form that always sends them cannot
+  // clear anything on the record by sending a blank.
+  for (const f of [...ACCESS_FIELDS, ...CREDENTIAL_FIELDS]) {
+    if (f === 'accountType' || f === 'role') { if (blank(b[f])) delete b[f]; continue; }
+    delete b[f];
+  }
+  return { ok: true, body: b };
+}
+
 // ---- The boot migration ----------------------------------------------------
 // Once per record, and idempotent: a record already consistent is left alone.
 //   1. The three lab-era access checkboxes are cleared on everyone. They no
@@ -280,5 +366,6 @@ module.exports = {
   CLINICIAN_TYPES, PRIVATE_HOME_CARE, LEGACY_FLAGS,
   fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
   landingFor, hubTilesFor, applyAccountTypeMigration,
-  HOME_CARE_OFFICE_TYPES, isHomeCareOffice
+  HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
+  OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
 };

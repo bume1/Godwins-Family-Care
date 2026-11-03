@@ -14,7 +14,7 @@ const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const hub = fs.readFileSync(path.join(root, 'public', 'admin-hub.html'), 'utf8');
 
 const putRoute = (() => {
-  const i = server.indexOf("app.put('/api/users/:userId', authenticateToken, requireAdmin");
+  const i = server.indexOf("app.put('/api/users/:userId', authenticateToken, guardUserWrite");
   assert.ok(i > 0, 'user PUT route not found');
   return strip(server.slice(i, server.indexOf('\n});', i)));
 })();
