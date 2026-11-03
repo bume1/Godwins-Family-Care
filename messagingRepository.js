@@ -689,7 +689,9 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     }
     // A message its sender sent to chosen people (a team member's Support
     // thread, a Care Team message without the patient) is read only by them.
-    if (thread.audience_chosen && !isParty(thread, user.id)) {
+    // A POA reads it whenever the patient is on it (owner, 2026-10-26).
+    const onIt = isParty(thread, user.id) || (role === ROLE.FAMILY && isPoa && isParty(thread, mine));
+    if (thread.audience_chosen && !onIt) {
       return deny('NOT_ON_THIS_MESSAGE', 'That conversation is between staff.');
     }
     return { visible: true, code: null, reason: null };
