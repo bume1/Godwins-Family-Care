@@ -535,3 +535,58 @@ test('screens: the user form is served only the types the viewer may pick, and s
   assert.match(hub, /<FinancialChangeQueue token=\{token\} requests=\{financialPending\} canDecide=\{isSuperAdmin\}/);
   assert.match(hub, /result\.message \|\|/, 'the form says which fields were held');
 });
+
+// ---------------------------------------------------------------------------
+// The Admin Hub opens to managers and coordinators for User Management only
+// (owner, 2026-11-04).
+// ---------------------------------------------------------------------------
+test('hub: managers and coordinators sign in to User Management and nothing else', () => {
+  const hub = read('public/admin-hub.html');
+  assert.match(hub, /const HUB_OFFICE_TYPES = \['manager', 'coordinator'\];/);
+  assert.match(hub, /result\.user\.role !== 'admin' && !isHubOffice\(result\.user\)/, 'the sign-in lets them in');
+  assert.match(hub, /user\.role !== 'admin' && !isHubOffice\(user\)\) window\.location\.replace/, 'and the page does not bounce them');
+  assert.match(hub, /if \(officeOnly\) return <UsersPage token=\{token\} isSuperAdmin=\{false\} \/>;/, 'they get the user page whatever was asked');
+  assert.match(hub, /: allMenuItems\.filter\(item => item\.id === 'users'\);/, 'the menu shows User Management only');
+  // The list shows only the accounts they manage, and the staff-only parts stay hidden.
+  assert.match(hub, /isSuperAdmin \|\| OFFICE_MANAGED_TYPES\.includes\(user\.accountType\)\)\.filter\(user =>/);
+  assert.match(hub, /\{isSuperAdmin && <button onClick=\{\(\) => handleDelete/);
+  assert.match(hub, /\{editingUser && isSuperAdmin && \(/, 'account recovery stays with the Super Admin');
+  for (const b of ['pendingTypeReview', 'pendingRoleReview', 'missingPatientFacingCredential']) {
+    assert.match(hub, new RegExp(`\\{isSuperAdmin && ${b}\\.length > 0 &&`), b);
+  }
+  // The list of types they manage matches the server's.
+  const m = /const OFFICE_MANAGED_TYPES = (\[[^\]]+\])/.exec(hub);
+  assert.deepStrictEqual(JSON.parse(m[1].replace(/'/g, '"')).sort(), [...accountTypes.OFFICE_MANAGEABLE_TYPES].sort());
+});
+
+test('hub: the rest of the Admin Hub API stays Super Admin only', () => {
+  const src = read('server.js');
+  const gate = src.slice(src.indexOf('const requireAdminHubAccess'), src.indexOf('const requireAdminHubAccess') + 200);
+  assert.match(gate, /req\.user\.role === config\.ROLES\.ADMIN/);
+  assert.ok(!/isManager|isHomeCareOffice/.test(gate));
+});
+
+test('hub: managers and coordinators get a User Management tile; nobody else new does', () => {
+  for (const t of ['manager', 'coordinator']) {
+    const tile = accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).find(x => x.id === 'users');
+    assert.ok(tile && tile.path === '/admin', t);
+  }
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
+    assert.ok(!accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).some(x => x.id === 'users'), t);
+  }
+});
+
+test('hub: the user page declares the pay-change state it reads (it crashed User Management for everyone)', () => {
+  // PR #225 put this state in the Inbox page by mistake, so User Management
+  // threw "financialPending is not defined" for the Super Admin too. Found by
+  // rendering the page, not by reading it.
+  const hub = read('public/admin-hub.html');
+  const start = hub.indexOf('const UsersPage = ({ token, isSuperAdmin }) => {');
+  const end = hub.indexOf('\n    const ', start + 10);
+  const page = hub.slice(start, end);
+  assert.match(page, /const \[financialPending, setFinancialPending\] = useState\(\[\]\);/);
+  assert.match(page, /loadFinancial\(\);/);
+  assert.strictEqual((hub.match(/const \[financialPending, setFinancialPending\]/g) || []).length, 1, 'declared once');
+  assert.match(page, /\{isSuperAdmin && \(\s*<button onClick=\{\(\) => \{ setShowBulkReset\(true\)/, 'bulk password reset stays the Super Admin\'s');
+  assert.match(page, /\{isSuperAdmin && <button onClick=\{\(\) => setActiveTab\('resets'\)\}/);
+});

@@ -204,15 +204,18 @@ function hubTilesFor(u) {
   // Managers and coordinators read Support and Admin Broadcasts here; the
   // Super Admin's inbox is in the Admin Hub.
   const messages = { id: 'messages', name: 'Messages', path: '/messages' };
+  // A manager or care coordinator opens the Admin Hub for User Management only
+  // (owner, 2026-11-04): caregivers, clients and family contacts.
+  const users = { id: 'users', name: 'User Management', path: '/admin' };
   if (type === TYPES.ADMIN) {
     tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile, messages);
+    tiles.push(clinical, phc, enrollment, billingTile, messages, users);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile, messages);
+    tiles.push(phc, enrollment, billingTile, messages, users);
   }
   return tiles;
 }

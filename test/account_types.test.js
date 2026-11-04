@@ -95,9 +95,10 @@ test('only the Super Admin sees the Admin Hub, the Service Portal and the Client
 });
 
 test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing', 'messages'],
+  // 'users' = User Management, the one part of the Admin Hub open to them (owner, 2026-11-04).
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'users']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'users'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing', 'messages', 'users'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
