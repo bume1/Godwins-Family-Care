@@ -25,8 +25,11 @@ const row = (code, code_type = 'CPT4', active = 1, extra = {}) =>
 // Every rule-list code active: the E/M level table (emLevels.js, 2026-11-04)
 // and the behavioral-health list.
 const emLevelCodes = () => require('../emLevels').FAMILIES.flatMap(f => f.levels.map(l => l.code));
+// And Phase 3b's rule files (serviceRules/), active codes only.
+const serviceRuleCodes = () => require('../serviceRules').ruleLists().flatMap(l => l.codes);
 const fullRows = () => [
   ...emLevelCodes().map(c => row(c)),
+  ...serviceRuleCodes().map(c => row(c, /^\d/.test(c) ? 'CPT4' : 'HCPCS')),
   ...roles.BEHAVIORAL_HEALTH_SERVICE_CODES.map(c => row(c, /^\d/.test(c) ? 'CPT4' : 'HCPCS'))
 ];
 const silentLog = { error: () => {} };
@@ -86,6 +89,15 @@ test('the E/M level table is registered for validation, every level in it', () =
   const l = C.RULE_LISTS.find(x => x.file === 'emLevels.js');
   assert.ok(l, 'emLevels.js is a rule list');
   assert.deepEqual(l.codes.slice().sort(), emLevelCodes().sort());
+});
+
+test('every Phase 3b rule file is registered for validation, RTM left out as inactive', () => {
+  for (const f of require('../serviceRules').FAMILIES) {
+    const l = C.RULE_LISTS.find(x => x.file === `serviceRules/${f.FAMILY}`);
+    assert.ok(l, `${f.FAMILY} is a rule list`);
+  }
+  const rm = C.RULE_LISTS.find(x => x.file === 'serviceRules/remote_monitoring');
+  assert.ok(!rm.codes.includes(require('../serviceRules/remoteMonitoring').RTM.setup), 'RTM is loaded inactive and is not checked');
 });
 
 test('the BH rule list is registered for validation', () => {
@@ -257,8 +269,10 @@ test('G0177, G0409 and G0410 appear in no page a clinician loads', () => {
 // emLevels.js (2026-11-04) is the second policy file: the AI coding pipeline
 // spec makes it THE one place the E/M level table lives. Like clinicalRoles.js
 // it is checked against OpenEMR's catalog (codeCatalog.RULE_LISTS).
-test('no CPT/HCPCS code list lives in app source outside the clinicalRoles.js and emLevels.js rule lists', () => {
-  const allowed = new Set(['clinicalRoles.js', 'emLevels.js']);
+// serviceRules/ (2026-11-04) holds Phase 3b's per-family thresholds, also
+// policy, also checked against the catalog (RTM excepted: loaded inactive).
+test('no CPT/HCPCS code list lives in app source outside the policy rule files', () => {
+  const allowed = new Set(['clinicalRoles.js', 'emLevels.js', ...require('fs').readdirSync(path.join(ROOT, 'serviceRules')).map(f => path.join('serviceRules', f))]);
   const codeLit = /['"`](\d{4}[0-9A-Z]|[A-V]\d{4})['"`]/g;
   for (const f of sourceFiles()) {
     if (allowed.has(f)) continue;

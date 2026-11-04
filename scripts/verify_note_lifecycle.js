@@ -685,6 +685,18 @@ const HP_NOTE = {
   const derLog = rows('activity_log').filter(a => a.action === 'em_level_derived');
   check('the activity log carries codes, never a fact or a quote', derLog.length >= 2 && !JSON.stringify(derLog).includes('lisinopril'), derLog);
 
+  console.log('\n── 13f. Phase 3b: service selection (2026-11-04) ──');
+  r = await call('GET', '/api/clinical/service-selection/families', tok.fnp);
+  check('the code helper is billing\'s', r.status === 403, r.body);
+  r = await call('GET', '/api/clinical/service-selection/families', tok.mgr);
+  check('billing gets every family with the fields it asks for', r.status === 200 && r.body.families.length === 8 && r.body.families.every(f => Array.isArray(f.fields)), r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'psychotherapy', input: { minutes: 35 } });
+  check('35 minutes of psychotherapy is 90832, flagged near 90834', r.status === 200 && r.body.codes[0].code === '90832' && r.body.reviewFlag && r.body.reviewFlag.next === '90834', r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'annual_wellness', clientId: BILLPATIENT.id, input: {} });
+  check('an AWV with none on file is G0438, and says another practice\'s claim is not seen', r.status === 200 && r.body.codes[0].code === 'G0438' && /Palmetto eServices/.test(r.body.notes[0]), r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'invented', input: {} });
+  check('an unknown family is refused by name', r.status === 400 && r.body.code === 'SERVICE_FAMILY_UNKNOWN', r.body);
+
   r = await call('GET', '/api/clinical/encounters/queue?state=held', tok.mgr);
   check('a released claim leaves the hold queue', r.status === 200 && !(r.body.encounters || []).some(e => e.encounterUuid === bv), r.body);
 

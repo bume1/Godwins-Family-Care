@@ -29,6 +29,10 @@ const clinicalRepo = require('./clinicalRepository');
 const codeCatalog = require('./codeCatalog');
 const insurance = require('./insuranceEligibility');
 const emLevels = require('./emLevels');
+const chronicCare = require('./serviceRules/chronicCare');
+const transitionalCare = require('./serviceRules/transitionalCare');
+const remoteMonitoring = require('./serviceRules/remoteMonitoring');
+const psychotherapy = require('./serviceRules/psychotherapy');
 
 const SEVERITY = Object.freeze({ BLOCK: 'block', WARN: 'warn' });
 const PHASES = Object.freeze(['pre_post', 'final']);
@@ -309,6 +313,60 @@ const scrubClaim = (input = {}) => {
     warn('EM_HIGHEST_LEVEL', `lines[${i}].code`, `${lineLabel(line, i)}: E/M level`,
       `${upper(line.code)} is the highest level in its family (${fam.label}). Not wrong; worth a second look against the note.`);
   });
+
+  // ---- Cross-family rules that block (spec 3b.4) ----
+  // `sameMonthOtherLines` are this patient's other encounters' lines in the
+  // same calendar month: { code, renderingProviderId }. The month stands in for
+  // RPM's 30-day period, which the app does not track by device.
+  const here = lines.map(l => upper(l.code));
+  const monthOthers = (Array.isArray(input.sameMonthOtherLines) ? input.sameMonthOtherLines : []).filter(Boolean);
+  const monthAll = [...here, ...monthOthers.map(o => upper(o.code))];
+  const rpId = input.renderingProviderId || null;
+  const sameProvider = [...here, ...monthOthers.filter(o => rpId && o.renderingProviderId === rpId).map(o => upper(o.code))];
+  const apcmBase = [chronicCare.APCM.low, chronicCare.APCM.multi, chronicCare.APCM.multiQmb];
+  const families = [
+    ['APCM', apcmBase], ['CCM', chronicCare.CCM_CODES], ['TCM', transitionalCare.CODES]
+  ].filter(([, codes]) => sameProvider.some(c => codes.includes(c)));
+  if (families.length > 1 && here.some(c => [...apcmBase, ...chronicCare.CCM_CODES, ...transitionalCare.CODES].includes(c))) {
+    block('CARE_MANAGEMENT_SAME_MONTH', 'lines', 'Care management this month',
+      `${families.map(([n]) => n).join(' and ')} are billed for this patient in the same month by the same practitioner. APCM, CCM and TCM cannot be billed together that way.`);
+  }
+  const addOns = here.filter(c => chronicCare.APCM_ADD_ONS.includes(c));
+  if (addOns.length && !monthAll.some(c => apcmBase.includes(c))) {
+    block('APCM_ADD_ON_WITHOUT_BASE', 'lines', 'APCM behavioral add-on',
+      `${addOns.join(', ')} ${addOns.length === 1 ? 'is an APCM behavioral add-on' : 'are APCM behavioral add-ons'}, and no base APCM code is billed for this patient this month.`);
+  }
+  const pairs = [
+    [remoteMonitoring.RPM.supply.full, remoteMonitoring.RPM.supply.short, 'for the same device in the same 30-day period'],
+    [remoteMonitoring.RTM.supply.musculoskeletal.full, remoteMonitoring.RTM.supply.musculoskeletal.short, 'for the same device in the same 30-day period'],
+    [remoteMonitoring.RPM.management.brief, remoteMonitoring.RPM.management.base, 'in the same month; they are not additive, one is chosen by the month\'s total minutes']
+  ];
+  for (const [a, b, why] of pairs) {
+    if ((here.includes(a) || here.includes(b)) && monthAll.includes(a) && monthAll.includes(b)) {
+      block('MUTUALLY_EXCLUSIVE_SAME_PERIOD', 'lines', `Lines ${a} and ${b}`, `${a} and ${b} cannot both be billed ${why}.`);
+    }
+  }
+  // A psychotherapy add-on and an E/M may not claim more minutes together than
+  // the encounter's documented total. Psychotherapy minutes are documented
+  // separately; a missing one is NOT CHECKED and blocks.
+  const psyAddOn = here.find(c => psychotherapy.ADD_ONS.includes(c));
+  if (psyAddOn && here.some(c => emLevels.isEmCode(c))) {
+    const psy = Number(input.psychotherapyMinutes);
+    const total = Number(input.totalMinutes);
+    if (!Number.isFinite(psy) || psy <= 0) {
+      block('PSYCHOTHERAPY_TIME_NOT_RECORDED', 'psychotherapyMinutes', 'Psychotherapy time',
+        `${psyAddOn} is billed with an E/M, and no psychotherapy minutes are recorded separately from the E/M time, so the two cannot be checked against the total.`);
+    } else if (!Number.isFinite(total) || total <= 0) {
+      block('TOTAL_TIME_NOT_RECORDED', 'totalMinutes', 'Total time', `${psyAddOn} is billed with an E/M, and the encounter has no total time to check them against.`);
+    } else {
+      const der = input.emDerivation;
+      const emMinutes = der && der.finalBasis === 'time' && der.time ? Number(der.time.minutes) : 0;
+      if (psy + emMinutes > total || psy > total) {
+        block('TIME_COUNTED_TWICE', 'psychotherapyMinutes', 'Psychotherapy and E/M time',
+          `${psy} psychotherapy minutes${emMinutes ? ` and ${emMinutes} E/M minutes` : ''} come to more than the ${total} minutes documented for the encounter.`);
+      }
+    }
+  }
 
   // The derived level (Phase 3). An open LEVEL_AMBIGUOUS flag is the coder's to
   // work, stated in full: both candidates and what the note does not say. A

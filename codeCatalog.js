@@ -31,6 +31,7 @@
 
 const clinicalRoles = require('./clinicalRoles');
 const emLevels = require('./emLevels');
+const serviceRules = require('./serviceRules');
 
 const KV_KEY = 'openemr_code_catalog';
 const CATALOG_TYPES = Object.freeze(['CPT4', 'HCPCS']);
@@ -45,7 +46,9 @@ const RULE_LISTS = Object.freeze([
   { file: 'clinicalRoles.js', list: 'BEHAVIORAL_HEALTH_SERVICE_CODES', codes: clinicalRoles.BEHAVIORAL_HEALTH_SERVICE_CODES },
   // The E/M level table (2026-11-04). Every level it names must exist and be
   // active in OpenEMR, or the table describes codes nobody can bill.
-  { file: 'emLevels.js', list: 'FAMILIES', codes: emLevels.FAMILIES.flatMap(f => f.levels.map(l => l.code)) }
+  { file: 'emLevels.js', list: 'FAMILIES', codes: emLevels.FAMILIES.flatMap(f => f.levels.map(l => l.code)) },
+  // Phase 3b's rule files. RTM is loaded inactive in OpenEMR and is left out.
+  ...serviceRules.ruleLists()
 ]);
 
 const upper = (v) => String(v == null ? '' : v).trim().toUpperCase();

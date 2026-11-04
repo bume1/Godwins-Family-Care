@@ -74,6 +74,7 @@ const claimScrub = require('./claimScrub');       // the claim scrub + documenta
 const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
 const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
+const serviceRules = require('./serviceRules');   // Phase 3b: selection for the codes that are not level-based
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
@@ -15306,7 +15307,23 @@ const payerForScrub = (client) => {
 };
 
 // One scrub, from the pieces. `lines` defaults to the app's own record.
-const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords }) => {
+// Psychotherapy minutes, documented separately from E/M time on the visit's
+// recorded timing (myDay). null when none is recorded.
+const psychotherapyMinutesFor = (record, links, timings) => {
+  const link = (links || []).find(l => l && String(l.encounterUuid) === String(record.encounterUuid));
+  const t = link ? (timings || []).find(r => r && r.id === myDay.timingId(link.eid)) : null;
+  const m = t ? Number(t.psychotherapyMinutes) : NaN;
+  return Number.isFinite(m) && m > 0 ? m : null;
+};
+// This patient's other encounters' lines in the same calendar month (3b.4).
+const sameMonthOtherLinesFor = (record, allRecords) => {
+  const month = String((record && record.date) || '').slice(0, 7);
+  if (!month) return [];
+  return (allRecords || []).filter(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+      String(r.date || '').slice(0, 7) === month && r.noteStatus !== 'voided')
+    .flatMap(r => (r.services || []).map(sv => ({ code: sv.code, renderingProviderId: (r.renderingProvider && r.renderingProvider.id) || null })));
+};
+const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords, psychotherapyMinutes = null }) => {
   const { payer, payerProblem } = payerForScrub(client);
   const encounterFacility = facts && facts.checked && facts.facilityId
     ? (facilityInfo.facilities || []).find(f => String(f.id) === String(facts.facilityId)) || null
@@ -15325,6 +15342,9 @@ const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, cata
     // read as "NCCI data never loaded" (caught by the HTTP probe, 2026-11-04).
     ncci: { ptpEdits: ncci.ncciPtpEdits, mueByCode: ncci.ncciMue, sourceVersion: ncci.ncciSourceVersion },
     sameDayOtherCodes: sameDayOtherCodesFor(record, allRecords),
+    sameMonthOtherLines: sameMonthOtherLinesFor(record, allRecords),
+    renderingProviderId: (record.renderingProvider && record.renderingProvider.id) || null,
+    psychotherapyMinutes, totalMinutes: record.totalMinutes || null,
     emDerivation: record.emDerivation || null
   });
 };
@@ -15338,8 +15358,9 @@ const liveClaimScrub = async (ctx, { phase, user }) => {
   // first: an NPI fixed in OpenEMR a minute ago must not still read as missing.
   // A failed read keeps the saved copy, which is what the scrub then judges.
   try { await readFacilities(ctx.emr, user); } catch (_) { /* the saved copy stands */ }
-  const [facts, facilityInfo, catalog, ncci, allRecords] = await Promise.all([
-    readClaimFacts(ctx), billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), loadRows('encounter_billing')
+  const [facts, facilityInfo, catalog, ncci, allRecords, links, timings] = await Promise.all([
+    readClaimFacts(ctx), billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), loadRows('encounter_billing'),
+    getAppointmentLinkage(), loadVisitTimings()
   ]);
   let lines = null; let chargeReadError = null;
   if (phase === 'final') {
@@ -15348,7 +15369,8 @@ const liveClaimScrub = async (ctx, { phase, user }) => {
   }
   const dx = [...(ctx.record.diagnoses || []).map(d => d.code), ...((lines || []).flatMap(l => l.dxLinks))];
   const icd10 = await verifyIcd10Codes(user, dx);
-  const scrub = runClaimScrub({ phase, record: ctx.record, client: ctx.client, users: ctx.users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords });
+  const scrub = runClaimScrub({ phase, record: ctx.record, client: ctx.client, users: ctx.users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords,
+    psychotherapyMinutes: psychotherapyMinutesFor(ctx.record, links, timings) });
   return { scrub, facts, chargeReadError, lines: lines || linesFromRecord(ctx.record) };
 };
 
@@ -16205,6 +16227,37 @@ app.get('/api/clinical/reports/em-distribution', authenticateToken, requireBilli
     res.json(emDistribution(await loadRows('encounter_billing'), month));
   } catch (error) {
     console.error('E/M distribution error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Phase 3b: service selection for the codes that are not level-based ────
+// Deterministic, no model. Each family's thresholds live in its own file under
+// serviceRules/. Billing's tool: the result is a suggestion with its reason and,
+// near a threshold, the same review flag as Phase 3. Nothing is written.
+app.get('/api/clinical/service-selection/families', authenticateToken, requireBilling, (req, res) => {
+  res.json({ families: serviceRules.FAMILIES.map(f => ({ family: f.FAMILY, label: f.label, fields: f.FIELDS })) });
+});
+app.post('/api/clinical/service-selection', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const input = { ...(body.input && typeof body.input === 'object' ? body.input : {}) };
+    // The AWV history is GFC's own billed AWVs for this patient, read here,
+    // never typed in.
+    if (body.family === 'annual_wellness') {
+      const clientId = String(body.clientId || '');
+      if (!clientId) return res.status(400).json({ error: 'Name the patient, so GFC\'s earlier AWVs can be read.', code: 'SERVICE_SELECTION_NO_CLIENT' });
+      const awv = require('./serviceRules/annualWellness');
+      input.priorAwvDates = (await loadRows('encounter_billing'))
+        .filter(r => r && String(r.clientId) === clientId && r.noteStatus !== 'voided' && (r.services || []).some(sv => awv.CODES.includes(sv.code)))
+        .map(r => r.date);
+      input.dos = String(input.dos || body.dos || practiceToday()).slice(0, 10);
+    }
+    const out = serviceRules.select(String(body.family || ''), input);
+    if (out.error) return res.status(400).json(out);
+    res.json(out);
+  } catch (error) {
+    console.error('Service selection error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -18973,7 +19026,7 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
     if (canBill) {
       const inQueue = rows.filter(r => !voided.has(String(r.encounterUuid)) && claimScrub.holdState(recByUuid.get(String(r.encounterUuid)) || null, r.billingStatus));
       if (inQueue.length) {
-        const [facilityInfo, catalog, ncci, users] = await Promise.all([billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), getUsers()]);
+        const [facilityInfo, catalog, ncci, users, links, timings] = await Promise.all([billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), getUsers(), getAppointmentLinkage(), loadVisitTimings()]);
         const clientRows = users;
         const dx = inQueue.flatMap(r => ((recByUuid.get(String(r.encounterUuid)) || {}).diagnoses || []).map(d => d.code));
         const icd10 = await verifyIcd10Codes(req.user, dx);
@@ -18982,7 +19035,8 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
           const client = clientRows.find(u => u && String(u.id) === String(record.clientId)) || {};
           const hold = claimScrub.holdState(record, r.billingStatus);
           const facts = record.claimFacts || { checked: false, error: 'not read yet; open the encounter to read it' };
-          const scrub = runClaimScrub({ phase: hold === 'awaiting_billing' ? 'pre_post' : 'final', record, client, users, facts, icd10, catalog, ncci, facilityInfo, allRecords: records });
+          const scrub = runClaimScrub({ phase: hold === 'awaiting_billing' ? 'pre_post' : 'final', record, client, users, facts, icd10, catalog, ncci, facilityInfo, allRecords: records,
+            psychotherapyMinutes: psychotherapyMinutesFor(record, links, timings) });
           r.holdState = hold;
           r.scrub = { block: scrub.counts.block, warn: scrub.counts.warn, factsReadAt: record.claimFacts ? record.claimFacts.readAt : null };
           r.totalMinutes = record.totalMinutes || null;
@@ -30228,6 +30282,8 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
     // The E/M level table's review date (emLevels.js, 2026-11-04). Admin hub
     // only; clears when the file's nextReviewDue moves.
     const emLevelReview = emLevels.reviewStatus(practiceToday());
+    // Phase 3b's threshold files share the same January review.
+    const serviceRulesReview = serviceRules.reviewStatus(practiceToday()).filter(r => r.overdue);
 
     // Get all open tickets across the app (feedback requests + password reset requests)
     const feedbackRequests = (await db.get('feedback_requests')) || [];
@@ -30255,7 +30311,8 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
       recentServiceReports: serviceReports.slice(0, 5),
       openTickets: totalOpenTickets,
       billingDataRefresh,
-      emLevelReview
+      emLevelReview,
+      serviceRulesReview
     };
 
     res.json(stats);
