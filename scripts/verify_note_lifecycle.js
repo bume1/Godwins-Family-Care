@@ -626,6 +626,15 @@ const HP_NOTE = {
   check('the release is logged with codes only, no patient name', relLog && relLog.details.lineCodes.includes('99349') && !JSON.stringify(relLog.details).includes('Probe Patient'), relLog);
   r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
   check('it cannot be released twice', r.status === 409 && r.body.code === 'CLAIM_ALREADY_RELEASED', r.body);
+  console.log('\n── 13d. Clinical fact extraction: the route and its refusals (Phase 2, 2026-11-04) ──');
+  r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.mgr, {});
+  check('starting an extraction needs clinical write access', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/no-such-encounter/ai/extract-mdm`, tok.fnp, {});
+  check('an unknown encounter is refused by name', r.status === 404 && r.body.code === 'ENCOUNTER_NOT_FOUND', r.body);
+  const aiBefore = rows('ai_reviews').length;
+  r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.fnp, {});
+  check('with Gemini not configured it is refused, naming the blockers', r.status === 503 && r.body.code === 'MODEL_BOUNDARY_REFUSED' && Array.isArray(r.body.blockers) && r.body.blockers.length > 0, r.body);
+  check('and the refusal wrote no row and no pointer', rows('ai_reviews').length === aiBefore && !record(bv).latestMdmExtractionId);
   r = await call('GET', '/api/clinical/encounters/queue?state=held', tok.mgr);
   check('a released claim leaves the hold queue', r.status === 200 && !(r.body.encounters || []).some(e => e.encounterUuid === bv), r.body);
 

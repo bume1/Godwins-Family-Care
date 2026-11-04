@@ -47,7 +47,10 @@ const PURPOSES = Object.freeze({
   DOCUMENT_CLASSIFICATION: 'document_classification',
   CHART_REVIEW: 'chart_review',
   CHART_REVIEW_MERGE: 'chart_review_merge',
-  RECORDS_EXTRACTION: 'records_extraction'
+  RECORDS_EXTRACTION: 'records_extraction',
+  // AI coding pipeline Phase 2 (2026-11-04): facts from one encounter note.
+  // It names no code; rules decide a level later, after a clinician confirms.
+  MDM_EXTRACTION: 'mdm_extraction'
 });
 
 // What a caller does with what came back. This is the evaluation signal §10.3

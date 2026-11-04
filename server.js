@@ -72,6 +72,7 @@ const clinicalRoles = require('./clinicalRoles');
 const codeCatalog = require('./codeCatalog');
 const claimScrub = require('./claimScrub');       // the claim scrub + documentation gate (AI coding pipeline, Phase 1, 2026-11-04)
 const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
+const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
@@ -21295,6 +21296,7 @@ const aiReviewListHandler = async (req, res) => {
       canRun: clinicalRoles.canClinicalWrite(req.user),
       reviews: rows.map(r => ({
         id: r.id, status: r.status, at: r.at, finishedAt: r.finishedAt || null,
+        purpose: r.purpose || null, encounterUuid: r.encounterUuid || null,
         requestedBy: r.requestedBy ? r.requestedBy.name : null,
         passes: r.passes || null, currentPass: r.currentPass || null,
         findings: r.output ? (r.output.findings || []).length : 0,
@@ -21325,6 +21327,8 @@ const aiReviewGetHandler = async (req, res) => {
         requestedBy: row.requestedBy ? row.requestedBy.name : null,
         passes: row.passes || null, currentPass: row.currentPass || null,
         model: row.model || null, focus: row.focus || null,
+        purpose: row.purpose || null, encounterUuid: row.encounterUuid || null,
+        quoteCounts: row.quoteCounts || null,
         manifest: row.manifest || null, output: row.output || null,
         findingDecisions: row.findingDecisions || [],
         droppedUncited: row.droppedUncited || 0,
@@ -21674,6 +21678,138 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
     res.status(202).json({ reviewId: row.id, status: row.status });
   } catch (error) {
     console.error('Records extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── AI coding pipeline, Phase 2: clinical fact extraction (2026-11-04) ─────
+//
+// THE MODEL EXTRACTS FACTS FROM ONE ENCOUNTER NOTE AND NAMES NO CODE. Rules
+// decide a level in Phase 3, after the clinician confirms the facts. Same
+// machinery as the records extraction: the one engine, a declared schema, a
+// background job on an ai_reviews row that the existing poll reads and the
+// existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
+// draft on the coding workflow, and the encounter record keeps only a pointer.
+// Rules, schema and quote checks: mdmExtraction.js.
+const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
+  try {
+    const notRead = [];
+    let narrativeText = '';
+    let problems = null; let medications = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const puuid = client.openEmrPatientId;
+      const [soap, probs, meds] = await Promise.allSettled([
+        record.narrativeNoteSid ? emr.getSoapNote(puuid, encounterUuid, record.narrativeNoteSid) : Promise.resolve(null),
+        emr.getProblems(puuid), emr.getMedicationRequests(puuid)
+      ]);
+      // The narrative is read by the RECORDED sid: getSoapNotes can return
+      // another encounter's notes (openemr.js), so it is never used here.
+      if (soap.status === 'fulfilled' && soap.value) {
+        const n = soap.value;
+        narrativeText = [n.subjective, n.objective, n.assessment, n.plan].filter(Boolean).join('\n');
+      } else if (soap.status === 'rejected') notRead.push({ sourceId: `enc:${encounterUuid}:narrative`, why: 'the OpenEMR copy of the note could not be read' });
+      if (probs.status === 'fulfilled') problems = probs.value.map(clinicalRepo.summarizeCondition);
+      else notRead.push({ sourceId: 'emr:problems', why: 'not returned by the clinician\'s own EMR session' });
+      if (meds.status === 'fulfilled') medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+      else notRead.push({ sourceId: 'emr:medications', why: 'not returned by the clinician\'s own EMR session' });
+    } else {
+      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
+    }
+
+    // Documents attached to THIS encounter, and only those.
+    const rawDocs = [];
+    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
+      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
+    for (const u of uploads) {
+      try {
+        rawDocs.push({
+          clientId: client.id, sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`, id: u.id,
+          title: u.fileName || u.kind || 'Document', date: u.at || u.uploadedAt || null,
+          mimeType: u.mimeType || 'application/pdf', bytes: await googledrive.downloadFileBuffer(u.driveFileId)
+        });
+      } catch (e) {
+        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
+      }
+    }
+    const documents = rawDocs.length ? chartPacket.buildSections({ clientId: client.id, documents: rawDocs }).documents : [];
+
+    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, documents, notRead });
+    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: packet.documents, notRead: packet.notRead, passes: 1 });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      input: { sections: packet.sections, documents: packet.documents },
+      schema: mdmExtraction.MDM_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'mdm_extraction',
+      sourceIds: [...packet.sections.map(s => s.sourceId), ...packet.documents.map(d => d.sourceId)]
+    });
+
+    // §2.4, on the SERVER, after the model: every item carries a quote that
+    // is really in the sources, or it is dropped and counted.
+    const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
+      sourceTexts: packet.sections.map(s => s.text), hasDocuments: packet.documents.length > 0
+    });
+    const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId, manifest,
+      output: { ...output, unreadable }, droppedUncited: dropped, quoteCounts: counts, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED, finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null, blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] MDM extraction failed:', (e && e.code) || e.message);
+  }
+};
+
+// POST …/encounters/:euuid/ai/extract-mdm — start one. Clinical write access.
+// The result is read through the existing GET …/ai/reviews/:id poll.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const encounterUuid = String(req.params.euuid || '');
+    const rows = await loadRows('encounter_billing');
+    const record = findBillingRecord(rows, encounterUuid);
+    if (!record || String(record.clientId) !== String(client.id)) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
+    // Refused BEFORE anything is gathered or sent.
+    if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
+      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' });
+    }
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({ error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
+    }
+    const row = {
+      id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id, encounterUuid,
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      passes: null, currentPass: null, invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    // A POINTER on the coding workflow, never the facts themselves.
+    await saveBillingRecord(rows, { ...record, latestMdmExtractionId: row.id });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
+      { reviewId: row.id, encounterUuid });
+    runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('MDM extraction start error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
