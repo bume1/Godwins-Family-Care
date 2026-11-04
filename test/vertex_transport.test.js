@@ -287,3 +287,29 @@ test('a missing bucket, and an unreachable Google, are each a failure rather tha
   assert.strictEqual(r.ok, false, 'an unreachable check is never read as a pass');
   assert.strictEqual(r.failures.length, 2, 'both checks report their own failure');
 });
+
+test('the cacheConfig check uses a real regional host: multi-region "us" goes to us-central1', async () => {
+  assert.strictEqual(T.cacheConfigHost('us'), 'us-central1');
+  assert.strictEqual(T.cacheConfigHost('US'), 'us-central1');
+  assert.strictEqual(T.cacheConfigHost('us-east4'), 'us-east4');
+  const urls = [];
+  const checks = T.createLiveChecks({
+    getStorage: () => ({ bucket: () => ({ exists: async () => [false] }) }),
+    getAuth: () => ({ getClient: async () => ({ request: async ({ url }) => { urls.push(url); return { data: { disableCache: true } }; } }) })
+  });
+  await checks({ projectId: 'gfc-clinical-ai', location: 'us', bucket: 'b' });
+  assert.deepStrictEqual(urls, ['https://us-central1-aiplatform.googleapis.com/v1/projects/gfc-clinical-ai/cacheConfig']);
+});
+
+test('a failed check carries Google\'s own reason, scrubbed', async () => {
+  const denied = Object.assign(new Error('Permission storage.buckets.get denied for jane@example.com'), { code: 403 });
+  const checks = T.createLiveChecks({
+    getStorage: () => ({ bucket: () => ({ exists: async () => { throw denied; } }) }),
+    getAuth: () => ({ getClient: async () => ({ request: async () => { throw Object.assign(new Error('Request failed'), { response: { status: 403, data: { error: { message: 'Permission aiplatform.cacheConfigs.get denied' } } } }); } }) })
+  });
+  const r = await checks({ projectId: 'p', location: 'us', bucket: 'b' });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.failures[0], /Google said: 403 Permission aiplatform\.cacheConfigs\.get denied/);
+  assert.match(r.failures[1], /Google said: 403 Permission storage\.buckets\.get denied/);
+  assert.ok(!r.failures.join(' ').includes('jane@example.com'), 'an address in Google\'s message is scrubbed');
+});
