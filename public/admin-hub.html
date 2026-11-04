@@ -881,7 +881,7 @@
               <div className="text-xs text-gray-600">
                 Google-side checks:{' '}
                 {st.checks && st.checks.at
-                  ? <>last run {gfcTime.fmtDateTime(st.checks.at)} — <strong>{st.checks.ok && !st.checks.stale ? 'passed' : 'not passing'}</strong></>
+                  ? <>last run {window.GFC_TIME ? window.GFC_TIME.fmtDateTime(st.checks.at) : new Date(st.checks.at).toLocaleString()} — <strong>{st.checks.ok && !st.checks.stale ? 'passed' : 'not passing'}</strong></>
                   : <strong>never run</strong>}
               </div>
               <button onClick={recheck} disabled={busy === 'recheck'}
@@ -1384,13 +1384,8 @@
         loadData();
       }, [token]);
 
-      const [financialPending, setFinancialPending] = useState([]);
-      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
-        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
-
       const loadData = async () => {
         setLoading(true);
-        loadFinancial();
         const [feedbackData, resetData] = await Promise.all([
           canSeeAdminInbox ? api.getFeedback(token) : Promise.resolve([]),
           canSeeAdminInbox ? api.getPasswordResetRequests(token) : Promise.resolve([])
@@ -2204,6 +2199,13 @@
 
     const UsersPage = ({ token, isSuperAdmin }) => {
       const [users, setUsers] = useState([]);
+      // Pay-rate changes waiting on the Super Admin. Read by the queue and the
+      // edit form on THIS page, so the state lives here.
+      const [financialPending, setFinancialPending] = useState([]);
+      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
+        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
+
+
       const [projects, setProjects] = useState([]);
       const [clients, setClients] = useState([]);
       const [clientPortals, setClientPortals] = useState([]);
@@ -2349,6 +2351,7 @@
 
       const loadData = async () => {
         setLoading(true);
+        loadFinancial();
         const [usersRes, projectsRes, resetsRes, portalsRes] = await Promise.all([
           api.getUsers(token),
           api.getProjects(token),

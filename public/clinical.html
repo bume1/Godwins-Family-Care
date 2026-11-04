@@ -3875,7 +3875,7 @@
                 {state.reviews.slice(0, 6).map(r => (
                   <button key={r.id} className="block text-left text-[12px] text-stone-700 hover:underline"
                     onClick={() => openReview(r.id)}>
-                    {gfcTime.fmtDateTime(r.at)} · {r.status}
+                    {window.GFC_TIME ? window.GFC_TIME.fmtDateTime(r.at) : new Date(r.at).toLocaleString()} · {r.status}
                     {r.status === 'done' ? ` · ${r.findings} finding${r.findings === 1 ? '' : 's'}` : ''}
                     {r.requestedBy ? ` · ${r.requestedBy}` : ''}
                   </button>
