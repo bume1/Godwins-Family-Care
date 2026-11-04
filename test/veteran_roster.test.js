@@ -9,7 +9,7 @@ const path = require('path');
 const v = require('../veteranRoster');
 
 const TODAY = '2026-10-30';
-const row = (o) => ({ id: o.id || 'r1', firstName: 'James', lastName: "O'Brien", dob: '1970-05-04', examDate: TODAY, status: 'expected', providerUserId: 'p1', ...o });
+const row = (o) => ({ id: o.id || 'r1', firstName: 'James', lastName: "O'Brien", dob: '1970-05-04', examDate: TODAY, site: v.DEFAULT_SITE, status: 'expected', providerUserId: 'p1', ...o });
 
 test('exact name and DOB matches, case, accents and punctuation folded', () => {
   const m = v.matchCheckin([row({})], { firstName: 'james', lastName: 'OBRIEN', dob: '1970-05-04' }, TODAY);
@@ -192,4 +192,126 @@ test('server: the windowed read goes through rowsInRange, so the provider scopin
   assert.ok(/providerUserId: office \? null : req\.user\.id/.test(route), 'the scoping must travel with the filter');
   // The old inline filter must not come back beside the shared one.
   assert.ok(!/r\.examDate === date/.test(route), 'the inline date filter was replaced, not duplicated');
+});
+
+// ── My Day: the IME exams beside the clinical day (owner, 2026-11-04) ───────
+// Option B — the exam line is billed to the contracting vendor, so it keeps its
+// own record and this is a join at the READ layer only.
+const myDay = require('../myDay');
+
+test('one window filter answers several provider ids, which is what My Day needs', () => {
+  const rows = [row({ id: 'a', providerUserId: 'p1' }), row({ id: 'b', providerUserId: 'p2' }),
+    row({ id: 'c', providerUserId: 'p3' })];
+  const r = { from: TODAY, to: TODAY };
+  assert.deepStrictEqual(v.rowsInRange(rows, r, { providerUserIds: ['p1', 'p3'] }).map(x => x.id), ['a', 'c']);
+  // A single id and a set of ids must agree, or the two scopings drift.
+  assert.deepStrictEqual(v.rowsInRange(rows, r, { providerUserId: 'p2' }).map(x => x.id),
+    v.rowsInRange(rows, r, { providerUserIds: ['p2'] }).map(x => x.id));
+  // Numbers and strings are the same id, BOTH WAYS — user ids arrive as both.
+  // A string-only fixture here proves nothing: the row id is folded with
+  // String() on the way in, so two strings match whether or not the scope was
+  // folded too. The mismatched pairs are what the folding actually buys.
+  assert.strictEqual(v.rowsInRange([row({ id: 'n', providerUserId: '7' })], r, { providerUserIds: [7] }).length, 1,
+    'a numeric id in the scope must match a string id on the row');
+  assert.strictEqual(v.rowsInRange([row({ id: 'n', providerUserId: 7 })], r, { providerUserIds: ['7'] }).length, 1,
+    'and the other way round');
+});
+
+test('an EMPTY provider scope means nobody, never the whole roster', () => {
+  const rows = [row({ id: 'a', providerUserId: 'p1' }), row({ id: 'b', providerUserId: 'p2' })];
+  const r = { from: TODAY, to: TODAY };
+  assert.deepStrictEqual(v.rowsInRange(rows, r, { providerUserIds: [] }), []);
+  // And no scope at all is still everybody — the office view.
+  assert.strictEqual(v.rowsInRange(rows, r, {}).length, 2);
+  assert.strictEqual(v.rowsInRange(rows, r, { providerUserIds: null }).length, 2);
+});
+
+test("My Day's exam row carries no DOB and no arrival contact details", () => {
+  const r = v.examDayRow(row({
+    id: 'x', status: 'arrived', arrivedAt: '2026-10-30T14:00:00Z', seenAt: null,
+    checkinId: 'c1', arrivalPhone: '+15555550123', arrivalEmail: 'vet@example.com'
+  }), 'Dr Example');
+  assert.strictEqual(r.lastName, "O'Brien");
+  assert.strictEqual(r.providerName, 'Dr Example');
+  assert.strictEqual(r.statusLabel, 'Arrived');
+  assert.strictEqual(r.siteLabel, 'Savannah clinic');
+  for (const k of ['dob', 'checkinId', 'arrivalPhone', 'arrivalEmail']) {
+    assert.ok(!(k in r), `${k} must not reach My Day — it is sign-in data, not day data`);
+  }
+  // Proven against the roster board's own projection, which DOES carry them:
+  // if publicRow ever stopped carrying dob this test would otherwise be vacuous.
+  assert.ok('dob' in v.publicRow(row({}), null), 'the roster board still needs the DOB');
+});
+
+test('exams are grouped by site and counted by status, with no time invented', () => {
+  const e = (o) => v.examDayRow(row(o), null);
+  const d = myDay.imeDay([
+    e({ id: '1', status: 'expected' }), e({ id: '2', status: 'arrived' }),
+    e({ id: '3', status: 'seen' }), e({ id: '4', status: 'no_show', site: 'atlanta' })
+  ]);
+  assert.deepStrictEqual(d.totals, { exams: 4, expected: 1, arrived: 1, seen: 1, noShow: 1 });
+  // TWO sites in the fixture on purpose: with every exam at one site, grouping
+  // and one flat list are indistinguishable and the assertion proves nothing.
+  assert.deepStrictEqual(d.sites.map(g => [g.site, g.exams.length]), [['savannah', 3], ['atlanta', 1]]);
+  assert.strictEqual(d.sites[0].siteLabel, 'Savannah clinic');
+  // A site the catalog does not name falls back to its own key rather than
+  // rendering as blank.
+  assert.strictEqual(d.sites[1].siteLabel, 'atlanta');
+  // A roster row has no time of day, so nothing here may claim one.
+  assert.ok(d.exams.every(x => !('time' in x) && !('startTime' in x)));
+  assert.deepStrictEqual(myDay.imeDay([]).totals.exams, 0);
+  assert.deepStrictEqual(myDay.imeDay(undefined).exams, []);
+});
+
+test('an exam never reaches a clinical figure: not the totals, the plot or the route', () => {
+  const day = myDay.buildMyDay({
+    date: TODAY, appointments: [], clientsById: new Map(), timingsByEid: new Map(),
+    signedEids: new Set(), unsignedEarlier: [], openTasks: 0, blocks: [],
+    homeVisitFields: [], imeExams: [v.examDayRow(row({ id: '1' }), null), v.examDayRow(row({ id: '2' }), null)]
+  });
+  assert.strictEqual(day.ime.totals.exams, 2);
+  // The clinical day is untouched: two exams are not two visits, and they are
+  // not two stops without coordinates either — that would make an accurate
+  // mileage total report itself as partial.
+  assert.strictEqual(day.totals.visits, 0);
+  assert.strictEqual(day.totals.unplaceableStops, 0);
+  assert.strictEqual(day.totals.milesPartial, false);
+  assert.strictEqual(day.visits.length, 0);
+  assert.ok(!Object.keys(day.totals).some(k => /exam|ime|veteran/i.test(k)),
+    'an exam count in the clinical totals is how the two lines start being added together');
+  // The plot and the route proposal are built from `visits`, so neither can
+  // see an exam. Driving to somebody with no address is the failure.
+  assert.deepStrictEqual(myDay.plotStops({ stops: day.visits }).points, []);
+  assert.strictEqual(myDay.proposeRouteOrder({ visits: day.visits }).proposal, null);
+});
+
+test('server: My Day scopes exams by the ROSTER\'s own rule, not a second copy', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.get('/api/clinical/my-day'");
+  assert.ok(i > 0, 'my-day route not found');
+  const route = src.slice(i, src.indexOf("app.post('/api/clinical/visits/:eid/timing'", i));
+  assert.ok(route.length > 500 && route.length < 20000, 'route slice looks wrong');
+  assert.ok(/vetRoster\.rowsInRange\(/.test(route), 'the exam read must go through the shared filter');
+  assert.ok(/vetRoster\.isOffice\(req\.user\)/.test(route), 'who may see which veteran is the roster module\'s answer');
+  assert.ok(/vetRoster\.examDayRow\(/.test(route), 'My Day must use the narrow projection, not publicRow');
+  assert.ok(!/publicRow/.test(route), 'publicRow carries the DOB and must not be used here');
+  // Display only: My Day may not write a roster row.
+  assert.ok(!/db\.set\('veteran_roster'/.test(route), 'My Day is a read of the exam line, never a writer');
+});
+
+test('page: the IME block is read-only and the empty-day sentence narrows', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  const i = src.indexOf('const ImeExamBlock');
+  assert.ok(i > 0, 'ImeExamBlock not found');
+  assert.ok(/^    const ImeExamBlock/m.test(src), 'must sit at module scope (react_input_focus)');
+  const comp = src.slice(i, src.indexOf('const DayScheduleRow', i));
+  // Status is marked on the Veterans board and nowhere else, or this screen
+  // becomes a second writer of it.
+  assert.ok(!/veterans\/roster/.test(comp), 'the block must not call a roster route');
+  assert.ok(!/method: 'POST'/.test(comp), 'the block must not write');
+  assert.ok(/onOpen/.test(comp), 'it links to the board, which is where status is marked');
+  // "No visits scheduled" is false on a day that carries exams.
+  assert.ok(/No clinical visits scheduled for this day/.test(src),
+    'the empty-day sentence must narrow when exams are on the day');
+  assert.ok(/ImeExamBlock ime=\{day\.ime\}/.test(src), 'the block must be rendered from the served day');
 });

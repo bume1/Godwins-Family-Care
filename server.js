@@ -17141,9 +17141,12 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     const scope = resolveProviderScope(req.user, req.query.providerId);
     const scopeProblem = scope.error ? { error: scope.error, code: scope.code } : null;
 
-    const [timingRows, linkRows, attestations, orderRows, resultRows, users, videoRows] = await Promise.all([
+    const [timingRows, linkRows, attestations, orderRows, resultRows, users, videoRows, rosterRows] = await Promise.all([
       loadVisitTimings(), getAppointmentLinkage(), loadRows('encounter_attestations'),
-      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers(), loadVideoLinks()
+      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers(), loadVideoLinks(),
+      // Track E. The exam line is its own record and this is a READ of it — no
+      // appointment, no encounter, no shared model (owner, 2026-11-04).
+      db.get('veteran_roster')
     ]);
     const clientsById = new Map(users
       .filter(u => u.role === config.ROLES.CLIENT)
@@ -17215,6 +17218,23 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     const unacked = (resultRows || []).filter(r => r && !r.acknowledgedAt);
     const openTasks = openOrders.filter(mineOrder).length + unacked.filter(mineResult).length;
 
+    // Track E — the IME exams on this same day, beside the clinical visits.
+    // SCOPED BY THE ROSTER'S OWN RULE, asked of `vetRoster` rather than restated:
+    // the office sees the whole exam day, anybody else sees only exams assigned
+    // to them, so a case manager's read-only My Day carries none. One rule for
+    // the Veterans board and this screen, or the two disagree about who may see
+    // which veteran. A provider id explicitly scoped narrows to the app users
+    // behind it — empty means nobody, which is the honest answer for a provider
+    // id no app user is mapped to.
+    const imeScopeIds = scope.providerId
+      ? Array.from(scopeUserIds)
+      : (vetRoster.isOffice(req.user) ? null : [String(req.user.id)]);
+    const imeExams = vetRoster.rowsInRange(
+      rosterRows, vetRoster.rosterRange({ date }, date), { providerUserIds: imeScopeIds }
+    ).map(r => vetRoster.examDayRow(
+      r, (users || []).reduce((n, u) => n || (String(u.id) === String(r.providerUserId) ? (u.name || null) : null), null)
+    ));
+
     const day = myDay.buildMyDay({
       date,
       appointments: forDate,
@@ -17228,7 +17248,8 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
       startCoords: null,
       // T1 B1: which of today's visits have a video room, by eid.
       videoByEid: new Map((videoRows || []).filter(r => r && r.eid != null)
-        .map(r => [String(r.eid), { meetingUri: r.meetingUri, meetingCode: r.meetingCode }]))
+        .map(r => [String(r.eid), { meetingUri: r.meetingUri, meetingCode: r.meetingCode }])),
+      imeExams
     });
     // The plot is computed HERE, not in the browser: myDay.js reaches into the
     // scheduling module for the one coordinate reader, and that chain does not

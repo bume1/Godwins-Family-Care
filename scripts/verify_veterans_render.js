@@ -42,6 +42,7 @@ for (const [file, url] of CDN_FILES) {
 
 const roles = require(path.join(root, 'clinicalRoles.js'));
 const vet = require(path.join(root, 'veteranRoster.js'));
+const myDay = require(path.join(root, 'myDay.js'));
 const T = require(path.join(root, 'public', 'gfc-time.js'));
 
 let pass = 0; const fails = [];
@@ -110,7 +111,18 @@ const run = async (scenario) => {
       });
     }
     if (p === '/api/clinical/patients') return json({ patients: [] });
-    if (p.endsWith('/my-day')) return json({ date: TODAY, visits: [], totals: { visits: 0, miles: null }, calendar: { ok: true }, unsignedEarlier: [], openTasks: [] });
+    if (p.endsWith('/my-day')) {
+      // The `ime` block is built by the REAL modules the way the route builds
+      // it, so this exercises the shipped contract rather than a hand-written
+      // shape the server never produces.
+      const d = myDay.buildMyDay({
+        date: TODAY, appointments: [], clientsById: new Map(), timingsByEid: new Map(),
+        signedEids: new Set(), unsignedEarlier: [], openTasks: 0, blocks: [], homeVisitFields: [],
+        imeExams: vet.rowsInRange(ROWS, vet.rosterRange({ date: TODAY }, TODAY), { providerUserIds: [DOC.id] })
+          .map(r => vet.examDayRow(r, DOC.name))
+      });
+      return json({ ...d, plot: myDay.plotStops({ stops: d.visits }), calendar: { ok: true }, providerId: null, locked: false });
+    }
     if (p === '/api/clinical/inbox') return json({ items: [], counts: { total: 0, actionable: 0, overdue: 0 } });
     return json({});
   });
@@ -174,6 +186,38 @@ const run = async (scenario) => {
     console.log('\nD. an over-long window is reported, not silently cut');
     const shortened = vet.rosterRange({ from: TODAY, to: T.addDays(TODAY, 400) }, TODAY);
     ok('the module reports the cap so the screen can say it', shortened.capped === true && shortened.to === T.addDays(TODAY, vet.RANGE_MAX_DAYS));
+  });
+
+  // ── E. My Day shows the exam day beside the clinical day ─────────────────
+  // Owner, 2026-11-04: one screen, two lines, labelled — and the exam half is
+  // read-only, because status is marked on the Veterans board and nowhere else.
+  await run(async (page) => {
+    console.log('\nE. My Day carries the day\'s IME exams, read-only');
+    await page.locator('a:has-text("My Day"), button:has-text("My Day")').first().click().catch(() => {});
+    await page.waitForFunction(() => /IME Exams/i.test(document.body.innerText), null, { timeout: 20000 });
+    const txt = await page.locator('body').innerText();
+    ok('the exam block is labelled as IME, not mixed into the visits', /IME Exams/i.test(txt));
+    ok("today's veteran is on My Day", /O'Brien/.test(txt), txt.slice(0, 600));
+    ok('a veteran booked for a later exam day is NOT on today', !/Zane/.test(txt) && !/Adams/.test(txt));
+    ok('the site is named', /Savannah clinic/.test(txt));
+    ok('the status is shown', /Arrived/.test(txt));
+    // The whole point of holding the two lines apart.
+    ok('no status buttons on My Day — status is marked on the board',
+      (await page.locator('button:has-text("Mark Seen")').count()) === 0 &&
+      (await page.locator('button:has-text("No Show")').count()) === 0);
+    ok('the exam count is in the day footer', /1 IME exam\b/.test(txt), txt.slice(-700));
+    ok('an exam day with no clinical visits says so without claiming an empty day',
+      /No clinical visits scheduled/.test(txt), txt.slice(0, 900));
+    // GFC_PROBE_SHOT=<dir> writes the rendered screen out, for a human to look
+    // at. Off by default: a probe's job is the assertions above.
+    if (process.env.GFC_PROBE_SHOT) {
+      await page.screenshot({ path: path.join(process.env.GFC_PROBE_SHOT, 'my-day-ime.png'), fullPage: true });
+    }
+    // It links to the one place a status IS changed.
+    await page.locator('button:has-text("Open Board")').first().click();
+    await page.waitForFunction(() => /Mark Seen/.test(document.body.innerText), null, { timeout: 15000 });
+    ok('Open Board carries you to the Veterans board, where status is marked',
+      (await page.locator('button:has-text("Mark Seen")').count()) > 0);
   });
 
   console.log(`\n${pass}/${pass + fails.length} checks passed.`);

@@ -370,9 +370,53 @@ const buildUnsignedBacklog = ({ rows, today }) => rows
   .filter(r => r && r.date && String(r.date) < String(today))
   .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
+// ---- IME exams on the same day (Track E, owner 2026-11-04) ---------------
+// ⚠️ DISPLAY ONLY, AND HELD SEPARATE FROM `visits` ON PURPOSE.
+//
+// An independent medical exam is billed to the contracting vendor and GFC then
+// pays the examining provider. That is not a claim, so the exam line keeps its
+// own record (`veteran_roster`) and shares no data model with clinical
+// scheduling — the owner's decision, 2026-11-04, and the reason this is a join
+// at the READ layer and nowhere else.
+//
+// A veteran has no client record, no coordinates and no encounter, so an exam
+// must never reach a clinical figure: one of them in `visits` would be an
+// unplaceable stop, which makes an accurate mileage total report itself as
+// partial, and the route proposal would try to drive to somebody with no
+// address. Build-enforced — nothing here touches `totals`, the plot or the
+// proposal, and the exam counts live under `ime` with their own names.
+//
+// An exam has a DATE AND A SITE AND NO TIME OF DAY (the roster has no time
+// field), so exams cannot be interleaved with timed visits and are not
+// pretended to be. They are grouped by site, in the order the roster returns
+// them, which is already surname order.
+const imeDay = (exams) => {
+  const rows = (exams || []).filter(Boolean);
+  const sites = [];
+  rows.forEach(r => {
+    const key = r.site || 'unknown';
+    let g = sites.find(x => x.site === key);
+    if (!g) { g = { site: key, siteLabel: r.siteLabel || key, exams: [] }; sites.push(g); }
+    g.exams.push(r);
+  });
+  const count = (status) => rows.filter(r => r.status === status).length;
+  return {
+    exams: rows,
+    sites,
+    totals: {
+      exams: rows.length,
+      expected: count('expected'),
+      arrived: count('arrived'),
+      seen: count('seen'),
+      noShow: count('no_show')
+    }
+  };
+};
+
 const buildMyDay = ({
   date, appointments, clientsById, timingsByEid, signedEids,
-  unsignedEarlier, openTasks, blocks, homeVisitFields, startCoords, videoByEid
+  unsignedEarlier, openTasks, blocks, homeVisitFields, startCoords, videoByEid,
+  imeExams
 }) => {
   const visits = [];
   let previousCoords = startCoords || null;
@@ -409,6 +453,8 @@ const buildMyDay = ({
     visits,
     blocks: (blocks || []).filter(b => b && NON_VISIT_KINDS.includes(b.kind)),
     unsigned: buildUnsignedBacklog({ rows: unsignedEarlier || [], today: date }),
+    // Track E, beside the clinical day and never inside it — see imeDay.
+    ime: imeDay(imeExams),
     totals: {
       visits: counted.length,
       miles: legs.length ? Math.round(legs.reduce((s, m) => s + m, 0) * 10) / 10 : null,
@@ -521,7 +567,7 @@ module.exports = {
   timingId, minutesBetween, totalVisitMinutes, timeStatement, MAX_VISIT_MINUTES,
   visitTiming, SCHEDULED_ONLY,
   DISTANCE_UNAVAILABLE, haversineMiles, coordsOf, addressLineOf,
-  buildDayRow, buildUnsignedBacklog, buildMyDay,
+  buildDayRow, buildUnsignedBacklog, buildMyDay, imeDay,
   proposeRouteOrder,
   plotStops, MAP_PADDING,
   findNearbyDue, DUE_AFTER_DAYS, daysBetweenYmd,
