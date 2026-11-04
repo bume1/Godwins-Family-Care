@@ -224,8 +224,10 @@ const run = async (viewer, startPath, scenario) => {
     await page.waitForTimeout(300);
     await page.locator(`text=${PATIENT.name}`).first().click();
     await page.waitForTimeout(500);
-    // Chart tabs are .tabbtn divs, not buttons.
-    await page.locator('.tabbtn:text-is("Referrals")').first().click();
+    // Chart tabs are .tabbtn divs, not buttons. Referrals is a filter on the
+    // one Orders place since 2026-11-04.
+    await page.locator('.tabbtn:text-is("Orders")').first().click();
+    await page.locator('button:text-is("Referrals")').first().click();
     await page.waitForSelector('text=Referred to Courtney Hale inside the team', { timeout: 15000 });
     ok('B1 the internal referral says who it went to', true);
     await page.locator('button', { hasText: 'Psychiatry' }).first().click();
@@ -248,6 +250,8 @@ const run = async (viewer, startPath, scenario) => {
   await run(PROVIDER, '/clinical#inbox', async (page, posted) => {
     await page.waitForSelector('text=Encounter documented but not signed', { timeout: 20000 });
     await page.locator('button:has-text("Open Encounter")').first().click();
+    // One step at a time (2026-11-04): orders are on the Orders & Rx step.
+    await page.locator('button[data-step="actions"]').first().click();
     await page.waitForSelector('button:has-text("+ Record Order")', { timeout: 20000 });
     await page.locator('button:has-text("+ Record Order")').first().click();
     await page.locator('select').filter({ has: page.locator('option[value="referral"]') }).first().selectOption('referral');
@@ -289,6 +293,8 @@ const run = async (viewer, startPath, scenario) => {
   await run(CASE_MANAGER, '/clinical#inbox', async (page) => {
     await page.waitForSelector('text=Encounter documented but not signed', { timeout: 20000 });
     await page.locator('button:has-text("Open Encounter")').first().click();
+    // One step at a time (2026-11-04): orders are on the Orders & Rx step.
+    await page.locator('button[data-step="actions"]').first().click();
     await page.waitForSelector('button:has-text("+ Record Order")', { timeout: 20000 });
     ok('D1 an LMSW is offered + Record Order', true);
     await page.locator('button:has-text("+ Record Order")').first().click();

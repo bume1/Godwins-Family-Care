@@ -722,7 +722,12 @@ test('My Day is the default landing view', () => {
   assert.match(pageCode, /return NAV_VIEWS\.some\(v => v\.key === h\) \? h : 'myday';/,
     'the workspace must open on the day unless the fragment names a view that exists');
   assert.match(pageCode, /\{ key: 'inbox', tab: 'Inbox'/, 'precondition: #inbox (the referral email) must still resolve');
-  assert.match(pageCode, /\{ key: 'queue', tab: 'Coding'/, "precondition: #queue (Billing's Open in Clinical) must still resolve");
+  // 2026-11-04: #queue, #results and #overdue are folded views. They still
+  // land: the coding queue is the billing page, the other two Inbox tabs.
+  assert.match(pageCode, /queue: \{ href: '\/billing#claims' \}/, '#queue lands on the billing page');
+  assert.match(pageCode, /results: \{ view: 'inbox', inboxTab: 'results' \}/, '#results lands on the Inbox\'s Results tab');
+  assert.match(pageCode, /overdue: \{ view: 'inbox', inboxTab: 'overdue' \}/, '#overdue lands on the Inbox\'s Overdue tab');
+  assert.match(pageCode, /if \(LEGACY_VIEWS\[h\]\) return LEGACY_VIEWS\[h\]\.view;/, 'and the fragment reader honours them');
   assert.match(pageCode, /\{ key: 'queues', tab: 'Tasks'/, 'precondition: #queues (the to-do emails) must still resolve');
   assert.match(pageCode, /<MyDayView/);
 });
@@ -862,12 +867,15 @@ test('every chart tab is a place in the record, and no workflow is one', () => {
   const i = pageCode.indexOf('const tabs = [');
   const decl = pageCode.slice(i, pageCode.indexOf('];', i));
   const keys = [...decl.matchAll(/\['([a-z]+)',/g)].map(m => m[1]);
-  // The brief's twelve places, plus Appointments (the per-patient calendar,
-  // kept because removing a working surface is not what a reorganisation is
-  // for). Enrollment left for Admin in PR #116.
-  ['summary', 'timeline', 'encounters', 'problems', 'medications', 'allergies',
-    'orders', 'results', 'imaging', 'referrals', 'documents', 'careplan']
+  // The brief's twelve places. Enrollment left for Admin in PR #116. On
+  // 2026-11-04 (owner) Encounters and Appointments became one place, Visits,
+  // and Imaging and Referrals became filters on Orders: still places, fewer
+  // tabs. Their old names stay as aliases, so nothing linking to them strands.
+  ['summary', 'timeline', 'visits', 'problems', 'medications', 'allergies',
+    'orders', 'results', 'documents', 'careplan']
     .forEach(k => assert.ok(keys.includes(k), `missing place: ${k}`));
+  for (const gone of ['encounters', 'appts', 'imaging', 'referrals']) assert.ok(!keys.includes(gone), `${gone} is folded, not a tab`);
+  assert.match(pageCode, /const CHART_TAB_ALIASES = Object\.freeze\(\{ encounters: \{ tab: 'visits' \}, appts: \{ tab: 'visits' \}, imaging: \{ tab: 'orders', ordersFilter: 'imaging' \}, referrals: \{ tab: 'orders', ordersFilter: 'referral' \} \}\);/);
   // The H&P is NOT a tab — it opens as a visit from the banner.
   assert.ok(!keys.includes('visit'), 'the H&P must not be a sibling tab');
   // Med rec is a section under MEDICATIONS, not a place beside it (D4).
@@ -883,8 +891,8 @@ test('the H&P is still reachable, and says where you are while it is open', () =
   // encounter: then it resumes THAT (a blank H&P would become a second
   // encounter, which can only be voided).
   const sv = pageCode.slice(pageCode.indexOf('const startVisit = () =>'), pageCode.indexOf('const documentFromSchedule'));
-  assert.match(sv, /if \(vd && vd\.encounterUuid\) \{ setEncTarget\(vd\.encounterUuid\); setTab\('encounters'\); return; \}/);
-  assert.match(sv, /setTab\('visit'\);/);
+  assert.match(sv, /if \(vd && vd\.encounterUuid\) \{ setEncTarget\(vd\.encounterUuid\); setTab\('visits'\); return; \}/);
+  assert.match(sv, /setHpApptEid\(null\); setTab\('visit'\);/);
   assert.match(pageCode, /tab === 'visit' && \(chart \?/, 'the H&P body still renders');
   // With no tab highlighted, a clinician has to be told where they are.
   assert.match(pageCode, /Documenting a visit/);
@@ -1002,14 +1010,20 @@ test('the views are declared once, and the sidebar, bottom bar and More all read
   // nine places to land in and landed in none.
   assert.match(pageCode, /const NAV_VIEWS = Object\.freeze\(\[/);
   const keys = [...pageCode.matchAll(/\{ key: '(\w+)', tab: '/g)].map(m => m[1]);
-  for (const k of ['myday', 'charts', 'schedule', 'queue', 'inbox', 'results', 'overdue', 'queues', 'analytics', 'messages', 'settings']) {
+  // 2026-11-04: Results and Overdue are Inbox tabs, and the Coding queue is
+  // the billing page (a link, drawn only for billing).
+  for (const k of ['myday', 'charts', 'schedule', 'billing', 'inbox', 'queues', 'analytics', 'messages', 'settings']) {
     assert.ok(keys.includes(k), `view ${k} must stay declared`);
   }
+  for (const k of ['queue', 'results', 'overdue']) assert.ok(!keys.includes(k), `${k} is folded, not a sidebar item`);
+  assert.match(pageCode, /\{ key: 'billing', tab: 'Billing', icon: 'ti-receipt', group: 'work', href: '\/billing', billingOnly: true \}/);
+  assert.match(pageCode, /const navShown = \(v, access\) => !v\.billingOnly \|\| !!\(access && access\.canSubmitBilling\);/);
+  assert.match(pageCode, /const INBOX_TABS = \[\['work', 'To Do'\], \['results', 'Results'\], \['overdue', 'Overdue Orders'\]\];/);
   assert.strictEqual(new Set(keys).size, keys.length, 'no view is declared twice');
-  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'main'\)\.map\(navButton\)/);
-  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'work'\)\.map\(navButton\)/);
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'main' && navShown\(v, access\)\)\.map\(navButton\)/);
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'work' && navShown\(v, access\)\)\.map\(navButton\)/);
   assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.phone\)\.map\(v =>/, 'the phone bottom bar reads the same list');
-  assert.match(pageCode, /NAV_VIEWS\.filter\(v => !v\.phone\)\.map\(v =>/, 'More lists everything the bottom bar does not');
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => !v\.phone && navShown\(v, access\)\)\.map\(v =>/, 'More lists everything the bottom bar does not');
 });
 
 test('every view is reachable on a laptop AND on a phone', () => {
@@ -1634,43 +1648,26 @@ const encounterPanel = (() => {
   return chartPage.slice(from, to);
 })();
 
-test('F3: the encounter shows one step at a time on a phone and stays one scroll at a desk', () => {
-  // Two different jobs. At a kitchen table you want the one thing in front of
-  // you; reviewing at a desk you want the whole visit at once. `on()` is what
-  // expresses that, and it must be viewport-conditional rather than a plain
-  // step comparison — a bare `step === k` would break the desktop.
-  assert.match(encounterPanel, /const on = \(k\) => !narrow \|\| step === k;/,
-    'a pane shows when the viewport is wide OR it is the current step');
-  assert.match(encounterPanel, /const narrow = useNarrowViewport\(\);/);
-  // The rail is a phone control; on a desktop there are no steps to walk.
-  assert.match(encounterPanel, /\{narrow && <EncounterStepRail/);
-  // Each step owns at least one pane, or a step exists that shows nothing.
+test('F3: the encounter shows one step at a time at every width, and keeps every step mounted', () => {
+  // 2026-11-04 (owner): at a desk the whole encounter as one scroll was
+  // fifteen cards deep, so the step rail shows on every screen. What a desk
+  // never had to worry about, typing on Visit and losing it on a look at
+  // Coding, is answered by HIDING the other steps rather than unmounting them.
+  assert.match(encounterPanel, /<EncounterStepRail step=\{step\} onStep=\{setStep\}/);
+  assert.doesNotMatch(encounterPanel, /\{narrow && <EncounterStepRail/, 'the rail is not a phone-only control any more');
   for (const key of ['visit', 'coding', 'actions', 'sign']) {
-    assert.ok(encounterPanel.includes(`on('${key}')`), `the ${key} step must gate at least one pane`);
+    assert.ok(encounterPanel.includes(`<div hidden={step !== '${key}'}>`), `the ${key} step is a pane that hides, not one that unmounts`);
   }
+  assert.doesNotMatch(encounterPanel, /\bon\('(visit|coding|actions|sign)'\) &&/, 'no pane is mounted only on its own step');
   // The header is deliberately ungated: a screen that does not say whose
   // encounter it is, or whether it is signed, is a screen you cannot act on.
-  // Looked for BEFORE the header, which is where a gate would be added — the
-  // first version of this sliced forward from the chip and so could not see
-  // the one thing it was checking for.
   const chip = encounterPanel.indexOf('<EncStateChip state={d.state} />');
   assert.ok(chip > 0, 'precondition: the header chip is still there');
   const openerLine = encounterPanel.lastIndexOf('<div className="card mb-4">', chip);
   const lineStart = encounterPanel.lastIndexOf('\n', openerLine) + 1;
   assert.equal(encounterPanel.slice(lineStart, openerLine).trim(), '',
     'the encounter header must show on every step — nothing may gate it');
-});
-
-test('F3: the viewport is watched, not sampled once, and the JS agrees with the CSS about what a phone is', () => {
-  const hook = chartPage.slice(chartPage.indexOf('const useNarrowViewport = ('), chartPage.indexOf('const ENCOUNTER_STEPS'));
-  // Rotating a phone changes the answer. A one-shot read leaves a step hidden
-  // with no way back to it.
-  assert.match(hook, /addEventListener/, 'the media query must be subscribed to');
-  assert.match(hook, /removeEventListener|removeListener/, 'and unsubscribed on unmount');
-  // 767px is Tailwind's md boundary. If the two disagreed the stepper would
-  // hide a card the grid was still laying out.
-  assert.match(chartPage, /const PHONE_QUERY = '\(max-width: 767px\)';/);
-  assert.ok(chartPage.includes('md:grid-cols-2'), 'precondition: the layout uses the md breakpoint this number matches');
+  assert.ok(encounterPanel.indexOf('<div hidden={step !== ') > chip, 'and it sits above every step pane');
 });
 
 test('F3: no step gates another — the only gate is the server-answered signature readiness', () => {
@@ -1726,7 +1723,8 @@ test('F5: the rest of the chart opens inside the encounter, and it is the SAME c
   assert.ok(!/api\./.test(drawer), 'the drawer must not call the API itself — it passes the chart it was given');
   // Rendered inside the panel, on the step where a clinician is reading the
   // note and deciding what to do next.
-  assert.match(encounterPanel, /\{on\('visit'\) && <EncounterLookups patient=\{patient\} chart=\{chart\}/);
+  const visitPane = encounterPanel.slice(encounterPanel.indexOf("<div hidden={step !== 'visit'}>"), encounterPanel.indexOf("<div hidden={step !== 'coding'}>"));
+  assert.match(visitPane, /<EncounterLookups patient=\{patient\} chart=\{chart\}/);
 });
 
 test('F5: the drawer is at module scope, so opening it does not remount what is under it', () => {
@@ -1892,7 +1890,8 @@ test('G build-enforced: the risk card is rendered inside the encounter', () => {
   assert.ok(page.includes("saveRisk: (id, euuid, body)"), 'the route must have a caller');
   // On the Visit step, where the clinician is reading the note and deciding.
   const panel = page.slice(page.indexOf('const EncounterPanel = ('), page.indexOf('const EncountersTab = ('));
-  assert.match(panel, /\{on\('visit'\) && \(\s*\n\s*<RiskCard/);
+  const visitPane = panel.slice(panel.indexOf("<div hidden={step !== 'visit'}>"), panel.indexOf("<div hidden={step !== 'coding'}>"));
+  assert.match(visitPane, /<RiskCard d=\{d\}/);
 });
 
 test('G build-enforced: the screen restates no risk vocabulary and no clinical rule', () => {

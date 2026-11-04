@@ -1232,8 +1232,10 @@ test('clinician page: hold at signing, Publish card, Refresh portal chart, patie
   assert.match(clinicalPage, /acknowledgeResult: \(resultId, followUpNote, patientNote\)/);
   assert.ok(!/The narrative note is never shown to patients/.test(clinicalPage), 'the old rule\'s copy is gone');
   assert.match(clinicalPage, /Since 2026-09-29 \(owner decision\) the signed note itself is also shown/);
-  // A hold with no reason cannot be submitted from either sign surface.
-  assert.equal((clinicalPage.match(/\(hold\.on && !hold\.reason\)|\(portalHold\.on && !portalHold\.reason\)/g) || []).length, 2);
+  // A hold with no reason cannot be submitted. Since 2026-11-04 there is ONE
+  // sign surface (the encounter's Sign card), so one such guard.
+  assert.equal((clinicalPage.match(/\(hold\.on && !hold\.reason\)|\(portalHold\.on && !portalHold\.reason\)/g) || []).length, 1);
+  assert.doesNotMatch(clinicalPage, /const SignNotePanel = \(/, 'the second sign box is gone');
 });
 test('the two published collections are claimed for migration as PHI', () => {
   const reg = require('../dataMigration');

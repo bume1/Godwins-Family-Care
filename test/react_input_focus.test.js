@@ -30,7 +30,11 @@ const PAGES = [
   { page: 'admin-hub.html',        nestedAt: 6 },
   { page: 'admin-enrollment.html', nestedAt: 6 },
   { page: 'caregiver.html',        nestedAt: 2 },
-  { page: 'scheduling.html',       nestedAt: 2 }
+  { page: 'scheduling.html',       nestedAt: 2 },
+  // 2026-11-04: the billing page's claims workspace, and the claim view it
+  // shares with the clinical workspace. Both are written flush left.
+  { page: 'billing.html',          nestedAt: 2 },
+  { page: 'components/claim-shared.jsx', nestedAt: 2 }
 ];
 const FORM_CONTROL = /<(input|textarea|select)\b/;
 

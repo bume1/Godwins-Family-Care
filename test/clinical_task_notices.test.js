@@ -512,6 +512,6 @@ test('N30 the form offers a time, and never sends one without a date', () => {
   assert.match(PAGE, /dueTime: f\.dueDate \? \(f\.dueTime \|\| null\) : null/);
   assert.match(PAGE, /Blank sends the reminder at 9:00 AM/, 'the default is stated where it is chosen');
   // The page formats a wall-clock time from its own digits, never via Date.
-  const fmt = between(PAGE, 'const fmtDueTime =', 'const fmtTs =', 'fmtDueTime');
+  const fmt = between(PAGE, 'const fmtDueTime =', 'const initials =', 'fmtDueTime');
   assert.ok(!/new Date/.test(fmt), 'a time with no date and no zone run through Date renders an invention');
 });

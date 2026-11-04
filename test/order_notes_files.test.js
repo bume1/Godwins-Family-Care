@@ -176,10 +176,12 @@ test('the routes are wired behind the right middleware', () => {
 
 test('the Orders tab lists every order type; Referrals stays a filtered view', () => {
   const code = stripComments(PAGE);
-  const orders = code.slice(code.indexOf('const OrdersTab'), code.indexOf('const ReferralsTab'));
+  const orders = code.slice(code.indexOf('const OrdersTab'), code.indexOf('const ORDER_FILTERS'));
   assert.match(orders, /keep=\{\(\) => true\}/);
   assert.equal(/referral/.test(orders.replace(/Referrals and DME/g, '')), false, 'no referral filter on the Orders tab');
   assert.match(code, /const ReferralsTab[\s\S]{0,200}o\.orderType === 'referral'/);
+  // 2026-11-04: the chart's one Orders place offers Referrals as a filter.
+  assert.match(code, /filter === 'referral' \? <ReferralsTab patient=\{patient\} \/>/);
 });
 
 test('an order row opens a detail that can add notes and files', () => {

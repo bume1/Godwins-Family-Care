@@ -136,6 +136,7 @@
 </head>
 <body>
   <div id="root"></div>
+  <script type="text/babel" src="/components/claim-shared.jsx"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback, useContext , useMemo } = React;
     const API_URL = window.location.origin;
@@ -365,8 +366,6 @@
       followUp: (id, body) => authedFetch(`/api/clinical/patients/${id}/encounters`, { method: 'POST', body: JSON.stringify(body) }),
       // Session 4.4 — clinical completeness P0
       dxCandidates: (id) => authedFetch(`/api/clinical/patients/${id}/dx-candidates`),
-      settings: () => authedFetch('/api/clinical/settings'),
-      saveSettings: (body) => authedFetch('/api/clinical/settings', { method: 'PUT', body: JSON.stringify(body) }),
       codeSearch: (params) => authedFetch(`/api/clinical/codes/search?${new URLSearchParams(params).toString()}`),
       encounters: (id, includeDeleted) => authedFetch(`/api/clinical/patients/${id}/encounters${includeDeleted ? '?includeDeleted=1' : ''}`),
       encounterDetail: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}`),
@@ -418,28 +417,18 @@
       carrySources: (id) => authedFetch(`/api/clinical/patients/${id}/notes/carry-forward-sources`),
       carryContent: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/note/carry-forward`),
       clinicianAddendum: (id, euuid, text, totalMinutes) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-sign`, { method: 'POST', body: JSON.stringify({ attest: true, text, ...(String(totalMinutes || '').trim() ? { totalMinutes: String(totalMinutes).trim() } : {}) }) }),
-      // The claim scrub (2026-11-04). Billing's screens only.
-      claimScrub: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/claim-scrub`),
+      // Billing's calls (the claim scrub, Submit, the level flag, the code
+      // helper, the queue, settings) live on /billing since 2026-11-04.
       // Phases 2 and 3: facts from the note, then the level from confirmed facts.
       extractMdm: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/ai/extract-mdm`, { method: 'POST', body: '{}' }),
       emDerive: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation`, { method: 'POST', body: JSON.stringify(body) }),
-      resolveEmFlag: (id, euuid, resolution) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation/flag/resolve`, { method: 'POST', body: JSON.stringify({ resolution }) }),
-      // Phase 4: diagnosis suggestions, modifier reasons, TCM dates.
+      // Phase 4: diagnosis suggestions, modifier reasons.
       suggestDiagnoses: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/ai/suggest-diagnoses`, { method: 'POST', body: '{}' }),
       justifyModifier: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/modifier-justification`, { method: 'POST', body: JSON.stringify(body) }),
-      saveTcmDates: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/tcm-dates`, { method: 'PUT', body: JSON.stringify(body) }),
-      serviceFamilies: () => authedFetch('/api/clinical/service-selection/families'),
-      selectService: (body) => authedFetch('/api/clinical/service-selection', { method: 'POST', body: JSON.stringify(body) }),
-      emDistribution: (month) => authedFetch(`/api/clinical/reports/em-distribution${month ? `?month=${encodeURIComponent(month)}` : ''}`),
-      claimRelease: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/claim-release`, { method: 'POST', body: JSON.stringify(body || {}) }),
-      billingSubmit: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/billing-submit`, { method: 'POST', body: JSON.stringify(body) }),
-      refreshPos: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/pos/refresh`, { method: 'POST', body: '{}' }),
-      syncFacilities: () => authedFetch('/api/clinical/facilities/sync', { method: 'POST', body: '{}' }),
       coSignNote: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-signatures`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       attachNote: (id, euuid, appointmentEid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/appointment`, { method: 'PUT', body: JSON.stringify({ appointmentEid }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
       resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
-      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`),
       inbox: () => authedFetch('/api/clinical/inbox'),
       // ── Referrals to the team or to a saved outside provider (2026-10-12) ──
       referralTargets: (clientId) => authedFetch(`/api/clinical/patients/${clientId}/referral-targets`),
@@ -453,8 +442,8 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      myday: 'My Day', queues: 'Tasks', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', queue: 'Coding Queue',
-      inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders',
+      myday: 'My Day', queues: 'Tasks', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', 
+      inbox: 'Inbox',
       messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More', enrollment: 'Enrollment'
     };
 
@@ -462,8 +451,8 @@
     // clipping "Analytics" off the right edge). It was nine hand-written
     // buttons, which is why the crowding had nine places to be fixed in and
     // got fixed in none. `tab` is the short label the strip shows; the long
-    // one stays in VIEW_TITLES for the heading beside it, so the bar reads
-    // "Coding queue" while the heading says "Coding Queue" in full.
+    // one stays in VIEW_TITLES for the heading beside it, so the bar can read
+    // "Tasks" while the heading says something longer.
     //
     // `keepsPatient` is the one behavioural difference between them: opening
     // Charts leaves the patient list showing on a phone, and every other view
@@ -479,10 +468,9 @@
       // unsigned encounters, pending co-signs, visit-log reviews. 4.10's
       // Results is what has COME IN from outside and needs acknowledging, and
       // Overdue is what went out and never came back. Three different
-      // questions, and each answers one; see the note where clinicalResults is
-      // required in server.js.
+      // questions, so three lists, but one place: tabs inside the Inbox
+      // (owner, 2026-11-04), not three sidebar items.
       { key: 'inbox', tab: 'Inbox', icon: 'ti-mail', group: 'main', phone: true },
-      { key: 'results', tab: 'Results', icon: 'ti-flask', group: 'main' },
       { key: 'messages', tab: 'Messages', icon: 'ti-message-circle', group: 'main', phone: true },
       { key: 'analytics', tab: 'Reports', icon: 'ti-file-analytics', group: 'main' },
       // Owner, 2026-10-14: Enrollment in the sidebar, under Reports. It is its
@@ -490,14 +478,22 @@
       // than switching a view. That page gates who may read and write it.
       { key: 'enrollment', tab: 'Enrollment', icon: 'ti-clipboard-list', group: 'main', href: '/admin/enrollment' },
       { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week', group: 'work' },
-      { key: 'queue', tab: 'Coding', icon: 'ti-receipt', group: 'work' },
-      { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation', group: 'work' },
+      // Owner, 2026-11-04: claims are worked on their own page, so billing's
+      // queue is a link out, and only billing sees it.
+      { key: 'billing', tab: 'Billing', icon: 'ti-receipt', group: 'work', href: '/billing', billingOnly: true },
       // Owner, 2026-10-30: the provider's IME veterans for the day, and who has
       // signed in on the clinic iPad. Arrival emails link here (#veterans).
       { key: 'veterans', tab: 'Veterans', icon: 'ti-medal', group: 'work' },
       { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox', group: 'work' },
       { key: 'settings', tab: 'Settings', icon: 'ti-settings', group: 'foot' }
     ]);
+
+    // Old fragments and digest links still land somewhere real: Results and
+    // Overdue are Inbox tabs now, and the Coding queue is the billing page.
+    // Chart tabs folded together on 2026-11-04, by their old names.
+    const CHART_TAB_ALIASES = Object.freeze({ encounters: { tab: 'visits' }, appts: { tab: 'visits' }, imaging: { tab: 'orders', ordersFilter: 'imaging' }, referrals: { tab: 'orders', ordersFilter: 'referral' } });
+    const LEGACY_VIEWS = Object.freeze({ results: { view: 'inbox', inboxTab: 'results' }, overdue: { view: 'inbox', inboxTab: 'overdue' }, queue: { href: '/billing#claims' } });
+    const INBOX_TABS = [['work', 'To Do'], ['results', 'Results'], ['overdue', 'Overdue Orders']];
 
     // A bare calendar date ("2026-10-01") parses as UTC midnight: the evening
     // BEFORE in Georgia, so every date-only value read a day early. Read it at
@@ -512,7 +508,12 @@
       const h = Number(String(hm).slice(0, 2)), m = String(hm).slice(3, 5);
       return `${((h + 11) % 12) + 1}:${m} ${h < 12 ? 'AM' : 'PM'}`;
     };
-    const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+    // The signed note, the signature, the code search and the service-line
+    // editor are shared with the billing page (/components/claim-shared.jsx).
+    const { fmtTs, humanize, npiLabel, SOURCE_META, FormattedView, SignatureBlock, NoteHistory, SignedNoteView, SourceChip, CodePicker, SvcEditor } = window.GFC_CLAIM_SHARED;
+    window.GFC_CLAIM_SHARED.configure({ codeSearch: (q) => api.codeSearch(q) });
+    // Where a signed visit's claim is worked: its own page (owner, 2026-11-04).
+    const billingClaimHref = (clientId, euuid) => `/billing?client=${encodeURIComponent(clientId)}&encounter=${encodeURIComponent(euuid)}#claims`;
     const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
 
     // ── Scheduling date/time helpers (wall-clock strings, matching OpenEMR) ──
@@ -1727,7 +1728,7 @@
               )}
               {onStartVisit && access.canDocument && (
                 <button className={`btn ${draftOpen ? 'gold' : 'ghost'} !py-2 !px-3.5 text-[13px]`} onClick={onStartVisit}>
-                  <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-player-play'}`} />{draftOpen ? 'Resume Draft' : 'Start Visit'}
+                  <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-plus'}`} />{draftOpen ? 'Resume Draft' : 'New Visit'}
                 </button>
               )}
               <button className="btn ghost !py-2 !px-3 text-[13px]" onClick={() => setMenu(m => !m)} aria-expanded={menu}>
@@ -2224,6 +2225,25 @@
     const OrdersTab = ({ patient }) => (
       <OrderBrowser patient={patient} keep={() => true}
         empty="No orders on this chart yet. Orders are placed from inside an encounter." />
+    );
+
+    // ONE Orders place on the chart (owner, 2026-11-04). Imaging and Referrals
+    // were their own tabs, each the same order list with one filter.
+    const ORDER_FILTERS = [['all', 'All'], ['lab', 'Labs'], ['imaging', 'Imaging'], ['referral', 'Referrals'], ['dme', 'Equipment']];
+    const OrdersPlace = ({ patient, filter, setFilter }) => (
+      <div>
+        <div className="flex gap-2 mb-4 overflow-x-auto">
+          {ORDER_FILTERS.map(([k, l]) => (
+            <button key={k} type="button" onClick={() => setFilter(k)}
+              className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${filter === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+          ))}
+        </div>
+        {filter === 'imaging' ? <ImagingTab patient={patient} />
+          : filter === 'referral' ? <ReferralsTab patient={patient} />
+          : filter === 'all' ? <OrdersTab patient={patient} />
+          : <OrderBrowser key={filter} patient={patient} keep={o => o.orderType === filter}
+              empty={`No ${filter === 'dme' ? 'equipment' : 'lab'} orders on this chart yet. Orders are placed from inside an encounter.`} />}
+      </div>
     );
 
     const ReferralsTab = ({ patient }) => (
@@ -3246,7 +3266,7 @@
             )}
             {p.emrNotice && <p className="text-[11.5px] text-amber-700">{p.emrNotice}</p>}
             <button className="btn gold w-full justify-center" onClick={() => onOpenChart(k.clientId)}>
-              <i className="ti ti-player-play" />Start Visit
+              <i className="ti ti-user" />Open Chart
             </button>
             {/* B5 — a house call is mostly driving, so filling a trip is the
                 biggest lever there is on a day. Surfaced here because this is
@@ -3290,10 +3310,18 @@
         setSelEid(wide ? day.visits[0].eid : null);
       }, [day]);
 
+      // ONE Start Visit (owner, 2026-11-04): it records the start time AND
+      // opens the note for this appointment — the visit's own note if it has
+      // one, otherwise a new one tied to it.
       const stamp = (v, event) => {
         setBusy(v.eid); setErr('');
         api.stampVisit(v.eid, { event, clientId: v.clientId })
-          .then(() => load())
+          .then(() => {
+            load();
+            if (event === 'start' && onOpenChart) {
+              onOpenChart(v.clientId, v.encounterUuid ? { tab: 'visits', encounterUuid: v.encounterUuid } : { tab: 'visit', appointmentEid: v.eid });
+            }
+          })
           .catch(e => setErr(e.message))
           .finally(() => setBusy(null));
       };
@@ -4293,13 +4321,6 @@
     // scope — see the note above VitalInput about remounting inputs.
     const NF = window.GFC_NOTE_FORMAT;
 
-    // Read-only formatted text. renderHtml ESCAPES every character before it
-    // applies a shape, so nothing a person typed can become live markup — the
-    // only raw-HTML render on this page, and build-enforced to be the only one.
-    const FormattedView = ({ markup, className }) => (
-      <div className={`fmt ${className || ''}`} dangerouslySetInnerHTML={{ __html: NF.renderHtml(markup || '') }} />
-    );
-
     const FMT_TOOLS = [
       { cmd: 'bold', label: <b>B</b>, title: 'Bold (Ctrl/⌘+B)' },
       { cmd: 'italic', label: <i>I</i>, title: 'Italic (Ctrl/⌘+I)' },
@@ -4373,42 +4394,6 @@
             </button>
           )}
         </div>
-      );
-    };
-
-    // The signature, bold and set apart at the bottom of the note — the one
-    // thing on the screen that has to be unmistakable.
-    const SignatureBlock = ({ signature }) => {
-      if (!signature) return null;
-      const who = (p) => `${p.name || 'Unknown'}${p.licenseLevel ? `, ${p.licenseLevel}` : ''}${p.npi ? ` (NPI ${p.npi})` : ''}`;
-      return (
-        <div className="sigblock mt-3">
-          <div className="text-[13px] font-extrabold text-primary tracking-wide mb-1">ELECTRONICALLY SIGNED</div>
-          <div className="text-[13px] font-bold">
-            Signed by {who(signature.signer)}{signature.signer.capacity === 'author' ? ' — author (not a billing signature)' : ''} — {fmtTs(signature.signer.at)}
-          </div>
-          {signature.billing && <div className="text-[13px] font-bold">Clinician addendum and billing signature: {who(signature.billing)} — {fmtTs(signature.billing.at)}</div>}
-          {signature.awaitingAddendum && <div className="text-[13px] font-bold text-amber-800">Awaiting clinician addendum — not billable until a provider (or an LCSW, for behavioral health) adds it.</div>}
-          {(signature.coSignatures || []).map((c, i) => <div key={i} className="text-[13px] font-bold">Co-signed by {who(c)} — {fmtTs(c.at)}</div>)}
-        </div>
-      );
-    };
-
-    // Every saved draft: who saved it and when.
-    const NoteHistory = ({ revisions }) => {
-      const saves = (revisions || []).filter(r => r.action !== 'sign');
-      if (!saves.length) return null;
-      const label = { create: 'started', save: 'saved', carry_forward: 'carried forward & saved', void: 'discarded' };
-      return (
-        <details className="text-[11.5px] text-stone-500 mt-2">
-          <summary className="cursor-pointer">Note history — {saves.length} save{saves.length === 1 ? '' : 's'}</summary>
-          <ul className="mt-1 grid gap-0.5">
-            {saves.map(r => (
-              <li key={r.id}>v{r.version} · {label[r.action] || 'saved'} by <b>{r.savedBy && r.savedBy.name}</b>{r.savedBy && r.savedBy.licenseLevel ? `, ${r.savedBy.licenseLevel}` : ''} · {fmtTs(r.savedAt)}
-                {r.sectionsChanged && r.sectionsChanged.length ? ` · ${r.sectionsChanged.length} section${r.sectionsChanged.length === 1 ? '' : 's'} changed` : ''}</li>
-            ))}
-          </ul>
-        </details>
       );
     };
 
@@ -4608,43 +4593,10 @@
       </label>
     );
 
-    const SignNotePanel = ({ patientId, euuid, saveFirst, signsAsAuthor, onSigned, onGoToCoding, onCancel }) => {
-      const [attest, setAttest] = useState(false);
-      const [hold, setHold] = useState({ on: false, reason: '' });
-      const [minutes, setMinutes] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState(null);
-      const CODING_BLOCKERS = ['SIGN_NO_DIAGNOSIS', 'SIGN_NO_SERVICE', 'SIGN_UNLINKED_SERVICE'];
-      const go = () => {
-        setBusy(true); setErr(null);
-        Promise.resolve(saveFirst ? saveFirst() : null)
-          .then(() => api.sign(patientId, euuid, portalHoldPayload(hold), minutes))
-          .then(r => onSigned && onSigned(r))
-          .catch(e => setErr({ text: e.message, coding: !!(e.data && (e.data.codes || [e.data.code]).some(c => CODING_BLOCKERS.includes(c))) }))
-          .finally(() => setBusy(false));
-      };
-      return (
-        <div className="card p-3 mb-3 border-accent">
-          <b className="text-sm text-primary"><i className="ti ti-writing-sign mr-1" />Sign &amp; Submit</b>
-          {signsAsAuthor && (
-            <p className="text-[11.5px] text-stone-600 mt-1">You sign as the note's <b>author</b>. The note locks, and it is not billable until a provider — or an LCSW, for a behavioral-health note — adds the clinician addendum.</p>
-          )}
-          <label className="flex items-start gap-2 text-xs mt-2">
-            <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
-            <span>I attest that this documentation is accurate and complete, and that I personally performed or directly supervised the services recorded. Signing locks the note — later changes are addenda.</span>
-          </label>
-          <div className="mt-2"><TotalTimeField value={minutes} onChange={setMinutes} /></div>
-          <div className="mt-2"><PortalHoldControl hold={hold} setHold={setHold} /></div>
-          {err && <p className="text-xs text-red-600 mt-2">{err.text}</p>}
-          <div className="flex flex-wrap gap-2 mt-2">
-            <button className="btn gold" disabled={!attest || busy || (hold.on && !hold.reason)} onClick={go}><i className="ti ti-writing-sign" />{busy ? 'Signing…' : 'Sign & Submit'}</button>
-            {err && err.coding && onGoToCoding && <button className="btn ghost" onClick={onGoToCoding}>Go to Coding</button>}
-            <button className="btn ghost" onClick={onCancel}>Not Yet</button>
-          </div>
-        </div>
-      );
-    };
-
+    // ONE place signs a note: the encounter's Sign card (2026-11-04). The
+    // note editors used to carry a second sign box of their own, with a
+    // different attestation and without the visit facts, so the same note had
+    // two ways in. Their Sign & Submit now saves and goes to that card.
     // ── ONE NOTE, IN THE VISIT TYPE'S OWN ORDER (owner report, 2026-09-28) ──
     // The template sections used to be dumped into a separate "Visit sections"
     // card in the middle of the note, with the note's fixed fields (chief
@@ -4793,7 +4745,36 @@
       .some(([k, v]) => String(v || '').trim() && !(part === 'skinWound' && k === 'woundPresent' && v === 'no'));
     const noteHasHpContent = (note) => !!(note && note.hp && Object.keys(note.hp).some(k => hpPartHasContent(k, note.hp[k])));
 
-    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged, codingDirty, onNoteState }) => {
+    // Which appointment a new note belongs to. Today's and earlier visits with
+    // no note yet, newest first, or "unscheduled". Module scope, per the
+    // input-focus rule.
+    const VisitAppointmentPicker = ({ patientId, value, onChange }) => {
+      const [appts, setAppts] = useState(null);
+      useEffect(() => {
+        let live = true;
+        api.patientAppointments(patientId)
+          .then(r => { if (!live) return; const today = todayYmd(); setAppts(((r && r.appointments) || []).filter(a => !a.encounterUuid && a.date <= today && ['scheduled', 'needs_documentation'].includes(a.state)).reverse()); })
+          .catch(() => { if (live) setAppts([]); });
+        return () => { live = false; };
+      }, [patientId]);
+      if (!appts || appts.length === 0) return null;
+      return (
+        <div className="card p-3 mb-4 grid gap-1.5 text-sm">
+          <label className="lblu" htmlFor="visit-appt">Which appointment is this visit for?</label>
+          <select id="visit-appt" className="inp" value={value || ''} onChange={e => onChange(e.target.value || null)}>
+            <option value="">Unscheduled visit (no appointment)</option>
+            {appts.map(a => <option key={a.eid} value={a.eid}>{fmtDayLabel(a.date)} · {fmt12h(a.startTime)} — {a.title || 'Appointment'}</option>)}
+          </select>
+        </div>
+      );
+    };
+
+    const HpTab = ({ patient, chart, appointmentEid: givenEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged, codingDirty, onNoteState, onSign }) => {
+      // ONE way to start a visit (owner, 2026-11-04): New Visit opens this
+      // screen, and when it was not opened from an appointment it asks which
+      // one it is for, or none. That choice used to be a separate popup.
+      const [pickedEid, setPickedEid] = useState(null);
+      const appointmentEid = givenEid || pickedEid;
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
@@ -4826,7 +4807,6 @@
       const [draftAt, setDraftAt] = useState(null);
       const [restored, setRestored] = useState(false);
       const [showCarry, setShowCarry] = useState(false);
-      const [showSign, setShowSign] = useState(false);
       // The shared note: once saved, it lives on its encounter and anyone
       // writing on this chart may edit it (2026-09-27).
       const sn = useSharedNote({ patientId: patient.id, encounterUuid, appointmentEid });
@@ -4879,6 +4859,7 @@
       // note has to follow the visit rather than the chart.
       const [visit, setVisit] = useState({ appointmentType: '', modality: 'in_person', location: '' });
       const [catalog, setCatalog] = useState(null);
+      const myRole = useClinicalRole();
       useEffect(() => {
         let live = true;
         api.placeOfService(patient.id)
@@ -4888,6 +4869,12 @@
             // The patient's usual location is a DEFAULT the clinician
             // confirms. Pre-filled, never locked.
             if (d.usualLocation) setVisit(v => v.location ? v : { ...v, location: d.usualLocation });
+            // Every note gets a type (owner, 2026-10-12): once the initial
+            // visit is done, Follow-up is the default, so a follow-up opens as
+            // its SOAP note and never saves as an H&P. A social worker picks
+            // one of their own types. (This was the old popup's default.)
+            const fu = (d.appointmentTypes || []).find(t => t.key === 'pc_follow_up' && t.canDocument !== false);
+            if (fu && patient.initialVisitAt && !['lcsw', 'lmsw'].includes(myRole)) setVisit(v => v.appointmentType ? v : { ...v, appointmentType: fu.key });
           })
           .catch(() => { /* the picker still works; it just has no default */ });
         return () => { live = false; };
@@ -4992,14 +4979,14 @@
           .finally(() => setBusy(false));
       };
 
-      // Sign & submit: the note has to exist before it can be signed, so a
-      // first save happens first.
+      // Sign & submit: the note has to exist before it can be signed, so it is
+      // saved first, then the encounter's Sign card opens — the one place a
+      // note is signed.
       const startSign = () => {
         // Signing reads the SAVED diagnoses and locks them: unsaved coding on the
         // encounter screen would be signed away.
         if (codingDirty) { setMsg({ ok: false, text: 'Save your diagnoses and coding on this encounter before signing.' }); return; }
-        if (sn.euuid) { setShowSign(true); return; }
-        saveDraft().then(() => setShowSign(true)).catch(() => {});
+        saveDraft().then(r => { const id = sn.euuid || (r && r.encounterUuid); if (id && onSign) onSign(id); }).catch(() => {});
       };
       const pickCarry = (r) => {
         const c = r.content || {};
@@ -5208,6 +5195,7 @@
       };
       return (
         <div className={embedded ? '' : 'max-w-3xl mx-auto'}>
+          {!embedded && !givenEid && !sn.euuid && !encounterUuid && <VisitAppointmentPicker patientId={patient.id} value={pickedEid} onChange={(eid) => { setPickedEid(eid); set('visitDate', eid ? '' : todayYmd()); }} />}
           {appointmentEid && !sn.euuid && (
             <div className="card p-3 mb-4 flex items-center gap-2 text-sm text-primary">
               <i className="ti ti-calendar-check text-accent" />
@@ -5339,12 +5327,6 @@
           </div>
 
           {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-          {showSign && sn.euuid && (
-            <SignNotePanel patientId={patient.id} euuid={sn.euuid} saveFirst={saveDraft} signsAsAuthor={sn.meta.signsAsAuthor}
-              onCancel={() => setShowSign(false)}
-              onGoToCoding={onGoToEncounter ? () => onGoToEncounter(sn.euuid) : null}
-              onSigned={(r) => { setShowSign(false); setMsg({ ok: true, text: r.message }); onDone && onDone(); onChanged && onChanged(); if (!embedded && onGoToEncounter) onGoToEncounter(sn.euuid); }} />
-          )}
           {/* The actions stay in reach on a phone: pinned above the bottom
               bar while the note scrolls (owner mockup 10). */}
           <div className="card p-3 mb-2 sticky bottom-[72px] lg:bottom-3 z-10">
@@ -5352,7 +5334,7 @@
               <button className="btn" disabled={!!busy} onClick={() => saveDraft().catch(() => {})}>
                 <i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save Draft'}
               </button>
-              <button className="btn gold" disabled={!!busy || showSign} onClick={startSign}>
+              <button className="btn gold" disabled={!!busy || !onSign} onClick={startSign}>
                 <i className="ti ti-writing-sign" />Sign &amp; Submit
               </button>
               {(draftAt || sn.euuid) && (
@@ -5362,7 +5344,7 @@
               )}
               <Hint className="w-full">
                 <b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign, and anyone working on this chart can keep editing it.
-                <b> Sign &amp; Submit</b> saves, then signs and locks it; after that, changes are addenda.
+                <b> Sign &amp; Submit</b> saves, then opens the Sign card where you attest and sign; after that, changes are addenda.
               </Hint>
             </div>
           </div>
@@ -6403,14 +6385,13 @@
 
     // Chart tab: this patient's upcoming + past appointments with
     // documented / no-show / not-yet-documented state (Scope B).
-    const ApptsTab = ({ patient, patients, chart, onDocumentHp, onEncounterCreated }) => {
+    const ApptsTab = ({ patient, patients, chart, onDocumentHp, onEncounterCreated, onNewVisit }) => {
       const canWrite = useCanDocument();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [providersData, setProvidersData] = useState(null);
       const [picked, setPicked] = useState(null);
       const [modal, setModal] = useState(null);
-      const [followUp, setFollowUp] = useState(null); // appt | 'plain'
       // Attaching a note written for an unscheduled visit to an appointment
       // booked afterwards — instead of "Document", which would make a second
       // encounter for the same visit.
@@ -6439,11 +6420,10 @@
       const today = todayYmd();
       const upcoming = data.appointments.filter(a => a.date >= today && a.state === 'scheduled');
       const past = data.appointments.filter(a => !(a.date >= today && a.state === 'scheduled')).reverse();
-      const changed = () => { setPicked(null); setModal(null); setFollowUp(null); load(); };
-      const documentFrom = (a) => {
-        if (!patient.initialVisitAt) onDocumentHp(a.eid);
-        else setFollowUp(a);
-      };
+      const changed = () => { setPicked(null); setModal(null); load(); };
+      // Every visit is documented on the one visit screen; the visit type
+      // chosen there decides H&P or follow-up (owner, 2026-11-04).
+      const documentFrom = (a) => onDocumentHp(a.eid);
       const Row = ({ a }) => (
         <div className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0">
           <div className="cursor-pointer" onClick={() => setPicked(a)}>
@@ -6481,9 +6461,7 @@
                 </div>
               </div>
               <div className="card">
-                <div className="card-h"><h2>Past &amp; Other</h2>
-                  {canWrite && <button className="btn ghost !py-1.5 text-xs" onClick={() => setFollowUp('plain')}>Document Unscheduled Visit</button>}
-                </div>
+                <div className="card-h"><h2>Past Appointments</h2></div>
                 <div className="p-4">
                   {past.length === 0 && <p className="text-sm text-stone-400">No appointment history yet.</p>}
                   {past.map(a => <Row key={a.eid} a={a} />)}
@@ -6503,10 +6481,6 @@
               providersData={providersData} defaultDate={todayYmd()}
               defaultProviderId={providersData && providersData.myProviderId}
               onClose={() => setModal(null)} onSaved={changed} />
-          )}
-          {followUp && (
-            <FollowUpModal patient={patient} chart={chart} appt={followUp === 'plain' ? null : followUp}
-              onClose={() => setFollowUp(null)} onSaved={(r) => { changed(); onEncounterCreated && onEncounterCreated(r.encounterUuid); }} />
           )}
           {attaching && (
             <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setAttaching(null)}>
@@ -6543,11 +6517,9 @@
       coded: { label: 'Coded', chip: 'bg-primary-50 text-primary' },
       signed: { label: 'Signed & closed', chip: 'bg-emerald-50 text-emerald-700' }
     };
-    // ── Session 4.12 Scope F3 — the encounter, one step per screen on a phone ──
-    // The encounter panel is six cards on one scroll. At a desk that is the
-    // right shape: a reviewer wants the whole visit in front of them. In
-    // somebody's front room on a phone it is a long scroll with no sense of
-    // where you are or what is left.
+    // ── The encounter, one step per screen (4.12 F3 on a phone; every width
+    // since 2026-11-04) ──
+    // On one scroll the encounter was fifteen cards deep on a laptop.
     //
     // THE STEPS ARE THE CARDS THAT ALREADY EXIST. Nothing new is modelled: a
     // second idea of "what an encounter consists of" would be a second thing
@@ -6556,29 +6528,8 @@
     // STEPPING IS DISPLAY ONLY, AND NO STEP GATES ANOTHER. A clinician in a
     // home who has to record an order before finishing coding must be able
     // to. The only gate is the signature's own readiness, which the SERVER
-    // answers and which was already there. A wizard that forces an order
-    // would make this slower than paper in the one place it has to be faster.
-    //
-    // 767px is Tailwind's `md` boundary, deliberately the same number the
-    // layout classes use: if the JS and the CSS disagreed about what a phone
-    // is, the stepper would hide a card the grid was still laying out.
-    const PHONE_QUERY = '(max-width: 767px)';
-    const useNarrowViewport = () => {
-      const [narrow, setNarrow] = useState(() =>
-        typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(PHONE_QUERY).matches : false);
-      useEffect(() => {
-        if (typeof window === 'undefined' || !window.matchMedia) return;
-        const mq = window.matchMedia(PHONE_QUERY);
-        const on = e => setNarrow(e.matches);
-        setNarrow(mq.matches);
-        // SUBSCRIBED, not read once: rotating a phone changes the answer, and
-        // a stale one leaves a step hidden with no way back to it.
-        mq.addEventListener ? mq.addEventListener('change', on) : mq.addListener(on);
-        return () => { mq.removeEventListener ? mq.removeEventListener('change', on) : mq.removeListener(on); };
-      }, []);
-      return narrow;
-    };
-
+    // answers and which was already there. The panel is the SAME mounted
+    // component on every step, so nothing typed on one is lost by moving.
     const ENCOUNTER_STEPS = [
       { key: 'visit', label: 'Visit', icon: 'ti-clipboard-text' },
       { key: 'coding', label: 'Coding', icon: 'ti-code' },
@@ -6604,7 +6555,7 @@
               const on = s.key === step;
               const n = byStep[s.key] || 0;
               return (
-                <button key={s.key} onClick={() => onStep(s.key)}
+                <button key={s.key} data-step={s.key} onClick={() => onStep(s.key)}
                   className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] leading-tight ${on ? 'bg-primary text-white border-primary' : 'bg-white border-stone-200 text-stone-600'}`}>
                   <i className={`ti ${s.icon} block text-sm`} />
                   {s.label}
@@ -6632,60 +6583,6 @@
       const m = ENC_STATE_META[state] || ENC_STATE_META.not_coded;
       return <span className={`chip ${m.chip}`}>{m.label}</span>;
     };
-    const SOURCE_META = {
-      problem_list: { label: 'Problem list (OpenEMR)', chip: 'bg-emerald-50 text-emerald-700' },
-      prior_encounter: { label: 'Prior encounter', chip: 'bg-emerald-50 text-emerald-700' },
-      favorite: { label: 'My favorites', chip: 'bg-primary-50 text-primary' },
-      practice: { label: 'Practice fee schedule', chip: 'bg-primary-50 text-primary' },
-      typed: { label: 'Typed — OpenEMR resolves on read-back', chip: 'bg-amber-50 text-amber-800' },
-      manual: { label: 'Entered', chip: 'bg-stone-100 text-stone-600' }
-    };
-    const SourceChip = ({ source }) => {
-      const m = SOURCE_META[source] || SOURCE_META.manual;
-      return <span className={`chip ${m.chip}`}>{m.label}</span>;
-    };
-    const npiLabel = (p) => p ? `${p.name || '—'}${p.licenseLevel ? `, ${p.licenseLevel}` : ''} · ${p.npi ? `NPI ${p.npi}` : 'NPI not on file'}` : '—';
-
-    // Code picker: results come ONLY from OpenEMR-sourced data (this patient's
-    // problem list, the clinician's own prior picks, the practice favorites).
-    // A full code typed in is accepted on format and flagged until OpenEMR
-    // resolves it. The app holds no code list (spec §7).
-    const CodePicker = ({ set, clientId, exclude, onPick, placeholder }) => {
-      const [q, setQ] = useState('');
-      const [res, setRes] = useState(null);
-      const [busy, setBusy] = useState(false);
-      useEffect(() => {
-        let alive = true;
-        setBusy(true);
-        const t = setTimeout(() => {
-          api.codeSearch({ set, q, clientId: clientId || '' })
-            .then(r => { if (alive) setRes(r); })
-            .catch(e => { if (alive) setRes({ results: [], error: e.message }); })
-            .finally(() => alive && setBusy(false));
-        }, 220);
-        return () => { alive = false; clearTimeout(t); };
-      }, [set, q, clientId]);
-      const rows = ((res && res.results) || []).filter(r => !(exclude || []).includes(r.code));
-      return (
-        <div className="border border-stone-200 rounded-lg p-2 bg-cream">
-          <input className="inp" placeholder={placeholder || (set === 'ICD10' ? 'Search code or description, or type a full ICD-10 code (e.g. E11.9)' : 'Type a CPT/HCPCS code (e.g. 99348)')}
-            value={q} onChange={e => setQ(e.target.value)} />
-          <div className="max-h-44 overflow-y-auto mt-1.5">
-            {busy && !res && <p className="text-xs text-stone-400 px-1">Searching…</p>}
-            {res && res.error && <p className="text-xs text-red-600 px-1">{res.error}</p>}
-            {res && !rows.length && !busy && <p className="text-xs text-stone-400 px-1">{q ? 'No match. Type the full code to add it.' : 'Start typing, or pick from your favorites below.'}</p>}
-            {rows.map(r => (
-              <button key={r.code} type="button" className="w-full text-left flex items-center justify-between gap-2 px-2 py-1.5 rounded hover:bg-white" onClick={() => { onPick(r); setQ(''); }}>
-                <span className="text-[13px]"><b className="font-mono">{r.code}</b> {r.description || r.label || ''}</span>
-                <SourceChip source={r.source} />
-              </button>
-            ))}
-          </div>
-          {res && res.notice && <p className="text-[10px] text-stone-400 px-1 mt-1">{res.notice}</p>}
-        </div>
-      );
-    };
-
     // Encounter diagnoses editor (+ T1 carry-forward candidates as proposals).
     const DxEditor = ({ diagnoses, setDiagnoses, candidates, clientId, readOnly, addToProblemList, setAddToProblemList }) => {
       // The problem list is an RN's or a provider's to write, and an LCSW's for
@@ -6752,61 +6649,6 @@
       );
     };
 
-    // Service (CPT/HCPCS) editor: each line must link to ≥1 encounter diagnosis.
-    const SvcEditor = ({ services, setServices, diagnoses, practiceFavorites, favorites, readOnly }) => {
-      const has = (code) => services.some(s => s.code === code);
-      const add = (r) => { if (!has(r.code)) setServices([...services, { code: r.code, codeType: r.codeType, label: r.label || r.description || '', units: 1, dxLinks: diagnoses.map(d => d.code), modifiers: [] }]); };
-      const update = (code, patch) => setServices(services.map(s => s.code === code ? { ...s, ...patch } : s));
-      const remove = (code) => setServices(services.filter(s => s.code !== code));
-      const favCodes = new Set((favorites || []).map(f => f.code));
-      const quick = [...(favorites || []).map(f => ({ ...f, source: 'favorite' })), ...(practiceFavorites || []).filter(f => !favCodes.has(f.code)).map(f => ({ ...f, source: 'practice' }))];
-      return (
-        <div className="grid gap-2">
-          {services.length === 0 && <p className="text-xs text-stone-400">No service codes on this encounter yet.</p>}
-          {services.map(s => (
-            <div key={s.code} className="py-1.5 border-b border-stone-100">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[13px]"><b className="font-mono">{s.code}</b> <span className="text-stone-500">{s.codeType}</span> {s.label}</div>
-                {!readOnly && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <label className="flex items-center gap-1">units <input className="inp !w-14 !py-0.5" value={s.units} onChange={e => update(s.code, { units: e.target.value.replace(/\D/g, '') || 1 })} /></label>
-                    <label className="flex items-center gap-1">mod <input className="inp !w-20 !py-0.5" placeholder="25" value={(s.modifiers || []).join(',')} onChange={e => update(s.code, { modifiers: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} /></label>
-                    <button type="button" className="text-red-600" onClick={() => remove(s.code)}><i className="ti ti-x" /></button>
-                  </div>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px] text-stone-500">
-                Linked dx:
-                {diagnoses.length === 0 && <span className="text-amber-700">add a diagnosis first</span>}
-                {diagnoses.map(d => (
-                  <label key={d.code} className={`chip border cursor-pointer ${(s.dxLinks || []).includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}>
-                    <input type="checkbox" className="hidden" disabled={readOnly} checked={(s.dxLinks || []).includes(d.code)}
-                      onChange={e => update(s.code, { dxLinks: e.target.checked ? [...(s.dxLinks || []), d.code] : (s.dxLinks || []).filter(c => c !== d.code) })} />
-                    {d.code}
-                  </label>
-                ))}
-                {!(s.dxLinks || []).length && diagnoses.length > 0 && <span className="text-red-600">must link to at least one</span>}
-              </div>
-            </div>
-          ))}
-          {!readOnly && (
-            <div>
-              <div className="lblu mb-1">Quick pick — your most-used first, then the practice fee schedule</div>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {quick.filter(f => !has(f.code)).map(f => (
-                  <button key={f.code} type="button" className={`chip border ${f.source === 'favorite' ? 'bg-primary-50 text-primary border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => add(f)} title={f.source === 'favorite' ? `used ${f.count}×` : 'practice favorite'}>
-                    + {f.code}{f.label ? ` · ${f.label}` : ''}
-                  </button>
-                ))}
-                {quick.length === 0 && <span className="text-xs text-stone-400">No favorites yet — an admin can seed the practice list in Settings.</span>}
-              </div>
-              <CodePicker set="SERVICE" exclude={services.map(s => s.code)} onPick={add} />
-            </div>
-          )}
-        </div>
-      );
-    };
-
     // Follow-up visit (Scope A): short SOAP + vitals + T1 diagnoses + quick
     // service pick → Encounter + narrative note + GFC structured note.
     // Module scope, same reason as VitalInput above: nested inside the modal
@@ -6815,139 +6657,6 @@
     const FollowUpVital = ({ k, label, f, setV }) => (
       <Field label={label}><input className="inp" value={(f.vitals || {})[k] || ''} onChange={e => setV(k, e.target.value)} /></Field>
     );
-    // Starts a follow-up note. Its first Save draft creates the encounter and
-    // writes the note to OpenEMR; editing and signing then continue on the
-    // encounter, where anyone working on this chart can pick it up.
-    const FollowUpModal = ({ patient, chart, appt, onClose, onSaved }) => {
-      // A SHORT STARTER (owner, 2026-10-12): pick what kind of visit it was,
-      // give the chief complaint, and the note opens on its encounter in the
-      // same SOAP layout the Visit tab shows. The note, codes, orders and
-      // signing all live there — this popup used to carry its own S/O/A/P form,
-      // a third layout of the same note.
-      const [f, setF] = useState({ reason: appt ? NF.fromPlainText(appt.title || '') : '', date: appt ? appt.date : todayYmd() });
-      const [showCarry, setShowCarry] = useState(false);
-      const [carry, setCarry] = useState(null);
-      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
-      const [visit, setVisit] = useState({ appointmentType: '', modality: 'in_person', location: '' });
-      const [catalog, setCatalog] = useState(null);
-      // A social worker writes only the social work types (served as
-      // canDocument), and never a note without a type.
-      const isSocialWorker = ['lcsw', 'lmsw'].includes(useClinicalRole());
-      useEffect(() => {
-        let live = true;
-        api.placeOfService(patient.id).then(d => {
-          if (!live) return;
-          setCatalog(d);
-          // Follow-up is the default: every note gets a type, so every
-          // follow-up opens with its SOAP template rather than none.
-          const fu = (d.appointmentTypes || []).find(t => t.key === 'pc_follow_up' && t.canDocument !== false);
-          setVisit(v => ({ ...v,
-            appointmentType: v.appointmentType || (!isSocialWorker && fu ? fu.key : ''),
-            location: v.location || d.usualLocation || '' }));
-        }).catch(() => {});
-        return () => { live = false; };
-      }, [patient.id]);
-      const visitType = catalog && (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
-      const allowedModalities = (visitType && visitType.modalities) || null;
-      const isPhone = visit.modality === 'phone';
-      // A note made only of its template sections: a phone call, or a social
-      // work note. Those sections are filled in here, as before.
-      const sectionsOnly = isPhone || !!(visitType && visitType.noteShape === 'sections');
-      const templateSections = useMemo(() => (catalog && catalog.noteTemplates && visit.appointmentType
-        ? (catalog.noteTemplates[visit.appointmentType] || []).filter(sec => sec.modality == null || sec.modality === visit.modality)
-        : []), [catalog, visit.appointmentType, visit.modality]);
-      const [sections, setSections] = useState({});
-      const setSection = (k, v) => setSections(p => ({ ...p, [k]: v }));
-      const chooseVisitType = (key) => setVisit(v => {
-        const t = catalog && (catalog.appointmentTypes || []).find(x => x.key === key);
-        const allowed = (t && t.modalities) || null;
-        const modality = allowed && !allowed.includes(v.modality) ? allowed[0] : (v.modality === 'phone' ? 'in_person' : v.modality);
-        return { ...v, appointmentType: key, modality,
-          location: modality === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') };
-      });
-      const submit = () => {
-        setBusy(true); setErr('');
-        const c = (carry && carry.content) || {};
-        const visitOut = { ...visit, location: isPhone ? '' : visit.location };
-        const note = sectionsOnly ? {
-          kind: 'followup', visitDate: f.date || undefined,
-          chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '',
-          vitals: {}, sections, visit: visitOut
-        } : {
-          // Copied text rides along so the encounter opens with it, each copied
-          // section held for review until it is edited or confirmed.
-          kind: 'followup', visitDate: f.date || undefined,
-          chiefConcern: f.reason, subjective: c.subjective || '', objective: c.objective || '',
-          assessment: c.assessment || '', plan: c.plan || '', vitals: {}, sections: { ...(c.sections || {}) },
-          visit: visitOut
-        };
-        api.createNote(patient.id, { note, appointmentEid: appt ? appt.eid : undefined, carryForwardFrom: carry ? carry.fromEncounterUuid : undefined })
-          .then(r => onSaved(r))
-          .catch(e => { setErr(e.message); setBusy(false); });
-      };
-      const pickCarry = (r) => {
-        const c = r.content || {};
-        setF(p => ({ ...p, reason: c.chiefConcern || p.reason }));
-        setCarry(r); setShowCarry(false);
-      };
-      const ready = !!visit.appointmentType && (isPhone || !!visit.location) &&
-        (sectionsOnly ? Object.values(sections).some(v => !NF.isBlank(v)) : !NF.isBlank(f.reason));
-      return (
-        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
-          <div className="card w-full max-w-2xl mt-6 mb-10" onClick={e => e.stopPropagation()}>
-            <div className="card-h"><h2>Document a Visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
-            <div className="p-4 grid gap-3">
-              {appt && <p className="text-xs text-stone-500">From appointment: {fmtDayLabel(appt.date)} {fmt12h(appt.startTime)} — the Encounter links back to it.</p>}
-              <div className="grid md:grid-cols-3 gap-3">
-                <Field label="Visit type">
-                  <select className="inp" value={visit.appointmentType} onChange={e => chooseVisitType(e.target.value)}>
-                    <option value="">— choose —</option>
-                    {((catalog && catalog.appointmentTypes) || []).filter(t => t.canDocument !== false).map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
-                  </select>
-                </Field>
-                <Field label="How the visit happened">
-                  <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value, location: e.target.value === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') }))}>
-                    {((catalog && catalog.modalities) || [{ key: 'in_person', label: 'In person' }, { key: 'telehealth', label: 'Telehealth (video)' }])
-                      .filter(m => allowedModalities ? allowedModalities.includes(m.key) : m.key !== 'phone')
-                      .map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
-                  </select>
-                </Field>
-                <Field label="Location">
-                  {isPhone
-                    ? <div className="inp bg-stone-50 text-stone-500">Not needed for a phone call</div>
-                    : <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
-                        <option value="">— choose —</option>
-                        {((catalog && catalog.locations) || []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
-                      </select>}
-                </Field>
-              </div>
-              {!sectionsOnly && !showCarry && !carry && (
-                <button className="btn ghost !py-1.5 text-xs w-fit" onClick={() => setShowCarry(true)}><i className="ti ti-copy" />Copy Previous Note</button>
-              )}
-              {showCarry && <CarryForwardPicker patientId={patient.id} onPick={pickCarry} onClose={() => setShowCarry(false)} />}
-              {carry && <p className="text-xs prefill rounded-lg p-2">Copied from the note of {carry.fromDate || 'an earlier visit'}. Each copied section is marked for review on the encounter — the note cannot be signed until each is edited or confirmed.</p>}
-              <div className="grid md:grid-cols-[1fr_160px] gap-3">
-                {sectionsOnly
-                  ? <div className="text-xs text-stone-500 self-end">{isSocialWorker && !visit.appointmentType ? 'Choose the visit type above to lay out the note.' : 'Fill in the sections below. Required ones are marked.'}</div>
-                  : <FormattedField label="Chief Complaint" value={f.reason} onChange={v => setF(p => ({ ...p, reason: v }))} />}
-                <Field label="Visit date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
-              </div>
-              {sectionsOnly && templateSections.map(sec => renderOwnSection(sec, sections, setSection, [], () => {}))}
-              {err && <p className="text-red-600 text-sm">{err}</p>}
-              <div className="flex flex-wrap items-center gap-2 justify-end">
-                <Hint className="w-full order-last">
-                  {!sectionsOnly && visitType && <>Save opens the {visitType.label} note on its encounter, laid out as Subjective, Objective, Assessment and Plan where it applies. Diagnoses, orders and signing are done there. </>}
-                  Saves a draft to the app and OpenEMR, stamped with your name and the time — it is <b>not</b> signed. The encounter then opens, where you or anyone working on this chart can keep writing, add codes, orders and prescriptions, and <b>Sign &amp; submit</b> it.
-                </Hint>
-                <button className="btn ghost" onClick={onClose}>Close</button>
-                <button className="btn" disabled={busy || !ready} onClick={submit}><i className="ti ti-device-floppy" />{busy ? 'Saving to the app and OpenEMR…' : 'Save Draft'}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
     const RxForm = ({ routes, onSave, busy, schedules, scheduleLabels, prescriber, kinds, kindLabels }) => {
       // ── Session 4.10 ── THE SCHEDULE HAS NO DEFAULT. The clinician chooses,
       // because the whole control is that a person declared it — a pre-selected
@@ -8239,41 +7948,6 @@
     // Billing's view of the derived level: what the clinician confirmed, both
     // candidates, and the coder's flag with the evidence that was absent. The
     // flag is resolved here, with a note, and stays on the record resolved.
-    const BillingLevelPanel = ({ patientId, euuid, derivation, onChanged }) => {
-      const [note, setNote] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState('');
-      if (!derivation) return <p className="text-xs text-stone-500">The clinician has not confirmed the visit facts, so no E/M level has been derived.</p>;
-      const f = derivation.flag;
-      const resolve = () => { setBusy(true); setErr(''); api.resolveEmFlag(patientId, euuid, note).then(() => { setNote(''); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
-      return (
-        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
-          <b className="text-primary text-[13px]"><i className="ti ti-stairs mr-1" />Derived E/M level: {derivation.finalCode}</b>
-          <div className="text-stone-600">{derivation.explanation}</div>
-          <div className="text-stone-600">Candidates: {(derivation.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} min)` : `MDM (${c.mdm})`}`).join(' · ')}. Default {derivation.defaultCode}{derivation.override ? `; the clinician chose ${derivation.finalCode} by time and affirmed it` : ''}.</div>
-          {f && (
-            <div className={`rounded px-2 py-1.5 border-l-2 ${f.resolvedAt ? 'border-stone-300 bg-stone-50' : 'border-amber-400 bg-amber-50'}`}>
-              <b className={f.resolvedAt ? 'text-stone-700' : 'text-amber-900'}>Level review {f.resolvedAt ? `resolved ${fmtTs(f.resolvedAt)}${f.resolvedBy ? ` by ${f.resolvedBy.name}` : ''}` : 'open'}</b>
-              {(f.absent || []).map((a, i) => <div key={i} className="text-stone-700">{a}</div>)}
-              {(f.elements || []).map(e => (
-                <div key={e.element} className="mt-1"><b className="text-stone-700">{e.element === 'problems' ? 'Problems' : e.element === 'data' ? 'Data' : 'Risk'}: {e.level}</b>
-                  {(e.facts || []).map((x, i) => <div key={i} className="text-stone-600">{x.description || x.detail}{x.quote ? <i> — “{x.quote}”</i> : <i> — added by the clinician</i>}</div>)}
-                </div>
-              ))}
-              {f.resolvedAt && <div className="text-stone-600 mt-1">{f.resolution}</div>}
-              {!f.resolvedAt && (
-                <div className="grid gap-1.5 mt-1.5">
-                  <input className="inp" value={note} maxLength={1000} onChange={e => setNote(e.target.value)} placeholder="How it was resolved" />
-                  <button className="btn w-fit" disabled={busy || note.trim().length < 3} onClick={resolve}>Resolve Flag</button>
-                </div>
-              )}
-            </div>
-          )}
-          {err && <p className="text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
     // ── Phase 4.1: ICD-10 suggestions from the note (2026-11-04) ──
     // Each is quoted from the note and resolved against OpenEMR's ICD-10
     // table. The clinician adds one to this visit's diagnoses herself, and it
@@ -8382,157 +8056,6 @@
     // ── Phase 4.2: what billing MAY add, and the TCM dates (2026-11-04) ──
     // Offers are never applied by the app. A person adds the code or modifier
     // on the coding screen, or does not.
-    const OffersList = ({ offers }) => (!offers || !offers.length) ? null : (
-      <div className="grid gap-1">
-        <b className="text-[12px] text-stone-700">May apply, never added automatically</b>
-        {offers.map((o, i) => <div key={i} className="text-xs border-l-2 border-sky-400 bg-sky-50 rounded px-2 py-1 text-sky-900">{o.message}</div>)}
-      </div>
-    );
-    const TcmDatesForm = ({ patientId, euuid, tcm, onSaved }) => {
-      const [f, setF] = useState({ dischargeDate: (tcm && tcm.dischargeDate) || '', contactDate: (tcm && tcm.contactDate) || '', faceToFaceDate: (tcm && tcm.faceToFaceDate) || '', complexity: (tcm && tcm.complexity) || '' });
-      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
-      const save = () => { setBusy(true); setErr(''); api.saveTcmDates(patientId, euuid, f).then(() => onSaved && onSaved()).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
-      return (
-        <div className="grid gap-1 text-xs border border-stone-200 rounded-lg p-2">
-          <b className="text-stone-700">Transitional care dates</b>
-          {[['dischargeDate', 'Discharge'], ['contactDate', 'Interactive contact'], ['faceToFaceDate', 'Face-to-face (blank: this visit\'s date)']].map(([k, l]) => (
-            <label key={k} className="flex items-center gap-2"><span className="w-56">{l}</span><input type="date" className="inp !py-1 text-xs" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} /></label>
-          ))}
-          <label className="flex items-center gap-2"><span className="w-56">Medical decision making</span>
-            <select className="inp !py-1 text-xs" value={f.complexity} onChange={e => setF({ ...f, complexity: e.target.value })}>
-              <option value="">From the derived level</option><option value="moderate">Moderate</option><option value="high">High</option>
-            </select></label>
-          <button className="btn w-fit !py-1 text-xs" disabled={busy} onClick={save}>Save Dates</button>
-          {err && <p className="text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
-    // ── Phase 3b: the code helper, billing's tool (2026-11-04) ──
-    // For the codes that are not level-based. The families and their inputs
-    // come from the server (serviceRules/), so this page names no code and no
-    // threshold. The answer is a suggestion with its reason; nothing is saved.
-    const CodeHelperPanel = ({ patientId, dos }) => {
-      const [fams, setFams] = useState(null);
-      const [family, setFamily] = useState('');
-      const [input, setInput] = useState({});
-      const [out, setOut] = useState(null);
-      const [err, setErr] = useState('');
-      useEffect(() => { api.serviceFamilies().then(r => setFams(r.families)).catch(e => setErr(e.message)); }, []);
-      if (!fams) return err ? <p className="text-xs text-red-600">{err}</p> : null;
-      const fam = fams.find(f => f.family === family);
-      const shown = (fld) => !fld.when || Object.entries(fld.when).every(([k, vals]) => vals.includes(input[k] != null ? input[k] : ((fam.fields.find(x => x.key === k) || {}).options || [[]])[0][0]));
-      const valueOf = (fld) => (input[fld.key] != null ? input[fld.key] : (fld.type === 'select' ? fld.options[0][0] : fld.type === 'boolean' ? false : ''));
-      const run = () => {
-        setErr(''); setOut(null);
-        const body = {};
-        for (const fld of fam.fields.filter(shown)) {
-          const v = valueOf(fld);
-          body[fld.key] = fld.type === 'number' ? (String(v).trim() === '' ? null : Number(v)) : v;
-        }
-        api.selectService({ family, input: { ...body, dos }, clientId: patientId, dos }).then(setOut).catch(e => setErr(e.message));
-      };
-      return (
-        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
-          <b className="text-primary text-[13px]"><i className="ti ti-calculator mr-1" />Code helper</b>
-          <select className="inp !py-1 text-xs w-fit" value={family} onChange={e => { setFamily(e.target.value); setInput({}); setOut(null); }}>
-            <option value="">Choose a service family…</option>
-            {fams.map(f => <option key={f.family} value={f.family}>{f.label}</option>)}
-          </select>
-          {fam && fam.fields.filter(shown).map(fld => (
-            <label key={fld.key} className="flex items-center gap-2">
-              {fld.type === 'boolean'
-                ? <><input type="checkbox" checked={!!valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.checked }))} /><span>{fld.label}</span></>
-                : <><span className="w-56">{fld.label}</span>
-                    {fld.type === 'select'
-                      ? <select className="inp !py-1 text-xs" value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.value }))}>{fld.options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
-                      : <input className="inp !py-1 text-xs w-36" type={fld.type === 'date' ? 'date' : 'text'} inputMode={fld.type === 'number' ? 'numeric' : undefined} value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: fld.type === 'number' ? e.target.value.replace(/[^0-9]/g, '').slice(0, 4) : e.target.value }))} />}
-                  </>}
-            </label>
-          ))}
-          {fam && <button className="btn w-fit !py-1 text-xs" onClick={run}>Work It Out</button>}
-          {out && (
-            <div className="grid gap-1">
-              <div><b>{out.codes.length ? out.codes.map(c => (c.units > 1 ? `${c.code} × ${c.units}` : c.code)).join(', ') : 'No code'}</b>: {out.explanation}</div>
-              {out.reviewFlag && <div className="border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1 text-amber-900">Level review: {(out.reviewFlag.absent || []).join(' ')}</div>}
-              {(out.notes || []).map((n, i) => <div key={i} className="text-stone-600">{n}</div>)}
-            </div>
-          )}
-          {err && <p className="text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
-    // ── The claim scrub, billing's review surface (2026-11-04) ──
-    // EVERY finding, in full: blockers first, then warnings, each naming the
-    // field it concerns and what is wrong. Nothing is collapsed behind a count;
-    // the person on this screen is here to work the list. Before submission it
-    // checks the visit's own lines; after, the lines OpenEMR holds now, prices
-    // included, and that is the check Release runs again.
-    const ClaimScrubPanel = ({ patientId, euuid, refreshKey, onReleased }) => {
-      const [s, setS] = useState(null);
-      const [err, setErr] = useState('');
-      const [busy, setBusy] = useState('');
-      const [reviewed, setReviewed] = useState(false);
-      const [msg, setMsg] = useState('');
-      const load = () => { setBusy('scan'); setErr(''); return api.claimScrub(patientId, euuid).then(r => { setS(r); setReviewed(false); }).catch(e => setErr(e.message)).finally(() => setBusy('')); };
-      useEffect(() => { setS(null); setMsg(''); load(); }, [patientId, euuid, refreshKey]);
-      const release = () => {
-        setBusy('release'); setErr(''); setMsg('');
-        api.claimRelease(patientId, euuid, { warningsReviewed: reviewed })
-          .then(r => { setMsg(r.message); onReleased && onReleased(r); return load(); })
-          .catch(e => { setErr(e.message); return load(); })
-          .finally(() => setBusy(''));
-      };
-      if (!s) return <div className="text-xs text-stone-500">{err ? <span className="text-red-600">{err}</span> : 'Running the claim scrub…'}</div>;
-      const blocks = s.findings.filter(f => f.severity === 'block');
-      const warns = s.findings.filter(f => f.severity === 'warn');
-      return (
-        <div className="grid gap-2 border border-stone-200 rounded-lg p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <b className="text-primary text-[13px]"><i className="ti ti-checklist mr-1" />Claim scrub</b>
-            <span className={`chip ${blocks.length ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{blocks.length} blocking</span>
-            <span className={`chip ${warns.length ? 'bg-amber-50 text-amber-800' : 'bg-stone-50 text-stone-600'}`}>{warns.length} warning{warns.length === 1 ? '' : 's'}</span>
-            <button className="btn ghost !py-1 !px-2.5 text-xs ml-auto" disabled={!!busy} onClick={load}><i className="ti ti-refresh" />{busy === 'scan' ? 'Checking…' : 'Check Again'}</button>
-          </div>
-          <p className="text-[11px] text-stone-500">{s.phase === 'final'
-            ? 'Checked against the charge lines OpenEMR holds now, prices included.'
-            : 'Checked against the codes on this visit. Prices are checked once the lines post, at Release.'}</p>
-          {s.chargeReadError && <p className="text-xs text-red-600">OpenEMR's charge lines could not be read ({s.chargeReadError}). The final charge set is unchecked.</p>}
-          {s.findings.length === 0 && <p className="text-xs text-emerald-700">No findings.</p>}
-          {s.needsTcmDates && <TcmDatesForm patientId={patientId} euuid={euuid} tcm={s.tcm} onSaved={load} />}
-          {blocks.map((f, i) => (
-            <div key={`b${i}`} className="text-xs border-l-2 border-red-400 bg-red-50 rounded px-2 py-1.5">
-              <b className="text-red-800">{f.fieldLabel}</b><span className="text-red-800"> — {f.message}</span>
-            </div>
-          ))}
-          {warns.map((f, i) => (
-            <div key={`w${i}`} className="text-xs border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1.5">
-              <b className="text-amber-900">{f.fieldLabel}</b><span className="text-amber-900"> — {f.message}</span>
-            </div>
-          ))}
-          <OffersList offers={s.offers} />
-          {s.holdState === 'held' && (
-            <div className="grid gap-2 mt-1">
-              {warns.length > 0 && (
-                <label className="flex items-start gap-2 text-xs">
-                  <input type="checkbox" className="mt-0.5" checked={reviewed} onChange={e => setReviewed(e.target.checked)} />
-                  <span>I reviewed every warning above.</span>
-                </label>
-              )}
-              <button className="btn gold w-fit" disabled={!!busy || blocks.length > 0 || (warns.length > 0 && !reviewed)} onClick={release}>
-                <i className="ti ti-lock-open" />{busy === 'release' ? 'Releasing…' : 'Release Claim'}
-              </button>
-              <p className="text-[10.5px] text-stone-400">Release re-reads the lines in OpenEMR and refuses if anything blocking is open. Nothing transmits from this app; the release records that you reviewed the claim and let it go.</p>
-            </div>
-          )}
-          {s.holdState === 'released' && s.release && <p className="text-xs text-emerald-700">Released {fmtTs(s.release.at)}{s.release.by ? ` by ${s.release.by.name}` : ''}.</p>}
-          {msg && <p className="text-xs text-emerald-700">{msg}</p>}
-          {err && <p className="text-xs text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
     // The encounter panel: coding, Rx, orders, sign & close, addenda.
     // ── Session 4.12 Scope F5 — act from inside the encounter ──────────────
     // Mid-visit a clinician needs the rest of the chart: what this patient is
@@ -8765,7 +8288,7 @@
 
     // A follow-up (or older) note being edited on its encounter. The H&P has its
     // own, larger form (HpTab) and is embedded the same way.
-    const FollowUpNoteEditor = ({ patient, euuid, noteSections, sectionsOnly, typeLabel, onGoToCoding, onChanged, codingDirty, onNoteState }) => {
+    const FollowUpNoteEditor = ({ patient, euuid, noteSections, sectionsOnly, typeLabel, onSign, onChanged, codingDirty, onNoteState }) => {
       const sn = useSharedNote({ patientId: patient.id, encounterUuid: euuid });
       const blank = { chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '', sections: {},
         vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' } };
@@ -8773,7 +8296,7 @@
       const [kind, setKind] = useState('followup');
       const [visit, setVisit] = useState(null);
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
-      const [showCarry, setShowCarry] = useState(false); const [showSign, setShowSign] = useState(false);
+      const [showCarry, setShowCarry] = useState(false);
       const [seeded, setSeeded] = useState(false);
       const applyNote = (n) => {
         if (!n) return;
@@ -8852,20 +8375,15 @@
             </div>
           </div>
           {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-          {showSign && (
-            <SignNotePanel patientId={patient.id} euuid={euuid} saveFirst={() => save()} signsAsAuthor={sn.meta.signsAsAuthor}
-              onCancel={() => setShowSign(false)} onGoToCoding={onGoToCoding}
-              onSigned={(r) => { setShowSign(false); setMsg({ ok: true, text: r.message }); onChanged && onChanged(); }} />
-          )}
           <div className="card p-3 mb-3">
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn" disabled={!!busy} onClick={() => save().catch(() => {})}><i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save Draft'}</button>
               {/* Signing reads the SAVED diagnoses and then locks them, so unsaved
                   coding on this screen would be signed away without a word. */}
-              <button className="btn gold" disabled={!!busy || showSign || codingDirty} title={codingDirty ? 'Save your diagnoses and coding first' : undefined} onClick={() => setShowSign(true)}><i className="ti ti-writing-sign" />Sign &amp; Submit</button>
+              <button className="btn gold" disabled={!!busy || codingDirty || !onSign} title={codingDirty ? 'Save your diagnoses and coding first' : undefined} onClick={() => save().then(() => onSign && onSign(euuid)).catch(() => {})}><i className="ti ti-writing-sign" />Sign &amp; Submit</button>
               {codingDirty && <span className="text-[11px] text-amber-700">Save your diagnoses and coding below before signing.</span>}
               <button className="btn ghost text-red-600" disabled={!!busy} onClick={discard}>{busy === 'discard' ? 'Deleting…' : 'Delete Encounter'}</button>
-              <Hint className="w-full"><b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; Submit</b> saves, then signs and locks it.</Hint>
+              <Hint className="w-full"><b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; Submit</b> saves, then opens the Sign card where you attest and sign.</Hint>
             </div>
             <NoteHistory revisions={sn.meta.revisions} />
           </div>
@@ -8875,41 +8393,6 @@
 
     // A signed (or discarded) note, formatted, with its signature bold at the
     // bottom. Read-only: after signing, changes are addenda.
-    const humanize = (k) => String(k).replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
-    const SignedNoteView = ({ note, noteSections, signature, revisions }) => {
-      const n = note || {};
-      const v = n.vitals || {};
-      const vitalsText = Object.keys(v).length
-        ? ((v.bpRightSys || v.bpLeftSys || v.bpRightUnable || v.bpLeftUnable)
-          ? ['Right', 'Left'].map(side => {
-              const s = `bp${side}`;
-              return `${side === 'Right' ? 'BP right' : 'left'} ${v[`${s}Unable`] ? `unable to obtain${v[`${s}UnableReason`] ? ` (${v[`${s}UnableReason`]})` : ''}` : `${v[`${s}Sys`] || '—'}/${v[`${s}Dia`] || '—'}`}`;
-            }).join(' · ')
-          : `BP ${v.bpSys || '—'}/${v.bpDia || '—'}`) + ` · HR ${v.hr || '—'} · Temp ${v.temp || '—'} · RR ${v.rr || '—'} · SpO₂ ${v.spo2 || '—'}`
-        : null;
-      const labelOf = (k) => ((noteSections || []).find(s => s.key === k) || {}).label || humanize(k);
-      const block = (label, markup) => (markup && !NF.isBlank(markup)
-        ? <div key={label}><div className="text-[11px] font-bold text-primary uppercase tracking-wide mb-0.5">{label}</div><FormattedView markup={markup} /></div>
-        : null);
-      return (
-        <div className="grid gap-3">
-          {block('Chief concern', n.chiefConcern)}
-          {block('Subjective', n.subjective)}
-          {vitalsText && <div><div className="text-[11px] font-bold text-primary uppercase tracking-wide mb-0.5">Vitals</div><div className="text-[13px]">{vitalsText}</div></div>}
-          {block('Objective', n.objective)}
-          {Object.entries(n.hp || {}).filter(([k, o]) => k !== 'triage' && o && Object.keys(o).length).map(([k, o]) => (
-            <div key={k}><div className="text-[11px] font-bold text-primary uppercase tracking-wide mb-0.5">{humanize(k)}</div>
-              <div className="text-[13px]">{Object.entries(o).map(([kk, vv]) => <div key={kk}>{humanize(kk)}: {vv}</div>)}</div></div>
-          ))}
-          {block('Assessment', n.assessment)}
-          {block('Plan', n.plan)}
-          {Object.entries(n.sections || {}).map(([k, m]) => block(labelOf(k), m))}
-          <SignatureBlock signature={signature} />
-          <NoteHistory revisions={revisions} />
-        </div>
-      );
-    };
-
     const EncounterLookups = ({ patient, chart, onChartChanged }) => {
       const [open, setOpen] = useState(null);
       return (
@@ -9052,7 +8535,7 @@
       );
     };
 
-    const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged }) => {
+    const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged, initialStep }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState('');
@@ -9069,23 +8552,16 @@
       const [totalMins, setTotalMins] = useState('');
       const [clinAttest, setClinAttest] = useState(false);
       const [coSignAttest, setCoSignAttest] = useState(false);
-      // Billing's half (owner, 2026-09-29): submit the signed visit, or close
-      // it with no charge and a reason.
-      const [billAttest, setBillAttest] = useState(false);
-      const [noChargeOpen, setNoChargeOpen] = useState(false);
-      const [noChargeReason, setNoChargeReason] = useState('');
-      // B1 E3: an admin may release a claim the insurance check refused, with a reason.
-      const [insBlock, setInsBlock] = useState(null);
-      const [insOverrideReason, setInsOverrideReason] = useState('');
-      const isAdminUser = useContext(AccessContext).role === 'admin';
       const [attachOpen, setAttachOpen] = useState(false);
       const [attachAppts, setAttachAppts] = useState(null);
       const [showRx, setShowRx] = useState(false); const [showOrder, setShowOrder] = useState(false);
       // F3: one step per screen on a phone. Presentation only — the panel is
       // the SAME mounted component on every step, so nothing typed on one is
       // lost by moving to another.
-      const narrow = useNarrowViewport();
-      const [step, setStep] = useState('visit');
+      // One step per screen at every width (owner, 2026-11-04). The whole
+      // encounter as one scroll was fifteen cards deep on a laptop.
+      const [step, setStep] = useState(initialStep && ENCOUNTER_STEPS.some(x => x.key === initialStep) ? initialStep : 'visit');
+      const goSign = () => { setStep('sign'); try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* old browser */ } };
       // 4.3: clinician-authored patient-facing text — the only visit text the
       // patient portal ever shows (never the narrative note)
       const [facing, setFacing] = useState({ patientSummary: '', followUpInstructions: '' });
@@ -9178,8 +8654,10 @@
       // Once a clinician signs, the SERVICE codes, modifiers and dx links are
       // billing's until billing submits (owner, 2026-09-29) — the diagnoses
       // stay exactly as the clinician signed them.
-      const billerEditing = closed && !!ba.canEditCoding && !na.canAddClinicianAddendum;
-      const codingLocked = closed ? !(na.canAddClinicianAddendum || ba.canEditCoding) : !canWrite;
+      // ONE coding area on the encounter (owner, 2026-11-04): before signing it
+      // is the clinician's. After a clinician signs, the service codes,
+      // modifiers and links are finished on the billing page, never here.
+      const codingLocked = closed ? !na.canAddClinicianAddendum : !canWrite;
       const awaitingAddendum = d.record.coSignStatus === 'pending';
       const BILLING_STATUS_TEXT = {
         awaiting_billing: 'With billing — service codes are added and the visit submitted by billing.',
@@ -9196,14 +8674,12 @@
       // Ticking "add to problem list" is a change too: without it, Save stayed disabled.
       const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty || (addToProblemList || []).length > 0;
       const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', scheduled: 'Scheduled', accepted: 'Accepted', resulted: 'Resulted', completed: 'Completed', cancelled: 'Cancelled' };
-      // On a phone one step shows at a time; at a desk the whole encounter is
-      // one scroll, because a reviewer wants to see all of it at once. Two
-      // different jobs, so two different shapes rather than one compromise.
-      const on = (k) => !narrow || step === k;
+      // Every step stays MOUNTED and only the current one shows, so a note
+      // half typed on Visit survives a look at Coding.
       return (
         <div className="max-w-4xl">
           <button className="text-xs text-primary underline mb-2" onClick={onBack}><i className="ti ti-arrow-left" /> All Encounters</button>
-          {narrow && <EncounterStepRail step={step} onStep={setStep} blockers={(d.signReadiness && d.signReadiness.missing) || []} closed={closed} />}
+          <EncounterStepRail step={step} onStep={setStep} blockers={(d.signReadiness && d.signReadiness.missing) || []} closed={closed} />
           {/* The header is on every step: who this is and whether it is signed
               is the context for all four, and hiding it would leave a screen
               that does not say whose encounter it belongs to. */}
@@ -9291,17 +8767,18 @@
           {/* THE NOTE. A draft is edited here by anyone writing on this chart —
               the H&P in its own form, everything else in the SOAP editor. Once
               signed it is read-only, formatted, with the signature at the foot. */}
-          {on('visit') && ns.status === 'draft' && na.canEdit && (
+          <div hidden={step !== 'visit'}>
+          {ns.status === 'draft' && na.canEdit && (
             // The H&P screen for an H&P — and for a draft still holding H&P
             // boxes, so they are shown and kept (it renders a follow-up type
             // as the same SOAP note). Everything else: the SOAP editor.
             (((ns.note && ns.note.kind) || d.record.noteKind) === 'hp' || noteHasHpContent(ns.note))
               ? <HpTab patient={patient} chart={chart} encounterUuid={euuid} embedded codingDirty={!locked && dirty} onNoteState={onNoteState}
-                  onChanged={() => { load(); onChanged && onChanged(); }} onGoToEncounter={() => setStep('coding')} />
+                  onChanged={() => { load(); onChanged && onChanged(); }} onGoToEncounter={() => setStep('coding')} onSign={goSign} />
               : <FollowUpNoteEditor patient={patient} euuid={euuid} noteSections={d.noteSections} sectionsOnly={!!d.sectionsOnly} typeLabel={d.noteTypeLabel} codingDirty={!locked && dirty} onNoteState={onNoteState}
-                  onGoToCoding={() => setStep('coding')} onChanged={() => { load(); onChanged && onChanged(); }} />
+                  onSign={goSign} onChanged={() => { load(); onChanged && onChanged(); }} />
           )}
-          {on('visit') && !(ns.status === 'draft' && na.canEdit) && <div className="card mb-4">
+          {!(ns.status === 'draft' && na.canEdit) && <div className="card mb-4">
             <div className="card-h"><h2>Note</h2><span className="text-[10.5px] text-stone-500">{closed ? 'signed — read-only; corrections are addenda' : ns.status === 'voided' ? 'deleted encounter' : 'draft — read-only for your role'}</span></div>
             <div className="p-4 text-sm grid gap-3">
               {ns.note
@@ -9322,29 +8799,31 @@
           {/* On the Visit step, where the clinician is reading the note and
               deciding. Shown even when not required, so a risk that turns up
               on a non-psychiatric visit has somewhere to go. */}
-          {on('visit') && (
+          {(
             <ScreeningCard d={d} patient={patient} euuid={euuid} locked={locked} busy={busy === 'screen'}
               onSave={(form) => run('screen', () => api.saveScreening(patient.id, euuid, form))} />
           )}
-          {on('visit') && (
+          {(
             <RiskCard d={d} patient={patient} euuid={euuid} locked={locked || !canWrite} busy={busy === 'risk'}
               onSave={(form) => run('risk', () => api.saveRisk(patient.id, euuid, form))} />
           )}
 
-          {on('visit') && <EncounterLookups patient={patient} chart={chart} onChartChanged={onChartChanged} />}
+          {<EncounterLookups patient={patient} chart={chart} onChartChanged={onChartChanged} />}
+          </div>
 
-          {on('coding') && <div className="card mb-4">
+          <div hidden={step !== 'coding'}>
+          {<div className="card mb-4">
             <div className="card-h"><h2>Diagnoses &amp; Services</h2>
               <span className={`chip ${d.record.codingStatus === 'coded' ? 'bg-primary-50 text-primary' : 'bg-amber-50 text-amber-800'}`}>{d.record.codingStatus === 'coded' ? 'CODED' : 'NOT CODED'}</span>
             </div>
             <div className="p-4 grid gap-4">
               <div>
                 <span className="lblu block mb-1">Diagnoses (ICD-10-CM)</span>
-                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked || billerEditing}
+                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked}
                   addToProblemList={addToProblemList} setAddToProblemList={setAddToProblemList} />
-                {!(codingLocked || billerEditing) && canWrite && <DxSuggestionsPanel patientId={patient.id} euuid={euuid} diagnoses={diagnoses} setDiagnoses={setDiagnoses} />}
+                {!codingLocked && canWrite && <DxSuggestionsPanel patientId={patient.id} euuid={euuid} diagnoses={diagnoses} setDiagnoses={setDiagnoses} />}
                 {d.candidatesError && <p className="text-[11px] text-amber-700 mt-1">Problem list unavailable: {d.candidatesError}</p>}
-                {billerEditing && <Hint className="mt-1">The diagnoses are the signing clinician's. Link services to them below; a change to a diagnosis goes back to the clinician as an addendum.</Hint>}
+                {closed && ba.canBill && !awaitingAddendum && <Hint className="mt-1">Signed. The service codes, modifiers and diagnosis links are finished on the <a className="underline" href={billingClaimHref(patient.id, euuid)}>Billing page</a>.</Hint>}
               </div>
               <div>
                 <span className="lblu block mb-1">Services (CPT / HCPCS) — each linked to ≥1 diagnosis</span>
@@ -9354,16 +8833,16 @@
                     correcting a diagnosis is not coding a claim. The route
                     gates on the codes CHANGING, so a read-only editor and the
                     server agree without the page having to re-derive it. */}
-                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={codingLocked || (!canSelectCodes && !billerEditing)}
+                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={codingLocked || !canSelectCodes}
                   practiceFavorites={d.favorites.practiceServices} favorites={d.favorites.services} />
-                {!codingLocked && !canSelectCodes && !billerEditing && <p className="text-[11px] text-stone-400 mt-1">Service codes are added by billing after the note is signed. You can still correct the diagnoses.</p>}
+                {!codingLocked && !canSelectCodes && <p className="text-[11px] text-stone-400 mt-1">Service codes are added by billing after the note is signed. You can still correct the diagnoses.</p>}
                 {!closed && canSelectCodes && <Hint className="mt-1">Optional before signing — billing adds or confirms the service codes after you sign.</Hint>}
               </div>
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Patient-facing summary (shown in the patient portal — plain language, optional)</span>
                 <div className="grid md:grid-cols-2 gap-3">
-                  <Field label="What we did today, in plain words"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
-                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
+                  <Field label="What we did today, in plain words"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
+                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
                 </div>
                 <Hint className="mt-1">Without this, the portal summary shows only the diagnoses addressed, prescriptions recorded and tests ordered. Since 2026-09-29 (owner decision) the signed note itself is also shown to the patient and their POA, unless you hold it from the portal when signing.</Hint>
               </div>
@@ -9377,8 +8856,10 @@
               )}
             </div>
           </div>}
+          </div>
 
-          {on('actions') && <div className="grid md:grid-cols-2 gap-4 mb-4">
+          <div hidden={step !== 'actions'}>
+          {<div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className="card">
               <div className="card-h"><h2>Prescriptions</h2>{!locked && canPrescribe && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
               <div className="p-4 text-sm">
@@ -9464,26 +8945,39 @@
               </div>
             </div>
           </div>}
+          </div>
 
-          {on('sign') && !locked && ns.status === 'draft' && na.canEdit && na.canSign === false && (
+          <div hidden={step !== 'sign'}>
+          {!locked && ns.status === 'draft' && na.canEdit && na.canSign === false && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2></div>
               <div className="p-4 text-sm text-stone-700">You prepare this note as a <b>care coordinator</b>. Save the draft and the clinician on the visit reviews it, edits anything they need and signs. Your name stays on the note as the person who prepared it.</div>
             </div>
           )}
 
-          {on('sign') && !locked && ns.status === 'draft' && !na.canEdit && (
+          {!locked && ns.status === 'draft' && !na.canEdit && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2></div>
               <div className="p-4 text-sm text-amber-800">Signing a note requires a clinical licence (RN, LCSW, LMSW or provider).</div>
             </div>
           )}
 
+          {/* Phase 3: the clinician confirms the facts of her visit; the level is
+              derived from them. Shown just above Sign, because they decide the
+              level she attests to (owner, 2026-11-04). Not for an author signer
+              (RN, LMSW), and gone once billing has submitted. */}
+          {canWrite && !na.signsAsAuthor && (!d.record.renderingProvider || d.record.renderingProvider.id === (d.me || {}).id) && (
+            <ModifierReasonsPanel patientId={patient.id} euuid={euuid} items={d.modifierJustifications} onChanged={load} />
+          )}
+          {canWrite && !na.signsAsAuthor && !['billed', 'no_charge'].includes(d.billingStatus) && (
+            <VisitFactsPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
+          )}
+
           {/* Sign & submit. A provider's signature (an LCSW's, for the
               behavioral-health set) is the billable one; an RN's or LMSW's is
               the AUTHOR's and waits for a clinician addendum. The server
               decides which, and the readiness shown is the one for THIS viewer. */}
-          {on('sign') && !locked && ns.status === 'draft' && na.canEdit && na.canSign !== false && (
+          {!locked && ns.status === 'draft' && na.canEdit && na.canSign !== false && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2>
                 {noteDirty
@@ -9514,7 +9008,7 @@
           )}
 
           {/* The clinician addendum — the billable signature on an author's note. */}
-          {on('sign') && awaitingAddendum && (
+          {awaitingAddendum && (
             <div className="card mb-4 border-amber-300">
               <div className="card-h"><h2>Clinician Addendum</h2><span className="chip bg-amber-50 text-amber-800">NOT BILLABLE YET</span></div>
               <div className="p-4 grid gap-3 text-sm">
@@ -9542,90 +9036,26 @@
             </div>
           )}
 
-          {/* Phase 3: the clinician confirms the facts of her visit; the level is
-              derived from them. Not for an author signer (RN, LMSW), and gone
-              once billing has submitted. */}
-          {on('sign') && canWrite && !na.signsAsAuthor && (!d.record.renderingProvider || d.record.renderingProvider.id === (d.me || {}).id) && (
-            <ModifierReasonsPanel patientId={patient.id} euuid={euuid} items={d.modifierJustifications} onChanged={load} />
-          )}
-          {on('sign') && canWrite && !na.signsAsAuthor && !['billed', 'no_charge'].includes(d.billingStatus) && (
-            <VisitFactsPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
-          )}
-
-          {/* BILLING (owner, 2026-09-29): an admin or a manager finishes the
-              codes on a signed visit and submits it. The only place a place of
-              service is shown or changed; a clinician never sees this card. */}
-          {on('sign') && closed && ba.canBill && !awaitingAddendum && (
+          {/* BILLING lives on its own page (owner, 2026-11-04). The encounter
+              says where the claim stands and links there; it carries no billing
+              controls of its own, so there is one place a claim is worked. */}
+          {closed && ba.canBill && !awaitingAddendum && (
             <div className="card mb-4 border-primary-100">
               <div className="card-h"><h2><i className="ti ti-receipt mr-1 text-accent" />Billing</h2>
                 <span className={`chip ${d.billingStatus === 'awaiting_billing' ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>
                   {d.billingStatus === 'awaiting_billing' ? 'AWAITING BILLING' : d.billingStatus === 'no_charge' ? 'NO CHARGE' : 'SUBMITTED'}
                 </span>
               </div>
-              <div className="p-4 grid gap-3 text-sm">
-                <div className="flex flex-wrap items-center gap-3 text-xs text-stone-600">
-                  <span>Place of service <b>{d.encounter.posCode || <span className="text-amber-700">not set</span>}</b>{d.encounter.facility ? <> · {d.encounter.facility}</> : null}</span>
-                  {ba.canRefreshPos && (
-                    <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={busy === 'pos'} onClick={() => run('pos', () => api.refreshPos(patient.id, euuid))}>
-                      <i className="ti ti-refresh" />{busy === 'pos' ? 'Setting…' : 'Refresh POS'}
-                    </button>
-                  )}
-                </div>
-                {d.posMissingReason && !d.encounter.posCode && <p className="text-[11px] text-amber-700">{d.posMissingReason}</p>}
-                <BillingLevelPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
-                {d.billingStatus === 'awaiting_billing' && <CodeHelperPanel patientId={patient.id} dos={d.record && d.record.date} />}
-                {(d.billingStatus === 'awaiting_billing' || d.billingStatus === 'billed') &&
-                  <ClaimScrubPanel patientId={patient.id} euuid={euuid} refreshKey={`${d.billingStatus}|${(d.record && d.record.updatedAt) || ''}`} />}
-                {d.billingStatus === 'awaiting_billing' && <>
-                  {d.billingReadiness && !d.billingReadiness.ok && <p className="text-xs text-amber-700">{d.billingReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
-                  {/* The NCCI warnings are listed once, by the claim scrub above, with the line each concerns. */}
-                  <Hint>A missing place of service is set from the patient's facility when you submit. Charges post to OpenEMR's Billing Manager with <b>{npiLabel(d.record.renderingProvider)}</b> as the rendering clinician.</Hint>
-                  <label className="flex items-start gap-2 text-xs">
-                    <input type="checkbox" className="mt-0.5" checked={billAttest} onChange={e => setBillAttest(e.target.checked)} />
-                    <span>The service codes and modifiers on this visit are supported by the signed note.</span>
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    <button className="btn gold w-fit" disabled={!billAttest || dirty || busy === 'bill' || (d.billingReadiness && !d.billingReadiness.ok && !(d.billingReadiness.missing || []).every(m => m === 'facility_pos' || m === 'pos_unreadable'))}
-                      onClick={() => { setInsBlock(null); run('bill', () => api.billingSubmit(patient.id, euuid, { attest: true }).catch(e => { if (e.data && e.data.overridable) setInsBlock(e.data); throw e; })).then(onOk(() => setBillAttest(false))); }}>
-                      <i className="ti ti-send" />{busy === 'bill' ? 'Submitting…' : 'Submit to Billing'}
-                    </button>
-                    {!noChargeOpen && <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(true)}>No charge…</button>}
-                  </div>
-                  {insBlock && (isAdminUser ? (
-                    <div className="grid gap-2 border border-amber-200 bg-amber-50 rounded-lg p-2.5">
-                      <label className="text-xs text-amber-900">Override the insurance check? Say why. The reason is saved on this claim.</label>
-                      <input className="inp" value={insOverrideReason} maxLength={500} onChange={e => setInsOverrideReason(e.target.value)} placeholder="e.g. Verified by phone with the plan on 10/13" />
-                      <button className="btn w-fit" disabled={!insOverrideReason.trim() || !billAttest || busy === 'bill'}
-                        onClick={() => run('bill', () => api.billingSubmit(patient.id, euuid, { attest: true, insuranceOverride: { reason: insOverrideReason } })).then(onOk(() => { setBillAttest(false); setInsBlock(null); setInsOverrideReason(''); }))}>
-                        Override and Submit
-                      </button>
-                    </div>
-                  ) : <p className="text-xs text-amber-800">Record the eligibility check on the patient's enrollment record (<a className="underline" href={`/admin/enrollment?client=${encodeURIComponent(patient.id)}`}>open it</a>), or ask an admin to override.</p>)}
-                  {noChargeOpen && (
-                    <div className="grid gap-2 border border-stone-200 rounded-lg p-2.5">
-                      <label className="text-xs text-stone-600">Why is this visit not being billed?</label>
-                      <input className="inp" value={noChargeReason} maxLength={500} onChange={e => setNoChargeReason(e.target.value)} placeholder="e.g. Courtesy phone follow-up" />
-                      <div className="flex gap-2">
-                        <button className="btn w-fit" disabled={noChargeReason.trim().length < 3 || busy === 'nocharge'}
-                          onClick={() => run('nocharge', () => api.billingSubmit(patient.id, euuid, { noCharge: true, reason: noChargeReason })).then(onOk(() => { setNoChargeOpen(false); setNoChargeReason(''); }))}>
-                          Close with No Charge
-                        </button>
-                        <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(false)}>Cancel</button>
-                      </div>
-                    </div>
-                  )}
-                </>}
-                {d.billingStatus === 'billed' && (
-                  <p className="text-xs text-stone-600">Submitted {d.record.billingSubmittedAt ? fmtTs(d.record.billingSubmittedAt) : ''}{d.record.billingSubmittedBy ? ` by ${d.record.billingSubmittedBy.name}` : ''}. {d.record.chargesPosted ? 'Charges posted to Billing Manager.' : (d.record.chargeError ? `Charges did not post (${d.record.chargeError}).` : '')}</p>
-                )}
-                {d.billingStatus === 'no_charge' && <p className="text-xs text-stone-600">Reason: {d.record.noChargeReason}</p>}
+              <div className="p-4 flex flex-wrap items-center gap-3 text-sm">
+                <span className="text-xs text-stone-600">Codes, place of service, the claim scrub and Submit are on the billing page.</span>
+                <a className="btn gold !py-1.5" href={billingClaimHref(patient.id, euuid)}><i className="ti ti-receipt" />Open in Billing</a>
               </div>
             </div>
           )}
 
           {/* A co-signature: any licensed clinician on the care team, attesting
               they took part in or reviewed the note. It never changes who bills. */}
-          {on('sign') && closed && na.canCoSign && (
+          {closed && na.canCoSign && (
             <div className="card mb-4">
               <div className="card-h"><h2>Co-Sign</h2></div>
               <div className="p-4 grid gap-2 text-sm">
@@ -9640,12 +9070,12 @@
             </div>
           )}
 
-          {on('sign') && closed && !awaitingAddendum && (
+          {closed && !awaitingAddendum && (
             <PortalPublishCard key={`hold:${!!(d.attestation && d.attestation.portalHold)}`} record={d.record} attestation={d.attestation} canWrite={canWrite} busy={busy}
               onPublish={(hold) => run('portal', () => api.publishToPortal(patient.id, euuid, hold))} />
           )}
 
-          {on('sign') && closed && (
+          {closed && (
             <div className="card mb-4">
               <div className="card-h"><h2>Attestation &amp; Addenda</h2></div>
               <div className="p-4 grid gap-3 text-sm">
@@ -9665,34 +9095,35 @@
               </div>
             </div>
           )}
+          </div>
           {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
         </div>
       );
     };
 
     // Chart tab: this patient's encounters with coded / signed state.
-    const EncountersTab = ({ patient, chart, initialEuuid, onOpened, onChartChanged }) => {
+    const EncountersTab = ({ patient, chart, initialEuuid, initialStep, onOpened, onChartChanged, onNewVisit, above }) => {
       const canWrite = useCanDocument();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [open, setOpen] = useState(initialEuuid || null);
-      const [followUp, setFollowUp] = useState(false);
       // Deleted encounters are hidden unless asked for; this is where who
       // deleted one, when and why is read back.
       const [showDeleted, setShowDeleted] = useState(false);
       const load = useCallback(() => { api.encounters(patient.id, showDeleted).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id, showDeleted]);
       useEffect(load, [load]);
       useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
-      if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); onChartChanged && onChartChanged(); }} onChanged={() => { load(); onChartChanged && onChartChanged(); }} />;
+      if (open) return <EncounterPanel key={open} initialStep={initialStep} patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); onChartChanged && onChartChanged(); }} onChanged={() => { load(); onChartChanged && onChartChanged(); }} />;
       if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
       if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
       return (
         <div className="max-w-3xl mx-auto">
+          {above}
           {!data.linked && <div className="card p-5 text-center"><i className="ti ti-stethoscope-off text-3xl text-accent" /><p className="text-sm text-stone-500 mt-1">Link this patient to OpenEMR to document visits.</p></div>}
           {data.linked && (
             <div className="card">
-              <div className="card-h"><h2>Encounters</h2>
-                {canWrite && <button className="btn gold !py-1.5" onClick={() => setFollowUp(true)}><i className="ti ti-stethoscope" />Document Follow-Up</button>}
+              <div className="card-h"><h2>Notes</h2>
+                {canWrite && onNewVisit && <button className="btn gold !py-1.5" onClick={onNewVisit}><i className="ti ti-stethoscope" />New Visit</button>}
               </div>
               <div className="p-4">
                 {data.emrError && <p className="text-xs text-amber-700 mb-2">OpenEMR encounter list unavailable ({data.emrError}) — showing what the app has recorded.</p>}
@@ -9702,7 +9133,7 @@
                     Show deleted encounters ({data.deletedCount})
                   </label>
                 )}
-                {data.encounters.length === 0 && <p className="text-sm text-stone-400">No encounters yet. The initial H&amp;P lives on its own tab; follow-ups start here.</p>}
+                {data.encounters.length === 0 && <p className="text-sm text-stone-400">No visit notes yet. New Visit starts one.</p>}
                 {data.encounters.map(e => (
                   <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0 cursor-pointer" onClick={() => setOpen(e.id)}>
                     <div>
@@ -9730,157 +9161,11 @@
               </div>
             </div>
           )}
-          {followUp && <FollowUpModal patient={patient} chart={chart} appt={null} onClose={() => setFollowUp(false)} onSaved={(r) => { setFollowUp(false); load(); setOpen(r.encounterUuid); }} />}
         </div>
       );
     };
 
     // Admin: billing identity (spec §2.5) + practice service-code favorites.
-    const SettingsCard = () => {
-      const [s, setS] = useState(null);
-      const [f, setF] = useState(null);
-      const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
-      // Collapsed unless something needs doing: open while the billing NPI is
-      // missing, because that blocks every submission to billing.
-      const [open, setOpen] = useState(null);
-      useEffect(() => { api.settings().then(r => { setS(r); setF({ billingNpiUsed: r.billingNpiUsed || '', billingProviderName: r.billingProviderName || '', favorites: (r.serviceCodeFavorites || []).map(x => `${x.code} | ${x.label || ''}`).join('\n') }); }).catch(e => setMsg({ ok: false, text: e.message })); }, []);
-      if (!s || !f) return null;
-      const save = () => {
-        setBusy(true); setMsg(null);
-        api.saveSettings({
-          billingNpiUsed: f.billingNpiUsed, billingProviderName: f.billingProviderName,
-          serviceCodeFavorites: f.favorites.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [code, ...rest] = l.split('|'); return { code: code.trim(), label: rest.join('|').trim() }; })
-        }).then(r => setMsg({ ok: true, text: r.message })).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
-      };
-      const isOpen = open == null ? !s.billingNpiUsed && s.billingNpiSource !== 'record' && s.billingNpiSource !== 'env_seed' : open;
-      return (
-        <div className="card mb-4">
-          <button type="button" className="card-h w-full text-left" onClick={() => setOpen(!isOpen)} aria-expanded={isOpen}>
-            <h2>Billing Settings</h2>
-            <span className="flex items-center gap-2">
-              {s.billingNpiSource === 'record' || s.billingNpiSource === 'env_seed'
-                ? <span className="chip bg-emerald-50 text-emerald-700">NPI set</span>
-                : <span className="chip bg-red-50 text-red-700">NPI not set</span>}
-              <span className="text-[11.5px] text-stone-500 hidden sm:inline">Admin only</span>
-              <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'} text-stone-400`} />
-            </span>
-          </button>
-          {isOpen && <div className="p-4 grid gap-3 text-sm">
-            <div className="grid md:grid-cols-2 gap-3">
-              <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — submitting to billing is blocked'})`}>
-                <input className="inp font-mono" maxLength={10} disabled={!s.isAdmin} value={f.billingNpiUsed} onChange={e => setF({ ...f, billingNpiUsed: e.target.value.replace(/\D/g, '') })} />
-              </Field>
-              <Field label="Billing provider name"><input className="inp" disabled={!s.isAdmin} value={f.billingProviderName} onChange={e => setF({ ...f, billingProviderName: e.target.value })} /></Field>
-            </div>
-            <Field label="Practice service-code favorites — one per line: CODE | label (codes must exist in OpenEMR's fee schedule; the AMA descriptors stay in OpenEMR)">
-              <textarea className="inp font-mono text-xs" rows={6} disabled={!s.isAdmin} value={f.favorites} onChange={e => setF({ ...f, favorites: e.target.value })} />
-            </Field>
-            {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-            {s.isAdmin && <button className="btn w-fit" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Settings'}</button>}
-            <p className="text-[11px] text-stone-400">The billing provider is the NPI every coded encounter bills under. Never hardcoded. The rendering provider is always the signing clinician.</p>
-          </div>}
-        </div>
-      );
-    };
-
-    // 3.6: E/M level distribution per clinician, this month against last, with
-    // the level-review flag rate beside it. Billing only (the queue shows it on
-    // the Hold Queue tab, which only billing has).
-    const EmDistributionCard = () => {
-      const [r, setR] = useState(null); const [err, setErr] = useState('');
-      useEffect(() => { api.emDistribution().then(setR).catch(e => setErr(e.message)); }, []);
-      if (err) return <div className="card p-3 text-xs text-red-600 mb-3">E/M distribution could not load: {err}</div>;
-      if (!r) return null;
-      const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
-      const codes = (m) => Object.entries(m || {}).sort(([a], [b]) => a.localeCompare(b)).map(([c, n]) => `${c} × ${n}`).join(', ') || 'none';
-      return (
-        <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
-          <b className="text-primary">E/M level distribution, {r.month} against {r.priorMonth}</b>
-          {!r.clinicians.length && <div className="text-stone-500 mt-1">No E/M visits in either month.</div>}
-          {r.clinicians.map(c => (
-            <div key={c.clinicianId} className="mt-1.5 border-t border-stone-100 pt-1.5">
-              <b>{c.clinician}</b>
-              <div>{r.month}: {codes(c.months[r.month])} · top level {pct(c.highestShare[r.month])} · flagged {pct(c.flagRate[r.month])}</div>
-              <div className="text-stone-500">{r.priorMonth}: {codes(c.months[r.priorMonth])} · top level {pct(c.highestShare[r.priorMonth])} · flagged {pct(c.flagRate[r.priorMonth])}</div>
-            </div>
-          ))}
-        </div>
-      );
-    };
-
-    // Staff coding queue (spec §2.6): every encounter that isn't coded/signed.
-    const CodingQueueView = ({ onOpenEncounter }) => {
-      const [filter, setFilter] = useState('open');
-      const [data, setData] = useState(null);
-      const [err, setErr] = useState('');
-      useEffect(() => { setData(null); api.queue(filter).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [filter]);
-      return (
-        <div className="p-4 lg:p-7">
-          <SettingsCard />
-          <div className="flex gap-2 mb-4 overflow-x-auto">
-            {[['open', 'Open'], ['not_coded', 'Not Coded'], ['coded', 'Coded, Unsigned'], ['awaiting_billing', 'Awaiting Billing'], ...(data && data.held ? [['held', 'Hold Queue'], ['level_flags', 'Level Review']] : (['held', 'level_flags'].includes(filter) ? [['held', 'Hold Queue'], ['level_flags', 'Level Review']] : [])), ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
-              <button key={k} onClick={() => setFilter(k)}
-                className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${filter === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>
-                {l}{data && data.counts && k in data.counts ? <span className="ml-1.5 opacity-80">{data.counts[k]}</span> : null}
-              </button>
-            ))}
-          </div>
-          {err && <div className="card p-4 text-red-600 text-sm mb-3">{err}</div>}
-          {data && (data.zeroFee || []).length > 0 && (
-            <div className="card !bg-amber-50 border-amber-300 p-3 text-[12.5px] text-amber-900 mb-3">
-              <div className="font-semibold mb-1">Charges posted at $0.00</div>
-              <div className="mb-1.5">OpenEMR had no price for these codes at the patient's price level. Set the price in OpenEMR's fee schedule, then correct the line in Billing Manager.</div>
-              {data.zeroFee.map(z => (
-                <button type="button" key={z.encounterUuid} onClick={() => onOpenEncounter(z.clientId, z.encounterUuid)} className="block text-left underline">
-                  {z.codes.join(', ')} · {z.patientName || 'Patient'}{z.date ? ` · ${fmtDate(z.date)}` : ''} · encounter {String(z.encounterUuid).slice(0, 8)}
-                </button>
-              ))}
-            </div>
-          )}
-          {/* The batch view the coder works from: every held encounter, awaiting
-              billing or submitted and not yet released, with both counts. */}
-          {data && filter === 'held' && data.held && (
-            <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
-              <b className="text-primary">{data.held.count} encounter{data.held.count === 1 ? '' : 's'} in the hold queue</b>
-              <span className="ml-2 chip bg-red-50 text-red-700">{data.held.blocking} blocking</span>
-              <span className="ml-1 chip bg-amber-50 text-amber-800">{data.held.warnings} warnings</span>
-              <div className="text-[11.5px] text-stone-500 mt-1">Most blockers first. Open an encounter to read every finding and check it live against OpenEMR.</div>
-            </div>
-          )}
-          {data && filter === 'level_flags' && (
-            <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
-              <b className="text-primary">Level review</b>: every visit whose E/M level is flagged, released or not. Each coded at the lower level; open one to read both candidates and what the note does not say, then resolve it.
-            </div>
-          )}
-          {data && data.held && filter === 'held' && <EmDistributionCard />}
-          {data && data.degraded && <div className="card !bg-amber-50 border-amber-200 p-3 text-[12.5px] text-amber-800 mb-3">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''}. Showing encounters the app has recorded.</div>}
-          <div className="card overflow-hidden">
-            {!err && !data && <p className="text-sm text-stone-500 px-5 py-6">Loading encounters from OpenEMR…</p>}
-            {data && data.encounters.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">Nothing here.</p>}
-            {data && data.encounters.map(e => (
-              <button type="button" key={e.encounterUuid} onClick={() => onOpenEncounter(e.clientId, e.encounterUuid)}
-                className="cw-row w-full text-left flex items-center gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0">
-                <div className="cw-avatar w-10 h-10 text-[13px] hidden sm:flex">{initials(e.patientName)}</div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-[14px] font-semibold text-primary truncate">{e.patientName || 'Patient'} · {e.reason}</div>
-                  <div className="text-[12.5px] text-stone-500 truncate">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`, e.signedAt && `signed ${fmtTs(e.signedAt)}`].filter(Boolean).join(' · ')}</div>
-                </div>
-                {(e.zeroFeeCharges || []).length > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 whitespace-nowrap">$0 charge: {e.zeroFeeCharges.map(c => c.code).join(', ')}</span>}
-                {e.scrub && <>
-                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${e.scrub.block ? 'bg-red-100 text-red-800' : 'bg-emerald-50 text-emerald-700'}`}>{e.scrub.block} blocking</span>
-                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${e.scrub.warn ? 'bg-amber-100 text-amber-900' : 'bg-stone-100 text-stone-600'}`}>{e.scrub.warn} warning{e.scrub.warn === 1 ? '' : 's'}</span>
-                  {e.holdState === 'held' && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 whitespace-nowrap">Held</span>}
-                </>}
-                {e.levelFlag && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 whitespace-nowrap">Level review</span>}
-                <EncStateChip state={e.state} />
-                <i className="ti ti-chevron-right text-stone-300" />
-              </button>
-            ))}
-          </div>
-        </div>
-      );
-    };
-
     // ── Messages across every patient (2026-10-12 redesign) ──
     // The sidebar's Messages. Same shared component as the chart's Messages
     // tab, mounted WITHOUT a client scope, so it carries its own client
@@ -10040,9 +9325,49 @@
     // Where the OpenEMR connection, the enrollment link and sign-out went when
     // the top bar was simplified. Nothing here is new; it is the old top bar's
     // right-hand group, given room.
+    // Server setup an admin fixes: an OAuth client older than the routes the
+    // app calls, and the billing provider NPI. Shown on Settings, to an admin.
+    const SetupChecks = ({ emrStatus, access }) => (
+      <>
+      {/* 4.4 deploy diagnostics: the appointment-scoped OAuth client swap
+          (P0 deploy step) and the billing NPI (spec §2.5). */}
+      {emrStatus && emrStatus.connected && emrStatus.appointmentScopes === false && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
+          <b>Appointment OAuth client swap not deployed.</b> The token OpenEMR issued to this server carries no appointment scopes, so scheduling will 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code> to the appointment-scoped client (enabled 2026-08-29), then stop and run the app.
+        </div>
+      )}
+      {/* 4.5 deploy diagnostics: the 8.4 / Phase 6B OAuth client swap.
+          A token carries only the scopes the DEPLOYED client was
+          registered with, and OpenEMR reports the shortfall as a narrower
+          token rather than an error — so the indicator above reads a
+          healthy green while every new route 401s "Unauthorized". Name the
+          shortfall here or nobody finds out until a write fails. */}
+      {emrStatus && emrStatus.connected && (emrStatus.billingRouteScopes === false || emrStatus.nativeWriteScopes === false) && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
+          <b>OpenEMR client is out of date for 8.4.</b> The token this server holds carries{' '}
+          <b>{emrStatus.grantedScopeCount} of {emrStatus.requestedScopeCount}</b> scopes, so{' '}
+          {[emrStatus.billingRouteScopes === false && 'charges, orders and code search',
+            emrStatus.nativeWriteScopes === false && 'prescription writes']
+            .filter(Boolean).join(' and ')}{' '}
+          will fail with 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code>{' '}
+          to the v4 client (54 scopes), then stop and run the app.
+          {(emrStatus.missingScopes || []).length > 0 && (
+            <> Missing: <code className="font-mono">{emrStatus.missingScopes.join(', ')}</code>.</>
+          )}
+        </div>
+      )}
+      {emrStatus && emrStatus.billingNpiConfigured === false && access.canSubmitBilling && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
+          <b>Billing provider NPI not configured.</b> Signed visits cannot be submitted to billing until an admin sets it on the Billing page, under Settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
+        </div>
+      )}
+      </>
+    );
+
     const SettingsView = ({ user, emrStatus, connectEmr, signOut, canWrite, access }) => (
       <div className="px-4 lg:px-8 py-5 lg:py-7 max-w-3xl">
         <h1 className="cw-title mb-5">Settings</h1>
+        {access.role === 'admin' && <div className="rounded-xl overflow-hidden mb-4"><SetupChecks emrStatus={emrStatus} access={access} /></div>}
         <div className="card mb-4">
           <div className="card-h"><h2>Your Account</h2></div>
           <div className="p-5 flex items-center gap-4">
@@ -10089,16 +9414,20 @@
     // ── Phone "More" (2026-10-12 redesign) ──
     // Every view that is not on the bottom bar, so nothing is out of reach on
     // a phone.
-    const MoreView = ({ onPick, badges }) => (
+    // A sidebar item only billing uses is drawn only for billing.
+    const navShown = (v, access) => !v.billingOnly || !!(access && access.canSubmitBilling);
+    // The Inbox item counts what is waiting in all its tabs.
+    const navBadge = (badges, key) => key === 'inbox' ? (badges.inbox || 0) + (badges.results || 0) : (badges[key] || 0);
+    const MoreView = ({ onPick, badges, access }) => (
       <div className="px-4 py-5">
         <h1 className="cw-title mb-4">More</h1>
         <div className="card overflow-hidden">
-          {NAV_VIEWS.filter(v => !v.phone).map(v => (
+          {NAV_VIEWS.filter(v => !v.phone && navShown(v, access)).map(v => (
             <button key={v.key} type="button" className="cw-row w-full text-left flex items-center gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0"
               onClick={() => onPick(v)}>
               <i className={`ti ${v.icon} text-[20px] text-primary`} />
               <span className="font-semibold text-primary flex-1">{v.tab}</span>
-              {badges[v.key] > 0 && <span className="cw-badge">{badges[v.key]}</span>}
+              {navBadge(badges, v.key) > 0 && <span className="cw-badge">{navBadge(badges, v.key)}</span>}
               <i className="ti ti-chevron-right text-stone-400" />
             </button>
           ))}
@@ -10156,7 +9485,17 @@
       const [q, setQ] = useState('');
       const [sel, setSel] = useState(null);
       const [chart, setChart] = useState(null);
-      const [tab, setTab] = useState('summary');
+      const [tab, setTabRaw] = useState('summary');
+      const [ordersFilter, setOrdersFilter] = useState('all');
+      // Chart tabs merged on 2026-11-04 keep their old names as aliases, so a
+      // link, an inbox row or a digest line naming one still lands.
+      const setTab = (t) => {
+        const alias = CHART_TAB_ALIASES[t];
+        if (alias) { if (alias.ordersFilter) setOrdersFilter(alias.ordersFilter); setTabRaw(alias.tab); return; }
+        if (t === 'orders') setOrdersFilter('all');
+        setTabRaw(t);
+      };
+      const [encStep, setEncStep] = useState(null); // the step an opened encounter starts on
       const [emrStatus, setEmrStatus] = useState(null);
       // Session 5.2: the OAuth round trip lands back here with ?emr=connected|error.
       const [emrReturn] = useState(() => new URLSearchParams(window.location.search).get('emr'));
@@ -10199,10 +9538,25 @@
       // fragment still falls back to My Day — a link must never render a tab
       // that does not exist. Read once, at mount: a later hash change is the
       // person navigating, and yanking the tab out from under them is worse.
-      const [view, setView] = useState(() => {
+      const [view, setViewRaw] = useState(() => {
         const h = String(window.location.hash || '').replace(/^#/, '');
+        if (LEGACY_VIEWS[h] && LEGACY_VIEWS[h].href) { window.location.replace(LEGACY_VIEWS[h].href); return 'myday'; }
+        if (LEGACY_VIEWS[h]) return LEGACY_VIEWS[h].view;
         return NAV_VIEWS.some(v => v.key === h) ? h : 'myday';
-      }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'inbox' (4.9, with Results and Overdue) | …
+      const [inboxTab, setInboxTab] = useState(() => {
+        const h = String(window.location.hash || '').replace(/^#/, '');
+        return (LEGACY_VIEWS[h] && LEGACY_VIEWS[h].inboxTab) || 'work';
+      });
+      // Every move between views comes through here, so a digest line or an
+      // old link naming Results, Overdue or the Coding queue still lands.
+      const setView = useCallback((v) => {
+        const legacy = LEGACY_VIEWS[v];
+        if (legacy && legacy.href) { window.location.assign(legacy.href); return; }
+        if (legacy) { setInboxTab(legacy.inboxTab); setViewRaw(legacy.view); return; }
+        if (v === 'inbox') setInboxTab('work');
+        setViewRaw(v);
+      }, []);
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
@@ -10231,7 +9585,7 @@
       const selIdRef = useRef(null);
       const openPatient = (p, opts) => {
         selIdRef.current = p.id;
-        setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary');
+        setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setEncStep((opts && opts.step) || null);
         // "Recent" on the Patients page: a per-browser convenience, so it is
         // localStorage, read and written defensively.
         try {
@@ -10261,15 +9615,18 @@
       // The banner's Start visit / Resume draft. A saved draft lives on its
       // encounter: resume THAT, rather than starting a blank H&P whose save
       // becomes a second OpenEMR encounter.
+      // New Visit is the ONE way a visit note starts (owner, 2026-11-04): the
+      // visit screen, which asks for the appointment and the visit type.
       const startVisit = () => {
         const vd = chart && chart.visitDraft;
-        if (vd && vd.encounterUuid) { setEncTarget(vd.encounterUuid); setTab('encounters'); return; }
-        setTab('visit');
+        if (vd && vd.encounterUuid) { setEncTarget(vd.encounterUuid); setTab('visits'); return; }
+        setHpApptEid(null); setTab('visit');
       };
+      const openEncounter = (euuid, step) => { setEncTarget(euuid); setEncStep(step || null); setTab('visits'); };
       const documentFromSchedule = (appt) => {
         const p = (patients || []).find(x => x.id === appt.clientId);
         if (!p) return;
-        openPatient(p, p.initialVisitAt ? { tab: 'appts' } : { tab: 'visit', appointmentEid: appt.eid });
+        openPatient(p, { tab: 'visit', appointmentEid: appt.eid });
       };
       const refreshChart = () => sel && api.chart(sel.id).then(c => { if (selIdRef.current === sel.id) setChart(c); }).catch(() => {});
       const link = (body) => {
@@ -10315,18 +9672,17 @@
       // Appointments is kept as a place alongside the brief's twelve because it
       // is the per-patient calendar — removing a working surface is not what a
       // reorganisation is for.
+      // Owner, 2026-11-04: Encounters and Appointments are one place (Visits),
+      // and Orders, Imaging and Referrals are one list with filters.
       const tabs = [
         ['summary', 'Overview', 'ti-layout-grid'],
         ['timeline', 'Timeline', 'ti-timeline'],
-        ['encounters', 'Encounters', 'ti-stethoscope'],
-        ['appts', 'Appointments', 'ti-calendar'],
+        ['visits', 'Visits', 'ti-stethoscope'],
         ['problems', 'Problems', 'ti-list-details'],
         ['medications', 'Medications', 'ti-pill'],
         ['allergies', 'Allergies', 'ti-alert-triangle'],
         ['orders', 'Orders', 'ti-clipboard-list'],
         ['results', 'Results', 'ti-flask'],
-        ['imaging', 'Imaging', 'ti-photo-scan'],
-        ['referrals', 'Referrals', 'ti-send'],
         ['documents', 'Documents', 'ti-file-text'],
         ['careplan', 'Care Plan', 'ti-heart-handshake'],
         ['extras', 'Rest of Record', 'ti-folders'],
@@ -10340,7 +9696,7 @@
           onClick={() => { if (v.href) { window.location.assign(v.href); return; } setView(v.key); if (v.key === 'charts') setSel(null); }}>
           <i className={`ti ${v.icon}`} />
           <span>{v.tab}</span>
-          {badges[v.key] > 0 && <span className="cw-badge">{badges[v.key]}</span>}
+          {navBadge(badges, v.key) > 0 && <span className="cw-badge">{navBadge(badges, v.key)}</span>}
         </button>
       );
       const runSearch = () => { setSel(null); setView('charts'); loadPatients(); };
@@ -10359,9 +9715,9 @@
               <div className="text-[9.5px] tracking-[2px] uppercase text-accent font-bold mt-2">Clinical Workspace</div>
             </div>
             <nav className="cw-nav">
-              {NAV_VIEWS.filter(v => v.group === 'main').map(navButton)}
+              {NAV_VIEWS.filter(v => v.group === 'main' && navShown(v, access)).map(navButton)}
               <div className="grp">Work</div>
-              {NAV_VIEWS.filter(v => v.group === 'work').map(navButton)}
+              {NAV_VIEWS.filter(v => v.group === 'work' && navShown(v, access)).map(navButton)}
             </nav>
             <div className="mt-auto pt-4">
               <nav className="cw-nav">{NAV_VIEWS.filter(v => v.group === 'foot').map(navButton)}</nav>
@@ -10436,38 +9792,9 @@
                   : <span><b>OpenEMR sign-in did not complete</b> ({emrReturnReason || 'unknown'}). Try again; if it repeats, tell an admin the code shown here.</span>}
               </div>
             )}
-            {/* 4.4 deploy diagnostics: the appointment-scoped OAuth client swap
-                (P0 deploy step) and the billing NPI (spec §2.5). */}
-            {emrStatus && emrStatus.connected && emrStatus.appointmentScopes === false && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
-                <b>Appointment OAuth client swap not deployed.</b> The token OpenEMR issued to this server carries no appointment scopes, so scheduling will 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code> to the appointment-scoped client (enabled 2026-08-29), then stop and run the app.
-              </div>
-            )}
-            {/* 4.5 deploy diagnostics: the 8.4 / Phase 6B OAuth client swap.
-                A token carries only the scopes the DEPLOYED client was
-                registered with, and OpenEMR reports the shortfall as a narrower
-                token rather than an error — so the indicator above reads a
-                healthy green while every new route 401s "Unauthorized". Name the
-                shortfall here or nobody finds out until a write fails. */}
-            {emrStatus && emrStatus.connected && (emrStatus.billingRouteScopes === false || emrStatus.nativeWriteScopes === false) && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
-                <b>OpenEMR client is out of date for 8.4.</b> The token this server holds carries{' '}
-                <b>{emrStatus.grantedScopeCount} of {emrStatus.requestedScopeCount}</b> scopes, so{' '}
-                {[emrStatus.billingRouteScopes === false && 'charges, orders and code search',
-                  emrStatus.nativeWriteScopes === false && 'prescription writes']
-                  .filter(Boolean).join(' and ')}{' '}
-                will fail with 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code>{' '}
-                to the v4 client (54 scopes), then stop and run the app.
-                {(emrStatus.missingScopes || []).length > 0 && (
-                  <> Missing: <code className="font-mono">{emrStatus.missingScopes.join(', ')}</code>.</>
-                )}
-              </div>
-            )}
-            {emrStatus && emrStatus.billingNpiConfigured === false && access.canSubmitBilling && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
-                <b>Billing provider NPI not configured.</b> Signed visits cannot be submitted to billing until an admin sets it under Coding queue → Billing settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
-              </div>
-            )}
+            {/* Setup checks (an outdated OAuth client, no billing NPI) are an
+                admin's to fix, so they live on Settings, not over every
+                clinician's screen (owner, 2026-11-04). */}
             {err && view !== 'charts' && <p className="text-red-600 text-sm px-4 lg:px-8 pt-3">{err}</p>}
             {!ownHeader.includes(view) && (
               <div className="px-4 lg:px-7 pt-5 lg:pt-7 -mb-2">
@@ -10486,22 +9813,32 @@
               </TasksShell>
             )}
             {view === 'analytics' && <AnalyticsView />}
-            {view === 'queue' && (
-              <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
-            )}
             {view === 'inbox' && (
-              <InboxView
-                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })}
-                onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />
+              <>
+                <div className="px-4 lg:px-7 pt-4">
+                  <div className="cw-tabs">
+                    {INBOX_TABS.map(([k, label]) => (
+                      <div key={k} className={`tabbtn ${inboxTab === k ? 'on' : ''}`} onClick={() => setInboxTab(k)}>
+                        {label}{k === 'work' && badges.inbox > 0 ? ` (${badges.inbox})` : k === 'results' && badges.results > 0 ? ` (${badges.results})` : ''}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {inboxTab === 'work' && (
+                  <InboxView
+                    onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })}
+                    onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />
+                )}
+                {inboxTab === 'results' && <ResultsInbox onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
+                {inboxTab === 'overdue' && <OverdueOrders onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
+              </>
             )}
-            {view === 'results' && <ResultsInbox onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
             {view === 'veterans' && <VeteransView />}
-            {view === 'overdue' && <OverdueOrders onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
             {view === 'messages' && <div className="p-4 lg:p-7"><StaffMessagesView /></div>}
             {view === 'settings' && (
               <SettingsView user={user} emrStatus={emrStatus} connectEmr={connectEmr} signOut={signOut} canWrite={canWrite} access={access} />
             )}
-            {view === 'more' && <MoreView badges={badges} onPick={goView} />}
+            {view === 'more' && <MoreView badges={badges} onPick={goView} access={access} />}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
                 onOpenChart={(clientId) => openChartById(clientId)}
@@ -10582,18 +9919,18 @@
                     linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }}
                     isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }}
                     onGoTab={setTab} />}
-                  {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
-                    onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
-                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
-                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
+                  {tab === 'visits' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} initialStep={encStep}
+                    onOpened={() => setEncTarget(null)} onChartChanged={() => { loadPatients(); refreshChart(); }}
+                    onNewVisit={access.canDocument ? startVisit : null}
+                    above={<ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
+                      onEncounterCreated={(euuid) => openEncounter(euuid)} />} />}
+                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => openEncounter(euuid)} onSign={(euuid) => openEncounter(euuid, 'sign')} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'timeline' && <TimelineTab patient={sel} />}
                   {tab === 'problems' && <ProblemsTab chart={chart} />}
                   {tab === 'medications' && <MedicationsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'allergies' && <AllergiesTab chart={chart} />}
-                  {tab === 'orders' && <OrdersTab patient={sel} />}
+                  {tab === 'orders' && <OrdersPlace patient={sel} filter={ordersFilter} setFilter={setOrdersFilter} />}
                   {tab === 'results' && <ResultsTab patient={sel} />}
-                  {tab === 'imaging' && <ImagingTab patient={sel} />}
-                  {tab === 'referrals' && <ReferralsTab patient={sel} />}
                   {tab === 'documents' && <DocumentsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'extras' && <RecordExtrasTab patient={sel} />}
@@ -10612,7 +9949,7 @@
               <button key={v.key} className={view === v.key ? 'on' : ''} onClick={() => goView(v)}>
                 <i className={`ti ${v.icon}`} />
                 <span>{v.tab}</span>
-                {badges[v.key] > 0 && <span className="dot">{badges[v.key]}</span>}
+                {navBadge(badges, v.key) > 0 && <span className="dot">{navBadge(badges, v.key)}</span>}
               </button>
             ))}
             <button className={!NAV_VIEWS.some(v => v.phone && v.key === view) ? 'on' : ''} onClick={() => setView('more')}>

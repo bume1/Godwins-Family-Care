@@ -305,13 +305,14 @@ test('the server maps getNcciTables field names onto the scrub\'s, or every clai
   const run = serverSrc.slice(serverSrc.indexOf('const runClaimScrub ='), serverSrc.indexOf('const liveClaimScrub ='));
   assert.match(run, /ncci: \{ ptpEdits: ncci\.ncciPtpEdits, mueByCode: ncci\.ncciMue, sourceVersion: ncci\.ncciSourceVersion \}/);
 });
-test('the scrub panel renders only inside billing\'s card, never on a clinician screen', () => {
-  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
-  const uses = page.split('<ClaimScrubPanel ').length - 1;
-  assert.equal(uses, 1, 'one use');
-  const at = page.indexOf('<ClaimScrubPanel ');
-  const card = page.lastIndexOf("{on('sign') && closed && ba.canBill", at);
-  assert.ok(card > 0 && at - card < 2000, 'inside the Billing card, which only billing sees');
+test('the scrub panel renders only on the billing page, never on a clinician screen', () => {
+  // 2026-11-04: billing's tools left the encounter for their own page.
+  const clinical = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.equal(clinical.split('<ClaimScrubPanel ').length - 1, 0, 'no scrub on the clinical page');
+  const billing = fs.readFileSync(path.join(__dirname, '..', 'public', 'billing.html'), 'utf8');
+  assert.equal(billing.split('<ClaimScrubPanel ').length - 1, 1, 'one use, on the billing page');
+  const at = billing.indexOf('<ClaimScrubPanel ');
+  assert.ok(billing.lastIndexOf('const ClaimDetail = (', at) > 0, 'inside the claim view');
 });
 
 // Lift requireCodingQueueReady (and encounterTotalMinutes) out of server.js and

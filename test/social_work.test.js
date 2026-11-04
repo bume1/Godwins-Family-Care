@@ -150,7 +150,9 @@ test('the visit-type picker offers only the types the server says this clinician
   assert.match(server, /canDocument: apptTypes\.canDocumentType\(t\.key, viewerRole\)\.ok/);
   assert.match(server, /noteShape: t\.noteShape \|\| null/);
   assert.match(page, /\.filter\(t => t\.service === svc\.key && t\.canDocument !== false\)/);
-  assert.match(page, /\.filter\(t => t\.canDocument !== false\)\.map\(t => <option/);
+  // (The Document a Visit popup carried a second copy of the picker; it was
+  // folded into the visit screen on 2026-11-04, so the one above is the one.)
+  assert.doesNotMatch(page, /const FollowUpModal = \(/);
   // A social worker never sees the H&P blocks while choosing.
   assert.match(page, /const sectionsOnly = isPhone \|\| isSocialWorker \|\|/);
   // The saved-note editor is told the shape by the server.

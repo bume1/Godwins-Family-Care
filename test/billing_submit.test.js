@@ -199,7 +199,9 @@ test('no place of service reaches a clinician: warnings, the encounter, the bann
 test('the page draws place-of-service and billing controls only for billing', () => {
   assert.match(page, /\{chart\.linked && canBill && <PlaceOfServiceCard patient=\{patient\} \/>\}/);
   assert.match(page, /\{canBill && <BannerFact label="Facility &amp; POS">/);
-  assert.match(page, /on\('sign'\) && closed && ba\.canBill && !awaitingAddendum && \(/, 'the Billing card');
+  // 2026-11-04: on the encounter the Billing card is only a pointer to the
+  // billing page, and only billing sees it.
+  assert.match(page, /\{closed && ba\.canBill && !awaitingAddendum && \(\s*<div className="card mb-4 border-primary-100">/, 'the Billing card');
   assert.match(page, /billingNpiConfigured === false && access\.canSubmitBilling &&/, 'the NPI banner');
   assert.match(page, /canSubmitBilling: !!\(emrStatus && emrStatus\.access && emrStatus\.access\.canSubmitBilling\)/, 'read from the server, not decided here');
   assert.doesNotMatch(page, /Its place of service will follow/, 'attaching a note says nothing about a place of service');

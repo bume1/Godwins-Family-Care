@@ -28,7 +28,8 @@ test('everyone else gets a ? bubble that opens on hover, focus and tap', () => {
 
 test('the save-draft notes are Hints, not always-on paragraphs', () => {
   const phrases = [
-    'stamped with your name and the time — it is <b>not</b> signed',
+    // The "it is not signed" copy went with the Document a Visit popup
+    // (2026-11-04); New Visit opens the visit screen, whose Hint says this:
     'stamped with your name and the time — it does <b>not</b> sign',
     'The original slot stays on the calendar',
     'Saving writes the versioned plan to the client record',
