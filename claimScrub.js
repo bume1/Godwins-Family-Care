@@ -310,6 +310,28 @@ const scrubClaim = (input = {}) => {
       `${upper(line.code)} is the highest level in its family (${fam.label}). Not wrong; worth a second look against the note.`);
   });
 
+  // The derived level (Phase 3). An open LEVEL_AMBIGUOUS flag is the coder's to
+  // work, stated in full: both candidates and what the note does not say. A
+  // billed E/M line that is not the confirmed level is surfaced too. Neither
+  // blocks: the claim releases at the lower level, and a corrected claim can be
+  // filed inside the twelve-month window once the flag is resolved.
+  const der = input.emDerivation;
+  if (der && der.flag && !der.flag.resolvedAt) {
+    const cands = (der.flag.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} minutes)` : `medical decision making (${c.mdm})`}`).join('; ');
+    const absent = (der.flag.absent || []).join(' ');
+    warn('LEVEL_AMBIGUOUS', 'emDerivation', 'E/M level review',
+      `The level is flagged for review. Candidates: ${cands}. Coded at ${der.finalCode}.${absent ? ` ${absent}` : ''}`);
+  }
+  if (der && der.finalCode) {
+    const billedEm = lines.map(l => upper(l.code)).filter(c => emLevels.isEmCode(c));
+    if (billedEm.length && !billedEm.includes(upper(der.finalCode))) {
+      warn('EM_DIFFERS_FROM_DERIVED', 'lines', 'E/M level',
+        `The E/M line billed (${billedEm.join(', ')}) is not the level derived from the clinician's confirmed facts (${der.finalCode}).`);
+    } else if (!billedEm.length && lines.length) {
+      warn('EM_DIFFERS_FROM_DERIVED', 'lines', 'E/M level', `The clinician's confirmed facts derive ${der.finalCode}, and no E/M line is billed.`);
+    }
+  }
+
   const sorted = sortFindings(findings);
   const counts = countFindings(sorted);
   return { phase, findings: sorted, counts, ok: counts.block === 0 };

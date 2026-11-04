@@ -156,6 +156,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   // ICD-10 lookups the claim scrub made through OpenEMR's code search (2026-11-04):
   // a code, whether it exists, its description and its more specific siblings.
   // Codes only, never a patient.
+  // Every confirmation of an encounter's facts and the level derived from them
+  // (AI coding pipeline Phase 3). Append-only audit. Carries quotes from the
+  // note, so it is PHI.
+  { key: 'em_derivations', phi: true, owner: 'em-derivation', note: 'extracted and confirmed facts, derived and final E/M level, who and when' },
   { key: 'icd10_code_lookups', phi: false, owner: 'claim-scrub', note: 'ICD-10 codes as last looked up in OpenEMR, 30-day cache for the claim scrub' },
   { key: 'openemr_facility_snapshot', phi: false, owner: 'billing-split', note: 'facility id/name/POS as last read by admin or manager — the POS source for clinician-created visits' },
   // NCCI/MUE sign-time bundling check. CMS reference data only — never a

@@ -90,6 +90,40 @@ const isHighestInFamily = (code) => {
   return !!f && f.levels[f.levels.length - 1].code === norm(code);
 };
 
+// ---- Lookups for the level derivation (Phase 3). Nothing outside this file
+// names a code or a minute threshold; callers ask by family and MDM level.
+const MDM_ORDER = Object.freeze([MDM.STRAIGHTFORWARD, MDM.LOW, MDM.MODERATE, MDM.HIGH]);
+const mdmRank = (m) => MDM_ORDER.indexOf(m);
+const familyKeyFor = ({ setting, patientStatus }) => {
+  const s = setting === 'office' ? 'office' : setting === 'home' ? 'home' : null;
+  const p = patientStatus === 'new' ? 'new' : patientStatus === 'established' ? 'established' : null;
+  return s && p ? `${s}_${p}` : null;
+};
+const familyByKey = (key) => FAMILIES.find(f => f.key === key) || null;
+// The code a family bills at an MDM level.
+const codeForMdm = (familyKey, mdm) => {
+  const f = familyByKey(familyKey);
+  const l = f && f.levels.find(x => x.mdm === mdm);
+  return l ? l.code : null;
+};
+// The highest level whose time threshold the minutes meet or exceed, or null
+// when they meet none. Thresholds, not ranges (CPT 2024 onward).
+const levelForMinutes = (familyKey, minutes) => {
+  const f = familyByKey(familyKey);
+  const m = Number(minutes);
+  if (!f || !Number.isFinite(m) || m <= 0) return null;
+  const met = f.levels.filter(l => m >= l.minutes);
+  return met.length ? met[met.length - 1] : null;
+};
+// The next level up in the family, for "within five minutes of the next
+// threshold" (3b.5) and for stating what a candidate is below.
+const nextLevelAbove = (code) => {
+  const f = familyOf(code);
+  if (!f) return null;
+  const i = f.levels.findIndex(l => l.code === norm(code));
+  return i >= 0 && i < f.levels.length - 1 ? f.levels[i + 1] : null;
+};
+
 // Whether the table is past its review date. Admin-hub and boot-log only:
 // no clinician or coder ever sees a verification notice (spec §3.1).
 const reviewStatus = (today = new Date().toISOString().slice(0, 10)) => ({
@@ -98,6 +132,7 @@ const reviewStatus = (today = new Date().toISOString().slice(0, 10)) => ({
 });
 
 module.exports = {
-  MDM, FAMILIES, verified, verifiedOn, verifiedAgainst, nextReviewDue,
-  familyOf, levelOf, isEmCode, isHighestInFamily, reviewStatus
+  MDM, MDM_ORDER, FAMILIES, verified, verifiedOn, verifiedAgainst, nextReviewDue,
+  familyOf, levelOf, isEmCode, isHighestInFamily, reviewStatus,
+  mdmRank, familyKeyFor, familyByKey, codeForMdm, levelForMinutes, nextLevelAbove
 };

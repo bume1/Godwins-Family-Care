@@ -73,6 +73,7 @@ const codeCatalog = require('./codeCatalog');
 const claimScrub = require('./claimScrub');       // the claim scrub + documentation gate (AI coding pipeline, Phase 1, 2026-11-04)
 const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
 const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
+const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
@@ -13610,6 +13611,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         canRefreshPos: canBill && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING
       },
       posMissingReason: canBill ? record.posMissingReason || null : undefined,
+      // Phase 3: the derived level. The flag only for billing.
+      emDerivation: emDerivationView(record, canBill),
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
@@ -15321,7 +15324,8 @@ const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, cata
     // the shape checkNcciBundling takes. Passed through unmapped, every claim
     // read as "NCCI data never loaded" (caught by the HTTP probe, 2026-11-04).
     ncci: { ptpEdits: ncci.ncciPtpEdits, mueByCode: ncci.ncciMue, sourceVersion: ncci.ncciSourceVersion },
-    sameDayOtherCodes: sameDayOtherCodesFor(record, allRecords)
+    sameDayOtherCodes: sameDayOtherCodesFor(record, allRecords),
+    emDerivation: record.emDerivation || null
   });
 };
 
@@ -16001,6 +16005,207 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/claim-release', aut
   } catch (error) {
     console.error('Claim release error:', error);
     res.status(502).json({ error: `The release could not complete: ${error.message}` });
+  }
+});
+
+// ── AI coding pipeline, Phase 3: level derivation from confirmed facts ─────
+// (2026-11-04; the decision change is docs/decisions/2026-11-04-ai-assisted-coding.md)
+//
+// The clinician confirms FACTS about her own visit, never a code. Rules
+// (emMdm.js over emLevels.js) then derive the level. Every confirmation is an
+// append-only row in em_derivations: what was extracted, what was confirmed,
+// the derived level, the final level, who, when, and whether the clinician
+// chose the non-default candidate. The LEVEL_AMBIGUOUS flag is the coder's:
+// it is never returned to a clinician, it persists after release, and it is
+// resolved only by billing, with a note.
+const EM_DERIVATIONS = 'em_derivations';
+
+// Confirmed facts, held to the Phase 2 schema. A fact the clinician added has
+// no quote and is marked so; a fact carried from the extraction keeps its
+// quote. The source of each is decided HERE, by comparing against the
+// extraction, never taken from the page.
+const sanitizeConfirmedFacts = (input, extracted) => {
+  const checked = modelEngine.validateAgainstSchema(input || {}, mdmExtraction.MDM_SCHEMA);
+  if (checked.error) return { error: checked.error };
+  const v = checked.value;
+  const out = {};
+  for (const key of mdmExtraction.LIST_KEYS) {
+    const prior = (extracted && Array.isArray(extracted[key])) ? extracted[key] : [];
+    out[key] = (v[key] || []).map(item => {
+      const same = prior.find(p => p && p.quote && item.quote && p.quote === item.quote);
+      const unchanged = same && Object.keys(item).every(k => k === 'quote' || item[k] === same[k]);
+      return { ...item, source: !same ? 'added' : unchanged ? 'extracted' : 'edited', quote: same ? same.quote : null };
+    });
+  }
+  const t = v.time || { statementPresent: false };
+  out.time = { totalMinutes: t.statementPresent && typeof t.totalMinutes === 'number' ? Math.round(t.totalMinutes) : null, statementPresent: !!t.statementPresent };
+  return { facts: out };
+};
+
+// New or established. The visit type says which; an earlier signed GFC visit
+// within three years says otherwise, and then established (the lower family)
+// is used and the conflict is stated for the coder.
+const patientStatusFor = (record, records, attestations) => {
+  const isNewType = ((record.visit || {}).appointmentType) === 'pc_new_patient';
+  if (!isNewType) return { status: 'established', conflict: null };
+  const dos = String(record.date || '').slice(0, 10);
+  const threeYearsBefore = dos ? `${Number(dos.slice(0, 4)) - 3}${dos.slice(4)}` : '';
+  const signed = new Set((attestations || []).filter(a => a && a.signedAt).map(a => String(a.encounterUuid)));
+  const prior = (records || []).find(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+    r.noteStatus !== 'voided' && signed.has(String(r.encounterUuid)) && String(r.date || '') < dos && String(r.date || '') >= threeYearsBefore);
+  if (!prior) return { status: 'new', conflict: null };
+  return { status: 'established', conflict: `This is booked as a new-patient visit, but GFC has a signed visit for this patient on ${String(prior.date).slice(0, 10)}, within three years, so the established-patient family was used.` };
+};
+
+// What each audience sees. A clinician sees the code and how it was reached;
+// billing also sees the flag.
+const emDerivationView = (record, canBill) => {
+  const d = record && record.emDerivation;
+  if (!d) return null;
+  const { flag, ...rest } = d;
+  return canBill ? { ...rest, flag: flag || null } : rest;
+};
+
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const record = ctx.record;
+    if (!record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
+    if (clinicalRepo.isBillingSubmitted(record, ctx.attestation)) {
+      return res.status(409).json({ error: 'This visit was already submitted to billing. Its level is settled there.', code: 'BILLING_SUBMITTED' });
+    }
+    // "Her own visit": once signed, the rendering clinician; before, any
+    // clinician whose credential bills E/M.
+    if (record.renderingProvider && record.renderingProvider.id && ctx.closed && record.renderingProvider.id !== req.user.id) {
+      return res.status(403).json({ error: `These facts are confirmed by the clinician who signed the visit (${record.renderingProvider.name || 'the rendering clinician'}).`, code: 'EM_NOT_YOUR_VISIT' });
+    }
+    const body = req.body || {};
+    const extraction = (await loadAiReviews()).find(r => r && r.id === String(body.extractionId || '') && r.purpose === modelEngine.PURPOSES.MDM_EXTRACTION);
+    if (!extraction || String(extraction.encounterUuid) !== String(ctx.encounterUuid) || String(extraction.clientId) !== String(ctx.client.id)) {
+      return res.status(404).json({ error: 'That fact extraction is not one for this visit.', code: 'EM_NO_EXTRACTION' });
+    }
+    if (extraction.status !== 'done' || !extraction.output) return res.status(409).json({ error: 'The fact extraction has not finished.', code: 'EM_EXTRACTION_NOT_DONE' });
+    const sane = sanitizeConfirmedFacts(body.facts, extraction.output);
+    if (sane.error) return res.status(400).json({ error: `Those facts are not in the expected shape: ${sane.error}`, code: 'EM_FACTS_INVALID' });
+
+    const fam = apptTypes.resolveCodeFamily(record.visit || {});
+    const setting = fam.family && ['home', 'office'].includes(fam.family.key) ? fam.family.key : null;
+    if (!setting) return res.status(409).json({ error: 'This visit is not a home or office E/M visit, so there is no E/M level to derive.', code: 'EM_NO_FAMILY' });
+    const [allRecords, attestations] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+    const ps = patientStatusFor(record, allRecords, attestations);
+    const out = emMdm.deriveLevel({
+      facts: sane.facts, setting, patientStatus: ps.status,
+      chooseTime: !!body.chooseTime, affirmTime: !!body.affirmTime,
+      context: { enteredMinutes: record.totalMinutes || null, statusConflict: ps.conflict }
+    });
+    if (out.error) return res.status(409).json({ error: out.error, code: out.code });
+    // The credential that bills E/M. An LCSW's or RN's confirmation derives
+    // nothing a claim could carry.
+    if (clinicalRoles.disallowedServiceCodesFor(req.user, [{ code: out.finalCode }]).length) {
+      return res.status(403).json({ error: 'Your clinical credential does not bill E/M, so no E/M level is derived for your confirmation.', code: 'EM_CREDENTIAL' });
+    }
+    const at = new Date().toISOString();
+    const by = clinicalRepo.actorRecord(ctx.actor);
+    const event = {
+      id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, at, by,
+      extractionId: extraction.id, extractedFacts: extraction.output, confirmedFacts: sane.facts,
+      patientStatus: ps.status, setting, derivation: out,
+      derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override
+    };
+    await db.set(EM_DERIVATIONS, [...(await loadRows(EM_DERIVATIONS)), event]);
+    const summary = {
+      eventId: event.id, at, by, extractionId: extraction.id,
+      familyLabel: out.familyLabel, elements: out.elements, mdm: out.mdm, time: out.time,
+      candidates: out.candidates, defaultCode: out.defaultCode, finalCode: out.finalCode,
+      finalBasis: out.finalBasis, override: out.override, explanation: out.explanation,
+      flag: out.flag ? { ...out.flag, raisedAt: at, resolvedAt: null, resolvedBy: null, resolution: null } : null
+    };
+    await saveBillingRecord(ctx.rows, { ...record, emDerivation: summary, updatedAt: at });
+    // Codes and whether the default was overridden. Never a fact or a quote.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'em_level_derived', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override, flagged: !!out.flag
+    });
+    // The clinician's view: the code and how it was reached. Never the flag.
+    res.json({ message: 'Confirmed.', emDerivation: emDerivationView({ emDerivation: summary }, false) });
+  } catch (error) {
+    console.error('E/M derivation error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The coder resolves a LEVEL_AMBIGUOUS flag, with a note. The flag stays on
+// the record, resolved, so the history of the claim reads true.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation/flag/resolve', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const d = ctx.record && ctx.record.emDerivation;
+    if (!d || !d.flag) return res.status(404).json({ error: 'This visit has no level review flag.', code: 'EM_NO_FLAG' });
+    if (d.flag.resolvedAt) return res.status(409).json({ error: `Already resolved ${d.flag.resolvedAt}.`, code: 'EM_FLAG_RESOLVED' });
+    const note = String((req.body || {}).resolution || '').trim();
+    if (note.length < 3) return res.status(400).json({ error: 'Say how the flag was resolved.', code: 'EM_FLAG_NOTE_REQUIRED' });
+    const at = new Date().toISOString();
+    const flag = { ...d.flag, resolvedAt: at, resolvedBy: clinicalRepo.actorRecord(ctx.actor), resolution: note.slice(0, 1000) };
+    await saveBillingRecord(ctx.rows, { ...ctx.record, emDerivation: { ...d, flag }, updatedAt: at });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'em_level_flag_resolved', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    res.json({ message: 'Resolved.', flag });
+  } catch (error) {
+    console.error('E/M flag resolve error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── 3.6: E/M level distribution per clinician, this month against last ─────
+// A shift upward is the first thing an auditor looks at, and it is also the
+// detector that catches a wrong level table before a payer does. The flag rate
+// is counted beside it: a rising rate is a documentation problem.
+const monthOf = (d) => String(d || '').slice(0, 7);
+const priorMonth = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+};
+const emDistribution = (records, month) => {
+  const prev = priorMonth(month);
+  const byClinician = new Map();
+  const row = (rp) => {
+    const key = (rp && rp.id) || 'unknown';
+    if (!byClinician.has(key)) byClinician.set(key, { clinicianId: key, clinician: (rp && rp.name) || 'Unknown', months: { [month]: {}, [prev]: {} }, encounters: { [month]: 0, [prev]: 0 }, flagged: { [month]: 0, [prev]: 0 } });
+    return byClinician.get(key);
+  };
+  for (const r of records || []) {
+    if (!r || r.noteStatus === 'voided') continue;
+    const ym = monthOf(r.date);
+    if (ym !== month && ym !== prev) continue;
+    const em = (r.services || []).filter(s => emLevels.isEmCode(s.code));
+    if (!em.length && !(r.emDerivation)) continue;
+    const c = row(r.renderingProvider);
+    c.encounters[ym]++;
+    for (const s of em) c.months[ym][s.code] = (c.months[ym][s.code] || 0) + 1;
+    if (r.emDerivation && r.emDerivation.flag) c.flagged[ym]++;
+  }
+  return {
+    month, priorMonth: prev,
+    clinicians: [...byClinician.values()].map(c => ({
+      ...c,
+      flagRate: { [month]: c.encounters[month] ? c.flagged[month] / c.encounters[month] : null, [prev]: c.encounters[prev] ? c.flagged[prev] / c.encounters[prev] : null },
+      // Share of each month's E/M lines at the highest level of a family.
+      highestShare: Object.fromEntries([month, prev].map(m => {
+        const total = Object.values(c.months[m]).reduce((a, b) => a + b, 0);
+        const top = Object.entries(c.months[m]).filter(([code]) => emLevels.isHighestInFamily(code)).reduce((a, [, n]) => a + n, 0);
+        return [m, total ? top / total : null];
+      }))
+    }))
+  };
+};
+app.get('/api/clinical/reports/em-distribution', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const month = /^\d{4}-\d{2}$/.test(String(req.query.month || '')) ? String(req.query.month) : practiceToday().slice(0, 7);
+    res.json(emDistribution(await loadRows('encounter_billing'), month));
+  } catch (error) {
+    console.error('E/M distribution error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -18709,7 +18914,7 @@ app.get('/api/clinical/patients/:clientId/calls/:callId/note', authenticateToken
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'level_flags', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
     let emrRows = null; let emrError = null;
     if (openemr.isConfigured()) {
@@ -18785,13 +18990,23 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         held = inQueue.filter(r => r.holdState !== 'released');
       }
     }
+    // Phase 3: every encounter with an open LEVEL_AMBIGUOUS flag, released or
+    // not. The flag lives in the coder's queue until a coder resolves it.
+    const levelFlags = canBill ? rows.filter(r => {
+      const rec = recByUuid.get(String(r.encounterUuid));
+      return rec && !voided.has(String(r.encounterUuid)) && rec.emDerivation && rec.emDerivation.flag && !rec.emDerivation.flag.resolvedAt;
+    }).map(r => { r.levelFlag = true; return r; }) : [];
+    if (filter === 'level_flags') {
+      filtered.length = 0;
+      filtered.push(...levelFlags.sort((a, b) => String(a.date || '').localeCompare(String(b.date || ''))));
+    }
     if (filter === 'held') {
       filtered.length = 0;
       filtered.push(...held.sort((a, b) => (b.scrub.block - a.scrub.block) || String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))));
     }
     const zeroFee = rows.filter(r => !voided.has(String(r.encounterUuid)) && r.zeroFeeCharges && r.zeroFeeCharges.length)
       .map(r => ({ encounterUuid: r.encounterUuid, clientId: r.clientId, patientName: r.patientName, date: r.date, codes: r.zeroFeeCharges.map(c => c.code) }));
-    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
+    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length, level_flags: levelFlags.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });

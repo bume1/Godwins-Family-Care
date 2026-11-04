@@ -635,6 +635,56 @@ const HP_NOTE = {
   r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.fnp, {});
   check('with Gemini not configured it is refused, naming the blockers', r.status === 503 && r.body.code === 'MODEL_BOUNDARY_REFUSED' && Array.isArray(r.body.blockers) && r.body.blockers.length > 0, r.body);
   check('and the refusal wrote no row and no pointer', rows('ai_reviews').length === aiBefore && !record(bv).latestMdmExtractionId);
+  console.log('\n── 13e. Phase 3: the clinician confirms facts, rules derive the level (2026-11-04) ──');
+  r = await call('POST', `${B}/notes`, tok.fnp, { note: { kind: 'followup', chiefConcern: 'BP recheck', assessment: 'HTN worsening', plan: 'Stop lisinopril. Total time 65 minutes.' } });
+  const lvx = r.body && r.body.encounterUuid;
+  check('a visit to derive a level for', r.status === 200 && !!lvx, r.body);
+  r = await call('PUT', `${B}/encounters/${lvx}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+  // A finished extraction, exactly as the Phase 2 job stores it (no Gemini here).
+  const exId = 'aimdm_probe_1';
+  STORE.set('ai_reviews', rows('ai_reviews').concat([{ id: exId, clientId: BILLPATIENT.id, encounterUuid: lvx, purpose: 'mdm_extraction', status: 'done', at: new Date().toISOString(),
+    output: { problemsAddressed: [{ description: 'Hypertension', status: 'worsening', management: 'medication', quote: 'HTN worsening', quoteVerified: true }],
+      dataReviewed: [], risk: [{ factor: 'prescription_management', detail: 'Stopped lisinopril', quote: 'Stop lisinopril.', quoteVerified: true }],
+      time: { totalMinutes: 65, statementPresent: true, quote: 'Total time 65 minutes.', quoteVerified: true }, unreadable: [] } }]));
+  const confirmed = { problemsAddressed: [{ description: 'Hypertension', status: 'worsening', management: 'medication', quote: 'HTN worsening' }],
+    dataReviewed: [], risk: [{ factor: 'prescription_management', detail: 'Stopped lisinopril', quote: 'Stop lisinopril.' }], time: { statementPresent: true, totalMinutes: 65 } };
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.mgr, { extractionId: exId, facts: confirmed });
+  check('confirming facts needs clinical write access', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: 'nope', facts: confirmed });
+  check('an extraction from another visit is refused', r.status === 404 && r.body.code === 'EM_NO_EXTRACTION', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed });
+  const der = r.body && r.body.emDerivation;
+  check('the FNP confirms; MDM moderate gives the lower level by default', r.status === 200 && der && der.finalCode === '99349' && der.defaultCode === '99349' && /reached from medical decision making, which was moderate/.test(der.explanation), r.body);
+  check('both candidates are presented to her', der && der.candidates.map(c => `${c.basis}:${c.code}`).join(',') === 'mdm:99349,time:99350', der && der.candidates);
+  check('SHE IS NEVER SHOWN THE FLAG', der && !('flag' in der), der);
+  check('but it is on the record, for the coder', record(lvx).emDerivation.flag && record(lvx).emDerivation.flag.code === 'LEVEL_AMBIGUOUS');
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed, chooseTime: true });
+  check('choosing the time level without affirming it is refused', r.status === 409 && r.body.code === 'EM_TIME_NOT_AFFIRMED', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed, chooseTime: true, affirmTime: true });
+  check('affirmed, the time level is chosen and recorded as an override', r.status === 200 && r.body.emDerivation.finalCode === '99350' && r.body.emDerivation.override === true, r.body);
+  const evs = rows('em_derivations').filter(e => e.encounterUuid === lvx);
+  check('every confirmation is an audit row: extracted, confirmed, derived, final, who, override', evs.length === 2 && evs[1].derivedCode === '99349' && evs[1].finalCode === '99350' && evs[1].override === true && evs[1].by.id === FNP.id && evs[1].extractedFacts && evs[1].confirmedFacts, evs);
+  r = await call('GET', `${B}/encounters/${lvx}`, tok.fnp);
+  check('her encounter view carries the level and no flag', r.status === 200 && r.body.emDerivation && r.body.emDerivation.finalCode === '99350' && !('flag' in r.body.emDerivation), r.body && r.body.emDerivation);
+  r = await call('GET', `${B}/encounters/${lvx}`, tok.mgr);
+  check('billing\'s view carries the flag and its absences', r.body.emDerivation && r.body.emDerivation.flag && r.body.emDerivation.flag.candidates.length === 2, r.body && r.body.emDerivation);
+  r = await call('GET', '/api/clinical/encounters/queue?state=level_flags', tok.mgr);
+  check('the coder\'s Level Review lists it', r.status === 200 && (r.body.encounters || []).some(e => e.encounterUuid === lvx && e.levelFlag), r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.fnp, { resolution: 'ok' });
+  check('a clinician cannot resolve the flag', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.mgr, { resolution: '' });
+  check('resolving needs a note', r.status === 400 && r.body.code === 'EM_FLAG_NOTE_REQUIRED', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.mgr, { resolution: 'Time statement confirmed against the note.' });
+  check('billing resolves it; it stays on the record, resolved', r.status === 200 && record(lvx).emDerivation.flag.resolvedAt && record(lvx).emDerivation.flag.resolvedBy.id === MGR.id);
+  r = await call('GET', '/api/clinical/encounters/queue?state=level_flags', tok.mgr);
+  check('a resolved flag leaves Level Review', !(r.body.encounters || []).some(e => e.encounterUuid === lvx));
+  r = await call('GET', '/api/clinical/reports/em-distribution', tok.fnp);
+  check('the distribution report is billing\'s', r.status === 403, r.body);
+  r = await call('GET', `/api/clinical/reports/em-distribution?month=${new Date().toISOString().slice(0, 7)}`, tok.mgr);
+  check('billing reads it, per clinician, against last month', r.status === 200 && Array.isArray(r.body.clinicians) && !!r.body.priorMonth, r.body);
+  const derLog = rows('activity_log').filter(a => a.action === 'em_level_derived');
+  check('the activity log carries codes, never a fact or a quote', derLog.length >= 2 && !JSON.stringify(derLog).includes('lisinopril'), derLog);
+
   r = await call('GET', '/api/clinical/encounters/queue?state=held', tok.mgr);
   check('a released claim leaves the hold queue', r.status === 200 && !(r.body.encounters || []).some(e => e.encounterUuid === bv), r.body);
 

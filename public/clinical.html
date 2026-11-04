@@ -420,6 +420,11 @@
       clinicianAddendum: (id, euuid, text, totalMinutes) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-sign`, { method: 'POST', body: JSON.stringify({ attest: true, text, ...(String(totalMinutes || '').trim() ? { totalMinutes: String(totalMinutes).trim() } : {}) }) }),
       // The claim scrub (2026-11-04). Billing's screens only.
       claimScrub: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/claim-scrub`),
+      // Phases 2 and 3: facts from the note, then the level from confirmed facts.
+      extractMdm: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/ai/extract-mdm`, { method: 'POST', body: '{}' }),
+      emDerive: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation`, { method: 'POST', body: JSON.stringify(body) }),
+      resolveEmFlag: (id, euuid, resolution) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation/flag/resolve`, { method: 'POST', body: JSON.stringify({ resolution }) }),
+      emDistribution: (month) => authedFetch(`/api/clinical/reports/em-distribution${month ? `?month=${encodeURIComponent(month)}` : ''}`),
       claimRelease: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/claim-release`, { method: 'POST', body: JSON.stringify(body || {}) }),
       billingSubmit: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/billing-submit`, { method: 'POST', body: JSON.stringify(body) }),
       refreshPos: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/pos/refresh`, { method: 'POST', body: '{}' }),
@@ -8308,6 +8313,213 @@
       );
     };
 
+    // ── Phase 3: the clinician confirms FACTS, never a code (2026-11-04) ──
+    // AI reads the note into facts (Phase 2); the clinician confirms, corrects
+    // or adds them; rules derive the level. The code appears only after
+    // confirmation, with a sentence saying how it was reached. No dollar
+    // amount anywhere. The draft notice is always shown in full while the AI
+    // output is on screen (Gemini spec standing requirement).
+    const MDM_STATUS_LABELS = Object.freeze({
+      stable: 'Stable chronic illness', worsening: 'Chronic illness, worsening (exacerbation, progression or side effects)',
+      new: 'New problem', resolved: 'Resolved, or self-limited or minor', unclear: 'Unclear'
+    });
+    const MDM_MANAGEMENT_LABELS = Object.freeze({ observation: 'Observation', medication: 'Medication', referral: 'Referral', testing: 'Testing', procedure: 'Procedure', other: 'Other' });
+    const MDM_DATA_LABELS = Object.freeze({
+      lab: 'Lab result reviewed or ordered', imaging: 'Imaging reviewed or ordered', outside_record: 'Outside record reviewed',
+      prior_note: 'Prior GFC note reviewed', independent_historian: 'Independent historian', discussion_with_clinician: 'Discussion with another clinician',
+      test_interpretation: 'Independent interpretation of a test'
+    });
+    const MDM_RISK_LABELS = Object.freeze({
+      prescription_management: 'Prescription drug management', decision_re_hospitalization: 'Decision about hospitalization',
+      decision_re_surgery: 'Decision about surgery', drug_therapy_monitoring: 'Drug therapy needing intensive monitoring for toxicity',
+      social_determinants: 'Care limited by social determinants of health', otc_management: 'Over-the-counter drug management', other: 'Other'
+    });
+    const FactQuote = ({ item }) => item.quote
+      ? <div className="text-[11px] text-stone-500 italic mt-0.5">“{item.quote}”{item.quoteVerified === false ? ' (from an attached document, not checked against the note)' : ''}</div>
+      : <div className="text-[11px] text-stone-400 mt-0.5">Added by you</div>;
+    const FactSelect = ({ value, labels, onChange }) => (
+      <select className="inp !py-1 text-xs" value={value} onChange={e => onChange(e.target.value)}>
+        {Object.entries(labels).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+    );
+    const VisitFactsPanel = ({ patientId, euuid, derivation, onChanged }) => {
+      const [run, setRun] = useState(null);       // the latest extraction for this visit
+      const [facts, setFacts] = useState(null);   // what the clinician is confirming
+      const [result, setResult] = useState(derivation || null);
+      const [busy, setBusy] = useState('');
+      const [err, setErr] = useState('');
+      const [affirm, setAffirm] = useState(false);
+      const adopt = (rv) => {
+        setRun(rv);
+        if (rv && rv.status === 'done' && rv.output) {
+          const o = rv.output;
+          setFacts({
+            problemsAddressed: (o.problemsAddressed || []).map(x => ({ ...x })), dataReviewed: (o.dataReviewed || []).map(x => ({ ...x })),
+            risk: (o.risk || []).map(x => ({ ...x })),
+            time: { statementPresent: !!(o.time && o.time.statementPresent), totalMinutes: o.time && o.time.totalMinutes != null ? String(o.time.totalMinutes) : '', quote: o.time && o.time.quote }
+          });
+        }
+      };
+      const findLatest = () => api.aiReviews(patientId).then(r => {
+        const mine = (r.reviews || []).filter(x => x.purpose === 'mdm_extraction' && x.encounterUuid === euuid);
+        return mine.length ? api.aiReview(patientId, mine[0].id).then(x => adopt(x.review)) : null;
+      }).catch(e => setErr(e.message));
+      useEffect(() => { findLatest(); }, [patientId, euuid]);
+      useEffect(() => {
+        if (!run || run.status !== 'running') return undefined;
+        const t = setInterval(() => { api.aiReview(patientId, run.id).then(x => { if (x.review.status !== 'running') adopt(x.review); }).catch(() => {}); }, 4000);
+        return () => clearInterval(t);
+      }, [run && run.id, run && run.status]);
+      const start = () => {
+        setBusy('read'); setErr('');
+        api.extractMdm(patientId, euuid).then(r => setRun({ id: r.reviewId, status: r.status })).catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      const setItem = (key, i, patch) => setFacts(f => ({ ...f, [key]: f[key].map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+      const dropItem = (key, i) => setFacts(f => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }));
+      const addItem = (key, blank) => setFacts(f => ({ ...f, [key]: [...f[key], blank] }));
+      const payload = () => ({
+        problemsAddressed: facts.problemsAddressed.filter(x => String(x.description || '').trim()).map(({ description, status, management, quote }) => ({ description, status, management, ...(quote ? { quote } : {}) })),
+        dataReviewed: facts.dataReviewed.filter(x => String(x.detail || '').trim()).map(({ kind, detail, quote }) => ({ kind, detail, ...(quote ? { quote } : {}) })),
+        risk: facts.risk.filter(x => String(x.detail || '').trim()).map(({ factor, detail, quote }) => ({ factor, detail, ...(quote ? { quote } : {}) })),
+        time: facts.time.statementPresent && /^\d+$/.test(String(facts.time.totalMinutes)) ? { statementPresent: true, totalMinutes: Number(facts.time.totalMinutes) } : { statementPresent: false }
+      });
+      const confirm = (extra) => {
+        setBusy('confirm'); setErr('');
+        api.emDerive(patientId, euuid, { extractionId: run.id, facts: payload(), ...(extra || {}) })
+          .then(r => { setResult(r.emDerivation); setAffirm(false); onChanged && onChanged(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      const timeCand = result && (result.candidates || []).find(c => c.basis === 'time');
+      const canChooseTime = result && timeCand && result.finalBasis !== 'time' && result.candidates.findIndex(c => c === timeCand) > -1 &&
+        timeCand.code !== result.defaultCode && result.time && result.time.statementPresent;
+      return (
+        <div className="card mb-4">
+          <div className="card-h"><h2><i className="ti ti-list-check mr-1 text-accent" />Visit Facts</h2></div>
+          <div className="p-4 grid gap-3 text-sm">
+            <p className="text-xs text-stone-600">Confirm the facts of your visit: the problems you addressed, the data you reviewed, the risk, and the time. The level is worked out from what you confirm.</p>
+            {!run && <button className="btn w-fit" disabled={!!busy} onClick={start}><i className="ti ti-sparkles" />{busy === 'read' ? 'Starting…' : 'Read My Note'}</button>}
+            {run && run.status === 'running' && <p className="text-xs text-stone-500">Reading your note…</p>}
+            {run && run.status === 'failed' && <p className="text-xs text-red-600">The note could not be read{run.error ? `: ${run.error}` : ''}. <button className="underline" onClick={start}>Try again</button></p>}
+            {facts && (
+              <>
+                <div className="border-2 border-amber-400 bg-amber-50 rounded-lg p-2.5 text-[12.5px] text-amber-900">
+                  <b>Drafted by AI from your note.</b> Unverified and not saved to the chart. Confirm, correct or remove each fact, and add anything it missed.
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Problems addressed</b>
+                  {facts.problemsAddressed.map((x, i) => (
+                    <div key={`p${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <input className="inp !py-1 text-xs" value={x.description || ''} onChange={e => setItem('problemsAddressed', i, { description: e.target.value })} placeholder="Problem" />
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.status} labels={MDM_STATUS_LABELS} onChange={v => setItem('problemsAddressed', i, { status: v })} />
+                        <FactSelect value={x.management} labels={MDM_MANAGEMENT_LABELS} onChange={v => setItem('problemsAddressed', i, { management: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('problemsAddressed', i)}>Remove</button>
+                      </div>
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('problemsAddressed', { description: '', status: 'stable', management: 'observation' })}><i className="ti ti-plus" />Add Problem</button>
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Data reviewed</b>
+                  {facts.dataReviewed.map((x, i) => (
+                    <div key={`d${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.kind} labels={MDM_DATA_LABELS} onChange={v => setItem('dataReviewed', i, { kind: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('dataReviewed', i)}>Remove</button>
+                      </div>
+                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('dataReviewed', i, { detail: e.target.value })} placeholder="What was reviewed" />
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('dataReviewed', { kind: 'lab', detail: '' })}><i className="ti ti-plus" />Add Data</button>
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Risk</b>
+                  {facts.risk.map((x, i) => (
+                    <div key={`r${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.factor} labels={MDM_RISK_LABELS} onChange={v => setItem('risk', i, { factor: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('risk', i)}>Remove</button>
+                      </div>
+                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('risk', i, { detail: e.target.value })} placeholder="What it was" />
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('risk', { factor: 'prescription_management', detail: '' })}><i className="ti ti-plus" />Add Risk</button>
+                </div>
+                <div className="grid gap-1">
+                  <b className="text-primary text-[13px]">Time</b>
+                  <label className="flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={facts.time.statementPresent} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, statementPresent: e.target.checked } }))} />
+                    <span>The note states a total time for this date</span>
+                  </label>
+                  {facts.time.statementPresent && <input className="inp w-32 !py-1 text-xs" inputMode="numeric" value={facts.time.totalMinutes} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, totalMinutes: e.target.value.replace(/[^0-9]/g, '').slice(0, 4) } }))} placeholder="Minutes" />}
+                  {facts.time.quote && <div className="text-[11px] text-stone-500 italic">“{facts.time.quote}”</div>}
+                </div>
+                <button className="btn gold w-fit" disabled={!!busy} onClick={() => confirm()}><i className="ti ti-check" />{busy === 'confirm' ? 'Confirming…' : 'Confirm Facts'}</button>
+              </>
+            )}
+            {result && (
+              <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-2.5 grid gap-1.5">
+                <div className="text-[13px] text-emerald-900"><b>{result.finalCode}</b>, confirmed {fmtTs(result.at)}{result.by ? ` by ${result.by.name}` : ''}.</div>
+                <div className="text-[12px] text-emerald-900">{result.explanation}</div>
+                {canChooseTime && (
+                  <div className="grid gap-1.5 border-t border-emerald-200 pt-1.5">
+                    <div className="text-[12px] text-stone-700">Your note also states {result.time.minutes} minutes, which supports {timeCand.code} by time. The lower of the two is used unless you choose time.</div>
+                    <label className="flex items-start gap-2 text-xs">
+                      <input type="checkbox" className="mt-0.5" checked={affirm} onChange={e => setAffirm(e.target.checked)} />
+                      <span>I affirm I spent a total of {result.time.minutes} minutes on this patient's care on this date.</span>
+                    </label>
+                    <button className="btn w-fit" disabled={!affirm || !!busy || !facts} onClick={() => confirm({ chooseTime: true, affirmTime: true })}>Use the Time-Based Level</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {err && <p className="text-xs text-red-600">{err}</p>}
+          </div>
+        </div>
+      );
+    };
+
+    // Billing's view of the derived level: what the clinician confirmed, both
+    // candidates, and the coder's flag with the evidence that was absent. The
+    // flag is resolved here, with a note, and stays on the record resolved.
+    const BillingLevelPanel = ({ patientId, euuid, derivation, onChanged }) => {
+      const [note, setNote] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      if (!derivation) return <p className="text-xs text-stone-500">The clinician has not confirmed the visit facts, so no E/M level has been derived.</p>;
+      const f = derivation.flag;
+      const resolve = () => { setBusy(true); setErr(''); api.resolveEmFlag(patientId, euuid, note).then(() => { setNote(''); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+      return (
+        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
+          <b className="text-primary text-[13px]"><i className="ti ti-stairs mr-1" />Derived E/M level: {derivation.finalCode}</b>
+          <div className="text-stone-600">{derivation.explanation}</div>
+          <div className="text-stone-600">Candidates: {(derivation.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} min)` : `MDM (${c.mdm})`}`).join(' · ')}. Default {derivation.defaultCode}{derivation.override ? `; the clinician chose ${derivation.finalCode} by time and affirmed it` : ''}.</div>
+          {f && (
+            <div className={`rounded px-2 py-1.5 border-l-2 ${f.resolvedAt ? 'border-stone-300 bg-stone-50' : 'border-amber-400 bg-amber-50'}`}>
+              <b className={f.resolvedAt ? 'text-stone-700' : 'text-amber-900'}>Level review {f.resolvedAt ? `resolved ${fmtTs(f.resolvedAt)}${f.resolvedBy ? ` by ${f.resolvedBy.name}` : ''}` : 'open'}</b>
+              {(f.absent || []).map((a, i) => <div key={i} className="text-stone-700">{a}</div>)}
+              {(f.elements || []).map(e => (
+                <div key={e.element} className="mt-1"><b className="text-stone-700">{e.element === 'problems' ? 'Problems' : e.element === 'data' ? 'Data' : 'Risk'}: {e.level}</b>
+                  {(e.facts || []).map((x, i) => <div key={i} className="text-stone-600">{x.description || x.detail}{x.quote ? <i> — “{x.quote}”</i> : <i> — added by the clinician</i>}</div>)}
+                </div>
+              ))}
+              {f.resolvedAt && <div className="text-stone-600 mt-1">{f.resolution}</div>}
+              {!f.resolvedAt && (
+                <div className="grid gap-1.5 mt-1.5">
+                  <input className="inp" value={note} maxLength={1000} onChange={e => setNote(e.target.value)} placeholder="How it was resolved" />
+                  <button className="btn w-fit" disabled={busy || note.trim().length < 3} onClick={resolve}>Resolve Flag</button>
+                </div>
+              )}
+            </div>
+          )}
+          {err && <p className="text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
     // ── The claim scrub, billing's review surface (2026-11-04) ──
     // EVERY finding, in full: blockers first, then warnings, each naming the
     // field it concerns and what is wrong. Nothing is collapsed behind a count;
@@ -9007,6 +9219,13 @@
             </div>
           )}
 
+          {/* Phase 3: the clinician confirms the facts of her visit; the level is
+              derived from them. Not for an author signer (RN, LMSW), and gone
+              once billing has submitted. */}
+          {on('sign') && canWrite && !na.signsAsAuthor && !['billed', 'no_charge'].includes(d.billingStatus) && (
+            <VisitFactsPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
+          )}
+
           {/* BILLING (owner, 2026-09-29): an admin or a manager finishes the
               codes on a signed visit and submits it. The only place a place of
               service is shown or changed; a clinician never sees this card. */}
@@ -9027,6 +9246,7 @@
                   )}
                 </div>
                 {d.posMissingReason && !d.encounter.posCode && <p className="text-[11px] text-amber-700">{d.posMissingReason}</p>}
+                <BillingLevelPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
                 {(d.billingStatus === 'awaiting_billing' || d.billingStatus === 'billed') &&
                   <ClaimScrubPanel patientId={patient.id} euuid={euuid} refreshKey={`${d.billingStatus}|${(d.record && d.record.updatedAt) || ''}`} />}
                 {d.billingStatus === 'awaiting_billing' && <>
@@ -9236,6 +9456,31 @@
       );
     };
 
+    // 3.6: E/M level distribution per clinician, this month against last, with
+    // the level-review flag rate beside it. Billing only (the queue shows it on
+    // the Hold Queue tab, which only billing has).
+    const EmDistributionCard = () => {
+      const [r, setR] = useState(null); const [err, setErr] = useState('');
+      useEffect(() => { api.emDistribution().then(setR).catch(e => setErr(e.message)); }, []);
+      if (err) return <div className="card p-3 text-xs text-red-600 mb-3">E/M distribution could not load: {err}</div>;
+      if (!r) return null;
+      const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+      const codes = (m) => Object.entries(m || {}).sort(([a], [b]) => a.localeCompare(b)).map(([c, n]) => `${c} × ${n}`).join(', ') || 'none';
+      return (
+        <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
+          <b className="text-primary">E/M level distribution, {r.month} against {r.priorMonth}</b>
+          {!r.clinicians.length && <div className="text-stone-500 mt-1">No E/M visits in either month.</div>}
+          {r.clinicians.map(c => (
+            <div key={c.clinicianId} className="mt-1.5 border-t border-stone-100 pt-1.5">
+              <b>{c.clinician}</b>
+              <div>{r.month}: {codes(c.months[r.month])} · top level {pct(c.highestShare[r.month])} · flagged {pct(c.flagRate[r.month])}</div>
+              <div className="text-stone-500">{r.priorMonth}: {codes(c.months[r.priorMonth])} · top level {pct(c.highestShare[r.priorMonth])} · flagged {pct(c.flagRate[r.priorMonth])}</div>
+            </div>
+          ))}
+        </div>
+      );
+    };
+
     // Staff coding queue (spec §2.6): every encounter that isn't coded/signed.
     const CodingQueueView = ({ onOpenEncounter }) => {
       const [filter, setFilter] = useState('open');
@@ -9246,7 +9491,7 @@
         <div className="p-4 lg:p-7">
           <SettingsCard />
           <div className="flex gap-2 mb-4 overflow-x-auto">
-            {[['open', 'Open'], ['not_coded', 'Not Coded'], ['coded', 'Coded, Unsigned'], ['awaiting_billing', 'Awaiting Billing'], ...(data && data.held ? [['held', 'Hold Queue']] : (filter === 'held' ? [['held', 'Hold Queue']] : [])), ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
+            {[['open', 'Open'], ['not_coded', 'Not Coded'], ['coded', 'Coded, Unsigned'], ['awaiting_billing', 'Awaiting Billing'], ...(data && data.held ? [['held', 'Hold Queue'], ['level_flags', 'Level Review']] : (['held', 'level_flags'].includes(filter) ? [['held', 'Hold Queue'], ['level_flags', 'Level Review']] : [])), ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
               <button key={k} onClick={() => setFilter(k)}
                 className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${filter === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>
                 {l}{data && data.counts && k in data.counts ? <span className="ml-1.5 opacity-80">{data.counts[k]}</span> : null}
@@ -9275,6 +9520,12 @@
               <div className="text-[11.5px] text-stone-500 mt-1">Most blockers first. Open an encounter to read every finding and check it live against OpenEMR.</div>
             </div>
           )}
+          {data && filter === 'level_flags' && (
+            <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
+              <b className="text-primary">Level review</b>: every visit whose E/M level is flagged, released or not. Each coded at the lower level; open one to read both candidates and what the note does not say, then resolve it.
+            </div>
+          )}
+          {data && data.held && filter === 'held' && <EmDistributionCard />}
           {data && data.degraded && <div className="card !bg-amber-50 border-amber-200 p-3 text-[12.5px] text-amber-800 mb-3">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''}. Showing encounters the app has recorded.</div>}
           <div className="card overflow-hidden">
             {!err && !data && <p className="text-sm text-stone-500 px-5 py-6">Loading encounters from OpenEMR…</p>}
@@ -9293,6 +9544,7 @@
                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${e.scrub.warn ? 'bg-amber-100 text-amber-900' : 'bg-stone-100 text-stone-600'}`}>{e.scrub.warn} warning{e.scrub.warn === 1 ? '' : 's'}</span>
                   {e.holdState === 'held' && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 whitespace-nowrap">Held</span>}
                 </>}
+                {e.levelFlag && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 whitespace-nowrap">Level review</span>}
                 <EncStateChip state={e.state} />
                 <i className="ti ti-chevron-right text-stone-300" />
               </button>
