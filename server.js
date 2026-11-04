@@ -70,6 +70,9 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
 const codeCatalog = require('./codeCatalog');
+const claimScrub = require('./claimScrub');       // the claim scrub + documentation gate (AI coding pipeline, Phase 1, 2026-11-04)
+const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
+const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
@@ -10762,7 +10765,9 @@ const appointmentSetupGap = (fields) => {
 // visit a clinician creates takes its POS from this copy instead of failing
 // into "this patient has no facility" (the owner report that started this).
 const FACILITY_SNAPSHOT_KEY = 'openemr_facility_snapshot';
-const FACILITY_SNAPSHOT_FIELDS = ['id', 'name', 'pos_code', 'service_location', 'billing_location', 'primary_business_entity', 'city', 'state'];
+// facility_npi, federal_ein and facility_taxonomy are what the claim scrub
+// checks on the billing facility (2026-11-04). Organisation identifiers, not PHI.
+const FACILITY_SNAPSHOT_FIELDS = ['id', 'name', 'pos_code', 'service_location', 'billing_location', 'primary_business_entity', 'city', 'state', 'facility_npi', 'federal_ein', 'facility_taxonomy'];
 const saveFacilitySnapshot = async (rows, user) => {
   const facilities = (rows || []).map(f => {
     const out = {};
@@ -13550,7 +13555,11 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
+    // The total time the documentation gate will read (2026-11-04): what was
+    // entered at signing, else the visit's recorded start and end.
+    const totalTime = await encounterTotalMinutes(record);
     res.json({
+      totalTime,
       encounter: emrRow ? {
         uuid: encounterUuid, eid: emrRow.eid != null ? String(emrRow.eid) : record.encounterEid, date: String(emrRow.date || '').slice(0, 10),
         reason: emrRow.reason, billingNote: emrRow.billing_note || null, providerId: emrRow.provider_id != null ? String(emrRow.provider_id) : null,
@@ -15177,6 +15186,224 @@ app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, 
   }
 });
 
+// ── CLAIM SCRUB AND DOCUMENTATION GATE (AI coding pipeline, Phase 1, 2026-11-04) ──
+// The rules are claimScrub.js (pure). This block loads what they read: the
+// billing facility's NPI/EIN/taxonomy from the facility snapshot, the
+// encounter's facility and place of service from OpenEMR, the ICD-10 lookups,
+// the code catalog, the NCCI tables and the patient's primary payer.
+//
+// A scrub finding is BILLING's to read. Every route here is behind
+// requireBilling; nothing here reaches a clinician's screen. The one gate a
+// clinician meets is the documentation gate, and it names only what they can
+// fix while standing there: the time, a diagnosis, the note.
+
+// ICD-10 lookups, cached. Codes only, never a patient: { [code]: { exists,
+// description, unspecified, moreSpecific, checkedAt } }. OpenEMR's set is
+// reissued every October, so an answer older than 30 days is asked again.
+const ICD10_LOOKUPS_KEY = 'icd10_code_lookups';
+const ICD10_LOOKUP_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const loadIcd10Lookups = async () => (await db.get(ICD10_LOOKUPS_KEY)) || {};
+// Fills in any code not yet looked up (or looked up too long ago), with this
+// person's OpenEMR session. A failed search leaves the code unchecked, which
+// the scrub reports as NOT CHECKED and blocks; it is never read as "missing".
+const verifyIcd10Codes = async (user, codes, { max = 40 } = {}) => {
+  const cache = await loadIcd10Lookups();
+  const now = Date.now();
+  const want = Array.from(new Set((codes || []).map(c => clinicalRepo.normalizeIcd10(c)).filter(Boolean)))
+    .filter(c => !cache[c] || (now - Date.parse(cache[c].checkedAt || 0)) > ICD10_LOOKUP_TTL_MS)
+    .slice(0, max);
+  if (!want.length || !openemr.isConfigured()) return cache;
+  const emr = openemr.forActor(user);
+  let changed = false;
+  for (const code of want) {
+    try {
+      const parent = claimScrub.parentOf(code);
+      const [exact, category] = await Promise.all([
+        emr.searchCodes({ type: 'ICD10', search: code, limit: 25 }),
+        parent ? emr.searchCodes({ type: 'ICD10', search: parent, limit: 50 }) : Promise.resolve([])
+      ]);
+      cache[code] = { ...claimScrub.buildIcd10Lookup(code, exact, category), checkedAt: new Date().toISOString() };
+      changed = true;
+    } catch (e) {
+      console.warn(`[claim-scrub] ICD-10 lookup for ${code} failed: ${e.message}`);
+    }
+  }
+  if (changed) await db.set(ICD10_LOOKUPS_KEY, cache);
+  return cache;
+};
+
+// The billing facility, from the saved facility list. `fieldsRead` is false
+// when that copy predates the NPI/EIN/taxonomy fields, so "not read" is never
+// confused with "OpenEMR has none".
+const billingFacilityForScrub = async () => {
+  const snap = await getFacilitySnapshot();
+  const rows = (snap && Array.isArray(snap.facilities)) ? snap.facilities : [];
+  if (!rows.length) return { facilityListKnown: false, billingFacility: { id: null, error: 'OpenEMR\'s facility list has never been read; an admin presses Sync facilities' }, facilities: [] };
+  const resolved = clinicalRepo.resolveBillingFacility({ facilities: rows, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null });
+  const row = resolved.facilityId ? rows.find(f => String(f.id) === String(resolved.facilityId)) : null;
+  return {
+    facilityListKnown: true, facilities: rows,
+    billingFacility: row ? {
+      id: String(row.id), name: row.name || null,
+      fieldsRead: ['facility_npi', 'federal_ein', 'facility_taxonomy'].every(k => k in row),
+      npi: row.facility_npi, ein: row.federal_ein, taxonomy: row.facility_taxonomy
+    } : { id: null, error: resolved.warning || 'no billing facility is configured or flagged in OpenEMR' }
+  };
+};
+
+// The encounter's facility and place of service as OpenEMR holds them. Stored
+// on the record as `claimFacts` so the queue can show them without a read per
+// row; the detail view, Submit and Release always read live.
+const readClaimFacts = async (ctx) => {
+  try {
+    const row = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
+    if (!row) return { checked: false, error: 'OpenEMR returned no encounter row', readAt: new Date().toISOString() };
+    return {
+      checked: true, readAt: new Date().toISOString(),
+      facilityId: row.facility_id != null && row.facility_id !== '' ? String(row.facility_id) : null,
+      posCode: row.pos_code != null && row.pos_code !== '' ? String(row.pos_code) : null,
+      facilityName: row.facility_name || row.facility || null
+    };
+  } catch (e) {
+    return { checked: false, error: String(e.message || e).slice(0, 160), readAt: new Date().toISOString() };
+  }
+};
+
+// The rendering provider as the claim will name them: the live user record's
+// NPI where the user still exists (an NPI added after signing counts), else
+// the snapshot taken at signing.
+const renderingProviderForScrub = (record, users) => {
+  const rp = (record && record.renderingProvider) || {};
+  const live = rp.id ? (users || []).find(u => u && u.id === rp.id) : null;
+  return { name: (live && live.name) || rp.name || null, npi: (live && live.npi) || rp.npi || null };
+};
+
+// The app's own charge lines, with the fee OpenEMR reported when each posted.
+const linesFromRecord = (record) => {
+  const posted = (record && record.postedCharges) || [];
+  return ((record && record.services) || []).map(s => {
+    const mods = (s.modifiers || []).join(':');
+    const p = posted.find(c => c && c.code === s.code && (c.modifier || '') === mods) || posted.find(c => c && c.code === s.code);
+    return { code: s.code, modifiers: s.modifiers || [], units: s.units || 1, dxLinks: s.dxLinks || [], fee: p ? p.fee : null };
+  });
+};
+
+const sameDayOtherCodesFor = (record, allRecords) => {
+  const day = String((record && record.date) || '').slice(0, 10);
+  if (!day) return [];
+  return (allRecords || []).filter(r => r && r !== record && r.encounterUuid !== record.encounterUuid &&
+      String(r.clientId) === String(record.clientId) && String(r.date || '').slice(0, 10) === day && r.noteStatus !== 'voided')
+    .flatMap(r => (r.services || []).map(s => s.code));
+};
+
+const payerForScrub = (client) => {
+  const norm = insurance.normalizePayers(client);
+  const problem = norm.unresolved.find(u => ['PAYER_RANK_DUPLICATE_PRIMARY', 'PAYER_RANK_NOT_STATED', 'PAYER_RANK_MISSING'].includes(u.code));
+  return { payer: norm.primary || null, payerProblem: problem ? problem.message : null };
+};
+
+// One scrub, from the pieces. `lines` defaults to the app's own record.
+const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords }) => {
+  const { payer, payerProblem } = payerForScrub(client);
+  const encounterFacility = facts && facts.checked && facts.facilityId
+    ? (facilityInfo.facilities || []).find(f => String(f.id) === String(facts.facilityId)) || null
+    : null;
+  return claimScrub.scrubClaim({
+    phase, today: practiceToday(),
+    encounter: { date: record.date, facts, visit: record.visit || null },
+    encounterFacility, facilityListKnown: facilityInfo.facilityListKnown,
+    billingFacility: facilityInfo.billingFacility,
+    renderingProvider: renderingProviderForScrub(record, users),
+    diagnoses: record.diagnoses || [],
+    lines: lines || linesFromRecord(record),
+    icd10, catalog, payer, payerProblem,
+    // getNcciTables names its fields for checkSignReadiness; the scrub reads
+    // the shape checkNcciBundling takes. Passed through unmapped, every claim
+    // read as "NCCI data never loaded" (caught by the HTTP probe, 2026-11-04).
+    ncci: { ptpEdits: ncci.ncciPtpEdits, mueByCode: ncci.ncciMue, sourceVersion: ncci.ncciSourceVersion },
+    sameDayOtherCodes: sameDayOtherCodesFor(record, allRecords)
+  });
+};
+
+// Everything one live scrub needs, read now with the requesting person's
+// session, then the scrub itself. Used by the detail view, Submit and Release.
+// Release ('final') reads the charge lines OpenEMR actually holds — that is
+// the check a Fee Sheet edit after signing cannot slip past.
+const liveClaimScrub = async (ctx, { phase, user }) => {
+  // Billing can read OpenEMR's facility list, so the saved copy is refreshed
+  // first: an NPI fixed in OpenEMR a minute ago must not still read as missing.
+  // A failed read keeps the saved copy, which is what the scrub then judges.
+  try { await readFacilities(ctx.emr, user); } catch (_) { /* the saved copy stands */ }
+  const [facts, facilityInfo, catalog, ncci, allRecords] = await Promise.all([
+    readClaimFacts(ctx), billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), loadRows('encounter_billing')
+  ]);
+  let lines = null; let chargeReadError = null;
+  if (phase === 'final') {
+    try { lines = claimScrub.linesFromCharges(await ctx.emr.getCharges(ctx.client.openEmrPatientId, ctx.encounterUuid)); }
+    catch (e) { chargeReadError = String(e.message || e).slice(0, 160); }
+  }
+  const dx = [...(ctx.record.diagnoses || []).map(d => d.code), ...((lines || []).flatMap(l => l.dxLinks))];
+  const icd10 = await verifyIcd10Codes(user, dx);
+  const scrub = runClaimScrub({ phase, record: ctx.record, client: ctx.client, users: ctx.users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords });
+  return { scrub, facts, chargeReadError, lines: lines || linesFromRecord(ctx.record) };
+};
+
+// ---- The documentation gate (spec §1.4) -------------------------------------
+// MIDDLEWARE, so the route sweep sees it on both doors into the coding queue:
+// the billable signature and the clinician addendum. An RN or LMSW author
+// signature does not enter the queue (it waits for the addendum), so it passes.
+// A request the handler is about to refuse for its own reason (already signed,
+// discarded, wrong credential) passes too, so the person reads that reason
+// rather than a list of missing documentation.
+//
+// The total time: the number the clinician enters on the sign card, else the
+// visit's recorded start and end (My Day). Never the scheduled duration.
+const encounterTotalMinutes = async (record) => {
+  if (Number.isInteger(record.totalMinutes) && record.totalMinutes > 0) {
+    return { minutes: record.totalMinutes, source: record.totalMinutesSource || 'entered' };
+  }
+  const link = (await getAppointmentLinkage()).find(l => l && String(l.encounterUuid) === String(record.encounterUuid));
+  if (link) {
+    const t = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(link.eid));
+    const m = myDay.totalVisitMinutes(t);
+    if (m != null && m > 0) return { minutes: m, source: 'recorded_start_end' };
+  }
+  return null;
+};
+const requireCodingQueueReady = (door) => async (req, res, next) => {
+  try {
+    if (door === 'sign' && clinicalRoles.isAuthorSigner(req.user)) return next();
+    if (door === 'addendum' && !clinicalRoles.canCoSignEncounter(req.user)) return next();
+    const record = findBillingRecord(await loadRows('encounter_billing'), req.params.euuid);
+    if (!record || String(record.clientId) !== String(req.params.clientId)) return next();
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return next();
+    const att = (await loadRows('encounter_attestations')).find(a => a && a.encounterUuid === String(req.params.euuid)) || null;
+    if (door === 'sign' && clinicalRepo.isEncounterClosed(att)) return next();
+    if (door === 'addendum' && record.coSignStatus !== 'pending') return next();
+    if (!(req.body || {}).attest) return next();
+    if (door === 'sign' && record.note && !clinicalNotes.checkNoteForSigning(record.note).ok) return next();
+    if (door === 'addendum' && !claimScrub.hasWords((req.body || {}).text)) return next();
+    if (door === 'addendum' && clinicalRoles.disallowedServiceCodesFor(req.user, record.services || []).length) return next();
+    let time = null;
+    const typed = (req.body || {}).totalMinutes;
+    if (typed !== undefined && typed !== null && String(typed).trim() !== '') {
+      const parsed = claimScrub.parseTotalMinutes(typed);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error, code: 'TOTAL_TIME_NOT_A_NUMBER', missing: ['total_time'] });
+      time = { minutes: parsed.minutes, source: 'entered' };
+    } else {
+      time = await encounterTotalMinutes(record);
+    }
+    const gate = claimScrub.documentationGate({ record, totalMinutes: time ? time.minutes : null, noteState: door === 'addendum' ? 'signed' : 'draft' });
+    // SIGN_NO_DIAGNOSIS rides along so the sign card still offers "Go to Coding".
+    if (!gate.ok) return res.status(409).json({ error: gate.error, code: 'CODING_QUEUE_GATE', codes: ['CODING_QUEUE_GATE', ...(gate.missing.includes('diagnosis') ? ['SIGN_NO_DIAGNOSIS'] : [])], missing: gate.missing });
+    req.codingQueueEntry = { totalMinutes: time.minutes, totalMinutesSource: time.source };
+    next();
+  } catch (error) {
+    console.error('Coding queue gate error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 // ── Sign & close (Scope F, spec §3 normative) ─────────────────────────────
 // Refused with a specific code until the encounter has a note, ≥1 diagnosis,
 // ≥1 service (each linked) and a configured billing NPI. The signer becomes
@@ -15225,7 +15452,7 @@ const readinessFor = async (ctx, { billingChecks = true, gate, payer, ncci } = {
   return { ready, payer: p, completedSections };
 };
 
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, requireCodingQueueReady('sign'), async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -15286,6 +15513,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     await db.set('encounter_attestations', atts);
     // Rendering provider on the charge = signing clinician (spec §2.5)
     const record = { ...ctx.record, renderingProvider: attestation.signedBy, renderingProviderClinicalRole: signature.clinicalRole, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
+    // The total time on the date of service (documentation gate, 2026-11-04).
+    // A billable signature passed the gate with it; an author's signature may
+    // carry one too, kept for the clinician addendum.
+    const timeEntry = req.codingQueueEntry || (() => {
+      const p = claimScrub.parseTotalMinutes((req.body || {}).totalMinutes);
+      return p.ok ? { totalMinutes: p.minutes, totalMinutesSource: 'entered' } : null;
+    })();
+    if (timeEntry) { record.totalMinutes = timeEntry.totalMinutes; record.totalMinutesSource = timeEntry.totalMinutesSource; }
     // NCCI: an allowed-but-flagged PTP pair (a modifier was required and one
     // was present) does not block signing, but it must reach the signer HERE
     // rather than pass silently — this is exactly the case a biller cannot
@@ -15420,7 +15655,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
 // claim names the person certified to render the service (spec §2.5, billing
 // spec §4 item 4). The route keeps its path so an encounter held under the old
 // LMSW rule is cleared the same way.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, requireCodingQueueReady('addendum'), async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res, { createRecord: false });
     if (!ctx) return;
@@ -15478,6 +15713,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
     // Sent to billing; the charges post when billing submits.
     record.billingStatus = clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
     record.sentToBillingAt = now;
+    // The documentation gate's total time (2026-11-04), stored with the entry.
+    if (req.codingQueueEntry) { record.totalMinutes = req.codingQueueEntry.totalMinutes; record.totalMinutesSource = req.codingQueueEntry.totalMinutesSource; }
     record.chargesPosted = false;
     record.chargeError = null;
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
@@ -15620,7 +15857,21 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
     }
     const { ready, payer } = await readinessFor(ctx, { gate: 'billing' });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
-    warnings.push(...(ready.warnings || []));
+    // ready.warnings are the NCCI warnings; the scrub below reports the same
+    // ones with the line they concern, so they are not added twice.
+
+    // The claim scrub (2026-11-04), before anything posts. Every blocking
+    // finding is returned in full; nothing posts while one is open. Prices are
+    // OpenEMR's and exist only once a line posts, so they are checked at Release.
+    const pre = await liveClaimScrub(ctx, { phase: 'pre_post', user: req.user });
+    if (!pre.scrub.ok) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: pre.facts, lastScrub: { at: now, phase: 'pre_post', counts: pre.scrub.counts, findings: pre.scrub.findings } });
+      const blockers = pre.scrub.findings.filter(f => f.severity === claimScrub.SEVERITY.BLOCK);
+      return res.status(409).json({
+        error: `This claim has ${blockers.length} blocking finding${blockers.length === 1 ? '' : 's'}: ${blockers.map(f => `${f.fieldLabel}: ${f.message}`).join(' ')}`,
+        code: 'CLAIM_SCRUB_BLOCKED', findings: pre.scrub.findings, counts: pre.scrub.counts
+      });
+    }
 
     const record = {
       ...ctx.record,
@@ -15630,8 +15881,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       posMissingReason: null,
       // What the insurance check said when this claim was released (B1).
       insuranceCheck: { status: insuranceGate.status, override: insuranceGate.override || null, at: now },
+      claimFacts: pre.facts,
+      lastScrub: { at: now, phase: 'pre_post', counts: pre.scrub.counts, findings: pre.scrub.findings },
       updatedAt: now
     };
+    for (const f of pre.scrub.findings) warnings.push(`${f.fieldLabel}: ${f.message}`);
     // Rendering provider = the signing clinician (or the addendum author) —
     // never the person clicking submit.
     await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: record.renderingProvider });
@@ -15662,6 +15916,91 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
   } catch (error) {
     console.error('Billing submit error:', error);
     res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// ── Claim scrub: the review surface and the release (2026-11-04) ───────────
+// GET shows EVERY finding on one encounter, blockers first, each naming its
+// field. Billing's screen only. Before submission it scrubs the app's own
+// lines; after, it reads the charge lines OpenEMR actually holds.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/claim-scrub', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    const status = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    const hold = claimScrub.holdState(ctx.record, status);
+    const phase = status === clinicalRepo.BILLING_STATUS.BILLED ? 'final' : 'pre_post';
+    const out = await liveClaimScrub(ctx, { phase, user: req.user });
+    const at = new Date().toISOString();
+    await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub: { at, phase, counts: out.scrub.counts, findings: out.scrub.findings } });
+    res.json({
+      phase, billingStatus: status, holdState: hold,
+      findings: out.scrub.findings, counts: out.scrub.counts, ok: out.scrub.ok,
+      chargeReadError: out.chargeReadError,
+      lines: out.lines, totalMinutes: ctx.record.totalMinutes || null, totalMinutesSource: ctx.record.totalMinutesSource || null,
+      release: ctx.record.claimRelease || null, scrubbedAt: at
+    });
+  } catch (error) {
+    console.error('Claim scrub error:', error);
+    res.status(502).json({ error: `The claim scrub could not run: ${error.message}` });
+  }
+});
+
+// POST releases a held claim. A person does this, never the app. Refused while
+// any blocking finding is open, against the lines OpenEMR holds NOW, so a Fee
+// Sheet edited after signing is checked here. Every warning must be confirmed
+// as reviewed. Nothing transmits from this app; the release is the record
+// that a person reviewed the claim and let it go.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/claim-release', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    const status = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    const hold = claimScrub.holdState(ctx.record, status);
+    if (hold === 'released') return res.status(409).json({ error: `Already released ${ctx.record.claimRelease.at} by ${(ctx.record.claimRelease.by || {}).name || 'a biller'}.`, code: 'CLAIM_ALREADY_RELEASED' });
+    if (hold !== 'held') {
+      return res.status(409).json({ error: status === clinicalRepo.BILLING_STATUS.AWAITING_BILLING
+        ? 'Submit this visit to billing first. Its lines are priced and held when they post.'
+        : 'Only a visit submitted to billing, with charges posted, is held for release.', code: 'CLAIM_NOT_HELD' });
+    }
+    if (!ctx.record.chargesPosted) {
+      return res.status(409).json({ error: `The charges did not post to Billing Manager${ctx.record.chargeError ? ` (${ctx.record.chargeError})` : ''}. Re-post them before releasing.`, code: 'CLAIM_CHARGES_NOT_POSTED' });
+    }
+    const out = await liveClaimScrub(ctx, { phase: 'final', user: req.user });
+    const now = new Date().toISOString();
+    const lastScrub = { at: now, phase: 'final', counts: out.scrub.counts, findings: out.scrub.findings };
+    if (out.chargeReadError) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub });
+      return res.status(502).json({ error: `The charge lines OpenEMR holds could not be read (${out.chargeReadError}), so the final charge set cannot be checked. Nothing was released.`, code: 'CLAIM_CHARGES_UNREADABLE', findings: out.scrub.findings, counts: out.scrub.counts });
+    }
+    if (!out.scrub.ok) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub });
+      const blockers = out.scrub.findings.filter(f => f.severity === claimScrub.SEVERITY.BLOCK);
+      return res.status(409).json({
+        error: `Not released. ${blockers.length} blocking finding${blockers.length === 1 ? ' is' : 's are'} open: ${blockers.map(f => `${f.fieldLabel}: ${f.message}`).join(' ')}`,
+        code: 'CLAIM_SCRUB_BLOCKED', findings: out.scrub.findings, counts: out.scrub.counts
+      });
+    }
+    if (out.scrub.counts.warn && !(req.body || {}).warningsReviewed) {
+      return res.status(400).json({ error: `Confirm you reviewed the ${out.scrub.counts.warn} warning${out.scrub.counts.warn === 1 ? '' : 's'} on this claim before releasing it.`, code: 'CLAIM_WARNINGS_NOT_REVIEWED', findings: out.scrub.findings, counts: out.scrub.counts });
+    }
+    const by = clinicalRepo.actorRecord(ctx.actor);
+    const record = {
+      ...ctx.record, claimFacts: out.facts, lastScrub,
+      claimRelease: { at: now, by, warningCodes: out.scrub.findings.map(f => f.code), lines: out.lines.map(l => ({ code: l.code, modifiers: l.modifiers, units: l.units, fee: l.fee })) },
+      updatedAt: now
+    };
+    await saveBillingRecord(ctx.rows, record);
+    // Codes and counts only: the audit row is not a second copy of the claim.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'claim_released', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, lineCodes: out.lines.map(l => l.code), warningCodes: out.scrub.findings.map(f => f.code)
+    });
+    res.json({ message: 'Released. This claim leaves the hold queue.', release: record.claimRelease, findings: out.scrub.findings, counts: out.scrub.counts });
+  } catch (error) {
+    console.error('Claim release error:', error);
+    res.status(502).json({ error: `The release could not complete: ${error.message}` });
   }
 });
 
@@ -18370,7 +18709,7 @@ app.get('/api/clinical/patients/:clientId/calls/:callId/note', authenticateToken
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
     let emrRows = null; let emrError = null;
     if (openemr.isConfigured()) {
@@ -18418,9 +18757,41 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         : String(b.date || '').localeCompare(String(a.date || '')));
     // Every encounter with a line that posted at $0, whatever the filter, so a
     // $0 charge is never hidden behind the wrong tab.
+    // ── The claim scrub on the queue (2026-11-04): every encounter in the hold
+    // queue carries its blocking and warning counts side by side. Only billing
+    // sees them; a clinician's queue carries none. Scrubbed from what the app
+    // holds — the encounter's facility as last read from OpenEMR, the posted
+    // fees — so the queue costs no OpenEMR read per row. Opening the encounter
+    // scrubs it live.
+    const canBill = clinicalRoles.canSubmitBilling(req.user);
+    let held = [];
+    if (canBill) {
+      const inQueue = rows.filter(r => !voided.has(String(r.encounterUuid)) && claimScrub.holdState(recByUuid.get(String(r.encounterUuid)) || null, r.billingStatus));
+      if (inQueue.length) {
+        const [facilityInfo, catalog, ncci, users] = await Promise.all([billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), getUsers()]);
+        const clientRows = users;
+        const dx = inQueue.flatMap(r => ((recByUuid.get(String(r.encounterUuid)) || {}).diagnoses || []).map(d => d.code));
+        const icd10 = await verifyIcd10Codes(req.user, dx);
+        for (const r of inQueue) {
+          const record = recByUuid.get(String(r.encounterUuid));
+          const client = clientRows.find(u => u && String(u.id) === String(record.clientId)) || {};
+          const hold = claimScrub.holdState(record, r.billingStatus);
+          const facts = record.claimFacts || { checked: false, error: 'not read yet; open the encounter to read it' };
+          const scrub = runClaimScrub({ phase: hold === 'awaiting_billing' ? 'pre_post' : 'final', record, client, users, facts, icd10, catalog, ncci, facilityInfo, allRecords: records });
+          r.holdState = hold;
+          r.scrub = { block: scrub.counts.block, warn: scrub.counts.warn, factsReadAt: record.claimFacts ? record.claimFacts.readAt : null };
+          r.totalMinutes = record.totalMinutes || null;
+        }
+        held = inQueue.filter(r => r.holdState !== 'released');
+      }
+    }
+    if (filter === 'held') {
+      filtered.length = 0;
+      filtered.push(...held.sort((a, b) => (b.scrub.block - a.scrub.block) || String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))));
+    }
     const zeroFee = rows.filter(r => !voided.has(String(r.encounterUuid)) && r.zeroFeeCharges && r.zeroFeeCharges.length)
       .map(r => ({ encounterUuid: r.encounterUuid, clientId: r.clientId, patientName: r.patientName, date: r.date, codes: r.zeroFeeCharges.map(c => c.code) }));
-    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
+    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -20925,6 +21296,7 @@ const aiReviewListHandler = async (req, res) => {
       canRun: clinicalRoles.canClinicalWrite(req.user),
       reviews: rows.map(r => ({
         id: r.id, status: r.status, at: r.at, finishedAt: r.finishedAt || null,
+        purpose: r.purpose || null, encounterUuid: r.encounterUuid || null,
         requestedBy: r.requestedBy ? r.requestedBy.name : null,
         passes: r.passes || null, currentPass: r.currentPass || null,
         findings: r.output ? (r.output.findings || []).length : 0,
@@ -20955,6 +21327,8 @@ const aiReviewGetHandler = async (req, res) => {
         requestedBy: row.requestedBy ? row.requestedBy.name : null,
         passes: row.passes || null, currentPass: row.currentPass || null,
         model: row.model || null, focus: row.focus || null,
+        purpose: row.purpose || null, encounterUuid: row.encounterUuid || null,
+        quoteCounts: row.quoteCounts || null,
         manifest: row.manifest || null, output: row.output || null,
         findingDecisions: row.findingDecisions || [],
         droppedUncited: row.droppedUncited || 0,
@@ -21304,6 +21678,138 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
     res.status(202).json({ reviewId: row.id, status: row.status });
   } catch (error) {
     console.error('Records extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── AI coding pipeline, Phase 2: clinical fact extraction (2026-11-04) ─────
+//
+// THE MODEL EXTRACTS FACTS FROM ONE ENCOUNTER NOTE AND NAMES NO CODE. Rules
+// decide a level in Phase 3, after the clinician confirms the facts. Same
+// machinery as the records extraction: the one engine, a declared schema, a
+// background job on an ai_reviews row that the existing poll reads and the
+// existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
+// draft on the coding workflow, and the encounter record keeps only a pointer.
+// Rules, schema and quote checks: mdmExtraction.js.
+const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
+  try {
+    const notRead = [];
+    let narrativeText = '';
+    let problems = null; let medications = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const puuid = client.openEmrPatientId;
+      const [soap, probs, meds] = await Promise.allSettled([
+        record.narrativeNoteSid ? emr.getSoapNote(puuid, encounterUuid, record.narrativeNoteSid) : Promise.resolve(null),
+        emr.getProblems(puuid), emr.getMedicationRequests(puuid)
+      ]);
+      // The narrative is read by the RECORDED sid: getSoapNotes can return
+      // another encounter's notes (openemr.js), so it is never used here.
+      if (soap.status === 'fulfilled' && soap.value) {
+        const n = soap.value;
+        narrativeText = [n.subjective, n.objective, n.assessment, n.plan].filter(Boolean).join('\n');
+      } else if (soap.status === 'rejected') notRead.push({ sourceId: `enc:${encounterUuid}:narrative`, why: 'the OpenEMR copy of the note could not be read' });
+      if (probs.status === 'fulfilled') problems = probs.value.map(clinicalRepo.summarizeCondition);
+      else notRead.push({ sourceId: 'emr:problems', why: 'not returned by the clinician\'s own EMR session' });
+      if (meds.status === 'fulfilled') medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+      else notRead.push({ sourceId: 'emr:medications', why: 'not returned by the clinician\'s own EMR session' });
+    } else {
+      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
+    }
+
+    // Documents attached to THIS encounter, and only those.
+    const rawDocs = [];
+    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
+      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
+    for (const u of uploads) {
+      try {
+        rawDocs.push({
+          clientId: client.id, sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`, id: u.id,
+          title: u.fileName || u.kind || 'Document', date: u.at || u.uploadedAt || null,
+          mimeType: u.mimeType || 'application/pdf', bytes: await googledrive.downloadFileBuffer(u.driveFileId)
+        });
+      } catch (e) {
+        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
+      }
+    }
+    const documents = rawDocs.length ? chartPacket.buildSections({ clientId: client.id, documents: rawDocs }).documents : [];
+
+    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, documents, notRead });
+    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: packet.documents, notRead: packet.notRead, passes: 1 });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      input: { sections: packet.sections, documents: packet.documents },
+      schema: mdmExtraction.MDM_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'mdm_extraction',
+      sourceIds: [...packet.sections.map(s => s.sourceId), ...packet.documents.map(d => d.sourceId)]
+    });
+
+    // §2.4, on the SERVER, after the model: every item carries a quote that
+    // is really in the sources, or it is dropped and counted.
+    const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
+      sourceTexts: packet.sections.map(s => s.text), hasDocuments: packet.documents.length > 0
+    });
+    const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId, manifest,
+      output: { ...output, unreadable }, droppedUncited: dropped, quoteCounts: counts, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED, finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null, blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] MDM extraction failed:', (e && e.code) || e.message);
+  }
+};
+
+// POST …/encounters/:euuid/ai/extract-mdm — start one. Clinical write access.
+// The result is read through the existing GET …/ai/reviews/:id poll.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const encounterUuid = String(req.params.euuid || '');
+    const rows = await loadRows('encounter_billing');
+    const record = findBillingRecord(rows, encounterUuid);
+    if (!record || String(record.clientId) !== String(client.id)) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
+    // Refused BEFORE anything is gathered or sent.
+    if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
+      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' });
+    }
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({ error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
+    }
+    const row = {
+      id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id, encounterUuid,
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      passes: null, currentPass: null, invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    // A POINTER on the coding workflow, never the facts themselves.
+    await saveBillingRecord(rows, { ...record, latestMdmExtractionId: row.id });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
+      { reviewId: row.id, encounterUuid });
+    runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('MDM extraction start error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -29504,6 +30010,9 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
     // separate "dismissed" flag to fall out of sync with reality.
     const { ncciSourceVersion } = await getNcciTables();
     const billingDataRefresh = clinicalRepo.ncciRefreshReminder(ncciSourceVersion);
+    // The E/M level table's review date (emLevels.js, 2026-11-04). Admin hub
+    // only; clears when the file's nextReviewDue moves.
+    const emLevelReview = emLevels.reviewStatus(practiceToday());
 
     // Get all open tickets across the app (feedback requests + password reset requests)
     const feedbackRequests = (await db.get('feedback_requests')) || [];
@@ -29530,7 +30039,8 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
       totalServiceReports: serviceReports.length,
       recentServiceReports: serviceReports.slice(0, 5),
       openTickets: totalOpenTickets,
-      billingDataRefresh
+      billingDataRefresh,
+      emLevelReview
     };
 
     res.json(stats);
@@ -29773,6 +30283,13 @@ process.on('unhandledRejection', (reason, promise) => {
 // gfc_billable_codes is seeded once, from the owner's OpenEMR export, the
 // first time the app boots without it. An empty list saved on purpose is left
 // alone; the NCCI loader then stops and says so.
+// The E/M level table has a known expiry (CPT 2027, 2027-01-01). Past its
+// review date it says so here, naming the file, and on the admin hub dashboard.
+// No clinician or coder ever sees a verification notice (spec §3.1).
+{
+  const emReview = emLevels.reviewStatus(practiceToday());
+  if (emReview.overdue) console.warn(`[em-levels] ${emReview.file} is past its review date (${emReview.nextReviewDue}; verified ${emReview.verifiedOn}). Re-verify it against the current CPT code set.`);
+}
 billableCodes.seedIfMissing(db).then(r => {
   if (r.seeded) console.log(`[billable-codes] Seeded gfc_billable_codes with ${r.count} codes from scripts/data/gfc_billable_codes_seed.json.`);
 }).catch(e => console.error('[billable-codes] Could not seed gfc_billable_codes:', e.message));
