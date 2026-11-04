@@ -2369,10 +2369,6 @@
         });
       }, [token]);
 
-      const [financialPending, setFinancialPending] = useState([]);
-      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
-        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
-
       const loadData = async () => {
         setLoading(true);
         loadFinancial();
