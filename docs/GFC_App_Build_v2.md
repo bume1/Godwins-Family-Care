@@ -325,6 +325,7 @@ Invoice/claim generator branches on this row (looked up via the client's `payer.
 - Contractor sees only their own schedule and exam log.
 - Admin sees everything, including all contractor schedules and rollups.
 - No veteran PHI in the app beyond the anonymized reference ID. No exam findings, no health details.
+  - **Changed 2026-11-04 for the IME record analyzer only** (`docs/decisions/2026-11-04-ime-record-analyzer.md`): an assigned examiner may upload a veteran's claim file and get a cited AI summary. The file and its results are deleted N days after the exam report. Exam logs, scheduling and invoicing keep the rule above.
 - Messaging (Admin ↔ contractor) is subject-threaded, HIPAA-compliant, and PHI-free.
 
 ---

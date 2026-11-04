@@ -21068,6 +21068,203 @@ const purgeAiReviews = async () => {
 };
 setInterval(purgeAiReviews, 24 * 60 * 60 * 1000).unref?.();
 
+// ── The IME record analyzer (spec GFC_IME_Record_Analyzer_Spec_v1.md) ─────
+//
+// A contract examiner's claim file, read by Gemini into a CITED summary before
+// a VA C&P exam. The rules are imeCases.js; the storage and the background job
+// are imeService.js; this is only the HTTP door. The case is not a patient:
+// nothing here touches a client record, OpenEMR or the clinical workspace.
+//
+// ACCESS (spec §5): the assigned examiner and admin. Every route below goes
+// through requireImeUser and then loadImeCase, which refuses another
+// examiner's case with 403 rather than an empty answer.
+const imeRules = require('./imeCases');
+const { createImeService } = require('./imeService');
+const { PDFDocument: ImePdfDocument } = require('pdf-lib');
+const imePacketReader = require('./welcomePacketImport');
+const imeService = createImeService({
+  db, drive: googledrive, engine: gfcModelEngine, modelEngine, logActivity, getUsers,
+  resolveClinicalRole: clinicalRoles.resolveClinicalRole,
+  detectFileType: (buf) => detectFileType(buf),
+  maxFileBytes: config.MAX_FILE_SIZE,
+  pdf: {
+    load: (bytes) => ImePdfDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false }),
+    slice: async (bytes, from, to) => {
+      const src = await ImePdfDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+      const out = await ImePdfDocument.create();
+      const pages = await out.copyPages(src, Array.from({ length: to - from + 1 }, (_, i) => from - 1 + i));
+      pages.forEach(p => out.addPage(p));
+      return Buffer.from(await out.save());
+    },
+    // The text layer, one string per page, for checking quotes. The same
+    // extractor the document readers use, so there is one PDF text reader.
+    pageTexts: async (bytes) => {
+      const src = await ImePdfDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+      const lines = imePacketReader.groupIntoLines(await imePacketReader.extractRuns(src));
+      const pages = Array.from({ length: src.getPageCount() }, () => []);
+      for (const l of lines) if (pages[l.page]) pages[l.page].push(l.text);
+      return pages.map(p => p.join('\n'));
+    }
+  }
+});
+
+const requireImeUser = (req, res, next) => {
+  if (imeRules.mayUseAnalyzer(req.user, clinicalRoles.resolveClinicalRole)) return next();
+  return res.status(403).json({ error: 'The IME record analyzer is for assigned examiners and admin only.', code: 'IME_NOT_PERMITTED' });
+};
+const requireImeAdmin = (req, res, next) => {
+  if (imeRules.isAdmin(req.user)) return next();
+  return res.status(403).json({ error: 'Only an admin can do this.', code: 'IME_ADMIN_ONLY' });
+};
+const loadImeCase = async (req, res) => {
+  const c = await imeService.getCase(req.params.caseId);
+  if (!c) { res.status(404).json({ error: 'Case not found.', code: 'IME_CASE_NOT_FOUND' }); return null; }
+  if (!imeRules.canSeeCase(req.user, c, clinicalRoles.resolveClinicalRole)) {
+    res.status(403).json({ error: 'This case is assigned to another examiner.', code: 'IME_NOT_ASSIGNED' });
+    return null;
+  }
+  return c;
+};
+const imeReply = (res, r) => {
+  const { status, ...body } = r;
+  return res.status(status || 200).json(body);
+};
+const imeRoute = (fn) => async (req, res) => {
+  try { await fn(req, res); } catch (e) {
+    console.error('IME route error:', (e && e.code) || (e && e.message));
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+const imeUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.MAX_FILE_SIZE, files: 50 }
+});
+
+app.get('/api/ime/meta', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const st = gfcModelEngine.status();
+  const admin = imeRules.isAdmin(req.user);
+  res.json({
+    isAdmin: admin,
+    contractingEntities: Object.entries(imeRules.CONTRACTING_ENTITIES).map(([value, label]) => ({ value, label })),
+    examiners: admin ? (await imeService.examiners()).map(u => ({ id: u.id, name: u.name || u.email })) : [],
+    retentionDays: imeRules.retentionDays(),
+    cleared7332: imeRules.usc7332Cleared(),
+    analysisAvailable: st.configured,
+    blockers: admin ? st.blockers : undefined,
+    maxFileBytes: config.MAX_FILE_SIZE,
+    maxFilesPerUpload: imeService.MAX_FILES_PER_UPLOAD
+  });
+}));
+
+app.get('/api/ime/cases', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  res.json({ cases: await imeService.listCases(req.user) });
+}));
+
+app.post('/api/ime/cases', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  imeReply(res, await imeService.createCase(req.user, req.body || {}));
+}));
+
+app.get('/api/ime/cases/:caseId', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  const analyses = (await imeService.analysesFor(c.id))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+    .map(a => ({ id: a.id, status: a.status, at: a.at, finishedAt: a.finishedAt || null,
+      requestedBy: a.requestedBy ? a.requestedBy.name : null, passes: a.passes, currentPass: a.currentPass,
+      pageCount: a.pageCount || null, purgedAt: a.purgedAt || null }));
+  res.json({
+    case: await imeService.view(c),
+    documents: (await imeService.docsFor(c.id)).filter(d => !d.removedAt).map(imeRules.publicDocument),
+    analyses
+  });
+}));
+
+app.put('/api/ime/cases/:caseId', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  imeReply(res, await imeService.updateCase(req.user, c, req.body || {}));
+}));
+
+app.post('/api/ime/cases/:caseId/report-submitted', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  imeReply(res, await imeService.submitReport(req.user, c));
+}));
+
+app.post('/api/ime/cases/:caseId/reopen', authenticateToken, requireImeUser, requireImeAdmin, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  imeReply(res, await imeService.reopenCase(req.user, c, req.body || {}));
+}));
+
+app.post('/api/ime/cases/:caseId/documents', authenticateToken, requireImeUser, uploadLimiter, (req, res, next) => {
+  imeUpload.array('files', 50)(req, res, (err) => {
+    if (!err) return next();
+    const tooBig = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(400).json({
+      error: tooBig ? `A file is over the ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB limit.` : 'The upload could not be read.',
+      code: tooBig ? 'IME_FILE_TOO_LARGE' : 'IME_UPLOAD_INVALID'
+    });
+  });
+}, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  // multer hands back the filename decoded as latin1; browsers send UTF-8.
+  const files = (req.files || []).map(f => ({ ...f, originalname: Buffer.from(String(f.originalname || ''), 'latin1').toString('utf8') }));
+  imeReply(res, await imeService.addDocuments(req.user, c, files));
+}));
+
+app.get('/api/ime/cases/:caseId/documents/:docId', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  const r = await imeService.readDocument(req.user, c, req.params.docId);
+  if (r.status !== 200) return imeReply(res, r);
+  res.setHeader('Content-Type', r.mimeType);
+  res.setHeader('Content-Disposition', contentDisposition('inline', r.fileName || 'document'));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(r.bytes);
+}));
+
+app.delete('/api/ime/cases/:caseId/documents/:docId', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  imeReply(res, await imeService.removeDocument(req.user, c, req.params.docId));
+}));
+
+app.post('/api/ime/cases/:caseId/analyses', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  imeReply(res, await imeService.startAnalysis(req.user, c));
+}));
+
+app.get('/api/ime/cases/:caseId/analyses/:analysisId', authenticateToken, requireImeUser, imeRoute(async (req, res) => {
+  const c = await loadImeCase(req, res); if (!c) return;
+  const a = await imeService.getAnalysis(c, req.params.analysisId);
+  if (!a) return res.status(404).json({ error: 'Analysis not found.', code: 'IME_ANALYSIS_NOT_FOUND' });
+  res.json({
+    analysis: {
+      id: a.id, status: a.status, at: a.at, finishedAt: a.finishedAt || null,
+      requestedBy: a.requestedBy ? a.requestedBy.name : null,
+      passes: a.passes, currentPass: a.currentPass, passesRun: a.passesRun || null,
+      model: a.model || null, output: a.output || null, counts: a.counts || null,
+      dropped: a.dropped || null, quoteChecks: a.quoteChecks || null,
+      cleared7332: a.cleared7332 === true,
+      error: a.error || null, code: a.code || null,
+      blockers: imeRules.isAdmin(req.user) ? (a.blockers || null) : undefined,
+      purgedAt: a.purgedAt || null
+    },
+    // Said on every result, by the server, so no screen can leave it off.
+    banner: 'AI draft. Unverified. Not part of the exam report. Check every item at its cited page.'
+  });
+}));
+
+app.get('/api/ime/admin/deletion-log', authenticateToken, requireImeUser, requireImeAdmin, imeRoute(async (req, res) => {
+  res.json({ entries: await imeService.deletionLog(), retentionDays: imeRules.retentionDays() });
+}));
+
+app.get('/api/ime/admin/spend', authenticateToken, requireImeUser, requireImeAdmin, imeRoute(async (req, res) => {
+  res.json({ spend: await imeService.spend() });
+}));
+
+// The retention sweep. Daily, and once shortly after boot so a restart over
+// the due date does not hold a claim file a day longer.
+const runImeRetention = () => imeService.purgeDue().catch(e => console.warn('[IME] retention sweep failed:', e.message));
+setInterval(runImeRetention, 24 * 60 * 60 * 1000).unref?.();
+setTimeout(runImeRetention, 60 * 1000).unref?.();
+
 // ── F: reading outside records into proposals ─────────────────────────────
 //
 // Owner decision 6 approves this now, though §10.4 had deferred it until
@@ -29550,6 +29747,11 @@ app.get('/login', (req, res) => {
 // exam (owner, 2026-10-30). Public: the veteran has no account.
 app.get('/veterans', (req, res) => {
   res.sendFile(__dirname + '/public/veterans.html');
+});
+
+// The IME record analyzer's screen. The API decides who sees what.
+app.get('/ime', (req, res) => {
+  res.sendFile(__dirname + '/public/ime.html');
 });
 
 // ============== AUTHENTICATED CLIENT PORTAL ROUTES ==============

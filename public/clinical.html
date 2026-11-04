@@ -7800,6 +7800,8 @@
             <h2 className="serif text-[24px] font-semibold text-primary mr-auto">Veterans{d && !d.office ? ' · My List' : ''}</h2>
             <input type="date" className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm" value={date} onChange={e => setDate(e.target.value)} />
             <button className="btn ghost" onClick={() => setShowAdd(s => !s)}>{showAdd ? 'Close' : 'Add Veteran'}</button>
+            {/* The claim-file analyzer is its own page: an IME case is not a patient and never appears in this workspace. */}
+            <a className="btn ghost" href="/ime">IME Claim Files</a>
           </div>
           {err && <div className="card p-4 text-red-600 text-sm mb-4">{err}</div>}
           {showAdd && d && <VeteranAddForm date={date} providers={d.providers || []} office={d.office} onAdded={load} />}

@@ -47,7 +47,10 @@ const PURPOSES = Object.freeze({
   DOCUMENT_CLASSIFICATION: 'document_classification',
   CHART_REVIEW: 'chart_review',
   CHART_REVIEW_MERGE: 'chart_review_merge',
-  RECORDS_EXTRACTION: 'records_extraction'
+  RECORDS_EXTRACTION: 'records_extraction',
+  // A contract examiner's claim file before a VA C&P exam (IME analyzer spec
+  // §3). Finds and cites what the records say; never an opinion.
+  IME_RECORD_REVIEW: 'ime_record_review'
 });
 
 // What a caller does with what came back. This is the evaluation signal §10.3

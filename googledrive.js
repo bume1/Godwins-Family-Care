@@ -558,6 +558,23 @@ async function uploadClientDocumentFile(clientName, fileName, fileBuffer, mimeTy
   };
 }
 
+// The IME record analyzer's claim files. One private folder per CASE ID under
+// "GFC IME Cases" — never a veteran's name, which the app does not hold for a
+// case. No anyone-link: read back only through the app, every read audited.
+async function uploadImeCaseFile(caseId, fileName, fileBuffer, mimeType) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+  const rootFolderId = await findOrCreateFolder('GFC IME Cases', null);
+  const caseFolderId = await findOrCreateFolder(String(caseId), rootFolderId);
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [caseFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name',
+    ...ALL_DRIVES
+  });
+  return { fileId: response.data.id, fileName: response.data.name };
+}
+
 // A caregiver's own paperwork — a physical timesheet photographed at the end of
 // a shift, a certificate, a signed visit note. Filed under the CAREGIVER, not
 // the client: it is employment paperwork, and a timesheet routinely covers
@@ -683,6 +700,7 @@ module.exports = {
   uploadClientDocumentFile,
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
+  uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,
   // Observability + the not-configured signal, so a caller can tell "Drive is
