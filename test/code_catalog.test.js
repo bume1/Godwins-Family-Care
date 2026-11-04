@@ -30,6 +30,7 @@ const serviceRuleCodes = () => require('../serviceRules').ruleLists().flatMap(l 
 const fullRows = () => [
   ...emLevelCodes().map(c => row(c)),
   ...serviceRuleCodes().map(c => row(c, /^\d/.test(c) ? 'CPT4' : 'HCPCS')),
+  ...['G2211', 'G0318'].map(c => row(c, 'HCPCS')),
   ...roles.BEHAVIORAL_HEALTH_SERVICE_CODES.map(c => row(c, /^\d/.test(c) ? 'CPT4' : 'HCPCS'))
 ];
 const silentLog = { error: () => {} };
@@ -272,7 +273,7 @@ test('G0177, G0409 and G0410 appear in no page a clinician loads', () => {
 // serviceRules/ (2026-11-04) holds Phase 3b's per-family thresholds, also
 // policy, also checked against the catalog (RTM excepted: loaded inactive).
 test('no CPT/HCPCS code list lives in app source outside the policy rule files', () => {
-  const allowed = new Set(['clinicalRoles.js', 'emLevels.js', ...require('fs').readdirSync(path.join(ROOT, 'serviceRules')).map(f => path.join('serviceRules', f))]);
+  const allowed = new Set(['clinicalRoles.js', 'emLevels.js', 'addOnRules.js', ...require('fs').readdirSync(path.join(ROOT, 'serviceRules')).map(f => path.join('serviceRules', f))]);
   const codeLit = /['"`](\d{4}[0-9A-Z]|[A-V]\d{4})['"`]/g;
   for (const f of sourceFiles()) {
     if (allowed.has(f)) continue;

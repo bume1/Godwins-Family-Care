@@ -1170,7 +1170,8 @@ const buildFollowUpWrites = (form, actor, opts) => {
 };
 
 // ---- Encounter diagnoses + services (spec §2.1–2.3) ----
-const DX_SOURCES = ['problem_list', 'favorite', 'manual', 'intake', 'prior_encounter'];
+// 'ai_suggestion' (Phase 4.1): added by the clinician from an AI suggestion.
+const DX_SOURCES = ['problem_list', 'favorite', 'manual', 'intake', 'prior_encounter', 'ai_suggestion'];
 const buildEncounterDiagnoses = (list) => {
   if (!Array.isArray(list)) return { error: 'diagnoses must be an array', code: 'DX_INVALID' };
   const out = []; const seen = new Set();

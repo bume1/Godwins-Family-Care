@@ -573,6 +573,20 @@ const HP_NOTE = {
   const insRow = EMR.insurance.find(x => x.puuid === 'uuid-bill-patient');
   check('and the row reaches OpenEMR as the primary policy, self-subscriber, no SSN', insRow && insRow.type === 'primary' && insRow.provider === '33' && insRow.policy_number === '1EG4TE5MK72' && insRow.subscriber_relationship === 'self' && insRow.date === '2025-01-01' && !('subscriber_ss' in insRow), insRow);
   check('the verification is kept as history', (STORE.get('insurance_verification_events') || []).filter(e => e.clientId === BILLPATIENT.id).length === 2);
+  // Phase 4.2: billing put modifier 25 on 99349, so the rendering clinician's
+  // reason is required before anything posts.
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('modifier 25 with no clinician reason refuses Submit, naming the line', r.status === 409 && (r.body.findings || []).some(f => f.code === 'MODIFIER_NOT_JUSTIFIED' && /99349/.test(f.fieldLabel)), r.body);
+  r = await call('GET', `${B}/encounters/${bv}`, tok.fnp);
+  check('the clinician sees the modifier that needs her reason', r.status === 200 && (r.body.modifierJustifications || []).some(x => x.key === '99349-25' && !x.justification), r.body && r.body.modifierJustifications);
+  r = await call('POST', `${B}/encounters/${bv}/modifier-justification`, tok.mgr, { code: '99349', modifier: '25', text: 'Billing cannot say this for her.' });
+  check('billing cannot record the clinician\'s reason', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${bv}/modifier-justification`, tok.fnp, { code: '99349', modifier: '59', text: 'Not on this line at all.' });
+  check('a modifier that is not on the visit is refused', r.status === 404 && r.body.code === 'MODIFIER_LINE_NOT_FOUND', r.body);
+  r = await call('POST', `${B}/encounters/${bv}/modifier-justification`, tok.fnp, { code: '99349', modifier: '25', text: 'Medication review for worsening dizziness, separate from the BP follow-up.' });
+  check('the FNP records why', r.status === 200 && record(bv).modifierJustifications['99349-25'].by.id === FNP.id, r.body);
+  check('the activity log carries the line, never the reason', !JSON.stringify(rows('activity_log').filter(a => a.action === 'modifier_justification_recorded')).includes('dizziness'));
+
   // The claim scrub at Submit (2026-11-04): the billing facility's NPI is gone
   // from its OpenEMR record, so nothing may post.
   FACILITIES[0].facility_npi = '';
@@ -635,6 +649,10 @@ const HP_NOTE = {
   r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.fnp, {});
   check('with Gemini not configured it is refused, naming the blockers', r.status === 503 && r.body.code === 'MODEL_BOUNDARY_REFUSED' && Array.isArray(r.body.blockers) && r.body.blockers.length > 0, r.body);
   check('and the refusal wrote no row and no pointer', rows('ai_reviews').length === aiBefore && !record(bv).latestMdmExtractionId);
+  r = await call('POST', `${B}/encounters/${bv}/ai/suggest-diagnoses`, tok.mgr, {});
+  check('diagnosis suggestions need clinical write access', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${bv}/ai/suggest-diagnoses`, tok.fnp, {});
+  check('with Gemini off, suggestions are refused naming the blockers, and nothing is written', r.status === 503 && r.body.code === 'MODEL_BOUNDARY_REFUSED' && rows('ai_reviews').length === aiBefore, r.body);
   console.log('\n── 13e. Phase 3: the clinician confirms facts, rules derive the level (2026-11-04) ──');
   r = await call('POST', `${B}/notes`, tok.fnp, { note: { kind: 'followup', chiefConcern: 'BP recheck', assessment: 'HTN worsening', plan: 'Stop lisinopril. Total time 65 minutes.' } });
   const lvx = r.body && r.body.encounterUuid;

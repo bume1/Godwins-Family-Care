@@ -33,6 +33,8 @@ const clean = (over = {}) => ({
   ncci: { ptpEdits: [], mueByCode: { 99349: { mueValue: 1, mai: '2' } }, sourceVersion: FRESH() },
   payer: { kind: 'medicare_ffs', payerName: 'Medicare', memberId: '1EG4TE5MK73' },
   sameDayOtherCodes: [],
+  // Phase 4.2: modifier 25 sits on a line only with the clinician's recorded reason.
+  modifierJustifications: { '99349-25': { text: 'A separately identifiable problem was managed.' }, '99350-25': { text: 'A separately identifiable problem was managed.' } },
   ...over
 });
 const codesOf = (r) => r.findings.map(f => f.code);
@@ -203,7 +205,7 @@ test('the date of service is not in the future and is within twelve months', () 
 test('modifier 25 with no other billable service on the same date warns; another service clears it', () => {
   const l25 = { code: '99349', modifiers: ['25'], units: 1, dxLinks: ['I10'], fee: 1 };
   assert.deepEqual(warns(S.scrubClaim(clean({ lines: [l25] }))), ['MODIFIER_25_ALONE']);
-  assert.deepEqual(warns(S.scrubClaim(clean({ lines: [l25, { code: 'G0439', units: 1, dxLinks: ['I10'], fee: 1 }] }))), []);
+  assert.deepEqual(warns(S.scrubClaim(clean({ lines: [l25, { code: '99497', units: 1, dxLinks: ['I10'], fee: 1 }] }))), []);
   assert.deepEqual(warns(S.scrubClaim(clean({ lines: [l25], sameDayOtherCodes: ['99497'] }))), [], 'another encounter the same day counts');
 });
 test('an unspecified ICD-10 code warns when OpenEMR lists a more specific sibling', () => {

@@ -157,7 +157,9 @@ test('it is stored in ai_reviews, purged on the same schedule as the chart revie
 
 // ---- RUN the job: what reaches the model, and what is stored ----
 const liftJob = (deps) => {
-  const start = serverSrc.indexOf('const runMdmExtraction = async');
+  // The shared note packet (gatherEncounterNotePacket, also used by Phase 4.1)
+  // and the job, lifted together.
+  const start = serverSrc.indexOf('const gatherEncounterNotePacket = async');
   const end = serverSrc.indexOf('// POST …/encounters/:euuid/ai/extract-mdm');
   assert.ok(start > 0 && end > start);
   // eslint-disable-next-line no-new-func
@@ -227,7 +229,7 @@ test('RUN: a failed call is recorded as failed, scrubbed, never as an empty succ
   assert.equal(saved.code, 'X');
 });
 test('the job never touches the chart: no OpenEMR write, no note save, no record write', () => {
-  const job = serverSrc.slice(serverSrc.indexOf('const runMdmExtraction = async'), serverSrc.indexOf('// POST …/encounters/:euuid/ai/extract-mdm'));
+  const job = serverSrc.slice(serverSrc.indexOf('const gatherEncounterNotePacket = async'), serverSrc.indexOf('// POST …/encounters/:euuid/ai/extract-mdm'));
   for (const w of ['updateSoapNote', 'addSoapNote', 'postCharge', 'updateEncounter', 'addProblem', 'addMedication', 'saveBillingRecord', "db.set('encounter_billing'"]) {
     assert.ok(!job.includes(w), `${w} must not appear in the extraction job`);
   }

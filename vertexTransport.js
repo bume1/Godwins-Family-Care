@@ -78,6 +78,14 @@ const SYSTEM_INSTRUCTIONS = Object.freeze({
     'Do NOT provide any billing code, E/M level, CPT, ICD-10 or other code, and do NOT say what level the visit supports. You report facts; you do not code.',
     'List anything you could not read in unreadable.'
   ].join(' '),
+  dx_suggestion: [
+    'You are reading ONE encounter note for a licensed clinician, who decides every diagnosis.',
+    'Propose ICD-10-CM diagnosis codes for the conditions this note documents as addressed at this visit, and nothing else.',
+    'Every proposal MUST carry a quote: the exact words from the note it rests on, copied character for character. A proposal you cannot quote is not made.',
+    'Use the most specific code the note\'s own words support. Do NOT infer a condition, a severity, a laterality or a complication the note does not state.',
+    'Propose ICD-10-CM codes ONLY. Do NOT provide any CPT or HCPCS code, modifier, or E/M level.',
+    'List anything you could not read in unreadable.'
+  ].join(' '),
   document_extraction: 'Read the attached document and return ONLY the fields you can actually see printed on it. Leave a field out entirely rather than guess — an omitted field is reviewed as blank, a wrong one is reviewed as if it were true. Never infer a value from context.',
   document_classification: 'Read the attached document and classify it using only what is printed on it.',
   dictation_to_note: 'Turn the attached dictation into a structured note. Use only what was dictated; never add a finding, a plan or a value that was not said.'
