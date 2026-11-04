@@ -386,23 +386,18 @@ const buildUnsignedBacklog = ({ rows, today }) => rows
 // address. Build-enforced — nothing here touches `totals`, the plot or the
 // proposal, and the exam counts live under `ime` with their own names.
 //
-// An exam has a DATE AND A SITE AND NO TIME OF DAY (the roster has no time
-// field), so exams cannot be interleaved with timed visits and are not
-// pretended to be. They are grouped by site, in the order the roster returns
-// them, which is already surname order.
+// An exam may carry a TIME SLOT (owner, 2026-11-04) and then reads in the
+// day's own order beside the visits, through `agenda` below. An exam with no
+// slot is still a real booking — the roster has always allowed one — and
+// sorts last rather than being shown a time nobody recorded.
 const imeDay = (exams) => {
   const rows = (exams || []).filter(Boolean);
-  const sites = [];
-  rows.forEach(r => {
-    const key = r.site || 'unknown';
-    let g = sites.find(x => x.site === key);
-    if (!g) { g = { site: key, siteLabel: r.siteLabel || key, exams: [] }; sites.push(g); }
-    g.exams.push(r);
-  });
   const count = (status) => rows.filter(r => r.status === status).length;
   return {
+    // In the order the roster returned them, which is already time order with
+    // the untimed exams last. No second sort here: two orderings of one list
+    // is how the day and the board start disagreeing about what comes first.
     exams: rows,
-    sites,
     totals: {
       exams: rows.length,
       expected: count('expected'),
@@ -412,6 +407,35 @@ const imeDay = (exams) => {
     }
   };
 };
+
+// THE DAY IN ONE READING ORDER, AND IT IS A LIST OF POINTERS.
+//
+// Once an exam carries a time (owner, 2026-11-04) a clinician with a 9am home
+// visit, an 11am exam and a 2pm home visit wants to read them in that order.
+// So the order is computed here and served — but each entry carries only a
+// KIND, AN ID AND A TIME. The rows themselves stay in `visits` and
+// `ime.exams`, so there is one copy of a visit and one copy of an exam, and
+// the order cannot drift from the thing it is ordering. That is what lets the
+// two lines read as one day without sharing a data model.
+//
+// Anything with no time sorts LAST rather than first: it happens "sometime
+// today", and at the head of a timed list it reads as the 8am appointment.
+const sortKey = (time) => (/^\d{2}:\d{2}$/.test(String(time || '')) ? String(time) : '99:99');
+const buildAgenda = ({ visits, exams }) => []
+  .concat((visits || []).map(v => ({ kind: 'visit', id: v.eid, time: v.time || null })))
+  .concat((exams || []).map(e => ({ kind: 'ime', id: e.id, time: e.examTime || null })))
+  .sort((a, b) => {
+    // PLAIN comparison, never localeCompare: under ICU collation a punctuation
+    // sentinel sorts BEFORE digits, which put every untimed row at the head of
+    // the day — exactly the thing the rule above exists to prevent. '99:99' is
+    // a real-shaped key no clock can produce, so it needs no special case.
+    const ka = sortKey(a.time), kb = sortKey(b.time);
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    // A visit and an exam at the same minute: the visit first, because the
+    // exam is at a clinic and the visit is somewhere the clinician must drive.
+    if (a.kind !== b.kind) return a.kind === 'visit' ? -1 : 1;
+    return 0;
+  });
 
 const buildMyDay = ({
   date, appointments, clientsById, timingsByEid, signedEids,
@@ -455,6 +479,8 @@ const buildMyDay = ({
     unsigned: buildUnsignedBacklog({ rows: unsignedEarlier || [], today: date }),
     // Track E, beside the clinical day and never inside it — see imeDay.
     ime: imeDay(imeExams),
+    // The reading order over both, as pointers only — see buildAgenda.
+    agenda: buildAgenda({ visits, exams: imeExams }),
     totals: {
       visits: counted.length,
       miles: legs.length ? Math.round(legs.reduce((s, m) => s + m, 0) * 10) / 10 : null,
@@ -567,7 +593,7 @@ module.exports = {
   timingId, minutesBetween, totalVisitMinutes, timeStatement, MAX_VISIT_MINUTES,
   visitTiming, SCHEDULED_ONLY,
   DISTANCE_UNAVAILABLE, haversineMiles, coordsOf, addressLineOf,
-  buildDayRow, buildUnsignedBacklog, buildMyDay, imeDay,
+  buildDayRow, buildUnsignedBacklog, buildMyDay, imeDay, buildAgenda,
   proposeRouteOrder,
   plotStops, MAP_PADDING,
   findNearbyDue, DUE_AFTER_DAYS, daysBetweenYmd,

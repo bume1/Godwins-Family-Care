@@ -58,7 +58,9 @@ const D21 = T.addDays(TODAY, 21);
 
 // Surnames fight the dates on purpose, so a surname-only ordering would show.
 const ROWS = [
-  { id: 'r-today', firstName: 'James', lastName: "O'Brien", dob: '1970-05-04', examDate: TODAY, site: 'savannah', providerUserId: DOC.id, status: 'arrived', arrivedAt: new Date().toISOString(), arrivalPhone: '(912) 555-7777', createdAt: new Date().toISOString() },
+  { id: 'r-today', firstName: 'James', lastName: "O'Brien", dob: '1970-05-04', examDate: TODAY, examTime: '11:00', durationMinutes: 60, site: 'savannah', providerUserId: DOC.id, status: 'arrived', arrivedAt: new Date().toISOString(), arrivalPhone: '(912) 555-7777', createdAt: new Date().toISOString() },
+  // A second exam today with NO slot, so the probe can see it sort last.
+  { id: 'r-today-untimed', firstName: 'Pat', lastName: 'Ames', dob: '1964-04-04', examDate: TODAY, site: 'savannah', providerUserId: DOC.id, status: 'expected', createdAt: new Date().toISOString() },
   { id: 'r-d7-z', firstName: 'Zoe', lastName: 'Zane', dob: '1960-03-03', examDate: D7, site: 'savannah', providerUserId: DOC.id, status: 'expected', createdAt: new Date().toISOString() },
   { id: 'r-d7-b', firstName: 'Bo', lastName: 'Baker', dob: '1961-01-01', examDate: D7, site: 'savannah', providerUserId: DOC.id, status: 'expected', createdAt: new Date().toISOString() },
   { id: 'r-d21-a', firstName: 'Abe', lastName: 'Adams', dob: '1962-02-02', examDate: D21, site: 'savannah', providerUserId: DOC.id, status: 'expected', createdAt: new Date().toISOString() }
@@ -115,8 +117,19 @@ const run = async (scenario) => {
       // The `ime` block is built by the REAL modules the way the route builds
       // it, so this exercises the shipped contract rather than a hand-written
       // shape the server never produces.
+      // A clinical visit before the exam and one after it, so the interleave
+      // is observable: with exams alone, order proves nothing.
+      const CLIENTS = new Map([
+        ['c-am', { id: 'c-am', name: 'Ada Early', serviceLine: 'ihpc' }],
+        ['c-pm', { id: 'c-pm', name: 'Zed Later', serviceLine: 'ihpc' }]
+      ]);
       const d = myDay.buildMyDay({
-        date: TODAY, appointments: [], clientsById: new Map(), timingsByEid: new Map(),
+        date: TODAY,
+        appointments: [
+          { eid: '901', clientId: 'c-am', date: TODAY, startTime: '09:00', title: 'Follow-up' },
+          { eid: '902', clientId: 'c-pm', date: TODAY, startTime: '14:00', title: 'Follow-up' }
+        ],
+        clientsById: CLIENTS, timingsByEid: new Map(),
         signedEids: new Set(), unsignedEarlier: [], openTasks: 0, blocks: [], homeVisitFields: [],
         imeExams: vet.rowsInRange(ROWS, vet.rosterRange({ date: TODAY }, TODAY), { providerUserIds: [DOC.id] })
           .map(r => vet.examDayRow(r, DOC.name))
@@ -162,7 +175,7 @@ const run = async (scenario) => {
     const ranged = asked.filter(q => q.from && q.to);
     ok('Upcoming asked for a window, not a day', ranged.length > 0 && ranged[0].from === TODAY, JSON.stringify(ranged[0]));
     ok('every booked exam in the window is listed', /Zane/.test(txt) && /Baker/.test(txt) && /Adams/.test(txt));
-    ok('the window is summarised with a count of exams and days', /4 exams across 3 days/.test(txt), txt.slice(0, 500));
+    ok('the window is summarised with a count of exams and days', /5 exams across 3 days/.test(txt), txt.slice(0, 500));
     ok('each exam day is its own group with its own count', (await page.locator('button:has-text("Open day")').count()) === 3);
     // The whole reason the forward view is read-only.
     ok('the day-of buttons are NOT on the forward view', (await page.locator('button:has-text("Mark Seen")').count()) === 0);
@@ -176,7 +189,8 @@ const run = async (scenario) => {
     // ── C. Open day carries you to where the buttons are ───────────────────
     console.log('\nC. Open day goes to that exam day');
     await page.locator('button:has-text("Open day")').nth(1).click();
-    await page.waitForFunction(() => /Mark Seen/.test(document.body.innerText), null, { timeout: 15000 });
+    await page.waitForFunction(() => /Zane/.test(document.body.innerText) && !/Ames/.test(document.body.innerText),
+      null, { timeout: 15000 });
     txt = await body();
     ok('the day view opened on the chosen day', /Zane/.test(txt) && /Baker/.test(txt) && !/Adams/.test(txt), txt.slice(0, 400));
     ok('the day-of buttons are back', await page.locator('button:has-text("Mark Seen")').count() > 0);
@@ -192,32 +206,44 @@ const run = async (scenario) => {
   // Owner, 2026-11-04: one screen, two lines, labelled — and the exam half is
   // read-only, because status is marked on the Veterans board and nowhere else.
   await run(async (page) => {
-    console.log('\nE. My Day carries the day\'s IME exams, read-only');
+    console.log('\nE. My Day reads as one day, clinical and IME together');
     await page.locator('a:has-text("My Day"), button:has-text("My Day")').first().click().catch(() => {});
-    await page.waitForFunction(() => /IME Exams/i.test(document.body.innerText), null, { timeout: 20000 });
+    await page.waitForFunction(() => /IME/.test(document.body.innerText), null, { timeout: 20000 });
     const txt = await page.locator('body').innerText();
-    ok('the exam block is labelled as IME, not mixed into the visits', /IME Exams/i.test(txt));
-    ok("today's veteran is on My Day", /O'Brien/.test(txt), txt.slice(0, 600));
+    ok('the exam is labelled IME, not passed off as a clinical visit', /IME/.test(txt));
+    ok("today's veteran is on My Day", /O'Brien/.test(txt), txt.slice(0, 700));
     ok('a veteran booked for a later exam day is NOT on today', !/Zane/.test(txt) && !/Adams/.test(txt));
-    ok('the site is named', /Savannah clinic/.test(txt));
-    ok('the status is shown', /Arrived/.test(txt));
-    // The whole point of holding the two lines apart.
-    ok('no status buttons on My Day — status is marked on the board',
+    ok('the slot is shown in 12-hour form, not the stored 24-hour value',
+      /11:00 AM . 12:00 PM/.test(txt) || /11:00 AM/.test(txt), txt.slice(0, 900));
+    ok('an exam with no slot says so rather than showing a made-up time', /No set time/.test(txt));
+    ok('the site and status are shown', /Savannah clinic/.test(txt) && /Arrived/.test(txt));
+
+    // ⚠️ THE POINT OF GIVING AN EXAM A TIME: one reading order over both lines.
+    const iEarly = txt.indexOf('Ada Early'), iExam = txt.indexOf("O'Brien"),
+      iLate = txt.indexOf('Zed Later'), iUntimed = txt.indexOf('Ames');
+    ok('the 11:00 exam reads between the 9am and 2pm visits',
+      iEarly > -1 && iExam > iEarly && iLate > iExam,
+      `early=${iEarly} exam=${iExam} late=${iLate}`);
+    ok('the untimed exam sorts last, not at the head of the day', iUntimed > iLate, `untimed=${iUntimed} late=${iLate}`);
+
+    // Status is marked on the board and nowhere else.
+    ok('no status buttons on My Day',
       (await page.locator('button:has-text("Mark Seen")').count()) === 0 &&
       (await page.locator('button:has-text("No Show")').count()) === 0);
-    ok('the exam count is in the day footer', /1 IME exam\b/.test(txt), txt.slice(-700));
-    ok('an exam day with no clinical visits says so without claiming an empty day',
-      /No clinical visits scheduled/.test(txt), txt.slice(0, 900));
-    // GFC_PROBE_SHOT=<dir> writes the rendered screen out, for a human to look
-    // at. Off by default: a probe's job is the assertions above.
+    ok('the exam count is in the day footer', /2 IME exams/.test(txt), txt.slice(-700));
     if (process.env.GFC_PROBE_SHOT) {
       await page.screenshot({ path: path.join(process.env.GFC_PROBE_SHOT, 'my-day-ime.png'), fullPage: true });
     }
-    // It links to the one place a status IS changed.
     await page.locator('button:has-text("Open Board")').first().click();
     await page.waitForFunction(() => /Mark Seen/.test(document.body.innerText), null, { timeout: 15000 });
     ok('Open Board carries you to the Veterans board, where status is marked',
       (await page.locator('button:has-text("Mark Seen")').count()) > 0);
+    const board = await page.locator('body').innerText();
+    ok('the board shows the same slot, from the same formatter', /11:00 AM/.test(board), board.slice(0, 700));
+    ok('and the untimed exam reads "No set time" there too', /No set time/.test(board));
+    if (process.env.GFC_PROBE_SHOT) {
+      await page.screenshot({ path: path.join(process.env.GFC_PROBE_SHOT, 'veterans-board.png'), fullPage: true });
+    }
   });
 
   console.log(`\n${pass}/${pass + fails.length} checks passed.`);

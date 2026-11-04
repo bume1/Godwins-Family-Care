@@ -46,6 +46,58 @@ function isoDate(s) {
   return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? t : '';
 }
 
+// ── A time slot on an exam (owner, 2026-11-04) ─────────────────────────────
+// OPTIONAL, AND OPTIONAL FOR GOOD. Every row already on the roster has no time
+// and is still a real booking; a clinic that runs an exam day first-come has
+// nothing to type. So an untimed row is valid, sorts after the timed ones, and
+// is never shown a made-up time.
+//
+// ⚠️ A TIME NEVER NARROWS THE SIGN-IN MATCH. `candidatesFor` and `matchCheckin`
+// are keyed on the DAY and must stay that way: a veteran arrives early, arrives
+// late, and arrives at the wrong hour entirely, and every one of them is the
+// person we are expecting. Matching on the slot would turn an ordinary early
+// arrival into "we don't have you down", at an iPad, with nobody to ask.
+// Build-enforced in test/veteran_roster.test.js.
+const MAX_EXAM_MINUTES = 8 * 60;
+
+// 'HH:MM' on a 24-hour clock, or ''. No seconds: nobody books an exam at 9:00:30.
+function isoTime(s) {
+  const t = String(s == null ? '' : s).trim();
+  const m = /^(\d{2}):(\d{2})$/.exec(t);
+  if (!m) return '';
+  return (+m[1] <= 23 && +m[2] <= 59) ? t : '';
+}
+const minutesOfDay = (hhmm) => { const t = isoTime(hhmm); return t ? (+t.slice(0, 2) * 60 + +t.slice(3)) : null; };
+
+// What an exam OCCUPIES, for the clash check. A row with no length recorded is
+// a POINT IN TIME, not a guessed hour: the app cannot know whether a 9:00 exam
+// runs past 9:30, and inventing a default here would refuse a real booking on
+// the strength of a number nobody entered.
+const occupies = (row) => {
+  const start = minutesOfDay(row && row.examTime);
+  if (start == null) return null;
+  const len = Number(row && row.durationMinutes);
+  return { start, end: start + (Number.isFinite(len) && len > 0 ? len : 0) };
+};
+const spansOverlap = (a, b) => {
+  if (!a || !b) return false;
+  // Two exams booked at the identical minute clash even when neither records a
+  // length, which is the commonest double-booking and the one zero-length
+  // spans would otherwise let through.
+  if (a.start === b.start) return true;
+  return a.start < b.end && b.start < a.end;
+};
+
+// The exam already in that slot for the same provider on the same day, or null.
+// `exceptId` is the row being edited, which must not clash with itself.
+function slotClash(rows, row, { exceptId = null } = {}) {
+  const want = occupies(row);
+  if (!want) return null;
+  return (rows || []).find(r => r && !r.removedAt && r.id !== exceptId &&
+    r.examDate === row.examDate && String(r.providerUserId) === String(row.providerUserId) &&
+    spansOverlap(want, occupies(r))) || null;
+}
+
 // Validates what staff or a provider types in. `today` is Georgia's date.
 // Returns { value } or { error, fieldErrors }.
 function normalizeRosterInput(body, { today } = {}) {
@@ -55,6 +107,10 @@ function normalizeRosterInput(body, { today } = {}) {
   const dob = isoDate(b.dob);
   const examDate = isoDate(b.examDate);
   const site = b.site && SITES[b.site] ? b.site : DEFAULT_SITE;
+  const examTime = isoTime(b.examTime);
+  const rawLen = b.durationMinutes;
+  const hasLen = rawLen !== undefined && rawLen !== null && String(rawLen).trim() !== '';
+  const durationMinutes = hasLen ? Number(rawLen) : null;
   const fieldErrors = {};
   if (!firstName) fieldErrors.firstName = 'First name is required.';
   if (!lastName) fieldErrors.lastName = 'Last name is required.';
@@ -62,8 +118,25 @@ function normalizeRosterInput(body, { today } = {}) {
   else if (today && dob >= today) fieldErrors.dob = 'Date of birth must be in the past.';
   else if (dob < '1900-01-01') fieldErrors.dob = 'Date of birth looks wrong.';
   if (!examDate) fieldErrors.examDate = 'Exam date is required.';
+  // A time is optional; a time that was TYPED and is not a time is a slip, and
+  // dropping it silently would book the exam at no time at all.
+  if (b.examTime !== undefined && b.examTime !== null && String(b.examTime).trim() !== '' && !examTime) {
+    fieldErrors.examTime = 'Use a 24-hour time like 09:30.';
+  }
+  if (hasLen) {
+    if (!Number.isFinite(durationMinutes) || !Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+      fieldErrors.durationMinutes = 'Length must be a whole number of minutes.';
+    } else if (durationMinutes > MAX_EXAM_MINUTES) {
+      fieldErrors.durationMinutes = `Length cannot be more than ${MAX_EXAM_MINUTES / 60} hours.`;
+    } else if (!examTime) {
+      // Refused BY NAME rather than ignored: a length with no start is a half
+      // -filled slot, and storing it would show a length the day cannot place.
+      fieldErrors.durationMinutes = 'Add a start time before a length.';
+    }
+  }
   if (Object.keys(fieldErrors).length) return { error: 'Please check the highlighted fields.', code: 'VETERAN_INVALID', fieldErrors };
-  return { value: { firstName, lastName, dob, examDate, site } };
+  return { value: { firstName, lastName, dob, examDate, site, examTime: examTime || null,
+    durationMinutes: (examTime && Number.isFinite(durationMinutes) && durationMinutes > 0) ? durationMinutes : null } };
 }
 
 // Who may do what. `isOffice` = admin or manager.
@@ -147,7 +220,11 @@ function rowsInRange(rows, range, { providerUserId = null, providerUserIds = nul
   return (rows || [])
     .filter(r => r && !r.removedAt && r.examDate >= from && r.examDate <= to &&
       (scope === null || scope.has(String(r.providerUserId))))
+    // Day, then TIME, then site, then surname. An untimed exam sorts AFTER the
+    // timed ones on its day rather than first: it happens "sometime today", and
+    // putting it at the head of a timed list reads as the 8am appointment.
     .sort((a, b) => (a.examDate || '').localeCompare(b.examDate || '')
+      || ((minutesOfDay(a.examTime) ?? Infinity) - (minutesOfDay(b.examTime) ?? Infinity))
       || (a.site || '').localeCompare(b.site || '')
       || (a.lastName || '').localeCompare(b.lastName || ''));
 }
@@ -156,7 +233,8 @@ function rowsInRange(rows, range, { providerUserId = null, providerUserIds = nul
 function publicRow(row, providerName) {
   return {
     id: row.id, firstName: row.firstName, lastName: row.lastName, dob: row.dob,
-    examDate: row.examDate, site: row.site, siteLabel: SITES[row.site] || row.site,
+    examDate: row.examDate, examTime: row.examTime || null, durationMinutes: row.durationMinutes || null,
+    site: row.site, siteLabel: SITES[row.site] || row.site,
     providerUserId: row.providerUserId, providerName: providerName || null,
     status: row.status, statusLabel: STATUS_LABELS[row.status] || row.status,
     arrivedAt: row.arrivedAt || null, checkinId: row.checkinId || null,
@@ -175,6 +253,7 @@ function examDayRow(row, providerName) {
   return {
     id: row.id,
     firstName: row.firstName, lastName: row.lastName,
+    examTime: row.examTime || null, durationMinutes: row.durationMinutes || null,
     site: row.site, siteLabel: SITES[row.site] || row.site,
     providerUserId: row.providerUserId, providerName: providerName || null,
     status: row.status, statusLabel: STATUS_LABELS[row.status] || row.status,
@@ -199,8 +278,8 @@ function providerEmailSubject(siteLabel) {
 
 module.exports = {
   STATUSES, STATUS_LABELS, SETTABLE_STATUSES, SITES, DEFAULT_SITE,
-  RANGE_MAX_DAYS, RANGE_DEFAULT_DAYS,
-  foldName, isoDate, rosterRange, rowsInRange,
+  RANGE_MAX_DAYS, RANGE_DEFAULT_DAYS, MAX_EXAM_MINUTES,
+  foldName, isoDate, isoTime, minutesOfDay, occupies, slotClash, rosterRange, rowsInRange,
   normalizeRosterInput, isOffice, canEditRow, examDayRow,
   candidatesFor, matchCheckin, publicRow, providerText, veteranText, providerEmailSubject
 };
