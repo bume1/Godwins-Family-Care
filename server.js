@@ -4007,18 +4007,26 @@ app.post('/api/veterans/check-in', async (req, res) => {
 // The roster for a day. The office sees everyone's; a provider sees their own.
 app.get('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
   try {
-    const date = vetRoster.isoDate(req.query.date) || practiceToday();
+    // A WINDOW, and one day is the degenerate case: no parameters still means
+    // today only, which is what the exam-day screen asks for. `from`/`to`
+    // open the forward schedule. Both the date filter and the provider
+    // scoping live in `rowsInRange`, so neither can be left out here.
+    const today = practiceToday();
+    const range = vetRoster.rosterRange(req.query, today);
     const users = await getUsers();
     const office = vetRoster.isOffice(req.user);
     const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? u.name : null; };
-    const rows = ((await db.get('veteran_roster')) || [])
-      .filter(r => !r.removedAt && r.examDate === date && (office || r.providerUserId === req.user.id))
-      .sort((a, b) => (a.lastName || '').localeCompare(b.lastName || ''))
+    const rows = vetRoster.rowsInRange(await db.get('veteran_roster'), range, { providerUserId: office ? null : req.user.id })
       .map(r => vetRoster.publicRow(r, nameOf(r.providerUserId)));
     const providers = office
       ? veteranProviders(users).map(u => ({ id: u.id, name: u.name, hasPhone: !!require('./quoSms').toE164(u.phone), hasEmail: !!u.email }))
       : [{ id: req.user.id, name: req.user.name, hasPhone: !!require('./quoSms').toE164((users.find(u => u.id === req.user.id) || {}).phone), hasEmail: !!req.user.email }];
-    res.json({ date, today: practiceToday(), office, rows, providers, statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES });
+    res.json({
+      date: range.from, from: range.from, to: range.to, capped: range.capped,
+      today, office, rows, providers,
+      statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES,
+      maxRangeDays: vetRoster.RANGE_MAX_DAYS, defaultRangeDays: vetRoster.RANGE_DEFAULT_DAYS
+    });
   } catch (error) {
     console.error('Veteran roster read error:', error);
     res.status(500).json({ error: 'Server error' });

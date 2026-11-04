@@ -17,6 +17,10 @@
 // ============================================================================
 'use strict';
 
+// Calendar-date arithmetic is the shared clock's, not ours: a second copy of
+// "the day after" is a second thing to get wrong at a clock change.
+const gfcTime = require('./public/gfc-time');
+
 const STATUSES = Object.freeze(['expected', 'arrived', 'seen', 'no_show']);
 const STATUS_LABELS = Object.freeze({ expected: 'Expected', arrived: 'Arrived', seen: 'Seen', no_show: 'No show' });
 // A provider marks these by hand. "arrived" only ever comes from a sign-in.
@@ -93,6 +97,53 @@ function matchCheckin(rows, checkin, today) {
   return { state: 'unmatched', row: null, candidates: [] };
 }
 
+// ── the window a roster read covers ─────────────────────────────────────────
+// A READ IS A WINDOW, and a single day is the degenerate case where both ends
+// are the same date. The exam-day screen and the forward schedule therefore
+// share ONE filter rather than two that drift the first time one of them
+// learns about removed rows and the other does not.
+//
+// Uncapped, a range is a way to pull the whole roster in one request, so the
+// window is clamped and SAYS when it was clamped. A quarter is longer than any
+// exam schedule anybody plans from.
+const RANGE_MAX_DAYS = 92;
+// What the forward view asks for when nobody has picked a window.
+const RANGE_DEFAULT_DAYS = 28;
+
+// { from, to, capped }. NO PARAMETERS AT ALL MEANS TODAY ONLY, which is what
+// the exam-day screen asks for and must keep getting.
+function rosterRange(query, today) {
+  const q = query || {};
+  const day = isoDate(q.date);
+  const from = isoDate(q.from) || day || isoDate(today) || '';
+  if (!from) return { from: '', to: '', capped: false };
+  let to = isoDate(q.to) || day || from;
+  // An inverted window is a slip in whatever asked for it. One day is a
+  // predictable answer; swapping the ends would hand back a window nobody
+  // asked for and look like it worked.
+  if (to < from) to = from;
+  const ceiling = gfcTime.addDays(from, RANGE_MAX_DAYS);
+  const capped = to > ceiling;
+  return { from, to: capped ? ceiling : to, capped };
+}
+
+// The rows inside a window. `providerUserId` narrows to one provider's list;
+// null is the office's view of everybody. BOTH filters live here together on
+// purpose — the date filter and the who-may-see-it filter split across two
+// files is how a later caller surfaces one provider's veterans to another.
+// Oldest day first, then site, then surname: the order a person reads a
+// schedule in. A removed row never appears.
+function rowsInRange(rows, range, { providerUserId = null } = {}) {
+  const { from, to } = range || {};
+  if (!from || !to) return [];
+  return (rows || [])
+    .filter(r => r && !r.removedAt && r.examDate >= from && r.examDate <= to &&
+      (providerUserId === null || r.providerUserId === providerUserId))
+    .sort((a, b) => (a.examDate || '').localeCompare(b.examDate || '')
+      || (a.site || '').localeCompare(b.site || '')
+      || (a.lastName || '').localeCompare(b.lastName || ''));
+}
+
 // What a list returns: the stored row plus the provider's display name.
 function publicRow(row, providerName) {
   return {
@@ -123,6 +174,8 @@ function providerEmailSubject(siteLabel) {
 
 module.exports = {
   STATUSES, STATUS_LABELS, SETTABLE_STATUSES, SITES, DEFAULT_SITE,
-  foldName, isoDate, normalizeRosterInput, isOffice, canEditRow,
+  RANGE_MAX_DAYS, RANGE_DEFAULT_DAYS,
+  foldName, isoDate, rosterRange, rowsInRange,
+  normalizeRosterInput, isOffice, canEditRow,
   candidatesFor, matchCheckin, publicRow, providerText, veteranText, providerEmailSubject
 };

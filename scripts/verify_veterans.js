@@ -146,6 +146,51 @@ const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example
   r = await call('DELETE', `/api/veterans/roster/${annId}`, d2);
   check('removing keeps the row, marked removed', r.status === 200 && roster().find(x => x.id === annId).removedAt);
 
+  console.log('\n── The forward schedule (a read is a window) ──');
+  const d7 = practiceTime.addDays(today, 7);
+  const d21 = practiceTime.addDays(today, 21);
+  // Surnames deliberately fight the dates, so a surname-only sort cannot pass.
+  r = await call('POST', '/api/veterans/roster', at, { firstName: 'Zoe', lastName: 'Zane', dob: '1960-03-03', examDate: d7, providerUserId: DOC1.id });
+  check('a veteran can be booked for a future exam day', r.status === 200, JSON.stringify(r.body));
+  await call('POST', '/api/veterans/roster', at, { firstName: 'Abe', lastName: 'Adams', dob: '1961-04-04', examDate: d21, providerUserId: DOC1.id });
+  await call('POST', '/api/veterans/roster', at, { firstName: 'Pat', lastName: 'Patel', dob: '1962-05-05', examDate: d7, providerUserId: DOC2.id });
+
+  r = await call('GET', `/api/veterans/roster?from=${today}&to=${d21}`, at);
+  const ids = (r.body.rows || []).map(x => `${x.examDate}:${x.lastName}`);
+  check('the office reads the whole window, oldest exam day first',
+    r.status === 200 && r.body.from === today && r.body.to === d21 &&
+    ids.indexOf(`${d7}:Patel`) < ids.indexOf(`${d21}:Adams`) &&
+    ids.indexOf(`${d7}:Zane`) < ids.indexOf(`${d21}:Adams`), JSON.stringify(ids));
+
+  r = await call('GET', `/api/veterans/roster?from=${today}&to=${d21}`, d1);
+  check("a provider's window carries only their own veterans",
+    r.status === 200 && r.body.rows.every(x => x.providerUserId === DOC1.id) &&
+    r.body.rows.some(x => x.lastName === 'Zane') && !r.body.rows.some(x => x.lastName === 'Patel'),
+    JSON.stringify(r.body.rows.map(x => x.lastName)));
+
+  // The exam-day screen's contract: no parameters is still today alone.
+  r = await call('GET', '/api/veterans/roster', at);
+  check('no parameters still means today only',
+    r.status === 200 && r.body.from === today && r.body.to === today &&
+    r.body.rows.every(x => x.examDate === today) && !r.body.rows.some(x => x.lastName === 'Zane'),
+    JSON.stringify({ from: r.body.from, to: r.body.to }));
+
+  r = await call('GET', `/api/veterans/roster?date=${d7}`, at);
+  check('a single named day returns that day alone',
+    r.status === 200 && r.body.rows.length === 2 && r.body.rows.every(x => x.examDate === d7));
+
+  r = await call('GET', `/api/veterans/roster?from=${today}&to=${practiceTime.addDays(today, 400)}`, at);
+  check('an over-long window is shortened and says so',
+    r.status === 200 && r.body.capped === true && r.body.to === practiceTime.addDays(today, r.body.maxRangeDays),
+    JSON.stringify({ to: r.body.to, capped: r.body.capped }));
+
+  r = await call('GET', `/api/veterans/roster?from=${d21}&to=${today}`, at);
+  check('an inverted window returns one day rather than a window nobody asked for',
+    r.status === 200 && r.body.from === d21 && r.body.to === d21);
+
+  r = await call('GET', `/api/veterans/roster?from=${today}&to=${d21}`, cg);
+  check('a caregiver still cannot read the roster at all', r.status === 403);
+
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

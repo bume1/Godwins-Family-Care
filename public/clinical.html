@@ -7777,15 +7777,45 @@
         </form>
       );
     };
+    // The rows come back already ordered by exam date, so grouping is a walk,
+    // not a sort. Grouping here rather than on the server keeps the day screen
+    // and this one reading ONE response shape.
+    const groupVeteransByDate = (rows) => {
+      const out = [];
+      (rows || []).forEach(r => {
+        const last = out[out.length - 1];
+        if (last && last.date === r.examDate) last.rows.push(r);
+        else out.push({ date: r.examDate, rows: [r] });
+      });
+      return out;
+    };
+
     const VeteransView = () => {
       const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
+      // 'day' is the exam-day screen. 'upcoming' is the forward schedule.
+      // Status actions live in 'day' ONLY: marking somebody Seen on a date
+      // three weeks out is a mis-click, so the forward view navigates to the
+      // day instead of carrying the buttons — the same move the shift board
+      // makes from its calendar into its list.
+      const [mode, setMode] = useState('day');
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
       const [showAdd, setShowAdd] = useState(false);
       const load = useCallback(() => {
-        authedFetch(`/api/veterans/roster?date=${date}`).then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message));
-      }, [date]);
-      useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+        const q = mode === 'upcoming'
+          ? `from=${date}&to=${GFC_TIME.addDays(date, 28)}`
+          : `date=${date}`;
+        authedFetch(`/api/veterans/roster?${q}`).then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [date, mode]);
+      // The day screen is a live board on an exam day, so it polls. The
+      // forward schedule is planning: it would only flicker.
+      useEffect(() => {
+        load();
+        if (mode !== 'day') return undefined;
+        const t = setInterval(load, 30000);
+        return () => clearInterval(t);
+      }, [load, mode]);
+      const openDay = (ymd) => { setDate(ymd); setMode('day'); };
       const setStatus = (row, status) => authedFetch(`/api/veterans/roster/${row.id}/status`, { method: 'POST', body: JSON.stringify({ status }) })
         .then(load).catch(e => setErr(e.message));
       const remove = (row) => {
@@ -7798,6 +7828,14 @@
         <div className="p-4 lg:p-7 max-w-5xl">
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <h2 className="serif text-[24px] font-semibold text-primary mr-auto">Veterans{d && !d.office ? ' · My List' : ''}</h2>
+            <div className="inline-flex rounded-lg border border-stone-300 overflow-hidden">
+              <button type="button" aria-pressed={mode === 'day'}
+                className={`px-3 py-1.5 text-sm ${mode === 'day' ? 'bg-primary text-white' : 'bg-white text-stone-600'}`}
+                onClick={() => setMode('day')}>Exam Day</button>
+              <button type="button" aria-pressed={mode === 'upcoming'}
+                className={`px-3 py-1.5 text-sm border-l border-stone-300 ${mode === 'upcoming' ? 'bg-primary text-white' : 'bg-white text-stone-600'}`}
+                onClick={() => setMode('upcoming')}>Upcoming</button>
+            </div>
             <input type="date" className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm" value={date} onChange={e => setDate(e.target.value)} />
             <button className="btn ghost" onClick={() => setShowAdd(s => !s)}>{showAdd ? 'Close' : 'Add Veteran'}</button>
           </div>
@@ -7806,6 +7844,39 @@
           {!d && !err && <div className="card p-6 text-stone-500 text-sm">Loading…</div>}
           {d && (
             <>
+              {mode === 'upcoming' && (
+                <>
+                  <p className="text-[13px] text-stone-500 mb-2">
+                    {rows.length === 0
+                      ? `No exams booked between ${fmtYmd(d.from)} and ${fmtYmd(d.to)}.`
+                      : `${rows.length} exam${rows.length === 1 ? '' : 's'} across ${groupVeteransByDate(rows).length} day${groupVeteransByDate(rows).length === 1 ? '' : 's'} · ${fmtYmd(d.from)} to ${fmtYmd(d.to)}`}
+                    {d.capped ? ` · shortened to ${d.maxRangeDays} days` : ''}
+                  </p>
+                  {groupVeteransByDate(rows).map(g => (
+                    <div key={g.date} className="card overflow-hidden mb-3">
+                      <button type="button" onClick={() => openDay(g.date)}
+                        className="w-full text-left px-4 py-2.5 bg-stone-50 border-b border-stone-100 hover:bg-stone-100">
+                        <span className="text-[14px] font-semibold text-primary">{fmtYmd(g.date)}</span>
+                        <span className="text-[12.5px] text-stone-500"> · {g.rows.length} booked{g.date === d.today ? ' · today' : ''}</span>
+                        <span className="text-[12.5px] text-primary float-right">Open day →</span>
+                      </button>
+                      {/* Read-only on purpose: Seen and No Show belong on the
+                          exam day, not three weeks out. Open day carries you
+                          to where those buttons live. */}
+                      {g.rows.map(r => (
+                        <div key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-stone-100 last:border-0">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-[14.5px] font-semibold text-primary">{r.firstName} {r.lastName}</span>
+                            <span className={`pill ml-2 ${VETERAN_STATUS_PILL[r.status] || ''}`}>{r.statusLabel}</span>
+                            <div className="text-[12.5px] text-stone-600">DOB {fmtYmd(r.dob)} · {r.siteLabel}{d.office && r.providerName ? ` · ${r.providerName}` : ''}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </>
+              )}
+              {mode === 'day' && <>
               <p className="text-[13px] text-stone-500 mb-2">{rows.length} on the list · {arrived} waiting now</p>
               <div className="card overflow-hidden">
                 {rows.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">No veterans on the list for this day.</p>}
@@ -7835,6 +7906,7 @@
                   </div>
                 ))}
               </div>
+              </>}
               {/* A provider is told about their own record only. */}
               {!d.office && d.providers && d.providers[0] && !d.providers[0].hasPhone && (
                 <p className="text-[12px] text-stone-500 mt-2">Your user record has no mobile number, so arrivals come by email only. Ask an admin to add it.</p>

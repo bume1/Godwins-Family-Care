@@ -207,9 +207,27 @@
     return true;
   }
 
+  // Shift a bare calendar date (YYYY-MM-DD) by whole days. Deliberately in
+  // UTC and deliberately NOT through a local Date: a bare date carries no
+  // zone, and "the day after the 28th" is a calendar statement rather than
+  // an instant plus 24 hours — the distinction that made the day-before
+  // reminders correct across the November clock change. Returns '' on
+  // anything that is not a real date, so a caller cannot build a window out
+  // of nonsense. `instantFromZoned` is the other direction, where the zone
+  // genuinely does decide the answer.
+  function addDays(isoDate, n) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate == null ? '' : isoDate).trim());
+    if (!m) return '';
+    const t = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    if (t.getUTCFullYear() !== +m[1] || t.getUTCMonth() !== +m[2] - 1 || t.getUTCDate() !== +m[3]) return '';
+    t.setUTCDate(t.getUTCDate() + Number(n || 0));
+    const p2 = (v) => String(v).padStart(2, '0');
+    return `${t.getUTCFullYear()}-${p2(t.getUTCMonth() + 1)}-${p2(t.getUTCDate())}`;
+  }
+
   return {
     PRACTICE_TIMEZONE, LOCALE,
     fmtDateTime, fmtDate, fmtTime, fmtClock, fmtDayTime, fmtLongDayTime,
-    zonedParts, instantFromZoned, installDefaultTimeZone
+    zonedParts, instantFromZoned, addDays, installDefaultTimeZone
   };
 });
