@@ -166,7 +166,8 @@ const SvcEditor = ({ services, setServices, diagnoses, practiceFavorites, favori
       {services.map(s => (
         <div key={s.code} className="py-1.5 border-b border-stone-100">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[13px]"><b className="font-mono">{s.code}</b> <span className="text-stone-500">{s.codeType}</span> {s.label}</div>
+            <div className="text-[13px]"><b className="font-mono">{s.code}</b> <span className="text-stone-500">{s.codeType}</span> {s.label}
+              {s.suggested && <span className="chip ml-1.5 bg-amber-50 text-amber-900 border border-amber-200" title="Added by the app from the clinician's confirmed facts and the add-on rules. Saving the coding accepts it.">Suggested{(s.suggestedModifiers || []).length ? ` · mod ${s.suggestedModifiers.join(', ')}` : ''}, review</span>}</div>
             {!readOnly && (
               <div className="flex items-center gap-2 text-xs">
                 <label className="flex items-center gap-1">units <input className="inp !w-14 !py-0.5" value={s.units} onChange={e => update(s.code, { units: e.target.value.replace(/\D/g, '') || 1 })} /></label>

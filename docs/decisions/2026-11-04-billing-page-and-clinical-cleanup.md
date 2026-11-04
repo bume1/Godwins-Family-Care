@@ -58,12 +58,12 @@ _2026-11-04 · owner-directed: "Billing needs to be its own page, wired into the
 - `test/billing_page.test.js`, 18 tests.
 - 28 existing guards repointed at the new shape, not deleted. The popup's rules now guard the visit screen.
 - 15 deliberate breaks, each confirmed to fail a test. Two did not fail at first and the tests were tightened: the allow-list check on the stored state row, and FixLink's no-link case. One break was badly written by me (a component nested on a single line); written properly, it fails a test.
-- Full suite 3015 pass, 0 fail. All three pages compile.
+- Full suite 3026 pass, 0 fail, after merging main (PR #241: its "Suggested, review" tag on pre-filled lines now shows in the shared service editor, so billing sees it). All three pages compile.
 - Probes:
   - New `scripts/verify_billing_render.js`, **21/21 in Chromium**: the connection card, a claim worked end to end, the Settings tab, the clinical sidebar for billing and for a clinician, and the encounter's Open in Billing link.
   - `verify_soap_note_render.js` **23/23** (updated for New Visit and the steps).
   - `verify_referrals_render.js` **31/31** (Referrals is now an Orders filter).
-  - `verify_note_lifecycle.js` **261/261** over real HTTP, including the Released list and the connection route.
+  - `verify_note_lifecycle.js` **262/262** over real HTTP, including the Released list and the connection route.
 - **Not proven from here:** a real OpenEMR answering the connection checks, and a clearinghouse.
 
 **Open for the owner:**

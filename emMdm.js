@@ -191,11 +191,12 @@ const mdmFromElements = (levels) => {
 // facts: the CONFIRMED facts, shaped like the Phase 2 output.
 // setting: 'home' | 'office' (appointmentTypes.resolveCodeFamily decides it).
 // patientStatus: 'new' | 'established'.
-// chooseTime / affirmTime: the clinician asked for the time-based level and
-//   affirmed the time explicitly (spec §3.3).
+// chooseMdm: the clinician deliberately takes the MDM level when time is
+//   higher (an override). chooseTime / affirmTime are accepted and ignored:
+//   the higher supported level is already the default (2026-11-04).
 // context: { enteredMinutes, statusConflict } facts the server knows about
 //   the encounter, stated in the flag when they disagree with the note.
-const deriveLevel = ({ facts, setting, patientStatus, chooseTime = false, affirmTime = false, context = {} }) => {
+const deriveLevel = ({ facts, setting, patientStatus, chooseTime = false, affirmTime = false, chooseMdm = false, context = {} }) => {
   const familyKey = emLevels.familyKeyFor({ setting, patientStatus });
   const family = familyKey ? emLevels.familyByKey(familyKey) : null;
   if (!family) return { error: 'This visit is not a home or office E/M visit, so there is no E/M level to derive.', code: 'EM_NO_FAMILY' };
@@ -212,16 +213,23 @@ const deriveLevel = ({ facts, setting, patientStatus, chooseTime = false, affirm
   const indexOf = (code) => family.levels.findIndex(l => l.code === code);
   const candidates = [{ basis: 'mdm', code: mdmCode, mdm }];
   if (timeCode) candidates.push({ basis: 'time', code: timeCode, minutes });
-  // The lower by default.
-  const def = timeCode && indexOf(timeCode) < indexOf(mdmCode) ? candidates[1] : candidates[0];
+  // THE MOST ACCURATE SUPPORTED LEVEL IS THE DEFAULT (owner decision,
+  // 2026-11-04, replacing "the lower by default"). The AMA lets the level be
+  // chosen by MDM or by total time, whichever the documentation supports
+  // higher, so when the note states a time that reaches a higher level than
+  // MDM, time is the default. A human biller reviews every claim, and any
+  // disagreement still raises LEVEL_AMBIGUOUS. What the note does NOT say
+  // (the `possible` levels) is never used as the default: that is the line
+  // between accurate and upcoding.
   const timeIsHigher = !!timeCode && indexOf(timeCode) > indexOf(mdmCode);
+  const def = timeIsHigher ? candidates[1] : candidates[0];
 
+  // `chooseTime` is kept so an older page cannot break: choosing time when it
+  // is already the default is the default. `chooseMdm` lets the clinician
+  // deliberately take the MDM level instead, recorded as an override.
   let final = def;
-  if (chooseTime) {
-    if (!timeIsHigher) return { error: 'The time-based level is not higher than the one medical decision making supports, so there is nothing to choose.', code: 'EM_TIME_NOT_HIGHER' };
-    if (!affirmTime) return { error: 'Choosing the level by time needs you to affirm the total time explicitly.', code: 'EM_TIME_NOT_AFFIRMED' };
-    final = candidates[1];
-  }
+  if (chooseMdm && def !== candidates[0]) final = candidates[0];
+  void chooseTime; void affirmTime;
 
   // ---- the review flag ----
   const absent = [];
