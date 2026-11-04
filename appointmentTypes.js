@@ -36,8 +36,26 @@ const SERVICES = Object.freeze([
   // Social work (owner, 2026-10-11): LMSW and LCSW documentation. Kept apart
   // from behavioral health because the psych types there carry medication
   // decisions, which are a prescriber's.
-  { key: 'social_work', label: 'Social Work' },
-  { key: 'ime', label: 'IME / C&P' }
+  { key: 'social_work', label: 'Social Work' }
+  // ⚠️ THERE IS NO 'ime' SERVICE AND NO IME APPOINTMENT TYPE, DELIBERATELY
+  // (owner, 2026-11-04). IME / C&P is scheduled in its OWN LANE —
+  // `veteranRoster.js` and the `veteran_roster` collection — because "IME
+  // payments will be billed and made to providers different than standard
+  // claims": a vendor pays GFC and GFC pays the examining provider, which is
+  // not a Medicare claim and must never travel through the clinical billing
+  // path. A veteran is a roster row, not a client and not an OpenEMR patient
+  // (2026-10-30), so there is nothing here for a clinical visit to attach to.
+  //
+  // An `ime` service with an `ime_exam` type under it was declared here until
+  // 2026-11-04 and was NOT inert. The booking picker renders one optgroup per
+  // service and fills it from APPOINTMENT_TYPES, and `canDocumentType` said
+  // yes to every provider — so it put a selectable "IME / C&P → Exam" option
+  // in front of every clinician, and choosing it opened the H&P screen and
+  // produced an OpenEMR encounter headed for coding and billing-submit. That
+  // is the one place this work is not supposed to go. Re-adding EITHER half
+  // re-opens it, and a service with no types also renders an empty optgroup.
+  //
+  // IME exam documentation and vendor invoicing are Track E / B7.
 ]);
 
 const MODALITIES = Object.freeze([
@@ -358,6 +376,13 @@ const EXPECTED_DOCUMENT_KINDS = Object.freeze([
   // Per-visit (scope VISIT, 2026-09-23). These belong to ONE encounter and
   // never appear on the client's checklist — a patient is not asked to
   // produce their own discharge summary.
+  //
+  // `imeRecords` and `imeExamRequest` are requested by NO appointment type
+  // since the IME type was removed (2026-11-04). They stay in the catalog
+  // because server.js still declares them and a filed row carries its kind —
+  // dropping a kind would show a document we hold as missing. They are inert
+  // here: a document kind creates no encounter and reaches no claim. Whether
+  // they should go at all is the owner's call, not a drive-by.
   'dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest'
 ]);
 
@@ -629,28 +654,10 @@ const APPOINTMENT_TYPES = Object.freeze([
       t('referralsResources', R.OPTIONAL), t('swPlan', R.ALWAYS),
       t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('contactTime', R.ALWAYS)
     ]
-  },
-  {
-    key: 'ime_exam', service: 'ime', label: 'Exam',
-    defaultMinutes: 90, telehealthAllowed: false, telehealthPayerCaveat: false,
-    noteForm: 'hp',
-    credentials: ['MD', 'DO', 'NP', 'PA'], specialty: 'ime_examiner',
-    // An IME is billed to the contracting entity and NEVER attached to a
-    // Medicare claim. Build-enforced downstream; declared here so the rule
-    // travels with the type rather than living only in a comment.
-    neverMedicare: true,
-    intake: [
-      // An IME is not treatment: nothing about it comes from the client's own
-      // enrollment record, and it is billed to the contracting entity.
-      D('imeRecords'),
-      D('imeExamRequest'),
-    ],
-    sections: [
-      t('examRequest', R.ALWAYS), t('identityVerification', R.ALWAYS), t('recordsReviewed', R.ALWAYS),
-      t('history', R.ALWAYS), t('examination', R.ALWAYS), t('dbqForms', R.ALWAYS),
-      t('medicalOpinion', R.ALWAYS), t('reportAttachment', R.ALWAYS)
-    ]
   }
+  // An `ime_exam` type sat here until 2026-11-04. See the note on SERVICES
+  // above for why IME is scheduled in `veteranRoster.js` instead, and what
+  // re-adding it would re-open.
 ]);
 
 // Runs at LOAD. A requirement that names something this app does not have is

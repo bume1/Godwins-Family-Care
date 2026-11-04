@@ -82,15 +82,30 @@ test('travel is needed exactly where somebody travels', () => {
   }
 });
 
-test('the twelve types are declared once, each with a note template and a duration', () => {
-  assert.equal(A.APPOINTMENT_TYPES.length, 12);
+test('the eleven types are declared once, each with a note template and a duration', () => {
+  assert.equal(A.APPOINTMENT_TYPES.length, 11);
   const keys = A.APPOINTMENT_TYPES.map(t => t.key);
   assert.equal(new Set(keys).size, keys.length, 'a duplicate key would make typeByKey silently pick one');
   assert.deepEqual(A.typesForService('primary_care').map(t => t.key),
     ['pc_new_patient', 'pc_follow_up', 'pc_acute', 'pc_awv', 'pc_tcm', 'pc_phone_ccm']);
   assert.deepEqual(A.typesForService('behavioral_health').map(t => t.key), ['bh_initial', 'bh_follow_up', 'sw_therapy']);
   assert.deepEqual(A.typesForService('social_work').map(t => t.key), ['sw_psychosocial', 'sw_follow_up']);
-  assert.equal(A.typesForService('ime').length, 1);
+  // Every service the page is served must have at least one type under it.
+  // The visit-type picker renders one optgroup per service and fills it from
+  // APPOINTMENT_TYPES, so a service with no types is a heading with nothing
+  // in it. This is what makes removing a type and leaving its service behind
+  // fail the build rather than ship an empty group.
+  assert.deepEqual(A.SERVICES.map(s => s.key), ['primary_care', 'behavioral_health', 'social_work']);
+  for (const svc of A.SERVICES) {
+    assert.ok(A.typesForService(svc.key).length > 0,
+      `service "${svc.key}" has no appointment types — the picker would render an empty group`);
+  }
+  // And every type's service is one the page was served, or the type is in a
+  // group that never renders and is unreachable from the picker.
+  const serviceKeys = new Set(A.SERVICES.map(s => s.key));
+  for (const t of A.APPOINTMENT_TYPES) {
+    assert.ok(serviceKeys.has(t.service), `${t.key} names service "${t.service}", which is not declared`);
+  }
   for (const t of A.APPOINTMENT_TYPES) {
     assert.ok(t.defaultMinutes > 0, `${t.key} needs a duration — booking has to put one number in the diary`);
     assert.ok(t.sections.length > 0, `${t.key} needs a note template`);
@@ -163,33 +178,65 @@ test('a psych visit needs the credential AND the specialty, and an LCSW can neve
   for (const t of A.APPOINTMENT_TYPES) {
     for (const bad of ['LCSW', 'LMSW', 'RN']) {
       assert.ok(!t.credentials.includes(bad), `${t.key} must not admit ${bad}`);
-      assert.equal(A.canBookType(t.key, { prescriberCredential: bad, specialties: ['behavioral_health', 'ime_examiner'] }).code,
+      assert.equal(A.canBookType(t.key, { prescriberCredential: bad, specialties: ['behavioral_health'] }).code,
         'CREDENTIAL_NOT_PERMITTED', `${bad} must be refused ${t.key}`);
     }
   }
-  // A PA may do primary care and an IME but not psych.
+  // A PA is refused psych. The positive case is asserted too, or this proves
+  // only that the gate refuses everybody.
+  //
+  // NOTE, found while removing the IME type (2026-11-04): a PA is on exactly
+  // three types — pc_phone_ccm, sw_psychosocial and sw_follow_up — so the IME
+  // exam was the only IN-PERSON visit a PA could book, and the comment that
+  // used to sit here ("a PA may do primary care and an IME") was wrong about
+  // primary care as well. Whether a PA should be on the primary-care visit
+  // types is the owner's call and is NOT changed here.
   assert.equal(A.canBookType('bh_initial', { prescriberCredential: 'PA', specialties: ['behavioral_health'] }).code, 'CREDENTIAL_NOT_PERMITTED');
-  assert.equal(A.canBookType('ime_exam', { prescriberCredential: 'PA', specialties: ['ime_examiner'] }).ok, true);
+  assert.equal(A.canBookType('pc_phone_ccm', { prescriberCredential: 'PA' }).ok, true);
+  assert.equal(A.canBookType('pc_follow_up', { prescriberCredential: 'PA' }).code, 'CREDENTIAL_NOT_PERMITTED',
+    'a PA is not on the primary-care visit types — pre-existing config, asserted so a change is deliberate');
   assert.equal(A.canBookType('made_up', { prescriberCredential: 'MD' }).code, 'UNKNOWN_APPOINTMENT_TYPE');
 });
 
-test('an IME is examiner-only, never telehealth, and never a Medicare claim', () => {
-  const ime = A.typeByKey('ime_exam');
-  assert.equal(ime.specialty, 'ime_examiner');
-  assert.equal(A.canBookType('ime_exam', { prescriberCredential: 'MD', specialties: [] }).code, 'SPECIALTY_REQUIRED');
-  // An IME is not treatment and is not billed to Medicare.
-  assert.equal(ime.neverMedicare, true);
-  assert.equal(A.canBeTelehealth('ime_exam'), false);
-  // Every other type may be telehealth; behavioural telehealth to the home is
-  // permanent, the rest carry a payer caveat.
-  // Every other VISIT type may be telehealth. The phone type is not a visit:
-  // a call written up as video would carry modifier 95 on a call.
-  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'ime_exam' && x.key !== 'pc_phone_ccm')) {
+test('every visit type may be telehealth, and the phone type never can', () => {
+  // Every VISIT type may be telehealth. The phone type is not a visit: a call
+  // written up as video would carry modifier 95 on a call.
+  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'pc_phone_ccm')) {
     assert.equal(A.canBeTelehealth(t.key), true, `${t.key} must be bookable as telehealth`);
   }
   assert.equal(A.canBeTelehealth('pc_phone_ccm'), false, 'a phone call is not a video visit');
   assert.equal(A.typeByKey('bh_initial').telehealthPayerCaveat, false, 'behavioural telehealth to the home is permanent');
   assert.equal(A.typeByKey('pc_follow_up').telehealthPayerCaveat, true, 'non-behavioural telehealth depends on current CMS flexibilities');
+});
+
+// ⚠️ IME / C&P IS NOT A CLINICAL APPOINTMENT TYPE, AND THAT IS THE POINT
+// (owner, 2026-11-04). It is scheduled in its own lane, `veteranRoster.js`,
+// because a vendor pays GFC and GFC pays the examiner — not a Medicare claim.
+// An `ime_exam` type was declared here and was NOT inert: the picker renders
+// one optgroup per service from APPOINTMENT_TYPES and `canDocumentType` said
+// yes to every provider, so it was selectable and opened an OpenEMR encounter
+// bound for coding and billing-submit.
+//
+// Asserted as the ABSENCE of a route into the clinical path, not just a
+// missing key — a bare `typeByKey` null could be satisfied by a renamed type
+// that still books.
+test('no clinical appointment type routes an IME into the billing path', () => {
+  assert.equal(A.typeByKey('ime_exam'), null);
+  assert.equal(A.canBookType('ime_exam', { prescriberCredential: 'MD', specialties: ['ime_examiner'] }).code,
+    'UNKNOWN_APPOINTMENT_TYPE', 'an IME must not be bookable as a clinical visit');
+  assert.equal(A.canDocumentType('ime_exam', 'provider').ok, false,
+    'and must not be documentable as a clinical note');
+  assert.deepEqual(A.typesForService('ime'), [], 'no type may claim an ime service');
+  assert.ok(!A.SERVICES.some(s => s.key === 'ime'),
+    'an ime service would render an optgroup in the visit-type picker');
+  // Nothing may re-declare it under another name either: no type may carry the
+  // examiner specialty or the never-Medicare marker, both of which existed
+  // only to describe an IME.
+  for (const t of A.APPOINTMENT_TYPES) {
+    assert.notEqual(t.specialty, 'ime_examiner', `${t.key} must not be an IME in disguise`);
+    assert.notEqual(t.neverMedicare, true, `${t.key} carries neverMedicare — IME belongs in veteranRoster.js`);
+    assert.notEqual(t.service, 'ime', `${t.key} must not name the retired ime service`);
+  }
 });
 
 test('annual wellness eligibility WARNS from a recorded date and never claims to have checked Medicare', () => {
@@ -387,10 +434,23 @@ test('a screening instrument is declared as OpenEMR’s, not as something to bui
   // reference, not by an empty build list, because "nothing is outstanding"
   // and "nothing is checked" look identical otherwise.
   const docRefs = A.APPOINTMENT_TYPES.flatMap(t => t.intake).filter(r => r.from === 'document').map(r => r.kind);
-  for (const k of ['dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest']) {
+  for (const k of ['dischargeSummary', 'dischargeMedList']) {
     assert.ok(docRefs.includes(k), `${k} must be referenced as a real document kind`);
     assert.ok(A.EXPECTED_DOCUMENT_KINDS.includes(k), `${k} must exist in the document catalog`);
     assert.ok(!building.includes(k) && !surfaced.includes(k), `${k} has a home; it is not outstanding`);
+  }
+  // ⚠️ THE TWO IME KINDS ARE DELIBERATELY NOT IN THAT LOOP ANY MORE
+  // (2026-11-04). They were referenced by the `ime_exam` appointment type,
+  // which is gone — IME is scheduled in `veteranRoster.js`, and a veteran is
+  // not a client and has no encounter, so no clinical visit requests them.
+  // Narrowing the loop silently would have left the catalog unguarded, so
+  // their new status is asserted outright: still real catalog kinds, still not
+  // outstanding, and requested by NO appointment type.
+  for (const k of ['imeRecords', 'imeExamRequest']) {
+    assert.ok(A.EXPECTED_DOCUMENT_KINDS.includes(k), `${k} must still exist in the document catalog`);
+    assert.ok(!building.includes(k) && !surfaced.includes(k), `${k} is not outstanding`);
+    assert.ok(!docRefs.includes(k),
+      `${k} must not be requested by an appointment type — IME is scheduled in veteranRoster.js`);
   }
   // Everything still outstanding is an instrument, not a document.
   assert.deepEqual(building, [], 'the per-visit documents were the whole build list; they are built');
