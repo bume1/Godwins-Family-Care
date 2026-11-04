@@ -218,6 +218,8 @@ const buildContents = ({ input, documentParts }) => {
 
 // A finishReason that is not STOP is a different failure with a different
 // remedy, so each is named rather than collapsed into "the model failed".
+const DEFAULT_MAX_OUTPUT_TOKENS = 65535;
+
 const FINISH_MESSAGES = {
   SAFETY: 'the model stopped on a safety filter',
   RECITATION: 'the model stopped because the answer was reciting source material',
@@ -301,7 +303,10 @@ const createTransport = ({ getClient = clientFor, getStorage = storageFor } = {}
           // Low, not zero: this is a reading task and a deterministic-looking
           // sampler is not the same thing as a correct answer.
           temperature: 0.1,
-          maxOutputTokens: (input && input.maxOutputTokens) || undefined
+          // Explicit, never the model's default: a full chart review with
+          // findings and a timeline outgrew the default and was cut off
+          // (2026-11-04). 65,535 is the Gemini Flash maximum.
+          maxOutputTokens: (input && input.maxOutputTokens) || DEFAULT_MAX_OUTPUT_TOKENS
           // NO `tools` KEY, EVER. See the header.
         }
       });
@@ -412,5 +417,5 @@ module.exports = {
   createTransport, createCountTokens, createLiveChecks,
   responseSchemaFor, buildContents, parseResponse, usageOf, sectionText,
   splitPdf, stageDocuments, stagedName, cacheConfigHost, reasonOf,
-  SYSTEM_INSTRUCTIONS, MAX_FILE_BYTES, SPLIT_PAGE_STEP, FINISH_MESSAGES
+  SYSTEM_INSTRUCTIONS, MAX_FILE_BYTES, SPLIT_PAGE_STEP, FINISH_MESSAGES, DEFAULT_MAX_OUTPUT_TOKENS
 };

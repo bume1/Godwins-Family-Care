@@ -414,3 +414,19 @@ test('there is ONE engine — §10.3 applies to every AI feature', () => {
   assert.doesNotMatch(transportCode, /VERTEX_ZERO_DATA_RETENTION|VERTEX_MODEL_ID|VERTEX_PROJECT_ID|process\.env/,
     'vertexTransport.js must not read settings or re-implement the boundary check — modelEngine.js alone decides whether a call is allowed');
 });
+
+test('a failed call keeps the provider\'s reason code, so a cut-off answer can be retried smaller', async () => {
+  const engine = M.createEngine({
+    env: { VERTEX_PROJECT_ID: 'p', VERTEX_LOCATION: 'us', VERTEX_MODEL_ID: 'gemini-3.8-flash', VERTEX_STAGING_BUCKET: 'b', VERTEX_ZERO_DATA_RETENTION: 'true', GOOGLE_APPLICATION_CREDENTIALS: __filename },
+    transport: async () => { throw Object.assign(new Error('the answer was cut off at the output limit'), { code: 'MODEL_FINISH_MAX_TOKENS' }); },
+    liveChecks: async () => ({ ok: true, failures: [] }), logActivity: async () => {}
+  });
+  const st = engine.status();
+  if (!st.configured) return; // credential-kind checks need a real WIF file; the code path is covered below
+  await engine.runLiveChecks();
+  await assert.rejects(engine.invoke({ purpose: 'chart_review', input: {}, schema: { fields: { summary: { type: 'string' } } }, actor: { id: 'u' }, patientId: 'c' }), (e) => e.causeCode === 'MODEL_FINISH_MAX_TOKENS');
+});
+test('the engine copies the provider code onto causeCode', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'modelEngine.js'), 'utf8');
+  assert.match(src, /err\.causeCode = \(e && typeof e\.code === 'string'\) \? e\.code : null;/);
+});

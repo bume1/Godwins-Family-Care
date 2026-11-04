@@ -566,3 +566,77 @@ test('F4: the enrollment document extraction now runs on the same engine', () =>
   assert.match(body, /gfcModelEngine\.invoke/);
   assert.ok(!/vertexTransport|generateContent/.test(body), 'through the engine, never the transport');
 });
+
+// ── an answer cut off at the output limit (2026-11-04) ───────────────────
+// Run the shipped job against a fake engine: a cut-off answer is retried as
+// more, smaller passes, and a cut-off merge falls back to joining the passes.
+const serverRaw = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+const liftRunAiReview = (deps) => {
+  const start = serverRaw.indexOf('const AI_REVIEW_MAX_PASSES');
+  const end = serverRaw.indexOf('\n// E1.', start);
+  assert.ok(start > 0 && end > start);
+  // eslint-disable-next-line no-new-func
+  return new Function(...Object.keys(deps), `${serverRaw.slice(start, end)}\nreturn runAiReview;`)(...Object.values(deps));
+};
+const realPacket = require('../chartPacket');
+const runCutOff = async ({ cutOffWhen }) => {
+  const saved = {}; const calls = [];
+  const groups = 8;
+  const packet = {
+    buildSections: () => ({ sections: [], documents: [], notRead: [], droppedForeign: [] }),
+    splitIntoPasses: ({ passCount }) => Array.from({ length: Math.min(passCount, groups) }, (_, i) => ({ pass: i + 1, sections: [], documents: [] })),
+    buildManifest: ({ passes }) => ({ notRead: [], passes }),
+    enforceCitations: (merged) => ({ output: merged, droppedUncited: 0 }),
+    joinPassOutputs: realPacket.joinPassOutputs,
+    BUDGET_FRACTION: 0.9, fitsInOnePass: () => true
+  };
+  const cut = Object.assign(new Error('Model call failed: the answer was cut off at the output limit'), { code: 'MODEL_CALL_FAILED', causeCode: 'MODEL_FINISH_MAX_TOKENS' });
+  const job = liftRunAiReview({
+    gatherChartPacketInput: async () => ({}),
+    chartPacket: packet,
+    saveAiReview: async (id, patch) => { Object.assign(saved, patch); },
+    gfcModelEngine: {
+      status: () => ({ modelId: 'm' }),
+      invoke: async (args) => {
+        calls.push({ purpose: args.purpose, pass: args.pass });
+        if (cutOffWhen(args, calls)) throw cut;
+        return { invocationId: `i${calls.length}`, proposal: { summary: `s${args.pass || 'm'}`, findings: [{ priority: 'info', statement: 'x', citations: [{ sourceId: 'a' }] }], timeline: [] } };
+      }
+    },
+    modelEngine: { PURPOSES: { CHART_REVIEW: 'chart_review', CHART_REVIEW_MERGE: 'chart_review_merge' }, scrubForLog: (x) => x },
+    vertexTransport: {},
+    AI_REVIEW_SCHEMA: {},
+    AI_REVIEW_STATUS: { DONE: 'done', FAILED: 'failed' },
+    process: { env: {} },
+    console: { warn: () => {}, error: () => {}, log: () => {} }
+  });
+  await job({ reviewId: 'r', req: { user: { id: 'u', name: 'U' } }, client: { id: 'c' }, focus: null, excludeDocumentIds: [] });
+  return { saved, calls };
+};
+
+test('RUN: a single pass cut off at the output limit is retried as two passes and finishes', async () => {
+  let attempts = 0;
+  const { saved, calls } = await runCutOff({ cutOffWhen: (a) => a.purpose === 'chart_review' && a.pass === 1 && attempts++ === 0 });
+  assert.equal(saved.status, 'done');
+  assert.equal(saved.passes, 2);
+  assert.deepEqual(calls.map(c => c.purpose), ['chart_review', 'chart_review', 'chart_review', 'chart_review_merge']);
+});
+
+test('RUN: a merge cut off at the output limit joins the passes instead of failing', async () => {
+  let attempts = 0;
+  const { saved } = await runCutOff({ cutOffWhen: (a) => (a.purpose === 'chart_review' && a.pass === 1 && attempts++ === 0) || a.purpose === 'chart_review_merge' });
+  assert.equal(saved.status, 'done');
+  assert.equal(saved.output.findings.length, 2, 'every pass\'s findings kept');
+  assert.match(saved.output.summary, /Pass 1: s1/);
+});
+
+test('RUN: a chart that cannot be split any further reports the failure by name, never a truncated answer', async () => {
+  const { saved } = await runCutOff({ cutOffWhen: (a) => a.purpose === 'chart_review' });
+  assert.equal(saved.status, 'failed');
+  assert.match(saved.error, /cut off at the output limit/);
+});
+
+test('an answer that is not cut off fails immediately, without retrying', async () => {
+  const src = serverRaw.slice(serverRaw.indexOf('const AI_REVIEW_MAX_PASSES'), serverRaw.indexOf('\n// E1.', serverRaw.indexOf('const AI_REVIEW_MAX_PASSES')));
+  assert.match(src, /if \(!cutOff \|\| next > AI_REVIEW_MAX_PASSES \|\| !smaller\) throw e;/);
+});

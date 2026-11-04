@@ -21771,6 +21771,7 @@ const saveAiReview = async (id, patch) => {
 // Runs the passes in sequence and merges. Sequential on purpose: the passes
 // share a rate limit, and a 429 storm would take a review down that a slower
 // run completes.
+const AI_REVIEW_MAX_PASSES = 16;
 const runAiReview = async ({ reviewId, req, client, focus, excludeDocumentIds }) => {
   const actor = { id: req.user.id, name: req.user.name || req.user.email };
   try {
@@ -21799,8 +21800,54 @@ const runAiReview = async ({ reviewId, req, client, focus, excludeDocumentIds })
       }
     }
 
-    const passes = chartPacket.splitIntoPasses({ ...built, passCount });
-    await saveAiReview(reviewId, { passes: passes.length });
+    // AN ANSWER CUT OFF AT THE OUTPUT LIMIT IS RETRIED AS MORE, SMALLER PASSES
+    // (2026-11-04). The input fitting is not the same as the answer fitting:
+    // a long chart can produce more findings than one answer can hold. Each
+    // retry doubles the passes, up to AI_REVIEW_MAX_PASSES; past that the
+    // failure is reported, never silently truncated.
+    const runPasses = async (count) => {
+      const passes = chartPacket.splitIntoPasses({ ...built, passCount: count });
+      await saveAiReview(reviewId, { passes: passes.length });
+      const ids = []; const outs = [];
+      for (const p of passes) {
+        await saveAiReview(reviewId, { currentPass: p.pass });
+        const r = await gfcModelEngine.invoke({
+          purpose: modelEngine.PURPOSES.CHART_REVIEW,
+          input: {
+            sections: p.sections,
+            documents: p.documents,
+            focus: focus || null,
+            instruction: passes.length > 1
+              ? `This is pass ${p.pass} of ${passes.length} over one patient's record.`
+              : null
+          },
+          schema: AI_REVIEW_SCHEMA,
+          actor: req.user, patientId: client.id,
+          feature: 'chart_review', pass: p.pass,
+          sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
+        });
+        ids.push(r.invocationId);
+        outs.push(r.proposal);
+      }
+      return { passes, invocationIds: ids, outputs: outs };
+    };
+    let run = null;
+    for (let count = passCount; ; count *= 2) {
+      try {
+        run = await runPasses(count);
+        break;
+      } catch (e) {
+        const cutOff = e && e.causeCode === 'MODEL_FINISH_MAX_TOKENS';
+        const next = count * 2;
+        // Stop when splitting further would not make the passes any smaller:
+        // a chart with fewer groups than passes cannot be divided again.
+        const smaller = chartPacket.splitIntoPasses({ ...built, passCount: next }).length
+          > chartPacket.splitIntoPasses({ ...built, passCount: count }).length;
+        if (!cutOff || next > AI_REVIEW_MAX_PASSES || !smaller) throw e;
+        console.warn(`[AI] chart review answer cut off at ${count} pass(es); retrying as ${next}.`);
+      }
+    }
+    const { passes, invocationIds, outputs } = run;
 
     const manifest = chartPacket.buildManifest({
       sections: passes.flatMap(p => p.sections.map(s => ({ ...s, pass: p.pass }))),
@@ -21809,46 +21856,30 @@ const runAiReview = async ({ reviewId, req, client, focus, excludeDocumentIds })
       passes: passes.length
     });
 
-    const invocationIds = [];
-    const outputs = [];
-    for (const p of passes) {
-      await saveAiReview(reviewId, { currentPass: p.pass });
-      const r = await gfcModelEngine.invoke({
-        purpose: modelEngine.PURPOSES.CHART_REVIEW,
-        input: {
-          sections: p.sections,
-          documents: p.documents,
-          focus: focus || null,
-          instruction: passes.length > 1
-            ? `This is pass ${p.pass} of ${passes.length} over one patient's record.`
-            : null
-        },
-        schema: AI_REVIEW_SCHEMA,
-        actor: req.user, patientId: client.id,
-        feature: 'chart_review', pass: p.pass,
-        sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
-      });
-      invocationIds.push(r.invocationId);
-      outputs.push(r.proposal);
-    }
-
     // One pass: that output. Several: a merge call that de-duplicates and
-    // keeps every citation.
+    // keeps every citation. If the merged answer itself is too long, the
+    // passes are joined here instead: nothing is de-duplicated, but nothing
+    // is lost, and every citation is still enforced below.
     let merged = outputs[0] || { summary: '', findings: [], timeline: [] };
     if (outputs.length > 1) {
-      const m = await gfcModelEngine.invoke({
-        purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
-        input: {
-          sections: outputs.map((o, i) => ({
-            sourceId: `pass:${i + 1}`, kind: 'pass findings',
-            title: `Pass ${i + 1} of ${outputs.length}`, value: o
-          }))
-        },
-        schema: AI_REVIEW_SCHEMA,
-        actor: req.user, patientId: client.id, feature: 'chart_review_merge'
-      });
-      invocationIds.push(m.invocationId);
-      merged = m.proposal;
+      try {
+        const m = await gfcModelEngine.invoke({
+          purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
+          input: {
+            sections: outputs.map((o, i) => ({
+              sourceId: `pass:${i + 1}`, kind: 'pass findings',
+              title: `Pass ${i + 1} of ${outputs.length}`, value: o
+            }))
+          },
+          schema: AI_REVIEW_SCHEMA,
+          actor: req.user, patientId: client.id, feature: 'chart_review_merge'
+        });
+        invocationIds.push(m.invocationId);
+        merged = m.proposal;
+      } catch (e) {
+        if (!(e && e.causeCode === 'MODEL_FINISH_MAX_TOKENS')) throw e;
+        merged = chartPacket.joinPassOutputs(outputs);
+      }
     }
 
     // E3. Enforced on the SERVER, after the model, because a citation that
