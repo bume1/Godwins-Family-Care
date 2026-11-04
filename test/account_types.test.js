@@ -154,9 +154,11 @@ test('the Billing module is its own page on its own route, behind the billing ga
   assert.ok(i > 0, 'the statement list is behind requireBilling');
   assert.ok(i < serverSrc.indexOf("app.get('/api/gfc/admin/billing/:clientId'"), 'and registered before the per-client route');
   const page = fs.readFileSync(path.join(root, 'public', 'billing.html'), 'utf8');
-  for (const route of ['/api/clinical/encounters/queue?state=awaiting_billing', '/api/gfc/admin/billing-statements',
+  // 2026-11-04: the claims workspace lives here, filtered by billing stage.
+  for (const route of ['/api/clinical/encounters/queue?state=', '/api/gfc/admin/billing-statements',
     '/billing-submit', '/api/gfc/admin/billing/invoices/']) assert.ok(page.includes(route), route);
-  assert.match(page, /submit\(r, \{ attest: true \}\)/, 'Submit carries the same attestation the visit card asks for');
+  assert.match(page, /\['awaiting_billing', 'Awaiting Billing'\]/, 'the worklist opens on what is waiting on billing');
+  assert.match(page, /submit\(\{ attest: true \}\)/, 'Submit carries the attestation');
   const pred = require('../clinicalRoles').canSubmitBilling;
   assert.equal(pred({ ...at.fieldsFor('coordinator') }), true);
   assert.equal(pred({ ...at.fieldsFor('manager', { managerClinicalAccess: 'none' }) }), true);

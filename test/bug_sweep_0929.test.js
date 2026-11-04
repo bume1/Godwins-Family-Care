@@ -144,7 +144,7 @@ test('coding typed on the encounter survives a reload, and signing waits for it 
   // any other reload still keeps unsaved coding.
   assert.match(clinical, /if \(!unsaved \|\| adoptCodingRef\.current\) \{\s*adoptCodingRef\.current = false;\s*setDiagnoses\(r\.record\.diagnoses \|\| \[\]\)/);
   assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} sectionsOnly=\{!!d\.sectionsOnly\} typeLabel=\{d\.noteTypeLabel\} codingDirty=\{!locked && dirty\}/);
-  assert.match(clinical, /disabled=\{!!busy \|\| showSign \|\| codingDirty\}/);
+  assert.match(clinical, /disabled=\{!!busy \|\| codingDirty \|\| !onSign\}/);
   assert.match(clinical, /if \(codingDirty\) \{ setMsg\(\{ ok: false, text: 'Save your diagnoses and coding on this encounter before signing\.' \}\); return; \}/);
 });
 

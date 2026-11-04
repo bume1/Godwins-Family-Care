@@ -92,8 +92,15 @@ const createEmrAuth = (deps) => {
 
   const scopeList = () => String(O.SCOPES || '').split(/\s+/).filter(Boolean);
 
+  // Where the browser lands after OpenEMR's sign-in. An allow-list, never a
+  // URL taken from the request: the callback is an open redirect otherwise.
+  // The billing page signs its own user in (a manager posts charges under
+  // their own OpenEMR login), so it is the one other place a sign-in starts.
+  const RETURN_PATHS = Object.freeze({ clinical: '/clinical', billing: '/billing' });
+  const returnPathFor = (key) => RETURN_PATHS[key] || RETURN_PATHS.clinical;
+
   // ---- 1. Begin: build the authorize URL, remember state + verifier ----
-  const beginAuthorization = async (user) => {
+  const beginAuthorization = async (user, opts = {}) => {
     const missing = missingConfig();
     if (missing.length) throw new EmrAuthError(`OpenEMR is not configured: ${missing.join(', ')}`, 'EMR_NOT_CONFIGURED', 503, { missing });
     if (!user || !user.id) throw new EmrAuthError('A signed-in app user is required', 'EMR_AUTH_NO_USER', 401);
@@ -101,7 +108,7 @@ const createEmrAuth = (deps) => {
     const { verifier, challenge } = pkcePair();
     const createdAt = new Date(now()).toISOString();
     await store.set(`${STATE_PREFIX}${state}`, {
-      userId: user.id, verifier, redirectUri: O.REDIRECT_URI, createdAt,
+      userId: user.id, verifier, redirectUri: O.REDIRECT_URI, createdAt, returnTo: returnPathFor(opts.returnTo),
       expiresAt: new Date(now() + STATE_TTL_MS).toISOString()
     });
     const q = new URLSearchParams({
@@ -157,19 +164,21 @@ const createEmrAuth = (deps) => {
     const pending = await store.get(stateKey);
     if (pending) await store.delete(stateKey);                   // single use, deleted before the exchange
     if (!pending) throw new EmrAuthError('Unknown or already-used authorization state', 'EMR_AUTH_STATE_UNKNOWN', 400);
-    if (new Date(pending.expiresAt).getTime() < now()) throw new EmrAuthError('The authorization request expired — start again', 'EMR_AUTH_STATE_EXPIRED', 400);
+    const returnTo = returnPathFor(Object.keys(RETURN_PATHS).find(k => RETURN_PATHS[k] === pending.returnTo));
+    const fail = (e) => { e.returnTo = returnTo; return e; };
+    if (new Date(pending.expiresAt).getTime() < now()) throw fail(new EmrAuthError('The authorization request expired — start again', 'EMR_AUTH_STATE_EXPIRED', 400));
     const { status, data } = await postForm(tokenUrl(), {
       grant_type: 'authorization_code', client_id: O.CLIENT_ID, client_secret: O.CLIENT_SECRET,
       redirect_uri: pending.redirectUri, code, code_verifier: pending.verifier
     });
     if (status !== 200 || !data || !data.access_token) {
       const hint = data && (data.error_description || data.error);
-      throw new EmrAuthError(`OpenEMR token exchange failed (HTTP ${status}${hint ? `: ${hint}` : ''})`, 'EMR_AUTH_EXCHANGE_FAILED', 502);
+      throw fail(new EmrAuthError(`OpenEMR token exchange failed (HTTP ${status}${hint ? `: ${hint}` : ''})`, 'EMR_AUTH_EXCHANGE_FAILED', 502));
     }
     const emrUser = await fetchUserinfo(data.access_token);
     const row = await storeTokens(pending.userId, data, { emrUser });
     if (emrUser) { row.emrUser = emrUser; await store.set(`${TOKEN_PREFIX}${pending.userId}`, row); }
-    return { userId: pending.userId, emrUser, scopes: row.scopes, expiresAt: row.expiresAt, hasRefreshToken: !!row.refreshToken };
+    return { userId: pending.userId, emrUser, scopes: row.scopes, expiresAt: row.expiresAt, hasRefreshToken: !!row.refreshToken, returnTo };
   };
 
   // ---- 3. Use: a live access token for this app user ----
@@ -261,7 +270,7 @@ const createEmrAuth = (deps) => {
     return n;
   };
 
-  return { beginAuthorization, completeAuthorization, getAccessTokenFor, invalidateAccessToken, disconnect, statusFor, missingConfig, sweepExpiredState,
+  return { RETURN_PATHS, beginAuthorization, completeAuthorization, getAccessTokenFor, invalidateAccessToken, disconnect, statusFor, missingConfig, sweepExpiredState,
     _internal: { encrypt, decrypt, parseKey, pkcePair, STATE_PREFIX, TOKEN_PREFIX } };
 };
 

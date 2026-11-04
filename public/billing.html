@@ -7,62 +7,83 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
   <script src="/gfc-time.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <script src="/note-format.js"></script>
+  <script>
+    // The clinical workspace's palette, so a claim reads the same here as the
+    // visit it came from.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 500: '#033D50', 600: '#02334a', 700: '#022A38' },
+            accent: '#C9A44A',
+            cream: '#FAF7F2', creamdeep: '#efe9db',
+            stone: { 50: '#FCFAF6', 100: '#F1ECE2', 200: '#E8E0D2', 300: '#D9CFBE', 400: '#8E9BA1',
+              500: '#5b6b73', 600: '#4a5a62', 700: '#34444c', 800: '#1a2a32', 900: '#11202a' }
+          },
+          fontFamily: { serif: ['"Cormorant Garamond"', 'Georgia', 'serif'], sans: ['"DM Sans"', 'system-ui', 'sans-serif'] }
+        }
+      }
+    }
+  </script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>
-    /* The Billing module (owner, 2026-10-15). Its own page on the hub, not only
-       a corner of the clinical workspace, because billing covers both medical
-       visits and home care. Same look as /scheduling. */
-    :root{--navy:#033D50;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;--cream-d:#efe9db;
-          --ink:#2b2b28;--mut:#7a746a;--red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
-    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
-    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
-    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
-    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
-    .hdr a{color:var(--gold);font-size:14px;font-weight:600;text-decoration:none}
-    .wrap{max-width:1180px;margin:0 auto;padding:20px 16px 60px}
-    .tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
-    .tab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 16px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit;font-weight:600}
-    .tab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
-    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
-    .card h2{font-family:'Cormorant Garamond',serif;font-size:21px;color:var(--navy);font-weight:600;margin-bottom:4px}
-    .sub{font-size:14px;color:var(--mut);margin-bottom:12px}
-    .row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #ece6db;flex-wrap:wrap;align-items:flex-start}
-    .row:last-child{border:none}
-    .row b{color:var(--navy)}
-    .mu{color:var(--mut);font-size:14px}
-    label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:5px}
-    input,select{border:1px solid #ddd3c0;border-radius:8px;padding:9px;font-size:15px;background:#fff;color:var(--ink);max-width:100%}
-    .btn{border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit;text-decoration:none;display:inline-block}
-    .btn.ghost{background:#fff;color:var(--navy)}
-    .btn[disabled]{opacity:.5;cursor:not-allowed}
-    .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-    .chip{display:inline-block;border-radius:12px;padding:3px 10px;font-size:11.5px;font-weight:700;text-transform:uppercase}
-    .chip.draft{background:#eee8db;color:#6d675d}
-    .chip.open{background:#fdf3dd;color:#8a6a1e}
-    .chip.paid{background:#eef3f0;color:var(--green)}
-    .chip.void{background:#f3eaea;color:var(--red)}
-    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
-    .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
-    .warn{background:#fdf6e6;border:1px solid #ecd9a8;color:#6d5313;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
-    .empty{text-align:center;padding:26px;color:var(--mut)}
-    .fl{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+    /* The Billing module (owner, 2026-10-15; the claims workspace 2026-11-04).
+       Its own page, because billing covers both medical visits and home care
+       and the person working claims needs none of the clinical chart. The
+       classes below are the clinical workspace's, so the shared claim view
+       (/components/claim-shared.jsx) looks the same on both pages. */
+    :root { --navy:#033D50; --navy2:#0a5066; --navyd:#022A38; --goldd:#C9A44A; --gold:#F5CD85; --gold-ink:#9A7430;
+      --cream:#FAF7F2; --wash:#F6EFE2; --edge:#ECE4D6; --edge2:#E1D7C5; --ink:#1a2a32; --mut:#5b6b73; --danger:#B5462E;
+      --shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18); }
+    * { font-family: 'DM Sans', system-ui, sans-serif; }
+    body { background: var(--cream); color: var(--ink); }
+    .card { background:#fff; border:1px solid var(--edge); border-radius:16px; box-shadow:var(--shadow); }
+    .card-h { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:14px 18px; border-bottom:1px solid var(--edge); }
+    .card-h h2 { font-family:'Cormorant Garamond',serif; font-size:20px; color:var(--navy); font-weight:600; line-height:1.15; }
+    .lblu { font-size:10.5px; letter-spacing:1.2px; text-transform:uppercase; color:var(--gold-ink); font-weight:700; }
+    .inp { width:100%; border:1px solid var(--edge2); border-radius:10px; padding:8px 11px; font-size:13.5px; background:#fff; color:var(--ink); }
+    .inp:focus { outline:none; border-color:var(--navy); box-shadow:0 0 0 3px rgba(3,61,80,.10); }
+    .btn { display:inline-flex; align-items:center; gap:6px; border-radius:10px; padding:8px 15px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--navy); background:var(--navy); color:#fff; text-decoration:none; }
+    .btn:hover:not(:disabled) { background:var(--navy2); }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .btn.gold { background:#A9853A; border-color:#A9853A; color:#fff; }
+    .btn.gold:hover:not(:disabled) { background:var(--gold-ink); }
+    .btn.ghost { background:#fff; color:var(--navy); border-color:var(--edge2); }
+    .btn.ghost:hover:not(:disabled) { background:var(--wash); }
+    .chip { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:2px 10px; font-size:11px; font-weight:600; white-space:nowrap; }
+    .tabbtn { padding:10px 14px; font-size:14px; font-weight:600; color:rgba(255,255,255,.75); border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; background:none; border-top:0; border-left:0; border-right:0; }
+    .tabbtn:hover { color:#fff; }
+    .tabbtn.on { color:var(--gold); border-color:var(--gold); }
+    .cw-row { transition:background .12s; }
+    .cw-row:hover { background:#FCFAF6; }
+    .cw-row.on { background:var(--wash); box-shadow:inset 3px 0 0 var(--goldd); }
+    .fmt { font-size:13px; line-height:1.5; color:#1f2937; }
+    .fmt ul { list-style:disc; padding-left:1.25rem; margin:2px 0; }
+    .fmt ol { list-style:decimal; padding-left:1.4rem; margin:2px 0; }
+    .fmt h3 { font-size:14px; font-weight:700; color:#033D50; margin:4px 0 2px; }
+    .fmt strong { font-weight:700; } .fmt em { font-style:italic; } .fmt u { text-decoration:underline; }
+    .sigblock { border:2px solid #033D50; border-radius:10px; padding:10px 12px; background:#fff; }
   </style>
   <script src="/session-guard.js"></script>
 </head>
 <body>
   <div id="root"></div>
+<script type="text/babel" src="/components/claim-shared.jsx"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 const API = window.location.origin;
 const getToken = () =>
   localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
 
-const api = async (path, opts = {}) => {
+const call = async (path, opts = {}) => {
   const res = await fetch(API + path, {
     ...opts,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) }
@@ -76,124 +97,798 @@ const api = async (path, opts = {}) => {
   }
   return data;
 };
-const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body || {}) });
+const enc = encodeURIComponent;
+const visit = (id, euuid) => `/api/clinical/patients/${enc(id)}/encounters/${enc(euuid)}`;
+// Every route this page calls. They are the clinical workspace's own billing
+// routes (requireBilling); this page adds no server rule of its own.
+const api = {
+  connection: () => call('/api/clinical/billing/connection'),
+  emrConnect: () => call('/api/emr/connect?return=billing'),
+  syncFacilities: () => post('/api/clinical/facilities/sync'),
+  queue: (state) => call(`/api/clinical/encounters/queue?state=${enc(state)}`),
+  encounterDetail: (id, euuid) => call(visit(id, euuid)),
+  saveCoding: (id, euuid, body) => call(`${visit(id, euuid)}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
+  refreshPos: (id, euuid) => post(`${visit(id, euuid)}/pos/refresh`),
+  billingSubmit: (id, euuid, body) => post(`${visit(id, euuid)}/billing-submit`, body),
+  claimScrub: (id, euuid) => call(`${visit(id, euuid)}/claim-scrub`),
+  claimRelease: (id, euuid, body) => post(`${visit(id, euuid)}/claim-release`, body),
+  charges: (id, euuid) => call(`${visit(id, euuid)}/charges`),
+  voidCharge: (id, euuid, chargeId, reason) => call(`${visit(id, euuid)}/charges/${enc(chargeId)}`, { method: 'DELETE', body: JSON.stringify({ reason }) }),
+  repostCharges: (id, euuid) => post(`${visit(id, euuid)}/charges/repost`),
+  resolveEmFlag: (id, euuid, resolution) => post(`${visit(id, euuid)}/em-derivation/flag/resolve`, { resolution }),
+  saveTcmDates: (id, euuid, body) => call(`${visit(id, euuid)}/tcm-dates`, { method: 'PUT', body: JSON.stringify(body) }),
+  serviceFamilies: () => call('/api/clinical/service-selection/families'),
+  selectService: (body) => post('/api/clinical/service-selection', body),
+  codeSearch: (params) => call(`/api/clinical/codes/search?${new URLSearchParams(params).toString()}`),
+  settings: () => call('/api/clinical/settings'),
+  saveSettings: (body) => call('/api/clinical/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  emDistribution: (month) => call(`/api/clinical/reports/em-distribution${month ? `?month=${enc(month)}` : ''}`)
+};
+// The signed note, the code search and the service-line editor are the
+// clinical workspace's own, shared (/components/claim-shared.jsx).
+const { fmtTs, npiLabel, FormattedView, SignedNoteView, SvcEditor } = window.GFC_CLAIM_SHARED;
+window.GFC_CLAIM_SHARED.configure({ codeSearch: api.codeSearch });
 
 const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
-const day = (iso) => {
+const fmtDate = (iso) => {
   if (!iso) return '';
   try { return window.GFC_TIME ? window.GFC_TIME.fmtDate(iso) : new Date(iso).toLocaleDateString(); }
   catch (e) { return String(iso).slice(0, 10); }
 };
+const Field = ({ label, children, className }) => (
+  <label className={`block ${className || ''}`}>
+    <span className="lblu block mb-1">{label}</span>
+    {children}
+  </label>
+);
 
-// ---- Claims: signed visits waiting on billing ------------------------------
-// The same worklist as the clinical workspace's "Awaiting Billing" filter,
-// oldest first. Submit runs the server's billing checks; if codes or a place of
-// service are missing the refusal says what, and the visit opens in the
-// Clinical Workspace to fix it.
-const Claims = ({ names }) => {
-  const [d, setD] = useState(null);
+// ── Billing's tools, moved here from the clinical workspace (2026-11-04) ──
+// The E/M level and its review flag, the code helper, the claim scrub with
+// its Release, the TCM dates and the E/M distribution. Their routes are
+// requireBilling, and none of them is drawn on a clinician's screen.
+const BillingLevelPanel = ({ patientId, euuid, derivation, onChanged }) => {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState('');
-  const load = useCallback(() => {
-    setErr('');
-    api('/api/clinical/encounters/queue?state=awaiting_billing').then(setD).catch(e => setErr(e.message));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-  const submit = (r, body) => {
-    setBusy(r.encounterUuid); setErr(''); setMsg('');
-    post(`/api/clinical/patients/${encodeURIComponent(r.clientId)}/encounters/${encodeURIComponent(r.encounterUuid)}/billing-submit`, body)
-      .then(() => { setMsg(body.noCharge ? 'Marked as no charge.' : 'Submitted to billing.'); load(); })
-      .catch(e => {
-        // An insurance block that billing may override carries a reason
-        // field; that override lives on the visit in the Clinical Workspace.
-        const where = e.data && e.data.overridable ? ' To override it with a reason, open the visit in the Clinical Workspace.' : '';
-        setErr(`${e.message}${where}`);
-      })
-      .finally(() => setBusy(''));
-  };
-  const noCharge = (r) => {
-    const reason = window.prompt('Why is this visit not being billed?');
-    if (reason && reason.trim()) submit(r, { noCharge: true, reason: reason.trim() });
+  if (!derivation) return <p className="text-xs text-stone-500">The clinician has not confirmed the visit facts, so no E/M level has been derived.</p>;
+  const f = derivation.flag;
+  const resolve = () => { setBusy(true); setErr(''); api.resolveEmFlag(patientId, euuid, note).then(() => { setNote(''); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  return (
+    <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
+      <b className="text-primary text-[13px]"><i className="ti ti-stairs mr-1" />Derived E/M level: {derivation.finalCode}</b>
+      <div className="text-stone-600">{derivation.explanation}</div>
+      <div className="text-stone-600">Candidates: {(derivation.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} min)` : `MDM (${c.mdm})`}`).join(' · ')}. Default {derivation.defaultCode}{derivation.override ? `; the clinician chose ${derivation.finalCode} by time and affirmed it` : ''}.</div>
+      {f && (
+        <div className={`rounded px-2 py-1.5 border-l-2 ${f.resolvedAt ? 'border-stone-300 bg-stone-50' : 'border-amber-400 bg-amber-50'}`}>
+          <b className={f.resolvedAt ? 'text-stone-700' : 'text-amber-900'}>Level review {f.resolvedAt ? `resolved ${fmtTs(f.resolvedAt)}${f.resolvedBy ? ` by ${f.resolvedBy.name}` : ''}` : 'open'}</b>
+          {(f.absent || []).map((a, i) => <div key={i} className="text-stone-700">{a}</div>)}
+          {(f.elements || []).map(e => (
+            <div key={e.element} className="mt-1"><b className="text-stone-700">{e.element === 'problems' ? 'Problems' : e.element === 'data' ? 'Data' : 'Risk'}: {e.level}</b>
+              {(e.facts || []).map((x, i) => <div key={i} className="text-stone-600">{x.description || x.detail}{x.quote ? <i> — “{x.quote}”</i> : <i> — added by the clinician</i>}</div>)}
+            </div>
+          ))}
+          {f.resolvedAt && <div className="text-stone-600 mt-1">{f.resolution}</div>}
+          {!f.resolvedAt && (
+            <div className="grid gap-1.5 mt-1.5">
+              <input className="inp" value={note} maxLength={1000} onChange={e => setNote(e.target.value)} placeholder="How it was resolved" />
+              <button className="btn w-fit" disabled={busy || note.trim().length < 3} onClick={resolve}>Resolve Flag</button>
+            </div>
+          )}
+        </div>
+      )}
+      {err && <p className="text-red-600">{err}</p>}
+    </div>
+  );
+};
+
+
+const OffersList = ({ offers }) => (!offers || !offers.length) ? null : (
+  <div className="grid gap-1">
+    <b className="text-[12px] text-stone-700">May apply, never added automatically</b>
+    {offers.map((o, i) => <div key={i} className="text-xs border-l-2 border-sky-400 bg-sky-50 rounded px-2 py-1 text-sky-900">{o.message}</div>)}
+  </div>
+);
+const TcmDatesForm = ({ patientId, euuid, tcm, onSaved }) => {
+  const [f, setF] = useState({ dischargeDate: (tcm && tcm.dischargeDate) || '', contactDate: (tcm && tcm.contactDate) || '', faceToFaceDate: (tcm && tcm.faceToFaceDate) || '', complexity: (tcm && tcm.complexity) || '' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const save = () => { setBusy(true); setErr(''); api.saveTcmDates(patientId, euuid, f).then(() => onSaved && onSaved()).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  return (
+    <div className="grid gap-1 text-xs border border-stone-200 rounded-lg p-2">
+      <b className="text-stone-700">Transitional care dates</b>
+      {[['dischargeDate', 'Discharge'], ['contactDate', 'Interactive contact'], ['faceToFaceDate', 'Face-to-face (blank: this visit\'s date)']].map(([k, l]) => (
+        <label key={k} className="flex items-center gap-2"><span className="w-56">{l}</span><input type="date" className="inp !py-1 text-xs" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} /></label>
+      ))}
+      <label className="flex items-center gap-2"><span className="w-56">Medical decision making</span>
+        <select className="inp !py-1 text-xs" value={f.complexity} onChange={e => setF({ ...f, complexity: e.target.value })}>
+          <option value="">From the derived level</option><option value="moderate">Moderate</option><option value="high">High</option>
+        </select></label>
+      <button className="btn w-fit !py-1 text-xs" disabled={busy} onClick={save}>Save Dates</button>
+      {err && <p className="text-red-600">{err}</p>}
+    </div>
+  );
+};
+
+// ── Phase 3b: the code helper, billing's tool (2026-11-04) ──
+// For the codes that are not level-based. The families and their inputs
+// come from the server (serviceRules/), so this page names no code and no
+// threshold. The answer is a suggestion with its reason; nothing is saved.
+const CodeHelperPanel = ({ patientId, dos }) => {
+  const [fams, setFams] = useState(null);
+  const [family, setFamily] = useState('');
+  const [input, setInput] = useState({});
+  const [out, setOut] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { api.serviceFamilies().then(r => setFams(r.families)).catch(e => setErr(e.message)); }, []);
+  if (!fams) return err ? <p className="text-xs text-red-600">{err}</p> : null;
+  const fam = fams.find(f => f.family === family);
+  const shown = (fld) => !fld.when || Object.entries(fld.when).every(([k, vals]) => vals.includes(input[k] != null ? input[k] : ((fam.fields.find(x => x.key === k) || {}).options || [[]])[0][0]));
+  const valueOf = (fld) => (input[fld.key] != null ? input[fld.key] : (fld.type === 'select' ? fld.options[0][0] : fld.type === 'boolean' ? false : ''));
+  const run = () => {
+    setErr(''); setOut(null);
+    const body = {};
+    for (const fld of fam.fields.filter(shown)) {
+      const v = valueOf(fld);
+      body[fld.key] = fld.type === 'number' ? (String(v).trim() === '' ? null : Number(v)) : v;
+    }
+    api.selectService({ family, input: { ...body, dos }, clientId: patientId, dos }).then(setOut).catch(e => setErr(e.message));
   };
   return (
-    <div className="card">
-      <h2>Claims waiting on billing</h2>
-      <p className="sub">Visits a clinician has signed that are not submitted yet. Oldest first. To change codes or the place of service, open the visit in the Clinical Workspace.</p>
-      {err && <div className="err">{err}</div>}
-      {msg && <div className="ok">{msg}</div>}
-      {d && d.degraded && <div className="warn">OpenEMR could not be read, so this list shows only what the app holds{d.emrError ? ` (${d.emrError})` : ''}. Sign in to OpenEMR from the Clinical Workspace for the full list.</div>}
-      {!d && !err && <div className="empty">Loading…</div>}
-      {d && d.encounters.length === 0 && <div className="empty">Nothing is waiting on billing.</div>}
-      {d && d.encounters.map(r => (
-        <div className="row" key={r.encounterUuid}>
-          <div>
-            <b>{r.patientName || names.get(r.clientId) || 'Patient'}</b>
-            <div className="mu">Visit {day(r.date)}{r.signedAt ? ` · signed ${day(r.signedAt)}` : ''}{r.renderingProvider && r.renderingProvider.name ? ` · ${r.renderingProvider.name}` : ''}</div>
-            <div className="mu">{r.diagnosisCount} diagnosis code{r.diagnosisCount === 1 ? '' : 's'} · {r.serviceCount} service code{r.serviceCount === 1 ? '' : 's'}</div>
-          </div>
-          <div className="btns">
-            <button className="btn" disabled={busy === r.encounterUuid} onClick={() => {
-              // The same attestation the visit's Billing card asks for.
-              if (window.confirm('The service codes and modifiers on this visit are supported by the signed note.\n\nSubmit to billing?')) submit(r, { attest: true });
-            }}>Submit</button>
-            <button className="btn ghost" disabled={busy === r.encounterUuid} onClick={() => noCharge(r)}>No Charge</button>
-            <a className="btn ghost" href="/clinical#queue">Open in Clinical</a>
-          </div>
+    <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
+      <b className="text-primary text-[13px]"><i className="ti ti-calculator mr-1" />Code helper</b>
+      <select className="inp !py-1 text-xs w-fit" value={family} onChange={e => { setFamily(e.target.value); setInput({}); setOut(null); }}>
+        <option value="">Choose a service family…</option>
+        {fams.map(f => <option key={f.family} value={f.family}>{f.label}</option>)}
+      </select>
+      {fam && fam.fields.filter(shown).map(fld => (
+        <label key={fld.key} className="flex items-center gap-2">
+          {fld.type === 'boolean'
+            ? <><input type="checkbox" checked={!!valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.checked }))} /><span>{fld.label}</span></>
+            : <><span className="w-56">{fld.label}</span>
+                {fld.type === 'select'
+                  ? <select className="inp !py-1 text-xs" value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.value }))}>{fld.options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                  : <input className="inp !py-1 text-xs w-36" type={fld.type === 'date' ? 'date' : 'text'} inputMode={fld.type === 'number' ? 'numeric' : undefined} value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: fld.type === 'number' ? e.target.value.replace(/[^0-9]/g, '').slice(0, 4) : e.target.value }))} />}
+              </>}
+        </label>
+      ))}
+      {fam && <button className="btn w-fit !py-1 text-xs" onClick={run}>Work It Out</button>}
+      {out && (
+        <div className="grid gap-1">
+          <div><b>{out.codes.length ? out.codes.map(c => (c.units > 1 ? `${c.code} × ${c.units}` : c.code)).join(', ') : 'No code'}</b>: {out.explanation}</div>
+          {out.reviewFlag && <div className="border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1 text-amber-900">Level review: {(out.reviewFlag.absent || []).join(' ')}</div>}
+          {(out.notes || []).map((n, i) => <div key={i} className="text-stone-600">{n}</div>)}
+        </div>
+      )}
+      {err && <p className="text-red-600">{err}</p>}
+    </div>
+  );
+};
+
+// ── The claim scrub, billing's review surface (2026-11-04) ──
+// On this page it is the claim's TO-DO LIST, first on the screen, and each
+// finding links to the section that fixes it.
+// EVERY finding, in full: blockers first, then warnings, each naming the
+// field it concerns and what is wrong. Nothing is collapsed behind a count;
+// the person on this screen is here to work the list. Before submission it
+// checks the visit's own lines; after, the lines OpenEMR holds now, prices
+// included, and that is the check Release runs again.
+const ClaimScrubPanel = ({ patientId, euuid, refreshKey, onReleased, onGoTo }) => {
+  const [s, setS] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [reviewed, setReviewed] = useState(false);
+  const [msg, setMsg] = useState('');
+  const load = () => { setBusy('scan'); setErr(''); return api.claimScrub(patientId, euuid).then(r => { setS(r); setReviewed(false); }).catch(e => setErr(e.message)).finally(() => setBusy('')); };
+  useEffect(() => { setS(null); setMsg(''); load(); }, [patientId, euuid, refreshKey]);
+  const release = () => {
+    setBusy('release'); setErr(''); setMsg('');
+    api.claimRelease(patientId, euuid, { warningsReviewed: reviewed })
+      .then(r => { setMsg(r.message); onReleased && onReleased(r); return load(); })
+      .catch(e => { setErr(e.message); return load(); })
+      .finally(() => setBusy(''));
+  };
+  if (!s) return <div className="text-xs text-stone-500">{err ? <span className="text-red-600">{err}</span> : 'Running the claim scrub…'}</div>;
+  const blocks = s.findings.filter(f => f.severity === 'block');
+  const warns = s.findings.filter(f => f.severity === 'warn');
+  return (
+    <div className="grid gap-2 border border-stone-200 rounded-lg p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <b className="text-primary text-[13px]"><i className="ti ti-checklist mr-1" />Claim scrub</b>
+        <span className={`chip ${blocks.length ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{blocks.length} blocking</span>
+        <span className={`chip ${warns.length ? 'bg-amber-50 text-amber-800' : 'bg-stone-50 text-stone-600'}`}>{warns.length} warning{warns.length === 1 ? '' : 's'}</span>
+        <button className="btn ghost !py-1 !px-2.5 text-xs ml-auto" disabled={!!busy} onClick={load}><i className="ti ti-refresh" />{busy === 'scan' ? 'Checking…' : 'Check Again'}</button>
+      </div>
+      <p className="text-[11px] text-stone-500">{s.phase === 'final'
+        ? 'Checked against the charge lines OpenEMR holds now, prices included.'
+        : 'Checked against the codes on this visit. Prices are checked once the lines post, at Release.'}</p>
+      {s.chargeReadError && <p className="text-xs text-red-600">OpenEMR's charge lines could not be read ({s.chargeReadError}). The final charge set is unchecked.</p>}
+      {s.findings.length === 0 && <p className="text-xs text-emerald-700">No findings.</p>}
+      {s.needsTcmDates && <TcmDatesForm patientId={patientId} euuid={euuid} tcm={s.tcm} onSaved={load} />}
+      {blocks.map((f, i) => (
+        <div key={`b${i}`} className="text-xs border-l-2 border-red-400 bg-red-50 rounded px-2 py-1.5">
+          <b className="text-red-800">{f.fieldLabel}</b><span className="text-red-800"> — {f.message}</span>
+      <FixLink field={f.field} patientId={patientId} onGoTo={onGoTo} />
+        </div>
+      ))}
+      {warns.map((f, i) => (
+        <div key={`w${i}`} className="text-xs border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1.5">
+          <b className="text-amber-900">{f.fieldLabel}</b><span className="text-amber-900"> — {f.message}</span>
+      <FixLink field={f.field} patientId={patientId} onGoTo={onGoTo} />
+        </div>
+      ))}
+      <OffersList offers={s.offers} />
+      {s.holdState === 'held' && (
+        <div className="grid gap-2 mt-1">
+          {warns.length > 0 && (
+            <label className="flex items-start gap-2 text-xs">
+              <input type="checkbox" className="mt-0.5" checked={reviewed} onChange={e => setReviewed(e.target.checked)} />
+              <span>I reviewed every warning above.</span>
+            </label>
+          )}
+          <button className="btn gold w-fit" disabled={!!busy || blocks.length > 0 || (warns.length > 0 && !reviewed)} onClick={release}>
+            <i className="ti ti-lock-open" />{busy === 'release' ? 'Releasing…' : 'Release Claim'}
+          </button>
+          <p className="text-[10.5px] text-stone-400">Release re-reads the lines in OpenEMR and refuses if anything blocking is open. Nothing transmits from this app; the release records that you reviewed the claim and let it go.</p>
+        </div>
+      )}
+      {s.holdState === 'released' && s.release && <p className="text-xs text-emerald-700">Released {fmtTs(s.release.at)}{s.release.by ? ` by ${s.release.by.name}` : ''}.</p>}
+      {msg && <p className="text-xs text-emerald-700">{msg}</p>}
+      {err && <p className="text-xs text-red-600">{err}</p>}
+    </div>
+  );
+};
+
+
+// 3.6: E/M level distribution per clinician, this month against last, with
+// the level-review flag rate beside it. Billing only (the queue shows it on
+// the Hold Queue tab, which only billing has).
+const EmDistributionCard = () => {
+  const [r, setR] = useState(null); const [err, setErr] = useState('');
+  useEffect(() => { api.emDistribution().then(setR).catch(e => setErr(e.message)); }, []);
+  if (err) return <div className="card p-3 text-xs text-red-600 mb-3">E/M distribution could not load: {err}</div>;
+  if (!r) return null;
+  const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+  const codes = (m) => Object.entries(m || {}).sort(([a], [b]) => a.localeCompare(b)).map(([c, n]) => `${c} × ${n}`).join(', ') || 'none';
+  return (
+    <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
+      <b className="text-primary">E/M level distribution, {r.month} against {r.priorMonth}</b>
+      {!r.clinicians.length && <div className="text-stone-500 mt-1">No E/M visits in either month.</div>}
+      {r.clinicians.map(c => (
+        <div key={c.clinicianId} className="mt-1.5 border-t border-stone-100 pt-1.5">
+          <b>{c.clinician}</b>
+          <div>{r.month}: {codes(c.months[r.month])} · top level {pct(c.highestShare[r.month])} · flagged {pct(c.flagRate[r.month])}</div>
+          <div className="text-stone-500">{r.priorMonth}: {codes(c.months[r.priorMonth])} · top level {pct(c.highestShare[r.priorMonth])} · flagged {pct(c.flagRate[r.priorMonth])}</div>
         </div>
       ))}
     </div>
   );
 };
 
+
+// ── Where a claim-scrub finding is fixed ──
+// The finding's `field` names what it is about; this only decides which
+// section of the claim (or which other screen) fixes it. An unknown field
+// gets no link: a link to the wrong place is worse than none.
+const SECTION_FOR_FIELD = [
+  [/^lines/, 'codes'], [/^diagnoses/, 'codes'], [/^encounter\.(posCode|facility)/, 'pos'],
+  [/^emDerivation/, 'level'], [/^(billingFacility|catalog|ncci)/, 'connection'], [/^totalMinutes|^psychotherapyMinutes/, 'note']
+];
+const FixLink = ({ field, patientId, onGoTo }) => {
+  const f = String(field || '');
+  if (/^patient\.insurance/.test(f)) {
+    return <a className="ml-2 underline text-primary" href={`/admin/enrollment?client=${encodeURIComponent(patientId)}`}>Open the enrollment record</a>;
+  }
+  const hit = SECTION_FOR_FIELD.find(([re]) => re.test(f));
+  if (!hit || !onGoTo) return null;
+  const label = { codes: 'Go to codes', pos: 'Go to place of service', level: 'Go to E/M level', connection: 'Go to OpenEMR connection', note: 'Go to the note' }[hit[1]];
+  return <button type="button" className="ml-2 underline text-primary" onClick={() => onGoTo(hit[1])}>{label}</button>;
+};
+
+// ── Is billing connected to OpenEMR? ──
+// The chain a claim travels, link by link (billingConnection.js decides each
+// one). Open while anything is wrong; one line once everything is right.
+const CONNECTION_ICON = { ok: 'ti-circle-check text-emerald-600', blocked: 'ti-circle-x text-red-600', unknown: 'ti-help-circle text-amber-600', outside: 'ti-arrow-right-circle text-sky-700' };
+const ConnectionCard = ({ refreshKey }) => {
+  const [c, setC] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [open, setOpen] = useState(null);
+  const load = () => { setErr(''); return api.connection().then(setC).catch(e => setErr(e.message)); };
+  useEffect(() => { load(); }, [refreshKey]);
+  const signIn = () => {
+    setBusy('signin');
+    api.emrConnect().then(r => { if (r && r.url) window.location.href = r.url; }).catch(e => { setErr(e.message); setBusy(''); });
+  };
+  const sync = () => { setBusy('sync'); setErr(''); api.syncFacilities().then(load).catch(e => setErr(e.message)).finally(() => setBusy('')); };
+  if (err && !c) return <div className="card p-4 mb-4 text-sm text-red-600">The OpenEMR connection could not be checked: {err}</div>;
+  if (!c) return <div className="card p-4 mb-4 text-sm text-stone-500">Checking the connection to OpenEMR…</div>;
+  const isOpen = open == null ? !c.ready : open;
+  const needsSignIn = c.checks.some(x => x.key === 'emr_signin' && x.state !== 'ok');
+  const needsSync = c.checks.some(x => x.key === 'billing_facility' && x.state !== 'ok');
+  return (
+    <div id="sec-connection" className="card mb-4">
+      <button type="button" className="card-h w-full text-left" onClick={() => setOpen(!isOpen)} aria-expanded={isOpen}>
+        <h2><i className="ti ti-plug-connected mr-1 text-accent" />OpenEMR Connection</h2>
+        <span className="flex items-center gap-2">
+          {c.ready
+            ? <span className="chip bg-emerald-50 text-emerald-700">Ready to post claims</span>
+            : <span className="chip bg-red-50 text-red-700">{c.blocked + c.unknown} to fix</span>}
+          <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'} text-stone-400`} />
+        </span>
+      </button>
+      {isOpen && (
+        <div className="p-4 grid gap-2.5 text-[13px]">
+          {c.checks.map(x => (
+            <div key={x.key} className="flex items-start gap-2.5">
+              <i className={`ti ${CONNECTION_ICON[x.state] || CONNECTION_ICON.unknown} text-[18px] mt-0.5`} />
+              <div className="min-w-0">
+                <b className="text-primary">{x.label}</b>
+                <div className="text-stone-600">{x.detail}</div>
+                {x.fix && x.state !== 'ok' && <div className="text-[12px] text-stone-500 mt-0.5">{x.fix}</div>}
+              </div>
+            </div>
+          ))}
+          {err && <p className="text-xs text-red-600">{err}</p>}
+          <div className="flex flex-wrap gap-2 mt-1">
+            {needsSignIn && <button className="btn gold" disabled={busy === 'signin'} onClick={signIn}><i className="ti ti-login" />{busy === 'signin' ? 'Opening OpenEMR…' : 'Sign In to OpenEMR'}</button>}
+            {needsSync && <button className="btn" disabled={busy === 'sync'} onClick={sync}><i className="ti ti-refresh" />{busy === 'sync' ? 'Syncing…' : 'Sync Facilities'}</button>}
+            <button className="btn ghost" onClick={load}><i className="ti ti-refresh" />Check Again</button>
+          </div>
+          <p className="text-[11.5px] text-stone-500">
+            {c.facilitiesSyncedAt ? `Facilities last read from OpenEMR ${fmtTs(c.facilitiesSyncedAt)}. ` : ''}
+            Submit posts the charge lines to OpenEMR. Release records that you checked them. OpenEMR's Billing Manager then generates the claim and sends it to the clearinghouse.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── The worklist ──
+// Billing's stages only (owner, 2026-11-04). A clinician's unsigned notes are
+// in their own Inbox, not here.
+const CLAIM_FILTERS = [
+  ['awaiting_billing', 'Awaiting Billing'], ['held', 'Hold Queue'], ['level_flags', 'Level Review'],
+  ['released', 'Released'], ['no_charge', 'No Charge']
+];
+const FILTER_HINT = {
+  awaiting_billing: 'Signed by a clinician, not submitted yet. Oldest first.',
+  held: 'Submitted and posted to OpenEMR, waiting for a person to release them. Most blockers first.',
+  level_flags: 'Every visit whose E/M level is flagged for review, released or not.',
+  released: 'Released here. Generate these, and only these, in OpenEMR\'s Billing Manager.',
+  no_charge: 'Closed with no charge, each with its reason.'
+};
+const ClaimList = ({ filter, setFilter, selected, onOpen, refreshKey }) => {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { setData(null); setErr(''); api.queue(filter).then(setData).catch(e => setErr(e.message)); }, [filter, refreshKey]);
+  return (
+    <div className="min-w-0">
+      <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+        {CLAIM_FILTERS.map(([k, l]) => (
+          <button key={k} onClick={() => setFilter(k)}
+            className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${filter === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>
+            {l}{data && data.counts && k in data.counts ? <span className="ml-1.5 opacity-80">{data.counts[k]}</span> : null}
+          </button>
+        ))}
+      </div>
+      <p className="text-[12px] text-stone-500 mb-2">{FILTER_HINT[filter]}</p>
+      {err && <div className="card p-3 text-red-600 text-sm mb-3">{err}</div>}
+      {data && (data.zeroFee || []).length > 0 && (
+        <div className="card !bg-amber-50 border-amber-300 p-3 text-[12.5px] text-amber-900 mb-3">
+          <div className="font-semibold mb-1">Charges posted at $0.00</div>
+          <div className="mb-1.5">OpenEMR had no price for these codes at the patient's price level. Set the price in OpenEMR's fee schedule, then correct the line in Billing Manager.</div>
+          {data.zeroFee.map(z => (
+            <button type="button" key={z.encounterUuid} onClick={() => onOpen({ clientId: z.clientId, encounterUuid: z.encounterUuid, patientName: z.patientName })} className="block text-left underline">
+              {z.codes.join(', ')} · {z.patientName || 'Patient'}{z.date ? ` · ${fmtDate(z.date)}` : ''}
+            </button>
+          ))}
+        </div>
+      )}
+      {data && filter === 'held' && data.held && (
+        <div className="card p-3 text-[12.5px] text-stone-700 mb-3">
+          <b className="text-primary">{data.held.count} in the hold queue</b>
+          <span className="ml-2 chip bg-red-50 text-red-700">{data.held.blocking} blocking</span>
+          <span className="ml-1 chip bg-amber-50 text-amber-800">{data.held.warnings} warnings</span>
+        </div>
+      )}
+      {data && filter === 'held' && <EmDistributionCard />}
+      {data && data.degraded && <div className="card !bg-amber-50 border-amber-200 p-3 text-[12.5px] text-amber-800 mb-3">OpenEMR's encounter list could not be read{data.emrError ? ` (${data.emrError})` : ''}, so this shows only what the app holds. Sign in to OpenEMR above for the full list.</div>}
+      <div className="card overflow-hidden">
+        {!err && !data && <p className="text-sm text-stone-500 px-5 py-6">Loading from OpenEMR…</p>}
+        {data && data.encounters.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">Nothing here.</p>}
+        {data && data.encounters.map(e => (
+          <button type="button" key={e.encounterUuid} onClick={() => onOpen(e)}
+            className={`cw-row w-full text-left flex items-center gap-3 px-4 py-3 border-b border-stone-100 last:border-0 ${selected === e.encounterUuid ? 'on' : ''}`}>
+            <div className="min-w-0 flex-1">
+              <div className="text-[14px] font-semibold text-primary truncate">{e.patientName || 'Patient'} · {e.reason || 'Visit'}</div>
+              <div className="text-[12px] text-stone-500 truncate">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`].filter(Boolean).join(' · ')}</div>
+            </div>
+            {(e.zeroFeeCharges || []).length > 0 && <span className="chip bg-amber-100 text-amber-900">$0</span>}
+            {e.scrub && <span className={`chip ${e.scrub.block ? 'bg-red-100 text-red-800' : 'bg-emerald-50 text-emerald-700'}`}>{e.scrub.block} blocking</span>}
+            {e.scrub && e.scrub.warn > 0 && <span className="chip bg-amber-100 text-amber-900">{e.scrub.warn} warn</span>}
+            {e.levelFlag && <span className="chip bg-amber-100 text-amber-900">Level review</span>}
+            <i className="ti ti-chevron-right text-stone-300" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ── The charge lines OpenEMR holds for a submitted visit ──
+// Read back from OpenEMR, never the app's copy: this is what Billing Manager
+// will put on the claim. Void (with a reason) and re-post live here.
+const ChargeLines = ({ patientId, euuid, refreshKey, onChanged }) => {
+  const [r, setR] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+  const load = () => { setErr(''); return api.charges(patientId, euuid).then(setR).catch(e => setErr(e.message)); };
+  useEffect(() => { setR(null); load(); }, [patientId, euuid, refreshKey]);
+  const act = (key, fn) => {
+    setBusy(key); setMsg(null);
+    return fn().then(x => { setMsg({ ok: true, text: x.message || 'Done.' }); onChanged && onChanged(); return load(); })
+      .catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(''));
+  };
+  const voidLine = (c) => {
+    const reason = window.prompt(`Why void ${c.code}? OpenEMR keeps the line, marked inactive.`);
+    if (reason && reason.trim()) act(`void:${c.id}`, () => api.voidCharge(patientId, euuid, c.id, reason.trim()));
+  };
+  const lines = r ? (r.charges || []).filter(c => ['CPT4', 'HCPCS'].includes(String(c.code_type || '').toUpperCase())) : [];
+  return (
+    <div className="grid gap-2 text-[13px]">
+      {err && <p className="text-xs text-red-600">OpenEMR's charge lines could not be read: {err}</p>}
+      {!r && !err && <p className="text-xs text-stone-500">Reading the charge lines from OpenEMR…</p>}
+      {r && lines.length === 0 && <p className="text-xs text-amber-700">OpenEMR holds no active charge lines for this visit.</p>}
+      {lines.map(c => (
+        <div key={c.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-1.5">
+          <div><b className="font-mono">{c.code}</b>{c.modifier ? <span className="font-mono">-{c.modifier}</span> : null} <span className="text-stone-500">× {c.units || 1}</span>
+            <span className="ml-2">{c.fee != null ? `$${Number(c.fee).toFixed(2)}` : ''}</span>
+            {c.justify ? <span className="ml-2 text-[11.5px] text-stone-500">dx {String(c.justify).replace(/ICD10\|/g, '').replace(/:$/, '').split(':').join(', ')}</span> : null}
+          </div>
+          <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={!!busy} onClick={() => voidLine(c)}>{busy === `void:${c.id}` ? 'Voiding…' : 'Void'}</button>
+        </div>
+      ))}
+      {r && !r.chargesPosted && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-amber-800">Posting did not finish for every line.</span>
+          <button className="btn !py-1 text-xs" disabled={!!busy} onClick={() => act('repost', () => api.repostCharges(patientId, euuid))}><i className="ti ti-send" />{busy === 'repost' ? 'Posting…' : 'Post Missing Lines'}</button>
+        </div>
+      )}
+      {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+    </div>
+  );
+};
+
+// ── One claim ──
+// Everything billing does to a signed visit, in the order it is done: the
+// scrub's to-do list, the codes, the level, the place of service, submit,
+// then the lines OpenEMR holds. The signed note is below to read.
+const Section = ({ id, title, right, children }) => (
+  <div id={`sec-${id}`} className="card mb-4">
+    <div className="card-h"><h2>{title}</h2>{right}</div>
+    <div className="p-4">{children}</div>
+  </div>
+);
+const ClaimDetail = ({ claim, names, isAdmin, onBack, onChanged }) => {
+  const { clientId, encounterUuid: euuid } = claim;
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  const [services, setServices] = useState([]);
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+  const [attest, setAttest] = useState(false);
+  const [noChargeOpen, setNoChargeOpen] = useState(false);
+  const [noChargeReason, setNoChargeReason] = useState('');
+  const [insBlock, setInsBlock] = useState(null);
+  const [insOverrideReason, setInsOverrideReason] = useState('');
+  const [tick, setTick] = useState(0);
+  const load = useCallback(() => {
+    setErr('');
+    return api.encounterDetail(clientId, euuid).then(r => { setD(r); setServices(r.record.services || []); }).catch(e => setErr(e.message));
+  }, [clientId, euuid]);
+  useEffect(() => { setD(null); setMsg(null); setAttest(false); setNoChargeOpen(false); setInsBlock(null); load(); }, [load]);
+  const run = (key, fn) => {
+    setBusy(key); setMsg(null);
+    return fn().then(r => {
+      setMsg({ ok: true, text: `${r.message || 'Saved.'}${r.warnings && r.warnings.length ? ` — ${r.warnings.join(' · ')}` : ''}` });
+      setTick(t => t + 1); onChanged && onChanged(); load(); return r;
+    }).catch(e => { setMsg({ ok: false, text: e.message }); throw e; }).finally(() => setBusy(''));
+  };
+  const goTo = (section) => { const el = document.getElementById(`sec-${section}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  if (err) return <div className="card p-4"><p className="text-sm text-red-600">{err}</p><button className="btn ghost mt-2" onClick={onBack}>Back</button></div>;
+  if (!d) return <div className="card p-6 text-sm text-stone-500">Loading the visit from OpenEMR…</div>;
+  const ba = d.billingActions || {};
+  const ns = d.noteState || {};
+  const rec = d.record || {};
+  const awaitingAddendum = rec.coSignStatus === 'pending';
+  const dirty = JSON.stringify(services) !== JSON.stringify(rec.services || []);
+  const status = d.billingStatus;
+  const patientName = claim.patientName || names.get(clientId) || 'Patient';
+  const saveCodes = () => run('codes', () => api.saveCoding(clientId, euuid, {
+    diagnoses: rec.diagnoses || [], services, addToProblemList: [],
+    patientSummary: rec.patientSummary || '', followUpInstructions: rec.followUpInstructions || ''
+  }));
+  const submit = (body) => {
+    setInsBlock(null);
+    return run('bill', () => api.billingSubmit(clientId, euuid, body).catch(e => { if (e.data && e.data.overridable) setInsBlock(e.data); throw e; }))
+      .then(() => { setAttest(false); setInsOverrideReason(''); }).catch(() => {});
+  };
+  return (
+    <div className="min-w-0">
+      <button className="text-xs text-primary underline mb-2 xl:hidden" onClick={onBack}><i className="ti ti-arrow-left" /> All claims</button>
+      <div className="card mb-4">
+        <div className="card-h">
+          <h2>{patientName} · {d.encounter.reason || rec.reason || 'Visit'}</h2>
+          <span className={`chip ${status === 'awaiting_billing' ? 'bg-amber-50 text-amber-800' : status === 'no_charge' ? 'bg-stone-100 text-stone-600' : status === 'billed' ? 'bg-emerald-50 text-emerald-700' : 'bg-stone-100 text-stone-600'}`}>
+            {status === 'awaiting_billing' ? 'AWAITING BILLING' : status === 'billed' ? 'SUBMITTED' : status === 'no_charge' ? 'NO CHARGE' : awaitingAddendum ? 'AWAITING CLINICIAN ADDENDUM' : 'NOT SIGNED'}
+          </span>
+        </div>
+        <div className="p-4 flex flex-wrap gap-x-5 gap-y-1 text-xs text-stone-600">
+          <span>Date of service <b>{d.encounter.date || rec.date || '—'}</b></span>
+          <span>OpenEMR encounter <b>#{d.encounter.eid || '—'}</b></span>
+          <span>Rendering clinician <b>{npiLabel(rec.renderingProvider)}</b></span>
+          <span>Billing provider NPI <b>{d.billingNpiUsed || <span className="text-red-600">not set (Settings)</span>}</b></span>
+          {d.attestation && d.attestation.signedAt && <span>Signed <b>{fmtTs(d.attestation.signedAt)}</b></span>}
+          <a className="underline text-primary" href={`/api/clinical/patients/${encodeURIComponent(clientId)}/encounters/${encodeURIComponent(euuid)}/note.pdf?token=${encodeURIComponent(getToken() || '')}`} target="_blank" rel="noopener noreferrer">Note PDF</a>
+        </div>
+      </div>
+
+      {msg && <div className={`card p-3 mb-4 text-sm ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</div>}
+      {awaitingAddendum && <div className="card p-4 mb-4 text-sm text-amber-800">Signed by the note's author and waiting for a clinician addendum. It is not billable until a provider (or an LCSW, for behavioral health) adds it.</div>}
+
+      {(status === 'awaiting_billing' || status === 'billed') && (
+        <Section id="scrub" title="Before This Claim Goes">
+          <ClaimScrubPanel patientId={clientId} euuid={euuid} refreshKey={`${status}|${rec.updatedAt || ''}|${tick}`} onGoTo={goTo}
+            onReleased={() => { setTick(t => t + 1); onChanged && onChanged(); load(); }} />
+        </Section>
+      )}
+
+      <Section id="codes" title="Codes" right={dirty ? <span className="chip bg-amber-50 text-amber-800">Unsaved</span> : null}>
+        <div className="grid gap-4">
+          <div>
+            <span className="lblu block mb-1">Diagnoses (ICD-10-CM), as the clinician signed them</span>
+            {(rec.diagnoses || []).length === 0 && <p className="text-xs text-stone-400">No diagnoses on this visit.</p>}
+            {(rec.diagnoses || []).map(dx => (
+              <div key={dx.code} className="text-[13px] py-1 border-b border-stone-100"><b className="font-mono">{dx.code}</b> {dx.description}{dx.primary && <span className="chip bg-accent text-primary ml-1">PRIMARY</span>}</div>
+            ))}
+            <p className="text-[11.5px] text-stone-500 mt-1">A change to a diagnosis is the clinician's, as an addendum on the visit.</p>
+          </div>
+          <div>
+            <span className="lblu block mb-1">Services (CPT / HCPCS), each linked to a diagnosis</span>
+            <SvcEditor services={services} setServices={setServices} diagnoses={rec.diagnoses || []} readOnly={!ba.canEditCoding}
+              practiceFavorites={(d.favorites && d.favorites.practiceServices) || []} favorites={(d.favorites && d.favorites.services) || []} />
+            {!ba.canEditCoding && <p className="text-[11.5px] text-stone-500 mt-1">{status === 'billed' ? 'Submitted, so the codes are locked here. Correct a posted line below, or in OpenEMR\'s Billing Manager.' : 'Codes are finished here once the clinician has signed.'}</p>}
+          </div>
+          {ba.canEditCoding && (
+            <div className="flex items-center gap-3">
+              <button className="btn" disabled={!dirty || busy === 'codes'} onClick={() => saveCodes().catch(() => {})}><i className="ti ti-device-floppy" />{busy === 'codes' ? 'Saving…' : 'Save Codes'}</button>
+              {dirty && <span className="text-xs text-amber-700">Save before you submit.</span>}
+            </div>
+          )}
+          {(d.modifierJustifications || []).length > 0 && (
+            <div className="grid gap-1 text-xs">
+              <b className="text-stone-700">Modifier reasons from the clinician</b>
+              {d.modifierJustifications.map(x => (
+                <div key={x.key} className={x.justification ? 'text-stone-600' : 'text-amber-800'}>{x.modifier} on {x.code}: {x.justification ? `${x.justification.text} (${(x.justification.by || {}).name || 'clinician'})` : 'no reason recorded yet. The rendering clinician records it on the visit\'s Sign step.'}</div>
+              ))}
+            </div>
+          )}
+          {status === 'awaiting_billing' && (
+            <details className="border border-stone-200 rounded-lg">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-primary">Code helper, for codes that are not level-based</summary>
+              <div className="p-2"><CodeHelperPanel patientId={clientId} dos={rec.date} /></div>
+            </details>
+          )}
+        </div>
+      </Section>
+
+      <Section id="level" title="E/M Level">
+        <BillingLevelPanel patientId={clientId} euuid={euuid} derivation={d.emDerivation} onChanged={() => { load(); setTick(t => t + 1); }} />
+      </Section>
+
+      <Section id="pos" title="Place of Service">
+        <div className="flex flex-wrap items-center gap-3 text-[13px]">
+          <span>Place of service <b>{d.encounter.posCode || <span className="text-amber-700">not set</span>}</b>{d.encounter.facility ? <> · {d.encounter.facility}</> : null}</span>
+          {ba.canRefreshPos && <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={busy === 'pos'} onClick={() => run('pos', () => api.refreshPos(clientId, euuid)).catch(() => {})}><i className="ti ti-refresh" />{busy === 'pos' ? 'Setting…' : 'Refresh POS'}</button>}
+        </div>
+        {d.posMissingReason && !d.encounter.posCode && <p className="text-[11.5px] text-amber-700 mt-1">{d.posMissingReason}</p>}
+        <p className="text-[11.5px] text-stone-500 mt-1">A missing place of service is set from the patient's facility when you submit.</p>
+      </Section>
+
+      {ba.canSubmit && (
+        <Section id="submit" title="Submit to Billing">
+          <div className="grid gap-3 text-sm">
+            {d.billingReadiness && !d.billingReadiness.ok && <p className="text-xs text-amber-700">{d.billingReadiness.message}</p>}
+            <p className="text-xs text-stone-600">Submit runs the claim scrub, then posts the charge lines to OpenEMR's Fee Sheet with <b>{npiLabel(rec.renderingProvider)}</b> as the rendering clinician. The claim then waits in the Hold Queue for you to release it.</p>
+            <label className="flex items-start gap-2 text-xs">
+              <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
+              <span>The service codes and modifiers on this visit are supported by the signed note.</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn gold w-fit" disabled={!attest || dirty || busy === 'bill'} onClick={() => submit({ attest: true })}>
+                <i className="ti ti-send" />{busy === 'bill' ? 'Submitting…' : 'Submit to Billing'}
+              </button>
+              {!noChargeOpen && <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(true)}>No Charge…</button>}
+            </div>
+            {dirty && <p className="text-xs text-amber-700">Save your code changes first.</p>}
+            {insBlock && (isAdmin ? (
+              <div className="grid gap-2 border border-amber-200 bg-amber-50 rounded-lg p-2.5">
+                <label className="text-xs text-amber-900">Override the insurance check? Say why. The reason is saved on this claim.</label>
+                <input className="inp" value={insOverrideReason} maxLength={500} onChange={e => setInsOverrideReason(e.target.value)} placeholder="e.g. Verified by phone with the plan on 10/13" />
+                <button className="btn w-fit" disabled={!insOverrideReason.trim() || !attest || busy === 'bill'} onClick={() => submit({ attest: true, insuranceOverride: { reason: insOverrideReason } })}>Override and Submit</button>
+              </div>
+            ) : <p className="text-xs text-amber-800">Record the eligibility check on the patient's <a className="underline" href={`/admin/enrollment?client=${encodeURIComponent(clientId)}`}>enrollment record</a>, or ask an admin to override it with a reason.</p>)}
+            {noChargeOpen && (
+              <div className="grid gap-2 border border-stone-200 rounded-lg p-2.5">
+                <label className="text-xs text-stone-600">Why is this visit not being billed?</label>
+                <input className="inp" value={noChargeReason} maxLength={500} onChange={e => setNoChargeReason(e.target.value)} placeholder="e.g. Courtesy phone follow-up" />
+                <div className="flex gap-2">
+                  <button className="btn w-fit" disabled={noChargeReason.trim().length < 3 || busy === 'nocharge'}
+                    onClick={() => run('nocharge', () => api.billingSubmit(clientId, euuid, { noCharge: true, reason: noChargeReason })).then(() => { setNoChargeOpen(false); setNoChargeReason(''); }).catch(() => {})}>
+                    Close with No Charge
+                  </button>
+                  <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      {status === 'billed' && (
+        <Section id="charges" title="Charge Lines in OpenEMR">
+          <p className="text-xs text-stone-600 mb-2">Submitted {rec.billingSubmittedAt ? fmtTs(rec.billingSubmittedAt) : ''}{rec.billingSubmittedBy ? ` by ${rec.billingSubmittedBy.name}` : ''}. These are the lines OpenEMR holds now, read back from it.</p>
+          <ChargeLines patientId={clientId} euuid={euuid} refreshKey={tick} onChanged={() => setTick(t => t + 1)} />
+        </Section>
+      )}
+      {status === 'no_charge' && <div className="card p-4 mb-4 text-sm text-stone-600">Closed with no charge. Reason: {rec.noChargeReason}</div>}
+
+      <Section id="note" title="Signed Note" right={d.totalTime ? <span className="text-xs text-stone-500">{d.totalTime.minutes} minutes total</span> : null}>
+        {ns.note ? <SignedNoteView note={ns.note} noteSections={d.noteSections} signature={ns.signature} revisions={ns.revisions} />
+          : <p className="text-sm text-stone-500">The note could not be read.</p>}
+        {(d.addenda || []).length > 0 && (
+          <div className="mt-3 grid gap-2">
+            {d.addenda.map(a => (
+              <div key={a.id} className="border-l-4 border-accent pl-3 py-1">
+                <div className="text-xs text-stone-500">{a.kind === 'clinician_addendum' ? <b className="text-primary">Clinician addendum</b> : 'Addendum'} · {a.signedBy && a.signedBy.name} · {fmtTs(a.signedAt)}</div>
+                <FormattedView markup={a.text} />
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+};
+
+// The claims workspace: the list beside the open claim on a wide screen, one
+// or the other on a narrow one.
+const ClaimsView = ({ names, initialClaim, isAdmin }) => {
+  const [filter, setFilter] = useState('awaiting_billing');
+  const [claim, setClaim] = useState(initialClaim || null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const open = (e) => {
+    setClaim({ clientId: e.clientId, encounterUuid: e.encounterUuid, patientName: e.patientName });
+    try { history.replaceState(null, '', `/billing?client=${encodeURIComponent(e.clientId)}&encounter=${encodeURIComponent(e.encounterUuid)}#claims`); } catch (x) { /* no history */ }
+  };
+  const back = () => { setClaim(null); try { history.replaceState(null, '', '/billing#claims'); } catch (x) { /* no history */ } };
+  return (
+    <>
+      <ConnectionCard refreshKey={refreshKey} />
+      <div className="xl:grid xl:grid-cols-[400px_minmax(0,1fr)] xl:gap-5">
+        <div className={claim ? 'hidden xl:block' : ''}>
+          <ClaimList filter={filter} setFilter={setFilter} selected={claim && claim.encounterUuid} onOpen={open} refreshKey={refreshKey} />
+        </div>
+        <div className={claim ? '' : 'hidden xl:block'}>
+          {claim
+            ? <ClaimDetail key={claim.encounterUuid} claim={claim} names={names} isAdmin={isAdmin} onBack={back} onChanged={() => setRefreshKey(k => k + 1)} />
+            : <div className="card p-8 text-center text-sm text-stone-500 hidden xl:block"><i className="ti ti-receipt text-3xl text-accent block mb-2" />Choose a claim from the list.</div>}
+        </div>
+      </div>
+    </>
+  );
+};
+
+// ── Settings: the billing provider and the practice's service favorites ──
+// Moved here from the clinical workspace's Coding queue (owner, 2026-11-04).
+const BillingSettings = () => {
+  const [s, setS] = useState(null);
+  const [f, setF] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  useEffect(() => {
+    api.settings().then(r => {
+      setS(r);
+      setF({ billingNpiUsed: r.billingNpiUsed || '', billingProviderName: r.billingProviderName || '', favorites: (r.serviceCodeFavorites || []).map(x => `${x.code} | ${x.label || ''}`).join('\n') });
+    }).catch(e => setMsg({ ok: false, text: e.message }));
+  }, []);
+  if (!s || !f) return msg ? <div className="card p-4 text-sm text-red-600">{msg.text}</div> : <div className="card p-4 text-sm text-stone-500">Loading settings…</div>;
+  const save = () => {
+    setBusy(true); setMsg(null);
+    api.saveSettings({
+      billingNpiUsed: f.billingNpiUsed, billingProviderName: f.billingProviderName,
+      serviceCodeFavorites: f.favorites.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [code, ...rest] = l.split('|'); return { code: code.trim(), label: rest.join('|').trim() }; })
+    }).then(r => setMsg({ ok: true, text: r.message })).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
+  };
+  const npiSet = s.billingNpiSource === 'record' || s.billingNpiSource === 'env_seed';
+  return (
+    <div className="card mb-4">
+      <div className="card-h"><h2>Billing Settings</h2>
+        {npiSet ? <span className="chip bg-emerald-50 text-emerald-700">NPI set</span> : <span className="chip bg-red-50 text-red-700">NPI not set</span>}
+      </div>
+      <div className="p-4 grid gap-3 text-sm">
+        {!s.isAdmin && <p className="text-xs text-stone-500">An admin changes these.</p>}
+        <div className="grid md:grid-cols-2 gap-3">
+          <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — submitting is blocked'})`}>
+            <input className="inp font-mono" maxLength={10} disabled={!s.isAdmin} value={f.billingNpiUsed} onChange={e => setF({ ...f, billingNpiUsed: e.target.value.replace(/\D/g, '') })} />
+          </Field>
+          <Field label="Billing provider name"><input className="inp" disabled={!s.isAdmin} value={f.billingProviderName} onChange={e => setF({ ...f, billingProviderName: e.target.value })} /></Field>
+        </div>
+        <Field label="Practice service-code favorites — one per line: CODE | label (codes must exist in OpenEMR's fee schedule)">
+          <textarea className="inp font-mono text-xs" rows={6} disabled={!s.isAdmin} value={f.favorites} onChange={e => setF({ ...f, favorites: e.target.value })} />
+        </Field>
+        {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+        {s.isAdmin && <button className="btn w-fit" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Settings'}</button>}
+        <p className="text-[11.5px] text-stone-500">The billing provider is the NPI every visit bills under, never written into the code. The rendering provider is always the signing clinician. OpenEMR's own billing-facility record (NPI, EIN, taxonomy) is what prints on the claim; the connection check on Claims reads it.</p>
+      </div>
+    </div>
+  );
+};
+
 // ---- Patient statements ----------------------------------------------------
+const STATEMENT_CHIP = { draft: 'bg-stone-100 text-stone-600', open: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700', void: 'bg-red-50 text-red-700' };
 const Statements = ({ data, reload }) => {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState('');
   const [show, setShow] = useState('outstanding');
   const act = (inv, action, body) => {
     setBusy(inv.id); setErr('');
-    post(`/api/gfc/admin/billing/invoices/${encodeURIComponent(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message)).finally(() => setBusy(''));
+    post(`/api/gfc/admin/billing/invoices/${enc(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message)).finally(() => setBusy(''));
   };
   const rows = data.invoices.filter(i => show === 'all' ? true : show === 'outstanding' ? (i.status === 'draft' || i.status === 'open') : i.status === show);
   return (
     <div className="card">
-      <h2>Patient statements</h2>
-      <p className="sub">Copays and home care hours. A draft is checked here, then sent to the patient.</p>
-      {!data.stripe.configured && <div className="warn">Online payment is not set up yet. Statements still work; patients are told to call to pay.</div>}
-      {err && <div className="err">{err}</div>}
-      <div className="tabs">
-        {[['outstanding', 'Outstanding'], ['draft', 'Drafts'], ['open', 'Sent'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([k, l]) => (
-          <button key={k} className={`tab ${show === k ? 'on' : ''}`} onClick={() => setShow(k)}>{l}</button>
+      <div className="card-h"><h2>Patient Statements</h2></div>
+      <div className="p-4">
+        <p className="text-[13px] text-stone-500 mb-3">Copays and home care hours. A draft is checked here, then sent to the patient.</p>
+        {!data.stripe.configured && <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[13px] p-3 mb-3">Online payment is not set up yet. Statements still work; patients are told to call to pay.</div>}
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 text-[13px] p-3 mb-3">{err}</div>}
+        <div className="flex gap-2 mb-3 overflow-x-auto">
+          {[['outstanding', 'Outstanding'], ['draft', 'Drafts'], ['open', 'Sent'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([k, l]) => (
+            <button key={k} onClick={() => setShow(k)}
+              className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${show === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+          ))}
+        </div>
+        {rows.length === 0 && <p className="text-sm text-stone-500 py-6 text-center">No statements here.</p>}
+        {rows.map(i => (
+          <div className="flex flex-wrap justify-between gap-3 py-3 border-b border-stone-100 last:border-0" key={i.id}>
+            <div className="text-[13.5px]">
+              <b className="text-primary">{i.clientName || 'Client'}</b> · {i.number}
+              <div className="text-[12.5px] text-stone-500">{i.kind === 'copay' ? 'Copay' : `Home care${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`} · created {fmtDate(i.createdAt)}</div>
+              {i.status === 'void' && <div className="text-[12.5px] text-stone-500">Voided: {i.voidReason}</div>}
+              {i.status === 'paid' && <div className="text-[12.5px] text-stone-500">Paid {fmtDate(i.paidAt)} by {((i.payments || []).slice(-1)[0] || {}).method}</div>}
+            </div>
+            <div className="text-right">
+              <div><b className="text-primary">{usd(i.totalCents)}</b> <span className={`chip ${STATEMENT_CHIP[i.status] || ''}`}>{i.status === 'open' ? 'SENT' : String(i.status).toUpperCase()}</span></div>
+              {(i.status === 'draft' || i.status === 'open') && (
+                <div className="flex flex-wrap gap-2 justify-end mt-2">
+                  {i.status === 'draft' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => act(i, 'send')}>Send to Patient</button>}
+                  {i.status === 'open' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => {
+                    const m = window.prompt('Paid how? Type check, cash or other.');
+                    if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
+                  }}>Record Payment</button>}
+                  <button className="btn ghost !py-1.5" disabled={busy === i.id} onClick={() => {
+                    const r = window.prompt('Why void this statement? The patient sees it as cancelled.');
+                    if (r && r.trim()) act(i, 'void', { reason: r.trim() });
+                  }}>Void</button>
+                </div>
+              )}
+            </div>
+          </div>
         ))}
       </div>
-      {rows.length === 0 && <div className="empty">No statements here.</div>}
-      {rows.map(i => (
-        <div className="row" key={i.id}>
-          <div>
-            <b>{i.clientName || 'Client'}</b> · {i.number}
-            <div className="mu">{i.kind === 'copay' ? 'Copay' : `Home care${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`} · created {day(i.createdAt)}</div>
-            {i.status === 'void' && <div className="mu">Voided: {i.voidReason}</div>}
-            {i.status === 'paid' && <div className="mu">Paid {day(i.paidAt)} by {((i.payments || []).slice(-1)[0] || {}).method}</div>}
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div><b>{usd(i.totalCents)}</b> <span className={`chip ${i.status}`}>{i.status === 'open' ? 'sent' : i.status}</span></div>
-            {(i.status === 'draft' || i.status === 'open') && (
-              <div className="btns" style={{ justifyContent: 'flex-end' }}>
-                {i.status === 'draft' && <button className="btn" disabled={busy === i.id} onClick={() => act(i, 'send')}>Send to Patient</button>}
-                {i.status === 'open' && <button className="btn" disabled={busy === i.id} onClick={() => {
-                  const m = window.prompt('Paid how? Type check, cash or other.');
-                  if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
-                }}>Record Payment</button>}
-                <button className="btn ghost" disabled={busy === i.id} onClick={() => {
-                  const r = window.prompt('Why void this statement? The patient sees it as cancelled.');
-                  if (r && r.trim()) act(i, 'void', { reason: r.trim() });
-                }}>Void</button>
-              </div>
-            )}
-          </div>
-        </div>
-      ))}
     </div>
   );
 };
@@ -211,73 +906,83 @@ const NewStatement = ({ data, reload }) => {
   useEffect(() => {
     setD(null); setPreview(null); setErr(''); setMsg('');
     if (!clientId) return;
-    api(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}`)
+    call(`/api/gfc/admin/billing/${enc(clientId)}`)
       .then(r => { setD(r); setCopay(r.copayCents ? (r.copayCents / 100).toFixed(2) : ''); })
       .catch(e => setErr(e.message));
   }, [clientId]);
   const run = (key, fn) => { setBusy(key); setErr(''); setMsg(''); return fn().catch(e => { setErr(e.message); return null; }).finally(() => setBusy('')); };
   return (
     <div className="card">
-      <h2>Copay and home care statements</h2>
-      <p className="sub">Choose a client to set their copay or make a home care statement from completed caregiver visits.</p>
-      <div style={{ marginBottom: 12 }}>
-        <label>Client</label>
-        <select value={clientId} onChange={e => setClientId(e.target.value)} style={{ minWidth: 260 }}>
-          <option value="">-- Choose a client --</option>
-          {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </div>
-      {err && <div className="err">{err}</div>}
-      {msg && <div className="ok">{msg}</div>}
-      {clientId && !d && !err && <div className="empty">Loading…</div>}
-      {d && (
-        <>
-          <div style={{ marginBottom: 16 }}>
-            <label>Fixed copay per visit</label>
-            <div className="mu" style={{ marginBottom: 6 }}>Only for plans with a set copay. Leave blank for none: for Medicare the patient's share comes from the insurance payment, not from here.</div>
-            <div className="fl">
-              <span>$</span><input style={{ width: 120 }} inputMode="decimal" value={copay} onChange={e => setCopay(e.target.value)} placeholder="none" />
-              <button className="btn" disabled={busy === 'copay'} onClick={() => run('copay', () => api(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/copay`, { method: 'PUT', body: JSON.stringify({ copay: copay.trim() || null }) })).then(r => r && setMsg('Copay saved.'))}>Save</button>
-            </div>
-          </div>
-          <div>
-            <label>Home care statement</label>
-            <div className="mu" style={{ marginBottom: 6 }}>{d.rate ? `From completed caregiver visits at ${usd(Math.round(d.rate.hourlyRate * 100))}/hour, ${d.rate.dailyMinimumHours}-hour daily minimum.` : 'No agreed rate on file. Set it on the client\'s enrollment record first.'}</div>
-            <div className="fl">
-              <input type="date" value={range.from} onChange={e => setRange({ ...range, from: e.target.value })} />
-              <span>to</span>
-              <input type="date" value={range.to} onChange={e => setRange({ ...range, to: e.target.value })} />
-              <button className="btn ghost" disabled={!range.from || !range.to || busy === 'preview'} onClick={() => run('preview', () => post(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/home-care/preview`, range)).then(r => r && setPreview(r))}>Preview</button>
-            </div>
-            {preview && (
-              <div className="card" style={{ marginTop: 10 }}>
-                {preview.lines.length === 0 && <div className="mu">No completed caregiver visits in those dates.</div>}
-                {preview.lines.map(l => (
-                  <div key={l.date} className="row" style={{ padding: '6px 0' }}>
-                    <span>{l.date} · {l.hours} h{l.minimumApplied ? ` (minimum; worked ${l.actualHours})` : ''}</span><span>{usd(l.amountCents)}</span>
-                  </div>
-                ))}
-                {preview.lines.length > 0 && <div className="row" style={{ padding: '6px 0' }}><b>Total</b><b>{usd(preview.totalCents)}</b></div>}
-                {preview.lines.length > 0 && (
-                  <button className="btn" disabled={busy === 'create'} onClick={() => run('create', () => post(`/api/gfc/admin/billing/${encodeURIComponent(clientId)}/home-care`, range)).then(r => {
-                    if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it under Statements, then send it.`); reload(); }
-                  })}>Create Draft Statement</button>
-                )}
+      <div className="card-h"><h2>Copay and Home Care Statements</h2></div>
+      <div className="p-4 grid gap-4 text-[13.5px]">
+        <p className="text-stone-500">Choose a client to set their copay or make a home care statement from completed caregiver visits.</p>
+        <Field label="Client">
+          <select className="inp max-w-sm" value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">-- Choose a client --</option>
+            {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
+        {msg && <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 p-3">{msg}</div>}
+        {clientId && !d && !err && <p className="text-stone-500">Loading…</p>}
+        {d && (
+          <>
+            <div>
+              <span className="lblu block mb-1">Fixed copay per visit</span>
+              <p className="text-[12.5px] text-stone-500 mb-1.5">Only for plans with a set copay. Leave blank for none: for Medicare the patient's share comes from the insurance payment, not from here.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <span>$</span><input className="inp !w-32" inputMode="decimal" value={copay} onChange={e => setCopay(e.target.value)} placeholder="none" />
+                <button className="btn" disabled={busy === 'copay'} onClick={() => run('copay', () => call(`/api/gfc/admin/billing/${enc(clientId)}/copay`, { method: 'PUT', body: JSON.stringify({ copay: copay.trim() || null }) })).then(r => r && setMsg('Copay saved.'))}>Save Copay</button>
               </div>
-            )}
-          </div>
-        </>
-      )}
+            </div>
+            <div>
+              <span className="lblu block mb-1">Home care statement</span>
+              <p className="text-[12.5px] text-stone-500 mb-1.5">{d.rate ? `From completed caregiver visits at ${usd(Math.round(d.rate.hourlyRate * 100))}/hour, ${d.rate.dailyMinimumHours}-hour daily minimum.` : 'No agreed rate on file. Set it on the client\'s enrollment record first.'}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input className="inp !w-44" type="date" value={range.from} onChange={e => setRange({ ...range, from: e.target.value })} />
+                <span>to</span>
+                <input className="inp !w-44" type="date" value={range.to} onChange={e => setRange({ ...range, to: e.target.value })} />
+                <button className="btn ghost" disabled={!range.from || !range.to || busy === 'preview'} onClick={() => run('preview', () => post(`/api/gfc/admin/billing/${enc(clientId)}/home-care/preview`, range)).then(r => r && setPreview(r))}>Preview</button>
+              </div>
+              {preview && (
+                <div className="border border-stone-200 rounded-lg p-3 mt-3">
+                  {preview.lines.length === 0 && <p className="text-stone-500">No completed caregiver visits in those dates.</p>}
+                  {preview.lines.map(l => (
+                    <div key={l.date} className="flex justify-between py-1 border-b border-stone-100">
+                      <span>{l.date} · {l.hours} h{l.minimumApplied ? ` (minimum; worked ${l.actualHours})` : ''}</span><span>{usd(l.amountCents)}</span>
+                    </div>
+                  ))}
+                  {preview.lines.length > 0 && <div className="flex justify-between py-1"><b>Total</b><b>{usd(preview.totalCents)}</b></div>}
+                  {preview.lines.length > 0 && (
+                    <button className="btn mt-2" disabled={busy === 'create'} onClick={() => run('create', () => post(`/api/gfc/admin/billing/${enc(clientId)}/home-care`, range)).then(r => {
+                      if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it under Statements, then send it.`); reload(); }
+                    })}>Create Draft Statement</button>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 };
 
+const TABS = [['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Copay & Home Care'], ['settings', 'Settings']];
 const App = () => {
-  const [tab, setTab] = useState(() => (['claims', 'statements', 'new'].includes(String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'claims'));
+  const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'claims'));
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+  // A claim opened from a visit's "Open in Billing" link: ?client=…&encounter=…
+  const [initialClaim] = useState(() => {
+    const q = new URLSearchParams(window.location.search);
+    return q.get('client') && q.get('encounter') ? { clientId: q.get('client'), encounterUuid: q.get('encounter') } : null;
+  });
+  // Back from OpenEMR's sign-in: ?emr=connected|error, said once.
+  const [emrReturn] = useState(() => { const q = new URLSearchParams(window.location.search); return q.get('emr') ? { state: q.get('emr'), reason: q.get('reason') } : null; });
   const load = useCallback(() => {
-    api('/api/gfc/admin/billing-statements').then(setData).catch(e => {
+    call('/api/gfc/admin/billing-statements').then(setData).catch(e => {
       if (e.status === 401) { window.location.replace('/login'); return; }
       setErr(e.status === 403 ? 'Billing is done by an admin, a manager or a care coordinator.' : e.message);
     });
@@ -285,26 +990,39 @@ const App = () => {
   useEffect(() => {
     if (!getToken()) { window.location.replace('/login'); return; }
     load();
+    // Who may override an insurance check is the server's answer.
+    api.settings().then(r => setIsAdmin(!!r.isAdmin)).catch(() => setIsAdmin(false));
+    if (emrReturn) { try { history.replaceState(null, '', `/billing${window.location.hash || '#claims'}`); } catch (e) { /* no history */ } }
   }, [load]);
-  const pick = (t) => { setTab(t); try { history.replaceState(null, '', `#${t}`); } catch (e) { /* no history */ } };
+  const pick = (t) => { setTab(t); try { history.replaceState(null, '', `/billing#${t}`); } catch (e) { /* no history */ } };
   const names = new Map(((data && data.clients) || []).map(c => [c.id, c.name]));
   return (
     <>
-      <div className="hdr">
-        <span className="t">Billing</span>
-        <a href="/login">Portal Hub</a>
-      </div>
-      <div className="wrap">
-        {err && <div className="err">{err}</div>}
-        <div className="tabs">
-          {[['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Copay & Home Care']].map(([k, l]) => (
-            <button key={k} className={`tab ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>
-          ))}
+      <div className="bg-primary text-white sticky top-0 z-30">
+        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 pt-3 flex items-center justify-between gap-3">
+          <span className="font-serif text-[24px] font-semibold">Billing</span>
+          <span className="flex items-center gap-4 text-[13.5px] font-semibold">
+            <a className="text-[#F5CD85]" href="/clinical">Clinical Workspace</a>
+            <a className="text-[#F5CD85]" href="/login">Portal Hub</a>
+          </span>
         </div>
-        {!data && !err && <div className="empty">Loading…</div>}
-        {data && tab === 'claims' && <Claims names={names} />}
+        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">
+          {TABS.map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}
+        </div>
+      </div>
+      <div className="max-w-[1500px] mx-auto px-4 lg:px-8 py-5">
+        {emrReturn && (
+          <div className={`rounded-lg border p-3 mb-4 text-[13px] ${emrReturn.state === 'connected' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-red-200 bg-red-50 text-red-900'}`}>
+            {emrReturn.state === 'connected' ? <b>Signed in to OpenEMR. Charges you submit now post under your own login.</b>
+              : <span><b>OpenEMR sign-in did not complete</b> ({emrReturn.reason || 'unknown'}). Try again; if it repeats, tell an admin the code shown here.</span>}
+          </div>
+        )}
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 text-[13px] p-3 mb-4">{err}</div>}
+        {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
+        {data && tab === 'claims' && <ClaimsView names={names} initialClaim={initialClaim} isAdmin={isAdmin} />}
         {data && tab === 'statements' && <Statements data={data} reload={load} />}
         {data && tab === 'new' && <NewStatement data={data} reload={load} />}
+        {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /></div>}
       </div>
     </>
   );

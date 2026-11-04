@@ -640,6 +640,18 @@ const HP_NOTE = {
   check('the release is logged with codes only, no patient name', relLog && relLog.details.lineCodes.includes('99349') && !JSON.stringify(relLog.details).includes('Probe Patient'), relLog);
   r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
   check('it cannot be released twice', r.status === 409 && r.body.code === 'CLAIM_ALREADY_RELEASED', r.body);
+  // The billing page (2026-11-04): its history and its OpenEMR connection check.
+  r = await call('GET', '/api/clinical/encounters/queue?state=released', tok.mgr);
+  check('the billing page lists a released claim under Released', r.status === 200 && (r.body.encounters || []).some(e => e.encounterUuid === bv) && r.body.counts.released >= 1, r.body && r.body.counts);
+  r = await call('GET', '/api/clinical/encounters/queue?state=released', tok.fnp);
+  check('a clinician\'s Released list is empty: it is billing\'s', r.status === 200 && (r.body.encounters || []).length === 0, r.body && r.body.encounters);
+  r = await call('GET', '/api/clinical/billing/connection', tok.mgr);
+  const conn = r.body || {};
+  check('billing reads the OpenEMR connection check, every link named', r.status === 200 && Array.isArray(conn.checks) &&
+    ['emr_signin', 'billing_npi', 'billing_facility', 'code_catalog', 'ncci', 'clearinghouse'].every(k => conn.checks.some(c => c.key === k)), conn);
+  check('and the clearinghouse is OpenEMR\'s, never reported connected', (conn.checks || []).find(c => c.key === 'clearinghouse').state === 'outside', conn.checks);
+  r = await call('GET', '/api/clinical/billing/connection', tok.fnp);
+  check('a clinician is refused the billing connection check', r.status === 403, r.body);
   console.log('\n── 13d. Clinical fact extraction: the route and its refusals (Phase 2, 2026-11-04) ──');
   r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.mgr, {});
   check('starting an extraction needs clinical write access', r.status === 403, r.body);

@@ -71,6 +71,7 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 const clinicalRoles = require('./clinicalRoles');
 const codeCatalog = require('./codeCatalog');
 const claimScrub = require('./claimScrub');       // the claim scrub + documentation gate (AI coding pipeline, Phase 1, 2026-11-04)
+const billingConnection = require('./billingConnection'); // is billing connected to OpenEMR, link by link (2026-11-04)
 const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
 const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
@@ -9620,7 +9621,7 @@ const SERVER_STARTED_AT = new Date().toISOString();
 // ============================================================
 app.get('/api/emr/connect', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const { url } = await emrAuth.beginAuthorization(req.user);
+    const { url } = await emrAuth.beginAuthorization(req.user, { returnTo: req.query.return === 'billing' ? 'billing' : 'clinical' });
     await logActivity(req.user.id, req.user.name || req.user.email, 'emr_connect_started', 'openemr:oauth', req.user.id, { role: req.user.role });
     res.json({ url });
   } catch (err) {
@@ -9628,17 +9629,18 @@ app.get('/api/emr/connect', authenticateToken, requireClinicalRead, async (req, 
   }
 });
 app.get('/oauth/callback', async (req, res) => {
-  const back = (q) => res.redirect(`/clinical?${new URLSearchParams(q).toString()}`);
+  // The landing page comes from the state row, never from the query string.
+  const back = (q, to) => res.redirect(`${to || '/clinical'}?${new URLSearchParams(q).toString()}`);
   try {
     const result = await emrAuth.completeAuthorization({
       state: req.query.state, code: req.query.code, error: req.query.error, errorDescription: req.query.error_description
     });
     await logActivity(result.userId, null, 'emr_connected', 'openemr:oauth', result.userId,
       { emrUsername: result.emrUser && result.emrUser.username, scopes: result.scopes.length, hasRefreshToken: result.hasRefreshToken });
-    return back({ emr: 'connected' });
+    return back({ emr: 'connected' }, result.returnTo);
   } catch (err) {
     console.error('OpenEMR callback failed:', err.code || err.message);
-    return back({ emr: 'error', reason: err.code || 'EMR_AUTH_FAILED' });
+    return back({ emr: 'error', reason: err.code || 'EMR_AUTH_FAILED' }, err.returnTo);
   }
 });
 app.post('/api/emr/disconnect', authenticateToken, requireClinicalRead, async (req, res) => {
@@ -16245,6 +16247,23 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
 // GET shows EVERY finding on one encounter, blockers first, each naming its
 // field. Billing's screen only. Before submission it scrubs the app's own
 // lines; after, it reads the charge lines OpenEMR actually holds.
+// The billing page's first question: is this person's billing connected to
+// OpenEMR, end to end? One read, every link named (billingConnection.js).
+app.get('/api/clinical/billing/connection', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const settle = (p) => p.then(v => v, () => null);
+    const [emr, payer, facilityInfo, catalog, ncci] = await Promise.all([
+      settle(openemr.getStatus(req.user)), settle(getPayerCredentialing()), settle(billingFacilityForScrub()),
+      settle(codeCatalogService.status()), settle(getNcciTables())
+    ]);
+    const snap = await settle(getFacilitySnapshot());
+    res.json({ ...billingConnection.buildBillingConnection({ emr, payer, facilityInfo, catalog, ncci }),
+      facilitiesSyncedAt: (snap && snap.syncedAt) || null });
+  } catch (error) {
+    console.error('Billing connection read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 app.get('/api/clinical/patients/:clientId/encounters/:euuid/claim-scrub', authenticateToken, requireBilling, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res, { createRecord: false });
@@ -19379,7 +19398,7 @@ app.get('/api/clinical/patients/:clientId/calls/:callId/note', authenticateToken
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'level_flags', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'level_flags', 'released', 'no_charge', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
     let emrRows = null; let emrError = null;
     if (openemr.isConfigured()) {
@@ -19470,9 +19489,18 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
       filtered.length = 0;
       filtered.push(...held.sort((a, b) => (b.scrub.block - a.scrub.block) || String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))));
     }
+    // The billing page's history (2026-11-04): claims a person released, ready
+    // for OpenEMR's Billing Manager to generate, and visits closed with no
+    // charge. Newest first. Billing's only; a clinician's queue has neither.
+    const released = canBill ? rows.filter(r => !voided.has(String(r.encounterUuid)) && r.holdState === 'released') : [];
+    const noCharge = canBill ? rows.filter(r => !voided.has(String(r.encounterUuid)) && r.billingStatus === clinicalRepo.BILLING_STATUS.NO_CHARGE) : [];
+    if (filter === 'released' || filter === 'no_charge') {
+      filtered.length = 0;
+      filtered.push(...(filter === 'released' ? released : noCharge).sort((a, b) => String(b.signedAt || b.date || '').localeCompare(String(a.signedAt || a.date || ''))));
+    }
     const zeroFee = rows.filter(r => !voided.has(String(r.encounterUuid)) && r.zeroFeeCharges && r.zeroFeeCharges.length)
       .map(r => ({ encounterUuid: r.encounterUuid, clientId: r.clientId, patientName: r.patientName, date: r.date, codes: r.zeroFeeCharges.map(c => c.code) }));
-    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length, level_flags: levelFlags.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
+    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length, level_flags: levelFlags.length, released: released.length, no_charge: noCharge.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });

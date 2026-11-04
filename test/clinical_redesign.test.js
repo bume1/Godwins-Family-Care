@@ -261,7 +261,7 @@ test('the note reads as unsaved only after typing, and clean again after a save'
 
 test('both editors report their note state, and mark it saved after a load and a save', () => {
   const hp = slice('const HpTab = (', 'const MedRecTab');
-  const fu = slice('const FollowUpNoteEditor = (', 'const SignedNoteView');
+  const fu = slice('const FollowUpNoteEditor = (', 'const EncounterLookups = (');
   for (const [name, src, saver] of [['HpTab', hp, 'saveDraft'], ['FollowUpNoteEditor', fu, 'save']]) {
     assert.match(src, new RegExp(`const markSaved = useNoteDirty\\(f, onNoteState, \\(\\) => ${saver}\\(\\)\\)`), `${name} reports up`);
     assert.match(src, /\.then\(r => \{ (if \(live && r && r\.note\)|if \(r\))[^\n]*markSaved\(\)/, `${name} marks the loaded note as saved`);
@@ -271,11 +271,11 @@ test('both editors report their note state, and mark it saved after a load and a
 });
 
 test('while the note is unsaved, the sign card says save first and cannot sign', () => {
-  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
+  const card = slice('{!locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
   assert.match(card, /\{noteDirty && <UnsavedNoteLine onSave=\{saveNoteFirst\} \/>\}/);
   assert.match(card, /\{!noteDirty && !d\.signReadiness\.ok && <p/, 'the stale section list is hidden while the note is unsaved');
   assert.match(card, /disabled=\{!attest \|\| !d\.signReadiness\.ok \|\| dirty \|\| noteDirty \|\|/);
-  const add = slice('{/* The clinician addendum', '{/* BILLING');
+  const add = slice('{/* The clinician addendum', '{/* BILLING lives on its own page');
   assert.match(add, /\{!noteDirty && d\.addendumReadiness/);
   assert.match(add, /dirty \|\| noteDirty \|\|/);
 });
@@ -285,8 +285,8 @@ test('while the note is unsaved, the sign card says save first and cannot sign',
 // button (signing reads the saved diagnoses); the card now says so even when
 // the sign check itself passes. No appointment is required to sign.
 test('a ready note with unsaved coding says why it cannot sign', () => {
-  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
+  const card = slice('{!locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
   assert.match(card, /\{!noteDirty && d\.signReadiness\.ok && dirty && <p[^>]*>.*Save your coding changes first\./);
-  const add = slice('{/* The clinician addendum', '{/* BILLING');
+  const add = slice('{/* The clinician addendum', '{/* BILLING lives on its own page');
   assert.match(add, /\(!d\.addendumReadiness \|\| d\.addendumReadiness\.ok\) && dirty && <p/);
 });

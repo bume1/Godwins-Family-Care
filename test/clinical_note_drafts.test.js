@@ -203,14 +203,16 @@ test('Save draft saves through the shared note, and Sign & submit really signs',
   const hp = clinicalPage.slice(clinicalPage.indexOf('const HpTab = ('));
   const actions = hp.slice(0, hp.indexOf('const MedRecTab'));
   assert.ok(actions.includes('sn.save(toNote()'), 'Save draft must save the shared note');
-  // The one component that renders the Sign & submit button used by the note
-  // editors must call the sign route — a "Sign" button that only saves is the
-  // defect this whole file exists to prevent.
-  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const FIXED_BLOCK_FOR_SECTION = '));
-  // 2026-11-04: and the total time on the date of service (documentation gate).
-  assert.ok(panel.includes('api.sign(patientId, euuid, portalHoldPayload(hold), minutes)'), 'Sign & submit must call the sign route (Portal P1: carrying the hold choice)');
-  assert.ok(actions.includes('<SignNotePanel'), 'the H&P must offer the real sign panel');
-  const shared = clinicalPage.slice(clinicalPage.indexOf('const useSharedNote = ('), clinicalPage.indexOf('const SignNotePanel = ('));
+  // The note editors' Sign & submit must lead to a real signature — a "Sign"
+  // button that only saves is the defect this whole file exists to prevent.
+  // Since 2026-11-04 there is ONE place that signs: the encounter's Sign card.
+  // The editors save, then go there; that card calls the sign route.
+  assert.match(actions, /saveDraft\(\)\.then\(r => \{ const id = sn\.euuid \|\| \(r && r\.encounterUuid\); if \(id && onSign\) onSign\(id\); \}\)/, 'the H&P saves, then opens the Sign card');
+  assert.match(clinicalPage, /onSign=\{\(euuid\) => openEncounter\(euuid, 'sign'\)\}/, 'opened from the chart, it lands on the encounter\'s Sign step');
+  assert.match(clinicalPage, /onSign=\{goSign\}/, 'inside an encounter, it moves to the Sign step');
+  assert.match(clinicalPage, /run\('sign', \(\) => api\.sign\(patient\.id, euuid, portalHoldPayload\(portalHold\)/, 'and the Sign card calls the sign route, carrying the hold choice');
+  assert.doesNotMatch(clinicalPage, /const SignNotePanel = \(/, 'no second sign box');
+  const shared = clinicalPage.slice(clinicalPage.indexOf('const useSharedNote = ('), clinicalPage.indexOf('const PORTAL_HOLD_REASONS = ['));
   assert.ok(shared.includes('api.createNote(') && shared.includes('api.saveNote('),
     'the first save creates the note on its encounter; later saves update it');
 });

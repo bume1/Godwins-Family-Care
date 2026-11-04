@@ -73,7 +73,8 @@ test('the coding queue serves and shows $0 charges by code and encounter', () =>
   assert.equal((body.match(/zeroFeeCharges: clinicalRepo\.zeroFeeCharges\(record\)/g) || []).length, 2, 'both the EMR and the degraded path');
   assert.match(body, /res\.json\(\{ filter, encounters: filtered, zeroFee,/);
   assert.match(server, /posted\.push\(clinicalRepo\.postedChargeEntry\(payload, row\)\)[\s\S]{0,400}zeroFeeWarning/);
-  const page = fs.readFileSync(path.join(ROOT, 'public', 'clinical.html'), 'utf8');
+  // The worklist moved to the billing page (2026-11-04).
+  const page = fs.readFileSync(path.join(ROOT, 'public', 'billing.html'), 'utf8');
   assert.match(page, /Charges posted at \$0\.00/);
-  assert.match(page, /\$0 charge: \{e\.zeroFeeCharges/);
+  assert.match(page, /\(e\.zeroFeeCharges \|\| \[\]\)\.length > 0 && <span className="chip bg-amber-100 text-amber-900">\$0<\/span>/);
 });

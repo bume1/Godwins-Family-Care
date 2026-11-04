@@ -14,7 +14,8 @@
 //   - Acute and Psych Follow-up add their own questions after the core;
 //   - New Patient is still the H&P, unchanged;
 //   - saving a follow-up POSTs kind 'followup';
-//   - the "Document a visit" popup is a short starter with no S/O/A/P form.
+//   - New Visit is the one way in: it defaults to Follow-up once the initial
+//     visit is done, and the old "Document a visit" popup is gone (2026-11-04).
 //   - on a saved encounter, the Sign & Submit card says "save first" while the
 //     note has unsaved typing, instead of listing typed sections as missing.
 //
@@ -138,6 +139,9 @@ const encounterDetail = () => ({
     if (p.endsWith('/chart')) return json({ banner: { name: PATIENT.name }, intakePrefill: {}, problems: [], medications: [], allergies: [], encounters: [], vitals: [], documents: [] });
     if (p.endsWith('/place-of-service')) return json(catalog());
     if (p.endsWith('/encounters')) return json({ linked: true, encounters: encRows });
+    // The Visits tab reads the appointments too (2026-11-04).
+    if (p.endsWith('/appointments')) return json({ linked: true, appointments: [] });
+    if (p === '/api/clinical/providers') return json({ providers: [] });
     if (p.endsWith(`/encounters/${ENC}/note`)) return json({ version: 1, status: 'draft', revisions: [], note: { kind: 'followup', chiefConcern: 'BP check', subjective: '', assessment: '', plan: '', sections: {}, vitals: {} } });
     if (p.endsWith(`/encounters/${ENC}`)) return json(encounterDetail());
     if (p.endsWith('/my-day')) return json({ date: '2026-10-12', visits: [], totals: { visits: 0, miles: null }, calendar: { ok: true }, unsignedEarlier: [], openTasks: [] });
@@ -149,14 +153,14 @@ const encounterDetail = () => ({
   }, PROVIDER);
   await page.goto(`${base}/clinical`, { waitUntil: 'networkidle' });
 
-  // Open the patient and the Visit tab (the banner's Start visit lands here).
+  // Open the patient and the Visit tab (the banner's New Visit lands here).
   const openVisit = async () => {
     // The workspace opens on My Day; the patient list is under Patients.
     await page.locator('button:has-text("Patients"), a:has-text("Patients")').first().click();
     await page.waitForTimeout(300);
     await page.locator(`text=${PATIENT.name}`).first().click();
     await page.waitForTimeout(400);
-    await page.locator('button:has-text("Start Visit")').first().click();
+    await page.locator('button:has-text("New Visit")').first().click();
     await page.waitForSelector('text=Visit Type', { timeout: 15000 });
   };
   try { await openVisit(); }
@@ -225,24 +229,24 @@ const encounterDetail = () => ({
     save ? JSON.stringify({ kind: save.body.note && save.body.note.kind, path: save.path }) : 'nothing posted');
   ok('E2 and carries no H&P blocks', !!save && !(save.body.note || {}).hp);
 
-  // --- G. The popup is a short starter -------------------------------------
+  // --- G. One way to start a visit (2026-11-04) -----------------------------
+  // The popup is gone; New Visit opened this screen with Follow-up already
+  // chosen (Juanita's initial visit is done), and the Visits tab offers New
+  // Visit and nothing else that starts a note.
   await page.locator('button:has-text("Back to Chart")').first().click();
   await page.waitForTimeout(300);
-  await page.locator('.tabbtn:text-is("Encounters")').first().click();
+  await page.locator('button:has-text("New Visit")').first().click();
+  await page.waitForSelector('text=Visit Type', { timeout: 15000 });
   await page.waitForTimeout(400);
-  await page.locator('button:has-text("Document Follow-Up")').first().click();
-  const modal = page.locator('.card', { hasText: 'Document a visit' }).first();
-  await modal.waitFor({ timeout: 10000 });
+  const chosen = await page.locator('select').filter({ has: page.locator('option:text-is("Follow-up")') }).first().inputValue();
+  ok('G1 New Visit defaults to the Follow-up visit type once the initial visit is done', chosen === 'pc_follow_up', chosen);
+  await page.locator('button:has-text("Back to Chart")').first().click();
   await page.waitForTimeout(300);
-  const mt = (await modal.innerText()).toUpperCase();
-  const typeValue = await modal.locator('select').first().inputValue();
-  ok('G1 the popup defaults to the Follow-up visit type', typeValue === 'pc_follow_up', typeValue);
-  ok('G2 it asks for the chief complaint and where the visit happened', /CHIEF COMPLAINT/.test(mt) && /LOCATION/.test(mt));
-  // Field LABELS, not loose words: the popup's own sentence mentions S/O/A/P.
-  const labels = (await modal.locator('.lblu').allInnerTexts()).map(x => x.trim().toUpperCase());
-  ok('G3 it carries no S/O/A/P boxes, vitals or coding',
-    !labels.some(l => ['SUBJECTIVE', 'OBJECTIVE', 'ASSESSMENT', 'PLAN', 'BP SYS'].includes(l)) && !/ICD-10/.test(mt) && labels.includes('CHIEF COMPLAINT'),
-    JSON.stringify(labels));
+  await page.locator('.tabbtn:text-is("Visits")').first().click();
+  await page.waitForTimeout(400);
+  const body = await page.locator('body').innerText();
+  ok('G2 the Visits tab has no second way to start a note', !/Document Follow-Up|Document Unscheduled Visit|Document a visit/i.test(body) && /New Visit/.test(body));
+  ok('G3 and it shows the appointments and the notes together', /Upcoming/.test(body) && /Notes/.test(body), body.slice(0, 300));
 
   // --- H. The encounter's Sign & Submit card while the note is unsaved -------
   // (owner report, 2026-10-12): it read the SAVED note, so it listed
@@ -253,17 +257,23 @@ const encounterDetail = () => ({
   await page.waitForTimeout(300);
   await page.locator(`text=${PATIENT.name}`).first().click();
   await page.waitForTimeout(400);
-  await page.locator('.tabbtn:text-is("Encounters")').first().click();
+  await page.locator('.tabbtn:text-is("Visits")').first().click();
   await page.waitForTimeout(400);
   await page.locator('div.cursor-pointer', { hasText: 'Not coded' }).first().click();
+  // One step at a time (2026-11-04): the Sign card is on the Sign step.
+  const step = async (k) => { await page.locator(`button[data-step="${k}"]`).first().click(); await page.waitForTimeout(250); };
+  await page.locator('button[data-step="sign"]').first().waitFor({ timeout: 15000 });
+  await step('sign');
   const signCard = page.locator('.card', { has: page.locator('h2:text-is("Sign & Submit")') }).first();
   try { await signCard.waitFor({ timeout: 15000 }); } catch (e) { console.log('   pageErrors:', pageErrors.join(' | ')); throw e; }
   await page.waitForTimeout(400);
   let sc = await signCard.innerText();
   ok('H1 a saved note shows what signing still needs', /still needs Subjective/.test(sc) && !/unsaved changes/i.test(sc), sc.slice(0, 200));
+  await step('visit');
   const subj = page.locator('.card', { hasText: 'Subjective' }).locator('[contenteditable="true"]').nth(1);
   await subj.click(); await page.keyboard.type('Feels better, no dizziness');
   await page.waitForTimeout(300);
+  await step('sign');
   sc = await signCard.innerText();
   ok('H2 typing in the note: the card says save first and no longer lists the sections', /unsaved changes/i.test(sc) && !/still needs Subjective/.test(sc), sc.slice(0, 200));
   ok('H3 and the card cannot sign while the note is unsaved', await signCard.locator('button:has-text("Sign & Submit")').isDisabled());
@@ -284,20 +294,26 @@ const encounterDetail = () => ({
   await page.waitForTimeout(300);
   await page.locator(`text=${PATIENT.name}`).first().click();
   await page.waitForTimeout(400);
-  await page.locator('.tabbtn:text-is("Encounters")').first().click();
+  await page.locator('.tabbtn:text-is("Visits")').first().click();
   await page.waitForTimeout(400);
   await page.locator('div.cursor-pointer', { hasText: 'Not coded' }).first().click();
+  await page.locator('button[data-step="sign"]').first().waitFor({ timeout: 15000 });
+  await step('sign');
   const card2 = page.locator('.card', { has: page.locator('h2:text-is("Sign & Submit")') }).first();
   await card2.waitFor({ timeout: 15000 });
   await card2.locator('input[type="checkbox"]').first().check();
   const signBtn = card2.locator('button:has-text("Sign & Submit")');
   ok('I1 a ready, clean note with no appointment can be signed', !(await signBtn.isDisabled()));
+  await step('coding');
   await page.locator('textarea[placeholder^="e.g. We checked"]').fill('We talked about your blood pressure.');
   await page.waitForTimeout(300);
+  await step('sign');
   let c2 = await card2.innerText();
   ok('I2 unsaved coding: the button is grey and the card says why', (await signBtn.isDisabled()) && /Save your coding changes first/.test(c2), c2.slice(0, 200));
+  await step('coding');
   await page.locator('button', { hasText: /^Save Coding$/ }).first().click();
   await page.waitForTimeout(600);
+  await step('sign');
   c2 = await card2.innerText();
   ok('I3 after saving coding the line goes and the button enables', !(await signBtn.isDisabled()) && !/Save your coding changes first/.test(c2), c2.slice(0, 200));
 
