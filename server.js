@@ -69,7 +69,8 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // vocabulary lives there rather than in config.js for the same reason the
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
-const codeCatalog = require('./codeCatalog');           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
+const codeCatalog = require('./codeCatalog');
+const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
@@ -29768,6 +29769,13 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled promise rejection:', reason);
 });
+
+// gfc_billable_codes is seeded once, from the owner's OpenEMR export, the
+// first time the app boots without it. An empty list saved on purpose is left
+// alone; the NCCI loader then stops and says so.
+billableCodes.seedIfMissing(db).then(r => {
+  if (r.seeded) console.log(`[billable-codes] Seeded gfc_billable_codes with ${r.count} codes from scripts/data/gfc_billable_codes_seed.json.`);
+}).catch(e => console.error('[billable-codes] Could not seed gfc_billable_codes:', e.message));
 
 // Rule lists in source (clinicalRoles.js) are checked against the cached
 // OpenEMR catalog at every boot. A code that is missing or inactive there is

@@ -34,18 +34,22 @@
 //          and it does not fail silently.
 //
 // FILTERED ON LOAD, NEVER STORED WHOLE. The four PTP ZIPs total on the order
-// of 2.7 million rows; GFC bills on the order of dozens of codes. This app
-// keeps no authoritative list of its own of "every code GFC bills" — the
-// clinical code-search notice says so explicitly ("The app keeps no code list
-// of its own"), and OpenEMR's own fee schedule cannot be read headlessly
-// (Session 5.2: per-clinician OAuth only, no service account). So the
-// practical, zero-live-dependency universe used here is the UNION of the
-// practice's own admin-curated favorites (clinical_settings), every
-// clinician's actual prior code selections (clinical_code_usage), and every
-// code that has ever actually been billed (encounter_billing) — the real,
-// locally-derivable ground truth of what GFC bills, rather than a guessed
-// static list. A PTP row is kept if EITHER of its two codes is in that
-// universe; the MUE table is filtered the same way for consistency.
+// of 2.7 million rows; GFC bills on the order of a hundred codes. The universe
+// a row is kept against is the UNION of:
+//   - gfc_billable_codes: every code GFC can bill, mirrored from OpenEMR's
+//     `codes` table (billableCodes.js, kept in step by
+//     scripts/billable_codes.js). REQUIRED: if it is empty the loader stops.
+//   - the catalog the app cached from OpenEMR (openemr_code_catalog), if any;
+//   - the admin's service favorites (clinical_settings);
+//   - every clinician's prior code selections (clinical_code_usage);
+//   - every code ever billed (encounter_billing).
+// The last three stay even with the first in place: a code a clinician
+// actually used belongs in the universe even if nobody added it to the list.
+// Without gfc_billable_codes, September's universe came to eight home-visit
+// codes and the loaded tables covered only those (2026-11-04). The end-of-run
+// summary prints how many universe codes matched nothing, which is the number
+// that would have shown it. A PTP row is kept if EITHER of its codes is in the
+// universe; the MUE table is filtered the same way.
 //
 // IDEMPOTENT BY CONSTRUCTION. Each write REPLACES the whole collection (the
 // blob model has no per-row accumulation), so there is no "duplicate quarter"
@@ -144,14 +148,20 @@ const parseMueLine = (line) => {
   return { code: code.toUpperCase(), mueValue, mai };
 };
 
-// ---- GFC's own code universe, derived, never a hand-kept list --------------
-const deriveGfcCodeUniverse = ({ serviceCodeFavorites, codeUsage, encounterBillingRows }) => {
+// ---- GFC's code universe -----------------------------------------------------
+const upperCodes = (list, pick = (x) => x && x.code) =>
+  (list || []).map(pick).filter(Boolean).map(c => String(c).toUpperCase());
+// Each source's codes, separately, so the summary can say where they came from.
+const universeSources = ({ billableCodes, catalogCodes, serviceCodeFavorites, codeUsage, encounterBillingRows }) => ({
+  billableCodes: upperCodes(billableCodes),
+  openemrCatalog: upperCodes(catalogCodes),
+  favorites: upperCodes(serviceCodeFavorites),
+  priorSelections: upperCodes((codeUsage || []).filter(u => u && u.set !== 'ICD10')),
+  billedHistory: (encounterBillingRows || []).flatMap(rec => upperCodes((rec && rec.services) || []))
+});
+const deriveGfcCodeUniverse = (sources) => {
   const codes = new Set();
-  for (const f of (serviceCodeFavorites || [])) if (f && f.code) codes.add(String(f.code).toUpperCase());
-  for (const u of (codeUsage || [])) if (u && u.code && u.set !== 'ICD10') codes.add(String(u.code).toUpperCase());
-  for (const rec of (encounterBillingRows || [])) {
-    for (const s of ((rec && rec.services) || [])) if (s && s.code) codes.add(String(s.code).toUpperCase());
-  }
+  for (const list of Object.values(universeSources(sources))) for (const c of list) codes.add(c);
   return codes;
 };
 
@@ -217,22 +227,34 @@ async function main(opts = {}) {
   const label = quarterLabel(target);
   console.log(`\nNCCI/MUE loader — targeting ${label} (say --quarter=YYYYQN if that is wrong)\n`);
 
+  // gfc_billable_codes is required. An empty list is exactly how the
+  // universe silently narrowed to eight codes, so the loader refuses to run
+  // against it rather than load a partial set.
+  const billableCodes = await db.get('gfc_billable_codes');
+  if (!Array.isArray(billableCodes) || !billableCodes.length) {
+    const error = 'gfc_billable_codes is empty, so GFC\'s code universe would be partial. Nothing was loaded. ' +
+      'Seed it with `node scripts/billable_codes.js seed` (or `from-catalog` after an admin refreshes the catalog), then re-run.';
+    console.error(`STOPPED: ${error}`);
+    return { quarter: label, stopped: 'billable_codes_empty', error, mue: { ok: false, error: 'not_run' }, ptp: { ok: false, error: 'not_run' } };
+  }
   const clinicalSettings = (await db.get('clinical_settings')) || {};
-  // The practice's codes come from OpenEMR's catalog as cached by the app
-  // (codeCatalog.js), plus any admin favorites. There is no built-in list.
   const cachedCatalog = (await db.get('openemr_code_catalog')) || {};
-  const favorites = [
-    ...(Array.isArray(clinicalSettings.serviceCodeFavorites) ? clinicalSettings.serviceCodeFavorites : []),
-    ...(Array.isArray(cachedCatalog.codes) ? cachedCatalog.codes.map(c => ({ code: c.code })) : [])
-  ];
-  const codeUsage = (await db.get('clinical_code_usage')) || [];
-  const encounterBillingRows = (await db.get('encounter_billing')) || [];
-  const codeSet = deriveGfcCodeUniverse({ serviceCodeFavorites: favorites, codeUsage, encounterBillingRows });
-  console.log(`GFC's code universe (practice favorites + clinician usage history + billed history): ${codeSet.size} distinct code(s).`);
-  if (!codeSet.size) console.log('WARNING: no codes found anywhere in this store — every PTP/MUE row will be filtered out until at least one code has been favorited or billed.');
+  const sourceArgs = {
+    billableCodes,
+    catalogCodes: [...(cachedCatalog.codes || []), ...(cachedCatalog.inactive || [])],
+    serviceCodeFavorites: Array.isArray(clinicalSettings.serviceCodeFavorites) ? clinicalSettings.serviceCodeFavorites : [],
+    codeUsage: (await db.get('clinical_code_usage')) || [],
+    encounterBillingRows: (await db.get('encounter_billing')) || []
+  };
+  const perSource = universeSources(sourceArgs);
+  const codeSet = deriveGfcCodeUniverse(sourceArgs);
+  const sourceCounts = Object.fromEntries(Object.entries(perSource).map(([k, v]) => [k, new Set(v).size]));
+  console.log(`GFC's code universe: ${codeSet.size} distinct code(s) — ${Object.entries(sourceCounts).map(([k, v]) => `${k} ${v}`).join(', ')}.`);
+  const matchedMue = new Set();
+  const matchedPtp = new Set();
 
   const nowIso = new Date().toISOString();
-  const summary = { quarter: label, mue: { ok: false }, ptp: { ok: false } };
+  const summary = { quarter: label, universe: { size: codeSet.size, bySource: sourceCounts }, mue: { ok: false }, ptp: { ok: false } };
 
   // ---- MUE: direct fetch, no human step ----
   try {
@@ -247,12 +269,14 @@ async function main(opts = {}) {
     const kept = rawRows.filter(r => codeSet.has(r.code));
     const byCode = {};
     for (const r of kept) byCode[r.code] = { mueValue: r.mueValue, mai: r.mai };
+    for (const c of Object.keys(byCode)) matchedMue.add(c);
     const priorMue = (await db.get('gfc_ncci_mue')) || {};
     const diff = diffMue(priorMue, byCode);
     await db.set('gfc_ncci_mue', byCode);
     const v1 = (await db.get('gfc_ncci_source_version')) || {};
     await db.set('gfc_ncci_source_version', { ...v1, mue: { quarter: label, loadedAt: nowIso } });
-    summary.mue = { ok: true, rawRowsSeen: rawRows.length, rowsKept: Object.keys(byCode).length, ...diff };
+    summary.mue = { ok: true, files: [{ file: path.basename(url), rowsSeen: rawRows.length, rowsKept: Object.keys(byCode).length }],
+      rawRowsSeen: rawRows.length, rowsKept: Object.keys(byCode).length, ...diff };
     console.log(`MUE: ${rawRows.length} row(s) parsed, ${Object.keys(byCode).length} kept for GFC's codes.`);
     console.log(`  vs prior load — added ${diff.added}, removed ${diff.removed}, value/MAI changed ${diff.valueChanged}.`);
   } catch (err) {
@@ -279,14 +303,22 @@ async function main(opts = {}) {
       console.log(`\nFound ${ptpZips.length} local PTP zip(s):`);
       ptpZips.forEach(z => console.log(`  ${path.basename(z)}`));
       let rawRows = [];
-      for (const zipPath of ptpZips) rawRows = rawRows.concat((await extractTextLines(zipPath)).map(parsePtpLine).filter(Boolean));
-      const kept = rawRows.filter(r => codeSet.has(r.column1Code) || codeSet.has(r.column2Code));
+      let kept = [];
+      const files = [];
+      for (const zipPath of ptpZips) {
+        const rows = (await extractTextLines(zipPath)).map(parsePtpLine).filter(Boolean);
+        const k = rows.filter(r => codeSet.has(r.column1Code) || codeSet.has(r.column2Code));
+        files.push({ file: path.basename(zipPath), rowsSeen: rows.length, rowsKept: k.length });
+        rawRows = rawRows.concat(rows);
+        kept = kept.concat(k);
+      }
+      for (const r of kept) for (const c of [r.column1Code, r.column2Code]) if (codeSet.has(c)) matchedPtp.add(c);
       const priorPtp = (await db.get('gfc_ncci_ptp_edits')) || [];
       const diff = diffPtp(priorPtp, kept);
       await db.set('gfc_ncci_ptp_edits', kept);
       const v2 = (await db.get('gfc_ncci_source_version')) || {};
       await db.set('gfc_ncci_source_version', { ...v2, ptp: { quarter: label, loadedAt: nowIso } });
-      summary.ptp = { ok: true, rawRowsSeen: rawRows.length, rowsKept: kept.length, ...diff };
+      summary.ptp = { ok: true, files, rawRowsSeen: rawRows.length, rowsKept: kept.length, ...diff };
       console.log(`PTP: ${rawRows.length} row(s) parsed across ${ptpZips.length} file(s), ${kept.length} kept for GFC's codes.`);
       console.log(`  vs prior load — added ${diff.added}, removed ${diff.removed}, indicator changed ${diff.indicatorChanged}.`);
     } catch (err) {
@@ -295,14 +327,42 @@ async function main(opts = {}) {
     }
   }
 
-  console.log(`\n================  ${label} — MUE ${summary.mue.ok ? 'loaded' : 'FAILED'}, PTP ${summary.ptp.ok ? 'loaded' : 'FAILED'}  ================\n`);
+  // The universe codes that matched nothing. This is the number that would
+  // have shown the eight-code table in September.
+  const matched = new Set([...matchedMue, ...matchedPtp]);
+  const unmatched = [...codeSet].filter(c => !matched.has(c)).sort();
+  const noMue = [...codeSet].filter(c => !matchedMue.has(c)).sort();
+  summary.matchedCodes = matched.size;
+  summary.unmatchedCodes = unmatched;
+  summary.codesWithoutMue = noMue;
+  printSummary(summary);
   return summary;
 }
+
+const printSummary = (summary) => {
+  const line = (s) => console.log(s);
+  const fileLines = (half) => (half.files || []).map(f => `    ${f.file}: ${f.rowsSeen} row(s) seen, ${f.rowsKept} kept`);
+  line(`\n================  NCCI/MUE load summary — ${summary.quarter}  ================`);
+  line(`Universe: ${summary.universe.size} distinct GFC code(s) (${Object.entries(summary.universe.bySource).map(([k, v]) => `${k} ${v}`).join(', ')})`);
+  for (const [name, half] of [['MUE', summary.mue], ['PTP', summary.ptp]]) {
+    if (!half.ok) { line(`${name}: NOT LOADED (${half.error})`); continue; }
+    line(`${name}: ${half.rawRowsSeen} row(s) seen, ${half.rowsKept} kept`);
+    fileLines(half).forEach(line);
+    const d = name === 'MUE'
+      ? `added ${half.added}, removed ${half.removed}, value/MAI changed ${half.valueChanged}`
+      : `added ${half.added}, removed ${half.removed}, indicator changed ${half.indicatorChanged}`;
+    line(`  vs prior load: ${d}`);
+  }
+  line(`GFC codes matched: ${summary.matchedCodes} of ${summary.universe.size}`);
+  line(`Universe codes that matched nothing${summary.ptp.ok ? '' : ' (MUE only; PTP not loaded)'}: ${summary.unmatchedCodes.length}${summary.unmatchedCodes.length ? ` — ${summary.unmatchedCodes.join(' ')}` : ''}`);
+  line(`Universe codes with no MUE row: ${summary.codesWithoutMue.length}`);
+  line(`================  MUE ${summary.mue.ok ? 'loaded' : 'FAILED'}, PTP ${summary.ptp.ok ? 'loaded' : 'FAILED'}  ================\n`);
+};
 
 module.exports = {
   main, computeTargetQuarter, quarterLabel, parseQuarterArg, mueUrl,
   parsePtpLine, parseMueLine, splitFields, isCodeShaped,
-  deriveGfcCodeUniverse, diffPtp, diffMue, extractTextLines, parseZipListing,
+  deriveGfcCodeUniverse, universeSources, printSummary, diffPtp, diffMue, extractTextLines, parseZipListing,
   PTP_SOURCE_PAGE, DEFAULT_PTP_DIR
 };
 
