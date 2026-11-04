@@ -21695,6 +21695,13 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
 // existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
 // draft on the coding workflow, and the encounter record keeps only a pointer.
 // Rules, schema and quote checks: mdmExtraction.js.
+// Append-only. No route, no purge and no job ever rewrites or deletes a row.
+const appendCodingAuditEvent = async (event) => {
+  const row = { id: `cae_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, at: new Date().toISOString(), ...event };
+  await db.set('coding_audit_events', [...(await loadRows('coding_audit_events')), row]);
+  return row;
+};
+
 const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
   try {
     const notRead = [];
@@ -21737,13 +21744,25 @@ const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }
     });
 
     // §2.4, on the SERVER, after the model: every item carries a quote that
-    // is really in THIS VISIT'S note, or it is dropped and counted. A quote
-    // found only in the problem or medication list does not count.
+    // is really in a text section sent (note, fields, problem or medication
+    // list), or it is dropped and counted. Each kept item says which.
     const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
       noteTexts: mdmExtraction.documentationTexts(packet.sections),
       contextTexts: mdmExtraction.contextTexts(packet.sections)
     });
     const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    // THE ONLY RECORD OF WHAT THE MODEL PROPOSED. Google-side request logging
+    // is off, so nothing at Google can reconstruct it. Written FIRST, append
+    // only, and never on the 180-day AI purge: the full proposal as the model
+    // returned it (dropped items included), what survived, and why the rest
+    // did not. Phase 3 appends the clinician's confirmation to this collection.
+    await appendCodingAuditEvent({
+      type: 'mdm_extraction_proposed', reviewId, clientId: client.id, encounterUuid,
+      actor: { id: req.user.id, name: req.user.name || req.user.email },
+      invocationId: r.invocationId, model: r.modelId,
+      sourceIds: packet.sections.map(s => s.sourceId),
+      proposal: r.proposal || null, kept: { ...output, unreadable }, dropped, quoteCounts: counts
+    });
     await saveAiReview(reviewId, {
       status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
       invocationIds: [r.invocationId], model: r.modelId, manifest,

@@ -104,7 +104,7 @@ test('quote matching tolerates case, curly quotes and spacing, not different wor
   const no = X.enforceQuotes({ risk: [{ factor: 'prescription_management', detail: 'Stop', quote: 'Stop metoprolol' }] }, { noteTexts: TEXT });
   assert.equal(no.output.risk.length, 0);
 });
-test('A QUOTE FOUND ONLY IN THE PROBLEM OR MEDICATION LIST IS DROPPED: only this visit\'s note counts', () => {
+test('a quote from the problem or medication list COUNTS, and is labelled as coming from a list', () => {
   const CONTEXT = ['Diabetes mellitus type 2 — active', 'Metformin 500 mg — active'];
   const { output, counts, dropped } = X.enforceQuotes({
     problemsAddressed: [
@@ -113,10 +113,10 @@ test('A QUOTE FOUND ONLY IN THE PROBLEM OR MEDICATION LIST IS DROPPED: only this
     ],
     risk: [{ factor: 'prescription_management', detail: 'Metformin', quote: 'Metformin 500 mg' }]
   }, { noteTexts: TEXT, contextTexts: CONTEXT });
-  assert.deepEqual(output.problemsAddressed.map(p => p.description), ['Orthostatic hypotension']);
-  assert.deepEqual(output.risk, []);
-  assert.equal(counts.notFromNote, 2);
-  assert.equal(dropped, 2);
+  assert.deepEqual(output.problemsAddressed.map(p => [p.description, p.quoteSource]), [['Diabetes', 'list'], ['Orthostatic hypotension', 'note']]);
+  assert.deepEqual(output.risk.map(r => r.quoteSource), ['list']);
+  assert.equal(dropped, 0);
+  assert.deepEqual(counts, { noQuote: 0, quoteNotFound: 0 });
 });
 test('the encounter fields count as this visit\'s documentation; the lists do not', () => {
   const p = X.buildMdmInput({ encounterUuid: 'e1', record: RECORD, problems: [{ title: 'Hypertension' }], medications: [{ title: 'Lisinopril' }] });
@@ -134,7 +134,7 @@ test('documents are not part of the coding packet (42 CFR Part 2: coding is paym
 });
 test('time: a stated total needs its quote; no statement is a fact that needs none', () => {
   const t = X.enforceQuotes({ time: { totalMinutes: 40, statementPresent: true, quote: 'Total time 40 minutes on this date.' } }, { noteTexts: TEXT });
-  assert.deepEqual(t.output.time, { totalMinutes: 40, statementPresent: true, quote: 'Total time 40 minutes on this date.', quoteVerified: true });
+  assert.deepEqual(t.output.time, { totalMinutes: 40, statementPresent: true, quote: 'Total time 40 minutes on this date.', quoteVerified: true, quoteSource: 'note' });
   const invented = X.enforceQuotes({ time: { totalMinutes: 60, statementPresent: true, quote: 'Total time 60 minutes.' } }, { noteTexts: TEXT });
   assert.deepEqual(invented.output.time, { totalMinutes: null, statementPresent: false, quote: null, quoteVerified: false }, 'an invented minute count is not a fact the note states');
   assert.equal(invented.counts.quoteNotFound, 1);
@@ -203,7 +203,7 @@ const liftJob = (deps) => {
   return new Function(...Object.keys(deps), `${serverSrc.slice(start, end)}\nreturn runMdmExtraction;`)(...Object.values(deps));
 };
 const runJob = async ({ proposal, soap, fail }) => {
-  const saved = {}; const sent = []; const writes = [];
+  const saved = {}; const sent = []; const writes = []; const audit = [];
   const emr = new Proxy({}, {
     get(_t, prop) {
       if (prop === 'getSoapNote') return async () => soap;
@@ -221,13 +221,14 @@ const runJob = async ({ proposal, soap, fail }) => {
     googledrive: { downloadFileBuffer: async () => Buffer.from('x') },
     mdmExtraction: X,
     saveAiReview: async (id, patch) => { Object.assign(saved, patch); },
+    appendCodingAuditEvent: async (e) => { audit.push(e); },
     gfcModelEngine: { invoke: async (args) => { sent.push(args); if (fail) throw Object.assign(new Error('boom'), { code: 'X' }); return { invocationId: 'inv1', modelId: 'gemini-test', proposal }; } },
     modelEngine: M,
     AI_REVIEW_STATUS: { RUNNING: 'running', DONE: 'done', FAILED: 'failed' },
     console: { error: () => {}, warn: () => {}, log: () => {} }
   });
   await job({ reviewId: 'r1', req: { user: { id: 'u1' } }, client: { id: 'c1', openEmrPatientId: 'p1' }, encounterUuid: 'e1', record: { ...RECORD, narrativeNoteSid: '9' } });
-  return { saved, sent, writes };
+  return { saved, sent, writes, audit };
 };
 
 test('RUN: the model is sent the note and lists with NO code in any of it, under the MDM purpose and schema', async () => {
@@ -260,8 +261,32 @@ test('RUN: unquoted and invented items are dropped, counted, and the rest stored
   assert.deepEqual(saved.output.risk, []);
   assert.equal(saved.output.time.totalMinutes, 40);
   assert.equal(saved.droppedUncited, 2);
-  assert.deepEqual(saved.quoteCounts, { noQuote: 1, quoteNotFound: 1, notFromNote: 0 });
+  assert.deepEqual(saved.quoteCounts, { noQuote: 1, quoteNotFound: 1 });
   assert.deepEqual(writes, [], 'nothing is written to OpenEMR');
+});
+test('RUN: the FULL proposal, dropped items included, goes to the permanent coding audit', async () => {
+  const proposal = {
+    problemsAddressed: [{ description: 'Orthostatic hypotension', status: 'worsening', management: 'medication', quote: 'Orthostatic hypotension, worsening.' }],
+    risk: [{ factor: 'prescription_management', detail: 'Lisinopril stopped' }]
+  };
+  const { audit, saved } = await runJob({ soap: null, proposal });
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].type, 'mdm_extraction_proposed');
+  assert.deepEqual(audit[0].proposal, proposal, 'what the model proposed, unfiltered');
+  assert.equal(audit[0].dropped, 1);
+  assert.equal(audit[0].invocationId, 'inv1');
+  assert.equal(audit[0].model, 'gemini-test');
+  assert.equal(saved.status, 'done');
+});
+test('the coding audit is append-only and outside the AI purge', () => {
+  const purge = serverSrc.slice(serverSrc.indexOf('const purgeAiReviews = async'), serverSrc.indexOf('setInterval(purgeAiReviews'));
+  assert.ok(!purge.includes('coding_audit_events'), 'the 180-day purge never touches it');
+  const writes = serverSrc.match(/db\.set\('coding_audit_events'/g) || [];
+  assert.equal(writes.length, 1, 'exactly one writer');
+  const fn = serverSrc.slice(serverSrc.indexOf('const appendCodingAuditEvent = async'), serverSrc.indexOf('const runMdmExtraction = async'));
+  assert.match(fn, /\[\.\.\.\(await loadRows\('coding_audit_events'\)\), row\]/, 'it only ever appends');
+  const job = serverSrc.slice(serverSrc.indexOf('const runMdmExtraction = async'), serverSrc.indexOf('// One way to start an extraction'));
+  assert.ok(job.indexOf('appendCodingAuditEvent(') < job.indexOf('status: AI_REVIEW_STATUS.DONE'), 'the audit is written before the draft is marked done');
 });
 test('RUN: a failed call is recorded as failed, scrubbed, never as an empty success', async () => {
   const { saved } = await runJob({ proposal: null, soap: null, fail: true });

@@ -13,13 +13,12 @@
 //
 // PURE. The server gathers, the engine calls, this file arranges and checks.
 //
-// EVERY ITEM CARRIES A QUOTE, AND THE QUOTE MUST COME FROM THIS VISIT'S OWN
-// DOCUMENTATION (spec §2.4, tightened 2026-11-04). Only what the clinician
-// documented at this visit counts toward the level: the note and the
-// encounter's own fields. The problem and medication lists are sent as
-// context, but a quote found only there is dropped and counted
-// (`notFromNote`): a problem on the list that nobody addressed today must not
-// raise the level. A quote found nowhere is dropped as invented.
+// EVERY ITEM CARRIES A QUOTE, AND THE QUOTE MUST BE REAL (spec §2.4). It may
+// come from any text section sent: the note, the encounter's fields, the
+// problem list or the medication list (owner, 2026-11-04). Each kept item
+// records `quoteSource` ('note' or 'list'), so the confirmation screen and a
+// coder can see which facts rest on the visit's own words. A quote found
+// nowhere is dropped as invented.
 //
 // DOCUMENTS ARE NOT SENT (2026-11-04). A document attached to the visit is the
 // one place a 42 CFR Part 2 record received for treatment can sit, and coding
@@ -153,33 +152,33 @@ const normalize = (s) => String(s || '').toLowerCase().replace(/[‘’]/g, "'")
   .replace(/[^a-z0-9%'".,/:;()-]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 // `noteTexts` is this visit's documentation (the note and the encounter's
-// fields); `contextTexts` is everything else sent (the problem and medication
-// lists). Only a quote found in the note counts.
+// fields); `contextTexts` is the problem and medication lists. A quote found
+// in either is kept; `quoteSource` says which.
 const documentationTexts = (sections) => (sections || []).filter(s => s && s.documentation).map(s => s.text);
 const contextTexts = (sections) => (sections || []).filter(s => s && !s.documentation).map(s => s.text);
 
 const enforceQuotes = (proposal, { noteTexts, contextTexts: ctx }) => {
   const note = normalize((noteTexts || []).join('\n'));
   const context = normalize((ctx || []).join('\n'));
-  const counts = { noQuote: 0, quoteNotFound: 0, notFromNote: 0 };
+  const counts = { noQuote: 0, quoteNotFound: 0 };
   const check = (quote) => {
     const q = normalize(quote);
     if (!q) return 'none';
-    if (note.includes(q)) return 'verified';
-    return context.includes(q) ? 'not_from_note' : 'not_found';
+    if (note.includes(q)) return 'note';
+    return context.includes(q) ? 'list' : 'not_found';
   };
   const tally = (state) => {
     if (state === 'none') counts.noQuote++;
-    else if (state === 'not_found') counts.quoteNotFound++;
-    else if (state === 'not_from_note') counts.notFromNote++;
+    else counts.quoteNotFound++;
   };
+  const found = (state) => state === 'note' || state === 'list';
   const out = {};
   for (const key of LIST_KEYS) {
     out[key] = [];
     for (const item of (proposal && Array.isArray(proposal[key]) ? proposal[key] : [])) {
       const state = check(item && item.quote);
-      if (state !== 'verified') { tally(state); continue; }
-      out[key].push({ ...item, quoteVerified: true });
+      if (!found(state)) { tally(state); continue; }
+      out[key].push({ ...item, quoteVerified: true, quoteSource: state });
     }
   }
   // Time: a minute count needs a real quote, or it is not a fact the note
@@ -189,12 +188,12 @@ const enforceQuotes = (proposal, { noteTexts, contextTexts: ctx }) => {
   let time = { totalMinutes: null, statementPresent: false, quote: null, quoteVerified: false };
   if (t.statementPresent || minutes != null) {
     const state = check(t.quote);
-    if (state !== 'verified') tally(state);
-    else time = { totalMinutes: minutes, statementPresent: true, quote: t.quote, quoteVerified: true };
+    if (!found(state)) tally(state);
+    else time = { totalMinutes: minutes, statementPresent: true, quote: t.quote, quoteVerified: true, quoteSource: state };
   }
   out.time = time;
   out.unreadable = Array.isArray(proposal && proposal.unreadable) ? proposal.unreadable : [];
-  return { output: out, dropped: counts.noQuote + counts.quoteNotFound + counts.notFromNote, counts };
+  return { output: out, dropped: counts.noQuote + counts.quoteNotFound, counts };
 };
 
 module.exports = {

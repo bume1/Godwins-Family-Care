@@ -58,6 +58,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // GFC_AI_REVIEW_RETENTION_DAYS (default 180), which is why it is its own
   // collection rather than anything hanging off an encounter.
   { key: 'ai_reviews', phi: true, owner: 'G1' },
+  { key: 'coding_audit_events', phi: true, owner: 'coding', note: 'append-only and NEVER on the 180-day AI purge: what the model proposed for coding (kept and dropped), and later what was confirmed. Google request logging is off, so this is the only record' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
   // A patient's request to give a family member portal access: their name,
   // email and relationship to a named client. Approved rows point at the user.

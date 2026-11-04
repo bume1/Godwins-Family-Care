@@ -73,8 +73,7 @@ const SYSTEM_INSTRUCTIONS = Object.freeze({
   mdm_extraction: [
     'You are reading ONE encounter note for a licensed clinician, who will confirm or correct every fact you report about her own visit.',
     'Report ONLY what the note and the sources provided actually say: the problems addressed at this visit, the data reviewed, the risk factors, and any total time stated.',
-    'Every item MUST carry a quote: the exact words from the encounter note or the encounter fields, copied character for character. An item you cannot quote is not reported.',
-    'The problem list and the medication list are context only. Only what the note itself says was addressed at this visit counts, so never quote either list.',
+    'Every item MUST carry a quote: the exact words from the source it came from (the note, the encounter fields, the problem list or the medication list), copied character for character. An item you cannot quote is not reported.',
     'Do NOT infer. If the note does not state that a medication was started, stopped or changed, that is not prescription management. If no total time is written in the note, set statementPresent false.',
     'Do NOT provide any billing code, E/M level, CPT, ICD-10 or other code, and do NOT say what level the visit supports. You report facts; you do not code.',
     'List anything you could not read in unreadable.'
