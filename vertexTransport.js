@@ -31,6 +31,7 @@ const { GoogleGenAI, Type } = require('@google/genai');
 const { GoogleAuth } = require('google-auth-library');
 const { Storage } = require('@google-cloud/storage');
 const { PDFDocument } = require('pdf-lib');
+const { scrubForLog } = require('./modelEngine');
 
 // Vertex's own ceiling on a single inline/stored file part. A PDF over this is
 // split by page range rather than refused — a hospital packet is routinely
@@ -338,6 +339,25 @@ const createCountTokens = ({ getClient = clientFor } = {}) =>
 // deletes, means a document outlives the call it was staged for.
 const US_LOCATIONS = new Set(['US', 'US-CENTRAL1', 'US-EAST1', 'US-EAST4', 'US-EAST5', 'US-SOUTH1', 'US-WEST1', 'US-WEST2', 'US-WEST3', 'US-WEST4']);
 
+// The cacheConfig resource is project-wide, but it is only served on a
+// REGIONAL host. A multi-region location ('us') has no `us-aiplatform` host,
+// so that request never reached Google. us-central1 is the host Google's own
+// instructions use, and the setting it reads covers every region.
+const cacheConfigHost = (location) => {
+  const loc = String(location || '').toLowerCase();
+  return /^[a-z]+-[a-z]+\d+$/.test(loc) ? loc : 'us-central1';
+};
+
+// What Google actually said, so a failed check names its cause (a 403 on a
+// missing permission reads differently from an unreachable host). Scrubbed
+// like every other provider error, and kept short.
+const reasonOf = (e) => {
+  const status = e && (e.code || e.status || (e.response && e.response.status));
+  const msg = (e && e.response && e.response.data && e.response.data.error && e.response.data.error.message)
+    || (e && e.message) || String(e);
+  return scrubForLog(`${status ? `${status} ` : ''}${String(msg)}`.slice(0, 300));
+};
+
 const createLiveChecks = ({ getStorage = storageFor, getAuth } = {}) =>
   async ({ projectId, location, bucket }) => {
     const failures = [];
@@ -347,7 +367,7 @@ const createLiveChecks = ({ getStorage = storageFor, getAuth } = {}) =>
       const auth = getAuth
         ? getAuth()
         : new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-      const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/cacheConfig`;
+      const url = `https://${cacheConfigHost(location)}-aiplatform.googleapis.com/v1/projects/${projectId}/cacheConfig`;
       const client = await auth.getClient();
       const res = await client.request({ url });
       const disabled = res && res.data && res.data.disableCache === true;
@@ -355,7 +375,7 @@ const createLiveChecks = ({ getStorage = storageFor, getAuth } = {}) =>
         failures.push('Gemini data caching is NOT disabled for this project — prompts would be retained, so nothing is sent until cacheConfig reports disableCache: true');
       }
     } catch (e) {
-      failures.push('the Gemini cacheConfig check could not be completed, so data caching cannot be confirmed off');
+      failures.push(`the Gemini cacheConfig check could not be completed, so data caching cannot be confirmed off. Google said: ${reasonOf(e)}`);
     }
 
     // (b) The staging bucket must exist, be US, be private, and expire fast.
@@ -379,7 +399,7 @@ const createLiveChecks = ({ getStorage = storageFor, getAuth } = {}) =>
         if (!expires) failures.push('the staging bucket has no lifecycle rule deleting objects at 1 day or less');
       }
     } catch (e) {
-      failures.push('the staging bucket could not be inspected, so its retention and access settings cannot be confirmed');
+      failures.push(`the staging bucket could not be inspected, so its retention and access settings cannot be confirmed. Google said: ${reasonOf(e)}`);
     }
 
     return { ok: failures.length === 0, failures };
@@ -391,6 +411,6 @@ module.exports = {
   liveChecks: createLiveChecks(),
   createTransport, createCountTokens, createLiveChecks,
   responseSchemaFor, buildContents, parseResponse, usageOf, sectionText,
-  splitPdf, stageDocuments, stagedName,
+  splitPdf, stageDocuments, stagedName, cacheConfigHost, reasonOf,
   SYSTEM_INSTRUCTIONS, MAX_FILE_BYTES, SPLIT_PAGE_STEP, FINISH_MESSAGES
 };
