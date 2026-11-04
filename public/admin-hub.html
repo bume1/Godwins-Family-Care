@@ -1384,8 +1384,13 @@
         loadData();
       }, [token]);
 
+      const [financialPending, setFinancialPending] = useState([]);
+      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
+        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
+
       const loadData = async () => {
         setLoading(true);
+        loadFinancial();
         const [feedbackData, resetData] = await Promise.all([
           canSeeAdminInbox ? api.getFeedback(token) : Promise.resolve([]),
           canSeeAdminInbox ? api.getPasswordResetRequests(token) : Promise.resolve([])
@@ -1973,6 +1978,52 @@
 
     // The app cannot tell for sure which patient logins are really the POA's,
     // so this only suggests, and says why. Nothing is ever moved on its own.
+    // Pay and rate changes a manager or care coordinator asked for (owner,
+    // 2026-11-03). The Super Admin approves or declines; everyone else sees
+    // what is waiting so nobody asks twice.
+    const fmtFinancial = (field, v) => {
+      if (v === null || v === undefined) return 'not set';
+      if (field === 'payRate') return `$${Number(v).toFixed(2)}/hr`;
+      if (field === 'rateAgreement') return `$${Number(v.hourlyRate).toFixed(2)}/hr, ${v.dailyMinimumHours} hr daily minimum`;
+      if (field === 'billingSettings') return v.copayCents == null ? 'no copay' : `$${(v.copayCents / 100).toFixed(2)} copay`;
+      if (field === 'clientPayRates') return `${Object.keys(v).length} per-client rate${Object.keys(v).length === 1 ? '' : 's'}`;
+      return String(v);
+    };
+    const FinancialChangeQueue = ({ token, requests, canDecide, onChanged }) => {
+      const [notes, setNotes] = React.useState({});
+      const [msg, setMsg] = React.useState('');
+      if (!requests.length) return null;
+      const decide = async (id, decision) => {
+        setMsg('');
+        const r = await fetch(`/api/users/financial-change-requests/${encodeURIComponent(id)}/decide`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ decision, note: notes[id] || '' })
+        }).then(x => x.json()).catch(() => ({ error: 'Could not reach the server.' }));
+        if (r.error) setMsg(`Error: ${r.error}`); else { setMsg(decision === 'approved' ? 'Approved and saved on the record.' : 'Declined. Nothing changed.'); onChanged(); }
+      };
+      return (
+        <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+          <p className="font-semibold text-amber-900">{requests.length} pay or rate change{requests.length === 1 ? '' : 's'} waiting on the Super Admin</p>
+          {msg && <p className="text-sm mt-1">{msg}</p>}
+          <div className="mt-2 space-y-3">
+            {requests.map(r => (
+              <div key={r.id} className="text-sm text-amber-900">
+                <div><b>{r.userName}</b>: {r.label} from {fmtFinancial(r.field, r.currentValue)} to {fmtFinancial(r.field, r.requestedValue)}. Asked by {r.requestedByName}{r.reason ? `: ${r.reason}` : '.'}</div>
+                {canDecide && (
+                  <div className="flex flex-wrap gap-2 mt-1 items-center">
+                    <input className="px-3 py-1.5 border border-amber-300 rounded-lg" placeholder="Note (optional)"
+                      value={notes[r.id] || ''} onChange={e => setNotes({ ...notes, [r.id]: e.target.value })} />
+                    <button type="button" className="px-3 py-1.5 bg-primary-600 text-white rounded-lg" onClick={() => decide(r.id, 'approved')}>Approve</button>
+                    <button type="button" className="px-3 py-1.5 border border-amber-400 rounded-lg" onClick={() => decide(r.id, 'declined')}>Decline</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
     const PossiblePoaLogins = ({ token, users, onOpen }) => {
       const [rows, setRows] = useState(null);
       const [open, setOpen] = useState(false);
@@ -2346,7 +2397,8 @@
           if (result.error) {
             setMessage(`Error: ${result.error}`);
           } else {
-            let note = editingUser ? 'User updated successfully' : 'User created successfully';
+            // A manager's pay change is held for the Super Admin; the server says which.
+            let note = result.message || (editingUser ? 'User updated successfully' : 'User created successfully');
             // Competencies go to the caregiver route, after the user exists.
             if (formData.role === 'vendor') {
               const savedId = (editingUser && editingUser.id) || result.id || (result.user && result.user.id);
@@ -2659,6 +2711,7 @@
 
       return (
         <div className="space-y-6">
+          <FinancialChangeQueue token={token} requests={financialPending} canDecide={isSuperAdmin} onChanged={loadData} />
           {isSuperAdmin && (
             <PageErrorBoundary quiet>
               <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
@@ -3328,6 +3381,12 @@
                           client cannot quietly drop someone back to their base rate. */}
                       <div className="mt-5 border-t pt-4">
                         <h4 className="font-medium text-gray-800 mb-1">Pay rate</h4>
+                        {!isSuperAdmin && (
+                          <p className="text-xs text-amber-800 mb-2">A change to a pay rate is sent to the Super Admin to approve. Everything else on this form saves straight away.</p>
+                        )}
+                        {editingUser && financialPending.filter(r => r.userId === editingUser.id).map(r => (
+                          <p key={r.id} className="text-xs text-amber-800 mb-2">Waiting on the Super Admin: {r.label} to {fmtFinancial(r.field, r.requestedValue)}, asked by {r.requestedByName}.</p>
+                        ))}
                         <p className="text-xs text-gray-500 mb-3">
                           What Godwins pays this caregiver per hour. Separate from what the client is billed.
                           Leave blank if it is not set yet — payroll will show the gap rather than paying $0.

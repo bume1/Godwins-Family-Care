@@ -79,6 +79,7 @@ const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and
 const dxSuggestion = require('./dxSuggestion');   // Phase 4.1: diagnosis wording from the note; OpenEMR supplies the codes
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
+const userFinancial = require('./userFinancialFields');   // the user fields that move money (owner, 2026-11-03)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
@@ -3095,7 +3096,14 @@ app.post('/api/auth/signup', authenticateToken, requireAdmin, async (req, res) =
 // same rule the competency catalog follows (2026-09-10): a second copy of the
 // vocabulary is a copy that drifts, and a drifting clinical role decides who
 // may prescribe. Build-enforced in test/clinical_roles.test.js.
-app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res) => {
+// A manager or care coordinator reads it too (owner, 2026-11-03), and is
+// served ONLY the account types they may pick (accountTypes.canManageAccountType).
+// The server still refuses anything else; the form just stops offering it.
+const requireUserFormReader = (req, res, next) => {
+  if (accountTypes.isHomeCareOffice(req.user)) return next();
+  return res.status(403).json({ error: 'Super Admin access required' });
+};
+app.get('/api/admin/clinical-roles', authenticateToken, requireUserFormReader, (req, res) => {
   res.json({
     roles: clinicalRoles.ALL_CLINICAL_ROLES.map(value => ({
       value,
@@ -3107,22 +3115,143 @@ app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res)
     capabilityLabels: clinicalRoles.CAPABILITY_REASONS,
     // The ONE account-type picker (owner, 2026-10-15), served so the form
     // never lists a type of its own.
-    accountTypes: accountTypes.ACCOUNT_TYPES.map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
+    accountTypes: accountTypes.ACCOUNT_TYPES
+      .filter(t => accountTypes.canManageAccountType(req.user, t.value))
+      .map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
     managerClinicalAccess: accountTypes.MANAGER_CLINICAL_ACCESS,
     defaultManagerClinicalAccess: accountTypes.DEFAULT_MANAGER_CLINICAL_ACCESS
   });
 });
 
 // Admin create user endpoint (Super Admin or Manager for client users only)
-app.post('/api/users', authenticateToken, async (req, res) => {
+// ---- USER ADMINISTRATION BY MANAGERS AND COORDINATORS (owner, 2026-11-03) --
+// The Super Admin manages every account. A manager or care coordinator may
+// create and edit caregiver, client and family accounts, under the ceiling in
+// accountTypes.checkUserWrite. Every route that writes a user runs this guard
+// or requireAdmin (build-enforced in test/phc_access.test.js), so a route
+// added later fails closed.
+//
+// Money is held, not saved: when a manager's or coordinator's edit carries a
+// field from userFinancialFields.js, the other changes save, the money ones do
+// not, and a request goes to the Super Admin (user_financial_change_requests).
+const guardUserWrite = async (req, res, next) => {
   try {
-    // Super Admin can create any user type, Managers can only create client users
-    const isSuperAdmin = req.user.role === config.ROLES.ADMIN;
-    const isCurrentUserManager = req.user.isManager || false;
-
-    if (!isSuperAdmin && !isCurrentUserManager) {
-      return res.status(403).json({ error: 'Admin or Manager access required' });
+    if (req.user.role === config.ROLES.ADMIN) return next();
+    let existing = null;
+    if (req.params.userId) {
+      existing = (await getUsers()).find(u => u.id === req.params.userId) || null;
+      if (!existing) return res.status(404).json({ error: 'User not found' });
     }
+    const verdict = accountTypes.checkUserWrite(req.user, { existing, body: req.body });
+    if (!verdict.ok) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'user_write_refused', 'user', existing ? existing.id : null, {
+        role: accountTypes.accountTypeOf(req.user), code: verdict.code,
+        targetType: existing ? accountTypes.accountTypeOf(existing) : null,
+        requestedType: (req.body || {}).accountType || (req.body || {}).role || null
+      });
+      return res.status(verdict.status).json({ error: verdict.error, code: verdict.code });
+    }
+    const { held, rest } = userFinancial.splitFinancial(verdict.body);
+    req.body = rest;
+    req.heldFinancial = held;
+    next();
+  } catch (error) {
+    console.error('User write guard error:', error);
+    res.status(500).json({ error: 'Authorization error' });
+  }
+};
+
+// Normalize one financial value the way the admin write path does, so "is this
+// a change?" and "what would be stored?" have one answer.
+function normalizeFinancialValue(field, value, actor) {
+  switch (field) {
+    case 'payRate': return { value: caregiverRepo.normalizePayRate(value) };
+    case 'clientPayRates': return { value: caregiverRepo.normalizeClientPayRates(value) };
+    case 'rateAgreement': {
+      if (!rateAgreementSupplied(value)) return { value: null, empty: true };
+      const built = buildRateAgreement(value, actor);
+      if (built.error) return { error: built.error, code: built.code };
+      return { value: built.rateAgreement };
+    }
+    case 'billingSettings': {
+      const n = billing.normalizeCopaySetting(value || {});
+      if (n.error) return { error: n.error, code: n.code };
+      return { value: { copayCents: n.value.copayCents } };
+    }
+    default: return { error: `${field} is not a financial field`, code: 'NOT_FINANCIAL' };
+  }
+}
+const financialComparable = (field, v) => {
+  if (v === null || v === undefined) return null;
+  if (field === 'rateAgreement') return JSON.stringify({ h: Number(v.hourlyRate), m: Number(v.dailyMinimumHours) });
+  if (field === 'billingSettings') return v.copayCents == null ? null : String(v.copayCents);
+  if (field === 'clientPayRates') return Object.keys(v).length ? JSON.stringify(Object.keys(v).sort().map(k => [k, v[k]])) : null;
+  return JSON.stringify(v);
+};
+
+// File a request for each held field that would actually change the record.
+// Returns { requests, held, ignored } for the response.
+async function raiseFinancialRequests(req, target, held, reason) {
+  const out = { requests: [], held: [], unchanged: [], invalid: [] };
+  const fields = Object.keys(held || {});
+  if (!fields.length) return out;
+  const rows = (await db.get('user_financial_change_requests')) || [];
+  const at = new Date().toISOString();
+  for (const field of fields) {
+    const n = normalizeFinancialValue(field, held[field], req.user);
+    if (n.error) { out.invalid.push({ field, error: n.error }); continue; }
+    const current = target[field] === undefined ? null : target[field];
+    const cur = field === 'billingSettings' ? (current ? { copayCents: current.copayCents ?? null } : null) : current;
+    if (financialComparable(field, n.value) === financialComparable(field, cur)) { out.unchanged.push(field); continue; }
+    const open = rows.find(r => r && r.user_id === target.id && r.field === field && r.status === 'pending');
+    if (open) { out.held.push({ field, label: userFinancial.LABELS[field], pendingRequestId: open.id, alreadyPending: true }); continue; }
+    const row = {
+      id: uuidv4(), user_id: target.id, user_name: target.name || target.email || null,
+      field, current_value: cur, requested_value: n.value,
+      reason: String(reason || '').trim().slice(0, 1000) || null,
+      requested_by_id: req.user.id, requested_by_name: req.user.name || req.user.email,
+      requested_by_role: accountTypes.accountTypeOf(req.user), requested_at: at,
+      status: 'pending', decided_by_id: null, decided_by_name: null, decided_at: null, decision_note: null,
+      history: [{ status: 'pending', at, byId: req.user.id, byName: req.user.name || req.user.email }]
+    };
+    rows.push(row);
+    out.requests.push(row);
+    out.held.push({ field, label: userFinancial.LABELS[field], requestId: row.id });
+  }
+  if (out.requests.length) {
+    await db.set('user_financial_change_requests', rows);
+    for (const r of out.requests) {
+      await logActivity(req.user.id, r.requested_by_name, 'user_financial_change_requested', 'user', r.user_id, {
+        requestId: r.id, field: r.field, role: r.requested_by_role
+      });
+    }
+    const admins = (await getUsers()).filter(u => u.role === config.ROLES.ADMIN && u.email && u.accountStatus !== 'inactive');
+    for (const admin of admins) {
+      await queueNotification('financial_change_requested', admin.id, admin.email, admin.name, {
+        subject: 'A pay or rate change is waiting for your approval',
+        body: `${req.user.name || req.user.email} asked to change ${out.requests.map(r => userFinancial.LABELS[r.field]).join(', ')} for ${target.name || 'a user'}. Nothing changes until you approve it.`,
+        ctaUrl: '/admin', ctaLabel: 'Open the Admin Hub'
+      }, { relatedEntityId: `${out.requests[0].id}:requested`, relatedEntityType: 'user', createdBy: req.user.id });
+    }
+  }
+  return out;
+}
+const financialHeldMessage = (f) => f && f.held.length
+  ? `Saved, except ${f.held.map(h => h.label).join(', ')}: ${f.held.length === 1 ? 'that is' : 'those are'} money, so ${f.held.length === 1 ? 'it was' : 'they were'} sent to the Super Admin to approve.`
+  : null;
+const publicFinancialRequest = (r) => r && ({
+  id: r.id, userId: r.user_id, userName: r.user_name, field: r.field, label: userFinancial.LABELS[r.field] || r.field,
+  currentValue: r.current_value, requestedValue: r.requested_value, reason: r.reason,
+  requestedById: r.requested_by_id, requestedByName: r.requested_by_name, requestedByRole: r.requested_by_role,
+  requestedAt: r.requested_at, status: r.status,
+  decidedById: r.decided_by_id, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note
+});
+
+app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
+  try {
+    // Who may create what is decided once, in guardUserWrite
+    // (accountTypes.checkUserWrite): the Super Admin anything, a manager or
+    // care coordinator a caregiver, client or family account (2026-11-03).
     const {
       name, practiceName, isNewClient, assignedProjects, logo,
       hasImplementationsAccess,
@@ -3147,10 +3276,6 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     const isManager = typed ? typed.isManager : req.body.isManager;
     const clinicalRole = typed ? typed.clinicalRole : req.body.clinicalRole;
 
-    // Managers can only create client users
-    if (isCurrentUserManager && !isSuperAdmin && role !== config.ROLES.CLIENT) {
-      return res.status(403).json({ error: 'Managers can only create client users' });
-    }
 
     // A patient whose POA handles everything may have no email of their own
     // (owner, 2026-10-20). They get a placeholder login nobody can use, the
@@ -3352,6 +3477,11 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     users.push(newUser);
     await db.set('users', users);
     invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'user_created', 'user', newUser.id, {
+      role: accountTypes.accountTypeOf(req.user), accountType: accountTypes.accountTypeOf(newUser), name: newUser.name
+    });
+    // A manager's or coordinator's money fields were held by guardUserWrite.
+    const financial = await raiseFinancialRequests(req, newUser, req.heldFinancial, (req.body || {}).financialChangeReason);
 
     // Send welcome email with login credentials (fire-and-forget, non-blocking).
     // A placeholder login has no inbox and no usable password.
@@ -3378,7 +3508,9 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       projectAccessLevels: newUser.projectAccessLevels,
       assignedClients: newUser.assignedClients,
       logo: newUser.logo || '',
-      createdAt: newUser.createdAt
+      createdAt: newUser.createdAt,
+      financialHeld: financial.held,
+      ...(financialHeldMessage(financial) ? { message: financialHeldMessage(financial) } : {})
     });
   } catch (error) {
     console.error('Admin create user error:', error);
@@ -4014,18 +4146,26 @@ app.post('/api/veterans/check-in', async (req, res) => {
 // The roster for a day. The office sees everyone's; a provider sees their own.
 app.get('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
   try {
-    const date = vetRoster.isoDate(req.query.date) || practiceToday();
+    // A WINDOW, and one day is the degenerate case: no parameters still means
+    // today only, which is what the exam-day screen asks for. `from`/`to`
+    // open the forward schedule. Both the date filter and the provider
+    // scoping live in `rowsInRange`, so neither can be left out here.
+    const today = practiceToday();
+    const range = vetRoster.rosterRange(req.query, today);
     const users = await getUsers();
     const office = vetRoster.isOffice(req.user);
     const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? u.name : null; };
-    const rows = ((await db.get('veteran_roster')) || [])
-      .filter(r => !r.removedAt && r.examDate === date && (office || r.providerUserId === req.user.id))
-      .sort((a, b) => (a.lastName || '').localeCompare(b.lastName || ''))
+    const rows = vetRoster.rowsInRange(await db.get('veteran_roster'), range, { providerUserId: office ? null : req.user.id })
       .map(r => vetRoster.publicRow(r, nameOf(r.providerUserId)));
     const providers = office
       ? veteranProviders(users).map(u => ({ id: u.id, name: u.name, hasPhone: !!require('./quoSms').toE164(u.phone), hasEmail: !!u.email }))
       : [{ id: req.user.id, name: req.user.name, hasPhone: !!require('./quoSms').toE164((users.find(u => u.id === req.user.id) || {}).phone), hasEmail: !!req.user.email }];
-    res.json({ date, today: practiceToday(), office, rows, providers, statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES });
+    res.json({
+      date: range.from, from: range.from, to: range.to, capped: range.capped,
+      today, office, rows, providers,
+      statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES,
+      maxRangeDays: vetRoster.RANGE_MAX_DAYS, defaultRangeDays: vetRoster.RANGE_DEFAULT_DAYS
+    });
   } catch (error) {
     console.error('Veteran roster read error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -4580,7 +4720,7 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
 
-app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res) => {
   try {
     const { userId } = req.params;
     const {
@@ -4887,6 +5027,14 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
 
     await db.set('users', users);
     invalidateUsersCache();
+    if (req.user.role !== config.ROLES.ADMIN) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'user_edited_by_office', 'user', users[idx].id, {
+        role: accountTypes.accountTypeOf(req.user), targetType: accountTypes.accountTypeOf(users[idx]),
+        fields: Object.keys(req.body || {}).filter(k => req.body[k] !== undefined && k !== 'password')
+      });
+    }
+    // A manager's or coordinator's money fields were held by guardUserWrite.
+    const financial = await raiseFinancialRequests(req, users[idx], req.heldFinancial, (req.body || {}).financialChangeReason);
 
     // If password was reset by admin, email the user a secure reset link
     if (passwordWasReset) {
@@ -4941,9 +5089,126 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       logo: users[idx].logo || '',
       hubspotCompanyId: users[idx].hubspotCompanyId || '',
       hubspotDealId: users[idx].hubspotDealId || '',
-      hubspotContactId: users[idx].hubspotContactId || ''
+      hubspotContactId: users[idx].hubspotContactId || '',
+      financialHeld: financial.held,
+      ...(financialHeldMessage(financial) ? { message: financialHeldMessage(financial) } : {})
     });
   } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ---- FINANCIAL CHANGE REQUESTS (owner, 2026-11-03) ------------------------
+// A manager or care coordinator asks for a pay or rate change; the Super Admin
+// approves or declines. Approving applies it through the same write the admin
+// edit uses (normalizeFinancialValue, and commitRate for a client's rate).
+const requireFinancialRequester = (req, res, next) => {
+  if (accountTypes.isHomeCareOffice(req.user)) return next();
+  return res.status(403).json({ error: 'The Super Admin, a manager or a care coordinator raises pay and rate changes.', code: 'FINANCIAL_REQUEST_FORBIDDEN' });
+};
+
+app.get('/api/users/financial-change-requests', authenticateToken, requireFinancialRequester, async (req, res) => {
+  try {
+    let rows = (await db.get('user_financial_change_requests')) || [];
+    if (req.query.userId) rows = rows.filter(r => r.user_id === String(req.query.userId));
+    if (req.query.status) rows = rows.filter(r => r.status === String(req.query.status));
+    rows = rows.slice().sort((a, b) => {
+      if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+      return a.status === 'pending' ? String(a.requested_at).localeCompare(String(b.requested_at)) : String(b.requested_at).localeCompare(String(a.requested_at));
+    });
+    res.json({ requests: rows.slice(0, 500).map(publicFinancialRequest), pendingCount: rows.filter(r => r.status === 'pending').length, canDecide: req.user.role === config.ROLES.ADMIN });
+  } catch (error) {
+    console.error('Financial request list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/users/:userId/financial-change-requests', authenticateToken, requireFinancialRequester, async (req, res) => {
+  try {
+    const { field, value, reason } = req.body || {};
+    if (!userFinancial.isFinancialField(field)) {
+      return res.status(400).json({ error: `field must be one of ${userFinancial.FINANCIAL_FIELDS.join(', ')}`, code: 'FINANCIAL_FIELD_INVALID' });
+    }
+    const target = (await getUsers()).find(u => u.id === req.params.userId);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (!accountTypes.canManageAccountType(req.user, accountTypes.accountTypeOf(target))) {
+      return res.status(403).json({ error: 'A Super Admin manages staff and clinical accounts.', code: 'USER_TYPE_NOT_MANAGEABLE' });
+    }
+    if (String(target.id) === String(req.user.id) && req.user.role !== config.ROLES.ADMIN) {
+      return res.status(403).json({ error: 'You cannot request a change to your own pay. Ask a Super Admin.', code: 'USER_SELF_EDIT_FORBIDDEN' });
+    }
+    const out = await raiseFinancialRequests(req, target, { [field]: value }, reason);
+    if (out.invalid.length) return res.status(400).json({ error: out.invalid[0].error, code: 'FINANCIAL_VALUE_INVALID' });
+    if (out.unchanged.length) return res.status(400).json({ error: 'That is the value already on the record.', code: 'FINANCIAL_NO_CHANGE' });
+    const already = out.held.find(h => h.alreadyPending);
+    if (already) return res.status(409).json({ error: `A change to ${already.label} is already waiting on the Super Admin.`, code: 'FINANCIAL_REQUEST_PENDING', pendingRequestId: already.pendingRequestId });
+    res.json({ request: publicFinancialRequest(out.requests[0]), message: 'Sent to the Super Admin. Nothing changes until they approve it.' });
+  } catch (error) {
+    console.error('Financial request error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/users/financial-change-requests/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const decision = String((req.body || {}).decision || '');
+    if (!['approved', 'declined'].includes(decision)) return res.status(400).json({ error: 'Choose approved or declined.', code: 'FINANCIAL_DECISION_INVALID' });
+    const note = String((req.body || {}).note || '').trim().slice(0, 1000) || null;
+    const rows = (await db.get('user_financial_change_requests')) || [];
+    const ri = rows.findIndex(r => r && r.id === req.params.id);
+    if (ri === -1) return res.status(404).json({ error: 'Request not found', code: 'FINANCIAL_REQUEST_NOT_FOUND' });
+    const row = rows[ri];
+    if (row.status !== 'pending') return res.status(409).json({ error: `This request was already ${row.status}.`, code: 'FINANCIAL_REQUEST_DECIDED' });
+
+    if (decision === 'approved') {
+      const users = await getUsers();
+      const idx = users.findIndex(u => u.id === row.user_id);
+      if (idx === -1) return res.status(404).json({ error: 'That user no longer exists.' });
+      const curRaw = users[idx][row.field] === undefined ? null : users[idx][row.field];
+      const cur = row.field === 'billingSettings' ? (curRaw ? { copayCents: curRaw.copayCents ?? null } : null) : curRaw;
+      if (financialComparable(row.field, cur) !== financialComparable(row.field, row.current_value)) {
+        return res.status(409).json({ error: 'This value has changed since the request was raised. Decline it and ask for a new one.', code: 'FINANCIAL_REQUEST_STALE' });
+      }
+      // The same writes an admin's own edit makes.
+      if (row.field === 'rateAgreement') {
+        await commitRate(users, idx, row.requested_value, req.user, { financialRequestId: row.id });
+      } else {
+        if (row.field === 'billingSettings') {
+          users[idx].billingSettings = { ...(users[idx].billingSettings || {}), copayCents: row.requested_value.copayCents, updatedAt: new Date().toISOString(), updatedBy: req.user.name || req.user.email };
+        } else {
+          users[idx][row.field] = row.requested_value;
+        }
+        await db.set('users', users);
+        invalidateUsersCache();
+      }
+    }
+    const at = new Date().toISOString();
+    row.status = decision;
+    row.decided_by_id = req.user.id;
+    row.decided_by_name = req.user.name || req.user.email;
+    row.decided_at = at;
+    row.decision_note = note;
+    row.history = (row.history || []).concat({ status: decision, at, byId: req.user.id, byName: row.decided_by_name, note });
+    const fresh = (await db.get('user_financial_change_requests')) || [];
+    const fi = fresh.findIndex(r => r && r.id === row.id);
+    if (fi === -1) fresh.push(row); else fresh[fi] = row;
+    await db.set('user_financial_change_requests', fresh);
+    await logActivity(req.user.id, row.decided_by_name, `user_financial_change_${decision}`, 'user', row.user_id, {
+      requestId: row.id, field: row.field, requestedById: row.requested_by_id, note
+    });
+    const requester = (await getUsers()).find(u => u.id === row.requested_by_id);
+    if (requester && requester.email) {
+      await queueNotification('financial_change_decided', requester.id, requester.email, requester.name, {
+        subject: decision === 'approved' ? 'Your pay or rate change was approved' : 'Your pay or rate change was declined',
+        body: decision === 'approved'
+          ? `The Super Admin approved the change to ${userFinancial.LABELS[row.field]} for ${row.user_name || 'the user'}. It is on their record now.`
+          : `The Super Admin declined the change to ${userFinancial.LABELS[row.field]} for ${row.user_name || 'the user'}.${note ? ` Their note: "${note}".` : ''} Nothing changed.`,
+        ctaUrl: '/admin', ctaLabel: 'Open the Admin Hub'
+      }, { relatedEntityId: `${row.id}:${decision}`, relatedEntityType: 'user', createdBy: req.user.id });
+    }
+    res.json({ request: publicFinancialRequest(row) });
+  } catch (error) {
+    console.error('Financial request decision error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
