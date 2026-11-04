@@ -481,8 +481,10 @@ test('which documents a visit wants is derived from its appointment type', () =>
   assert.equal(partly.find(d => d.kind === 'dischargeMedList').filed, false);
   assert.deepEqual(apptTypes412.visitDocumentsOutstanding('pc_tcm', ['dischargeSummary', 'dischargeMedList', 'priorRecords']), []);
 
-  const ime = apptTypes412.visitDocumentsFor('ime_exam', []);
-  assert.deepEqual(ime.map(d => d.kind).sort(), ['imeExamRequest', 'imeRecords']);
+  // The IME exam used to be the second type asserted here. It is gone
+  // (2026-11-04) — IME is scheduled in veteranRoster.js — so a retired type
+  // now behaves exactly like an unknown one.
+  assert.deepEqual(apptTypes412.visitDocumentsFor('ime_exam', []), []);
   // A visit type that wants none says so with an empty list, not by failing.
   assert.deepEqual(apptTypes412.visitDocumentsFor('pc_follow_up', []), []);
   assert.deepEqual(apptTypes412.visitDocumentsFor('made_up', []), []);

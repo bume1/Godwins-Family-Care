@@ -79,7 +79,9 @@ test('telehealth has the SAME sections as in person; only vitals and exam become
 });
 
 test('which note each type produces is declared on the type', () => {
-  const hp = ['pc_new_patient', 'bh_initial', 'ime_exam'];
+  // The IME exam was the third 'hp' type until 2026-11-04; it is scheduled in
+  // veteranRoster.js now and is not a clinical appointment type.
+  const hp = ['pc_new_patient', 'bh_initial'];
   for (const t of A.APPOINTMENT_TYPES) {
     assert.equal(A.noteFormFor(t.key), hp.includes(t.key) ? 'hp' : 'followup', t.key);
   }
