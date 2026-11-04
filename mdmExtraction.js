@@ -13,12 +13,19 @@
 //
 // PURE. The server gathers, the engine calls, this file arranges and checks.
 //
-// EVERY ITEM CARRIES A QUOTE, AND THE QUOTE MUST BE REAL (spec §2.4). An item
-// with no quote is dropped and counted. A quote that does not appear in the
-// text sources sent is dropped and counted too: a quote the model invented is
-// an inference wearing a citation. The one exception is a quote that could
-// have come from an attached document, whose words this app cannot read back;
-// it is kept and marked unverified, so the confirmation screen can say so.
+// EVERY ITEM CARRIES A QUOTE, AND THE QUOTE MUST COME FROM THIS VISIT'S OWN
+// DOCUMENTATION (spec §2.4, tightened 2026-11-04). Only what the clinician
+// documented at this visit counts toward the level: the note and the
+// encounter's own fields. The problem and medication lists are sent as
+// context, but a quote found only there is dropped and counted
+// (`notFromNote`): a problem on the list that nobody addressed today must not
+// raise the level. A quote found nowhere is dropped as invented.
+//
+// DOCUMENTS ARE NOT SENT (2026-11-04). A document attached to the visit is the
+// one place a 42 CFR Part 2 record received for treatment can sit, and coding
+// is payment, not treatment. Its words could not be verified anyway, so it
+// could never have supplied a counted fact. If the note says an outside record
+// was reviewed, the note's own sentence is the quote.
 //
 // `quote` is deliberately NOT a required schema field. In the shared engine one
 // item failing the schema fails the whole answer, so a single quoteless item
@@ -107,14 +114,14 @@ const noteToText = (note) => {
 
 // ---- The input packet (spec §2.2) ------------------------------------------------
 // The note, the encounter's structured fields, the problem list, the medication
-// list and the documents attached to the encounter. Each section has a sourceId.
+// list. Documents are not sent (see the header). Each section has a sourceId.
 // A section that could not be read is listed in `notRead`, never filled another
 // way.
-const buildMdmInput = ({ encounterUuid, record, narrativeText, problems, medications, documents, notRead }) => {
+const buildMdmInput = ({ encounterUuid, record, narrativeText, problems, medications, notRead }) => {
   const sections = [];
   const rec = record || {};
   const noteText = [noteToText(rec.note), String(narrativeText || '').trim()].filter(Boolean).join('\n\n');
-  if (noteText) sections.push({ sourceId: `enc:${encounterUuid}:note`, kind: 'encounter note', title: 'The encounter note', text: noteText });
+  if (noteText) sections.push({ sourceId: `enc:${encounterUuid}:note`, kind: 'encounter note', title: 'The encounter note', text: noteText, documentation: true });
   const visit = rec.visit || {};
   const fields = [
     rec.date ? `Date of service: ${rec.date}` : null,
@@ -125,7 +132,7 @@ const buildMdmInput = ({ encounterUuid, record, narrativeText, problems, medicat
     // Descriptions only. A code in the prompt invites the model to support it.
     ...(rec.diagnoses || []).map(d => (d && d.description ? `Diagnosis recorded: ${d.description}` : null))
   ].filter(Boolean);
-  if (fields.length) sections.push({ sourceId: `enc:${encounterUuid}:fields`, kind: 'encounter fields', title: 'The encounter\'s structured fields', text: fields.join('\n') });
+  if (fields.length) sections.push({ sourceId: `enc:${encounterUuid}:fields`, kind: 'encounter fields', title: 'The encounter\'s structured fields', text: fields.join('\n'), documentation: true });
   if (Array.isArray(problems)) {
     sections.push({ sourceId: 'emr:problems', kind: 'problem list', title: 'Problem list',
       text: problems.map(p => [p && (p.title || p.description), p && p.status].filter(Boolean).join(' — ')).filter(Boolean).join('\n') || 'None recorded.' });
@@ -136,7 +143,6 @@ const buildMdmInput = ({ encounterUuid, record, narrativeText, problems, medicat
   }
   return {
     sections,
-    documents: Array.isArray(documents) ? documents : [],
     notRead: Array.isArray(notRead) ? notRead : [],
     hasNote: !!noteText
   };
@@ -146,24 +152,34 @@ const buildMdmInput = ({ encounterUuid, record, narrativeText, problems, medicat
 const normalize = (s) => String(s || '').toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
   .replace(/[^a-z0-9%'".,/:;()-]+/g, ' ').replace(/\s+/g, ' ').trim();
 
-const enforceQuotes = (proposal, { sourceTexts, hasDocuments }) => {
-  const haystack = normalize((sourceTexts || []).join('\n'));
-  const counts = { noQuote: 0, quoteNotFound: 0, unverified: 0 };
+// `noteTexts` is this visit's documentation (the note and the encounter's
+// fields); `contextTexts` is everything else sent (the problem and medication
+// lists). Only a quote found in the note counts.
+const documentationTexts = (sections) => (sections || []).filter(s => s && s.documentation).map(s => s.text);
+const contextTexts = (sections) => (sections || []).filter(s => s && !s.documentation).map(s => s.text);
+
+const enforceQuotes = (proposal, { noteTexts, contextTexts: ctx }) => {
+  const note = normalize((noteTexts || []).join('\n'));
+  const context = normalize((ctx || []).join('\n'));
+  const counts = { noQuote: 0, quoteNotFound: 0, notFromNote: 0 };
   const check = (quote) => {
     const q = normalize(quote);
     if (!q) return 'none';
-    if (haystack.includes(q)) return 'verified';
-    return hasDocuments ? 'unverified' : 'not_found';
+    if (note.includes(q)) return 'verified';
+    return context.includes(q) ? 'not_from_note' : 'not_found';
+  };
+  const tally = (state) => {
+    if (state === 'none') counts.noQuote++;
+    else if (state === 'not_found') counts.quoteNotFound++;
+    else if (state === 'not_from_note') counts.notFromNote++;
   };
   const out = {};
   for (const key of LIST_KEYS) {
     out[key] = [];
     for (const item of (proposal && Array.isArray(proposal[key]) ? proposal[key] : [])) {
       const state = check(item && item.quote);
-      if (state === 'none') { counts.noQuote++; continue; }
-      if (state === 'not_found') { counts.quoteNotFound++; continue; }
-      if (state === 'unverified') counts.unverified++;
-      out[key].push({ ...item, quoteVerified: state === 'verified' });
+      if (state !== 'verified') { tally(state); continue; }
+      out[key].push({ ...item, quoteVerified: true });
     }
   }
   // Time: a minute count needs a real quote, or it is not a fact the note
@@ -173,19 +189,15 @@ const enforceQuotes = (proposal, { sourceTexts, hasDocuments }) => {
   let time = { totalMinutes: null, statementPresent: false, quote: null, quoteVerified: false };
   if (t.statementPresent || minutes != null) {
     const state = check(t.quote);
-    if (state === 'none') counts.noQuote++;
-    else if (state === 'not_found') counts.quoteNotFound++;
-    else {
-      if (state === 'unverified') counts.unverified++;
-      time = { totalMinutes: minutes, statementPresent: true, quote: t.quote, quoteVerified: state === 'verified' };
-    }
+    if (state !== 'verified') tally(state);
+    else time = { totalMinutes: minutes, statementPresent: true, quote: t.quote, quoteVerified: true };
   }
   out.time = time;
   out.unreadable = Array.isArray(proposal && proposal.unreadable) ? proposal.unreadable : [];
-  return { output: out, dropped: counts.noQuote + counts.quoteNotFound, counts };
+  return { output: out, dropped: counts.noQuote + counts.quoteNotFound + counts.notFromNote, counts };
 };
 
 module.exports = {
   PROBLEM_STATUS, PROBLEM_MANAGEMENT, DATA_KINDS, RISK_FACTORS, QUOTE_MAX, LIST_KEYS,
-  MDM_SCHEMA, noteToText, buildMdmInput, normalize, enforceQuotes
+  MDM_SCHEMA, noteToText, buildMdmInput, normalize, enforceQuotes, documentationTexts, contextTexts
 };
