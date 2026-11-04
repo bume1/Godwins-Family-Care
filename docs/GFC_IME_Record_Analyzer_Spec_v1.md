@@ -1,6 +1,6 @@
 # IME record analyzer — spec v1
 
-**Owner request, 2026-11-04.** Contract examiners need to read a claim file of hundreds or thousands of pages before a VA C&P exam. Build an in-app analyzer that reads the whole file with Gemini and returns a cited summary. VA C&P exams (LSGS, Leidos QTC) come first. The design also covers private IMEs (attorneys, insurers, workers' comp), which ship later on the same engine.
+**Owner request, 2026-11-04.** Contract examiners need to read a claim file of hundreds or thousands of pages before a VA C&P exam. Build an in-app analyzer that reads the whole file with Gemini and returns a cited summary. VA C&P exams (LSGS, Leidos QTC, VES) come first. The design also covers private IMEs (attorneys, insurers, workers' comp), which ship later on the same engine.
 
 **What it is not.** It never gives a medical opinion: no nexus ("at least as likely as not"), no rating, no diagnosis of its own, no DBQ answers. It finds and cites what the records say. The examiner forms the opinion.
 
@@ -8,7 +8,7 @@
 
 ## Gates before any code
 
-1. **Written permission from LSGS and from Leidos QTC** to (a) store veteran claim-file records in GFC's systems and (b) process them with Google Gemini under GFC's Google Cloud BAA. File both with compliance records. Without it, nothing here is built for C&P. Private IMEs need only the referring party's engagement terms.
+1. **Written permission from each contractor: LSGS, Leidos QTC and VES (Veterans Evaluation Services)** to (a) store veteran claim-file records in GFC's systems and (b) process them with Google Gemini under GFC's Google Cloud BAA. File both with compliance records. Without it, nothing here is built for C&P. Private IMEs need only the referring party's engagement terms.
 2. **Their retention rule.** How long GFC may keep a claim file after the exam report is submitted, and whether any copy may outlive that. This sets §6.
 3. **A written decision** (`docs/decisions/YYYY-MM-DD-ime-record-analyzer.md`) changing `GFC_App_Build_v2.md` §14, which today allows no veteran health information in the app beyond the anonymized reference ID.
 4. **38 U.S.C. 7332.** VA records about substance use treatment, HIV, sickle cell anemia and alcohol use carry their own redisclosure limits on top of HIPAA. Confirm with counsel and the contractor that examining for the claim is a permitted use. If it is not, those records are excluded from analysis.
@@ -24,7 +24,7 @@ New collection `ime_cases` (PHI, registered in `dataMigration.js`).
 | `id` | |
 | `caseType` | `va_cp` now; `private_ime` later |
 | `referenceId` | the contractor's anonymized ID. Never a name, SSN or VA file number |
-| `contractingEntity` | `lsgs`, `leidos_qtc`, or the referring party for private IME |
+| `contractingEntity` | `lsgs`, `leidos_qtc`, `ves`, or the referring party for private IME. Each has its own permission, retention rule and portal |
 | `examinerId` | the assigned FNP contractor |
 | `claimedConditions` | list of conditions the exam covers, typed by the examiner. Focuses the summary |
 | `examDate`, `reportSubmittedAt` | `reportSubmittedAt` starts the deletion clock |
@@ -96,6 +96,8 @@ A full claim file of 1,000+ pages runs several passes, likely a few dollars per 
 3. **IME-AI.3:** the `private_ime` case type. Same engine. Adds a referring-party record and that party's retention terms.
 
 ## 9. Open for the owner
+
+- `GFC_App_Build_v2.md` §14 names only LSGS and Leidos QTC. VES belongs there too, for scheduling, exam logs and B7 invoicing; fold it in at the next docs pass.
 
 - Gates 1 to 4.
 - Whether examiners also get the claimed-conditions list from the contractor's portal, or type it.
