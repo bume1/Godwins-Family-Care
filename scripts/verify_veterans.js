@@ -66,9 +66,11 @@ const ADMIN = { id: 'admin_v', role: 'admin', email: 'admin-v@example.test', nam
 const DOC1 = { id: 'doc_v1', role: 'user', hasClinicalAccess: true, clinicalRole: 'provider', clinicalRoleConfirmed: true, email: 'doc1@example.test', name: 'Dana Provider', phone: '(912) 555-0101' };
 const DOC2 = { id: 'doc_v2', role: 'user', hasClinicalAccess: true, clinicalRole: 'provider', clinicalRoleConfirmed: true, email: 'doc2@example.test', name: 'Sam Provider' };
 const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example.test', name: 'Care Giver' };
+// A read-only clinical reader: My Day must hand them no veterans at all.
+const CM = { id: 'cm_v', role: 'caseManager', hasClinicalAccess: true, clinicalRole: 'readOnly', clinicalRoleConfirmed: true, email: 'cm@example.test', name: 'Casey Manager' };
 
 (async () => {
-  STORE.set('users', [ADMIN, DOC1, DOC2, CG]);
+  STORE.set('users', [ADMIN, DOC1, DOC2, CG, CM]);
   require(path.join(__dirname, '..', 'server.js'));
   await wait(2500);
   const today = practiceTime.zonedParts(new Date()).isoDate;
@@ -190,6 +192,58 @@ const CG = { id: 'cg_v', role: 'vendor', licenseLevel: 'PCA', email: 'cg@example
 
   r = await call('GET', `/api/veterans/roster?from=${today}&to=${d21}`, cg);
   check('a caregiver still cannot read the roster at all', r.status === 403);
+
+  // ── My Day shows the day's IME exams beside the clinical visits ──────────
+  // Owner, 2026-11-04 (Option B): a join at the READ layer only. The exam line
+  // keeps its own record because a vendor pays GFC and GFC pays the provider,
+  // which is not a claim.
+  console.log('\nMy Day — the IME exams beside the clinical day');
+  const cmTok = tok(CM);
+  // This section seeds its OWN rows for today rather than reading whatever the
+  // earlier sections happened to leave behind: a probe that assumes a world it
+  // did not create is reporting on a world that is not production.
+  await call('POST', '/api/veterans/roster', at, { firstName: 'Nina', lastName: 'Okafor', dob: '1961-02-02', examDate: today, providerUserId: DOC1.id });
+  await call('POST', '/api/veterans/roster', at, { firstName: 'Carl', lastName: 'Reyes', dob: '1958-07-07', examDate: today, providerUserId: DOC2.id });
+
+  r = await call('GET', `/api/clinical/my-day?date=${today}`, at);
+  check('the office sees every one of today\'s exams on My Day',
+    r.status === 200 && r.body.ime && r.body.ime.totals.exams >= 2 &&
+    r.body.ime.exams.some(x => x.providerUserId === DOC1.id) &&
+    r.body.ime.exams.some(x => x.providerUserId === DOC2.id),
+    JSON.stringify(r.body.ime && r.body.ime.totals));
+
+  check('an exam on My Day carries no DOB and no arrival contact details',
+    r.status === 200 && r.body.ime.exams.every(x =>
+      !('dob' in x) && !('arrivalPhone' in x) && !('arrivalEmail' in x) && !('checkinId' in x)),
+    JSON.stringify(Object.keys((r.body.ime.exams || [])[0] || {})));
+
+  check('exams never reach a clinical figure — not the visit count, not the mileage',
+    r.status === 200 && r.body.totals.visits === 0 &&
+    r.body.totals.unplaceableStops === 0 && r.body.totals.milesPartial === false &&
+    !Object.keys(r.body.totals).some(k => /exam|ime|veteran/i.test(k)) &&
+    (r.body.visits || []).length === 0 && (r.body.plot.points || []).length === 0,
+    JSON.stringify(r.body.totals));
+
+  r = await call('GET', `/api/clinical/my-day?date=${today}`, d1);
+  check('a provider sees only the exams assigned to them',
+    r.status === 200 && r.body.ime.totals.exams > 0 &&
+    r.body.ime.exams.every(x => x.providerUserId === DOC1.id),
+    JSON.stringify(r.body.ime.exams.map(x => x.providerUserId)));
+
+  r = await call('GET', `/api/clinical/my-day?date=${today}`, cmTok);
+  check('a read-only case manager is shown no veterans on My Day',
+    r.status === 200 && r.body.ime && r.body.ime.totals.exams === 0 && r.body.ime.exams.length === 0,
+    JSON.stringify(r.body.ime && r.body.ime.totals));
+
+  r = await call('GET', `/api/clinical/my-day?date=${practiceTime.addDays(today, 1)}`, at);
+  check('a day with no exams reports zero rather than yesterday\'s list',
+    r.status === 200 && r.body.ime.totals.exams === 0 && r.body.ime.sites.length === 0);
+
+  // Status is marked on the Veterans board, and My Day is a read of it.
+  const beforeSeen = (STORE.get('veteran_roster') || []).filter(x => x.status === 'seen').length;
+  await call('GET', `/api/clinical/my-day?date=${today}`, at);
+  check('reading My Day changes no roster row',
+    (STORE.get('veteran_roster') || []).filter(x => x.status === 'seen').length === beforeSeen);
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);

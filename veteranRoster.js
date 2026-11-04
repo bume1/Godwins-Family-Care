@@ -133,12 +133,20 @@ function rosterRange(query, today) {
 // files is how a later caller surfaces one provider's veterans to another.
 // Oldest day first, then site, then surname: the order a person reads a
 // schedule in. A removed row never appears.
-function rowsInRange(rows, range, { providerUserId = null } = {}) {
+// `providerUserIds` is the same question asked of several ids at once, which is
+// what My Day needs: an OpenEMR provider id can stand for more than one app
+// user. It NORMALIZES into the one filter rather than adding a second — and an
+// EMPTY array means NOBODY, never everybody, because the tempting bug is a
+// narrowed scope falling through to the whole roster.
+function rowsInRange(rows, range, { providerUserId = null, providerUserIds = null } = {}) {
   const { from, to } = range || {};
   if (!from || !to) return [];
+  const scope = providerUserIds != null
+    ? new Set((providerUserIds || []).map(String))
+    : (providerUserId !== null ? new Set([String(providerUserId)]) : null);
   return (rows || [])
     .filter(r => r && !r.removedAt && r.examDate >= from && r.examDate <= to &&
-      (providerUserId === null || r.providerUserId === providerUserId))
+      (scope === null || scope.has(String(r.providerUserId))))
     .sort((a, b) => (a.examDate || '').localeCompare(b.examDate || '')
       || (a.site || '').localeCompare(b.site || '')
       || (a.lastName || '').localeCompare(b.lastName || ''));
@@ -154,6 +162,23 @@ function publicRow(row, providerName) {
     arrivedAt: row.arrivedAt || null, checkinId: row.checkinId || null,
     arrivalPhone: row.arrivalPhone || null, arrivalEmail: row.arrivalEmail || null,
     seenAt: row.seenAt || null, createdAt: row.createdAt, createdByName: row.createdByName || null
+  };
+}
+
+// WHAT MY DAY SHOWS ABOUT A VETERAN, WHICH IS LESS THAN THE ROSTER BOARD DOES.
+// An allow-list, not a filtered copy of publicRow: date of birth is the
+// identity-matching data the sign-in screen compares against, and the phone and
+// email a veteran typed at the iPad are contact details for whoever rings them
+// back. A clinician reading their day needs none of the three, so they are not
+// put on the wire and then hidden. Build-enforced.
+function examDayRow(row, providerName) {
+  return {
+    id: row.id,
+    firstName: row.firstName, lastName: row.lastName,
+    site: row.site, siteLabel: SITES[row.site] || row.site,
+    providerUserId: row.providerUserId, providerName: providerName || null,
+    status: row.status, statusLabel: STATUS_LABELS[row.status] || row.status,
+    arrivedAt: row.arrivedAt || null, seenAt: row.seenAt || null
   };
 }
 
@@ -176,6 +201,6 @@ module.exports = {
   STATUSES, STATUS_LABELS, SETTABLE_STATUSES, SITES, DEFAULT_SITE,
   RANGE_MAX_DAYS, RANGE_DEFAULT_DAYS,
   foldName, isoDate, rosterRange, rowsInRange,
-  normalizeRosterInput, isOffice, canEditRow,
+  normalizeRosterInput, isOffice, canEditRow, examDayRow,
   candidatesFor, matchCheckin, publicRow, providerText, veteranText, providerEmailSubject
 };

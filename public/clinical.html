@@ -3115,6 +3115,45 @@
     );
 
     // One line on the day's schedule. Picking it fills the Visit Details pane.
+    // Track E — the day's IME exams, beside the clinical visits and labelled.
+    // READ ONLY, on purpose: a veteran's status is marked on the Veterans board
+    // and nowhere else, so this screen cannot become a second writer of it.
+    // An exam has a date and a site and no time of day, so these are grouped by
+    // site rather than slotted into the timed list, which would invent a time.
+    const ImeExamBlock = ({ ime, onOpen }) => {
+      if (!ime || !ime.exams || !ime.exams.length) return null;
+      const t = ime.totals || {};
+      const chip = { expected: 'bg-stone-100 text-stone-600', arrived: 'bg-emerald-100 text-emerald-800',
+        seen: 'bg-sky-100 text-sky-800', no_show: 'bg-amber-100 text-amber-800' };
+      return (
+        <div className="border-t border-stone-100">
+          <div className="flex items-center justify-between gap-2 px-4 lg:px-5 pt-3 pb-1">
+            <div className="text-[12px] font-bold uppercase tracking-wide text-stone-500">
+              <i className="ti ti-shield-check mr-1" />
+              IME Exams · {t.exams} {t.exams === 1 ? 'Veteran' : 'Veterans'}
+            </div>
+            <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" onClick={onOpen}>Open Board</button>
+          </div>
+          {(ime.sites || []).map(g => (
+            <div key={g.site} className="px-4 lg:px-5 pb-2">
+              <div className="text-[11.5px] text-stone-400 py-1">{g.siteLabel}</div>
+              {g.exams.map(e => (
+                <div key={e.id} className="flex items-center justify-between gap-2 py-1 text-[13px]">
+                  <span className="truncate">
+                    {e.lastName}, {e.firstName}
+                    {e.providerName && <span className="text-stone-400"> · {e.providerName}</span>}
+                  </span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${chip[e.status] || chip.expected}`}>
+                    {e.statusLabel}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    };
+
     const DayScheduleRow = ({ v, on, onSelect }) => (
       <button type="button" onClick={() => onSelect(v)}
         className={`cw-row w-full text-left flex items-center gap-3 px-4 lg:px-5 py-3.5 border-b border-stone-100 last:border-0 ${on ? 'on' : ''} ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
@@ -3396,12 +3435,19 @@
                   {day && visits.length === 0 && (
                     <div className="px-5 py-10 text-center">
                       <i className="ti ti-calendar-off text-3xl text-stone-300" />
-                      <p className="text-sm text-stone-500 mt-2">No visits scheduled for this day.</p>
+                      {/* "Nothing today" would be false on a day carrying IME
+                          exams, so the sentence narrows to the clinical half. */}
+                      <p className="text-sm text-stone-500 mt-2">
+                        {day.ime && day.ime.totals && day.ime.totals.exams > 0
+                          ? 'No clinical visits scheduled for this day.'
+                          : 'No visits scheduled for this day.'}
+                      </p>
                     </div>
                   )}
                   {visits.map(v => (
                     <DayScheduleRow key={v.eid} v={v} on={v.eid === selEid} onSelect={(vv) => setSelEid(vv.eid)} />
                   ))}
+                  {day && <ImeExamBlock ime={day.ime} onOpen={() => onGo && onGo('veterans')} />}
                 </div>
               )}
               {day && (
@@ -3413,6 +3459,9 @@
                       : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
                   </span>
                   <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
+                  {day.ime && day.ime.totals && day.ime.totals.exams > 0 && (
+                    <span><b>{day.ime.totals.exams}</b> IME {day.ime.totals.exams === 1 ? 'exam' : 'exams'}</span>
+                  )}
                 </div>
               )}
             </div>
