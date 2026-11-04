@@ -76,12 +76,12 @@ The case is not a GFC patient. It never links to a client record or OpenEMR, and
 ## 5. Access
 
 - New capability `imeRecordReview`, held by the assigned examiner and admin only. Not case managers, clinical staff or billing.
-- This extends Gemini decision 7 (licensed clinicians only) to licensed FNP contractors, for their own assigned cases. Record that in the §0 decision.
+- This extends Gemini decision 7 (licensed clinicians only) to licensed FNP contractors, for their own assigned cases. Record that in the decision under "Before building".
 - 1099 contractors need app accounts with MFA (Session 5 rules apply).
 
 ## 6. Retention and audit
 
-- Case documents and AI outputs are deleted automatically N days after `reportSubmittedAt`. N is the owner's retention period (§0, item 2). Default is 30 days until it is set. Deletion removes the Drive files, and the case moves to `purged`, keeping only its metadata.
+- Case documents and AI outputs are deleted automatically N days after `reportSubmittedAt`. N is the owner's retention period ("Before building", item 2). Default is 30 days until it is set. Deletion removes the Drive files, and the case moves to `purged`, keeping only its metadata.
 - **The audit conflicts with the deletion rule.** On the clinical side, the coding audit keeps the full model proposal forever. Here, the claim file is deleted after the report, so a permanent copy of its content in the audit would defeat the deletion. The IME audit keeps who, when, model, invocation id, document hashes, page counts and item counts, **and no content**, unless the owner decides otherwise.
 
 ## 7. Cost
