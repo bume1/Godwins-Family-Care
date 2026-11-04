@@ -48,6 +48,9 @@ const PURPOSES = Object.freeze({
   CHART_REVIEW: 'chart_review',
   CHART_REVIEW_MERGE: 'chart_review_merge',
   RECORDS_EXTRACTION: 'records_extraction',
+  // A contract examiner's claim file before a VA C&P exam (IME analyzer spec
+  // §3). Finds and cites what the records say; never an opinion.
+  IME_RECORD_REVIEW: 'ime_record_review',
   // AI coding pipeline Phase 2 (2026-11-04): facts from one encounter note.
   // It names no code; rules decide a level later, after a clinician confirms.
   MDM_EXTRACTION: 'mdm_extraction',

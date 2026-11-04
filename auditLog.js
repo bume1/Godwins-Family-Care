@@ -42,7 +42,9 @@ const PHI_PREFIXES = Object.freeze([
   // patient's consultation, so it is as much a PHI access as any chart read.
   '/v',
   // The clinic iPad's veteran sign-in: a name and phone number tied to an exam.
-  '/api/veterans'
+  '/api/veterans',
+  // The IME record analyzer: a veteran's claim file and what was read from it.
+  '/api/ime'
 ]);
 // Not PHI by construction: auth handshakes (audited by their own events),
 // templates/config/announcements, email unsubscribe tokens, bootstrap.

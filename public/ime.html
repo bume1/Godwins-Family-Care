@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — IME Claim Files</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The IME record analyzer (spec GFC_IME_Record_Analyzer_Spec_v1.md).
+       Every element is built with DOM nodes and textContent: a claim file is
+       somebody else's document and nothing read from it is ever parsed as
+       HTML. The server decides who sees which case. */
+    :root{--navy:#033D50;--gold:#F5CD85;--cream:#FAF7F2;--cream-d:#efe9db;--ink:#2b2b28;--mute:#6b6a64;--line:#ddd5c4;--warn:#8a5a00;--warn-bg:#fff4dc;--bad:#7d2020;--bad-bg:#fdeeee;--ok:#1d5e3a;--ok-bg:#e6f3ea}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a{color:var(--gold);font-size:14px;font-weight:600;text-decoration:none}
+    .wrap{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+    h2{font-family:'Cormorant Garamond',serif;font-size:24px;font-weight:600;color:var(--navy);margin-bottom:10px}
+    h3{font-size:16px;font-weight:700;color:var(--navy);margin:14px 0 6px}
+    .mute{color:var(--mute);font-size:13px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px}
+    input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:15px;background:#fff}
+    textarea{min-height:90px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+    @media (max-width:700px){.grid2{grid-template-columns:1fr}}
+    button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer}
+    button.sec{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+    button.danger{background:#fff;color:var(--bad);border:1px solid var(--bad)}
+    button:disabled{opacity:.5;cursor:default}
+    .link{background:none;border:0;color:var(--navy);text-decoration:underline;padding:0;font-weight:600;cursor:pointer;font-size:13px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+    th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
+    .tablewrap{overflow-x:auto}
+    .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:var(--cream-d)}
+    .chip.ok{background:var(--ok-bg);color:var(--ok)} .chip.warn{background:var(--warn-bg);color:var(--warn)} .chip.bad{background:var(--bad-bg);color:var(--bad)}
+    .banner{background:var(--warn-bg);border:1px solid #e9c97a;color:var(--warn);border-radius:9px;padding:11px 13px;font-weight:600;margin-bottom:12px}
+    .err{background:var(--bad-bg);border:1px solid #e7bcbc;color:var(--bad);border-radius:9px;padding:11px;font-size:14px;margin:10px 0}
+    .note{background:var(--cream);border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-size:14px;margin:8px 0}
+    .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+    .tabs button{background:#fff;color:var(--navy);border:1px solid var(--line)}
+    .tabs button.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+    .item{border-left:3px solid var(--line);padding:6px 10px;margin:6px 0}
+    .item .q{font-style:italic;color:var(--mute);font-size:13px;margin-top:2px}
+    .cite{font-size:12px;margin-top:3px}
+    ul.plain{list-style:none}
+  </style>
+  <script src="/session-guard.js"></script>
+</head>
+<body>
+  <div class="hdr"><span class="t">IME Claim Files</span><a href="/login">Back</a></div>
+  <div class="wrap" id="app"></div>
+<script>
+(function () {
+  'use strict';
+  var token = localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+  if (!token) { window.location.replace('/login'); return; }
+  var root = document.getElementById('app');
+  var meta = null;
+  var docNames = {};
+  var T = window.GFC_TIME;
+
+  // ── tiny DOM helper. Text always goes in as textContent. ──
+  function h(tag, attrs, kids) {
+    var el = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'onclick' || k === 'onchange' || k === 'onsubmit') el[k] = v;
+      else if (k === 'className') el.className = v;
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    (Array.isArray(kids) ? kids : [kids]).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+    });
+    return el;
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function when(iso) { if (!iso) return '—'; try { return T && T.fmtDateTime ? T.fmtDateTime(iso) : new Date(iso).toLocaleString(); } catch (e) { return iso; } }
+  function day(ymd) { return ymd || '—'; }
+  function kb(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB'; }
+
+  function api(method, path, body, isForm) {
+    var opts = { method: method, headers: { Authorization: 'Bearer ' + token } };
+    if (body && !isForm) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    if (isForm) opts.body = body;
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (r.status === 401) j.error = 'Your session has ended. Sign in again.';
+        return { status: r.status, ok: r.ok, body: j };
+      });
+    });
+  }
+  function errBox(msg) { return h('div', { className: 'err', role: 'alert' }, msg); }
+
+  // ── routing: #case=<id> or the list ──
+  function route() {
+    var m = /case=([^&]+)/.exec(location.hash);
+    if (m) showCase(decodeURIComponent(m[1])); else showList();
+  }
+  window.addEventListener('hashchange', route);
+
+  // ── the list ──
+  function showList() {
+    clear(root);
+    root.appendChild(h('p', { className: 'mute' }, 'Loading…'));
+    api('GET', '/api/ime/cases').then(function (r) {
+      clear(root);
+      if (!r.ok) { root.appendChild(errBox(r.body.error || 'Cases could not be loaded.')); return; }
+      root.appendChild(h('div', { className: 'card' }, [
+        h('h2', {}, meta.isAdmin ? 'All cases' : 'My cases'),
+        h('p', { className: 'mute' }, 'A claim file is read into a cited summary for the examiner. It is never an opinion, and it is deleted ' + meta.retentionDays + ' days after the exam report is submitted.'),
+        r.body.cases.length ? caseTable(r.body.cases) : h('p', {}, 'No cases yet.')
+      ]));
+      root.appendChild(newCaseForm());
+      if (meta.isAdmin) adminCards();
+    });
+  }
+
+  function statusChip(s) {
+    var label = { open: 'Open', report_submitted: 'Report submitted', purged: 'Purged' }[s] || s;
+    return h('span', { className: 'chip' + (s === 'open' ? ' ok' : s === 'purged' ? '' : ' warn') }, label);
+  }
+
+  function caseTable(cases) {
+    var rows = cases.map(function (c) {
+      return h('tr', {}, [
+        h('td', {}, h('button', { className: 'link', onclick: function () { location.hash = 'case=' + encodeURIComponent(c.id); } }, c.referenceId)),
+        h('td', {}, c.contractingEntityLabel),
+        meta.isAdmin ? h('td', {}, c.examinerName || '—') : null,
+        h('td', {}, day(c.examDate)),
+        h('td', {}, statusChip(c.status)),
+        h('td', {}, c.documentCount + ' files, ' + c.pageCount + ' pages'),
+        h('td', {}, c.purgeDueAt && c.status !== 'purged' ? 'Deleted after ' + when(c.purgeDueAt) : '—')
+      ]);
+    });
+    return h('div', { className: 'tablewrap' }, h('table', {}, [
+      h('thead', {}, h('tr', {}, ['Reference ID', 'Contractor', meta.isAdmin ? 'Examiner' : null, 'Exam date', 'Status', 'Claim file', 'Deletion']
+        .filter(Boolean).map(function (t) { return h('th', {}, t); }))),
+      h('tbody', {}, rows)
+    ]));
+  }
+
+  function newCaseForm() {
+    var ref = h('input', { id: 'f-ref', autocomplete: 'off', placeholder: 'The contractor\'s anonymized ID' });
+    var ent = h('select', { id: 'f-ent' }, [h('option', { value: '' }, 'Choose…')].concat(meta.contractingEntities.map(function (e) { return h('option', { value: e.value }, e.label); })));
+    var ex = meta.isAdmin ? h('select', { id: 'f-ex' }, [h('option', { value: '' }, 'Choose…')].concat(meta.examiners.map(function (u) { return h('option', { value: u.id }, u.name); }))) : null;
+    var date = h('input', { id: 'f-date', type: 'date' });
+    var cond = h('textarea', { id: 'f-cond', placeholder: 'One per line, for example:\nTinnitus\nLumbar strain\nPTSD' });
+    var out = h('div');
+    var btn = h('button', { onclick: function () {
+      clear(out); btn.disabled = true;
+      api('POST', '/api/ime/cases', {
+        referenceId: ref.value, contractingEntity: ent.value, examDate: date.value,
+        claimedConditions: cond.value.split('\n'), examinerId: ex ? ex.value : undefined
+      }).then(function (r) {
+        btn.disabled = false;
+        if (!r.ok) { out.appendChild(errBox(r.body.error || 'The case could not be created.')); return; }
+        location.hash = 'case=' + encodeURIComponent(r.body.case.id);
+      });
+    } }, 'Create Case');
+    return h('div', { className: 'card' }, [
+      h('h2', {}, 'New case'),
+      h('p', { className: 'mute' }, 'Never put a name, Social Security number or VA file number here. The reference ID is the contractor\'s anonymized ID.'),
+      h('div', { className: 'grid2' }, [
+        h('div', {}, [h('label', { for: 'f-ref' }, 'Reference ID'), ref]),
+        h('div', {}, [h('label', { for: 'f-ent' }, 'Contracting entity'), ent]),
+        ex ? h('div', {}, [h('label', { for: 'f-ex' }, 'Examiner'), ex]) : null,
+        h('div', {}, [h('label', { for: 'f-date' }, 'Exam date'), date])
+      ]),
+      h('label', { for: 'f-cond' }, 'Claimed conditions'), cond,
+      h('div', { className: 'row', style: 'margin-top:12px' }, btn), out
+    ]);
+  }
+
+  function adminCards() {
+    var spend = h('div', { className: 'card' }, [h('h2', {}, 'Spend per case'), h('p', { className: 'mute' }, 'Loading…')]);
+    var log = h('div', { className: 'card' }, [h('h2', {}, 'Deletion log'), h('p', { className: 'mute' }, 'Loading…')]);
+    root.appendChild(spend); root.appendChild(log);
+    if (!meta.analysisAvailable) {
+      root.insertBefore(h('div', { className: 'card' }, [
+        h('h2', {}, 'AI analysis is not switched on'),
+        h('p', {}, 'Cases and uploads work now. Running an analysis waits on the Gemini setup:'),
+        h('ul', {}, (meta.blockers || []).map(function (b) { return h('li', { className: 'mute' }, b); }))
+      ]), root.firstChild);
+    }
+    api('GET', '/api/ime/admin/spend').then(function (r) {
+      clear(spend); spend.appendChild(h('h2', {}, 'Spend per case'));
+      var rows = (r.body.spend || []);
+      if (!rows.length) { spend.appendChild(h('p', {}, 'No analyses have run yet.')); return; }
+      spend.appendChild(h('p', { className: 'mute' }, 'Token counts are exact. Dollar figures are an estimate, and blank until the per-token prices are set.'));
+      spend.appendChild(h('div', { className: 'tablewrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['Case', 'Runs', 'Input tokens', 'Output tokens', 'Estimate'].map(function (t) { return h('th', {}, t); }))),
+        h('tbody', {}, rows.map(function (s) {
+          return h('tr', {}, [h('td', {}, h('button', { className: 'link', onclick: function () { location.hash = 'case=' + encodeURIComponent(s.caseId); } }, s.caseId)),
+            h('td', {}, s.runs), h('td', {}, s.inputTokens.toLocaleString()), h('td', {}, s.outputTokens.toLocaleString()),
+            h('td', {}, s.estimatedCost === null ? '—' : '$' + s.estimatedCost.toFixed(2))]);
+        }))
+      ])));
+    });
+    api('GET', '/api/ime/admin/deletion-log').then(function (r) {
+      clear(log); log.appendChild(h('h2', {}, 'Deletion log'));
+      log.appendChild(h('p', { className: 'mute' }, 'Claim files and AI results are deleted ' + r.body.retentionDays + ' days after the report is submitted. Only the case\'s metadata stays.'));
+      var rows = r.body.entries || [];
+      if (!rows.length) { log.appendChild(h('p', {}, 'Nothing has been deleted yet.')); return; }
+      log.appendChild(h('div', { className: 'tablewrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['Reference ID', 'Report submitted', 'Deleted', 'Files', 'Results cleared'].map(function (t) { return h('th', {}, t); }))),
+        h('tbody', {}, rows.map(function (e) {
+          return h('tr', {}, [h('td', {}, e.referenceId), h('td', {}, when(e.reportSubmittedAt)), h('td', {}, when(e.purgedAt)), h('td', {}, e.filesDeleted), h('td', {}, e.analysesCleared)]);
+        }))
+      ])));
+    });
+  }
+
+  // ── one case ──
+  var pollTimer = null;
+  function showCase(id) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    clear(root);
+    root.appendChild(h('p', { className: 'mute' }, 'Loading…'));
+    api('GET', '/api/ime/cases/' + encodeURIComponent(id)).then(function (r) {
+      clear(root);
+      root.appendChild(h('p', {}, h('button', { className: 'link', onclick: function () { location.hash = ''; } }, '← All cases')));
+      if (!r.ok) { root.appendChild(errBox(r.body.error || 'This case could not be opened.')); return; }
+      var c = r.body.case;
+      docNames = {};
+      r.body.documents.forEach(function (d) { docNames[d.id] = d.fileName || 'Removed file'; });
+      root.appendChild(caseHeader(c));
+      if (c.status === 'open') root.appendChild(uploadCard(c));
+      root.appendChild(documentsCard(c, r.body.documents));
+      root.appendChild(analysisCard(c, r.body.analyses));
+    });
+  }
+
+  function caseHeader(c) {
+    var out = h('div');
+    var conds = h('textarea', { id: 'c-cond' }); conds.value = (c.claimedConditions || []).join('\n');
+    var date = h('input', { id: 'c-date', type: 'date' }); date.value = c.examDate || '';
+    var ex = null;
+    if (meta.isAdmin && c.status !== 'purged') {
+      ex = h('select', { id: 'c-ex' }, meta.examiners.map(function (u) { return h('option', { value: u.id }, u.name); }));
+      ex.value = c.examinerId;
+    }
+    var editable = c.status !== 'purged';
+    var actions = h('div', { className: 'row', style: 'margin-top:12px' }, [
+      editable ? h('button', { className: 'sec', onclick: function () {
+        clear(out);
+        var body = { claimedConditions: conds.value.split('\n'), examDate: date.value };
+        if (ex) body.examinerId = ex.value;
+        api('PUT', '/api/ime/cases/' + encodeURIComponent(c.id), body).then(function (r) {
+          if (!r.ok) out.appendChild(errBox(r.body.error || 'The case could not be saved.'));
+          else showCase(c.id);
+        });
+      } }, 'Save Changes') : null,
+      c.status === 'open' ? h('button', { className: 'danger', onclick: function () {
+        if (!confirm('Record the exam report as submitted? The claim file and every AI result on this case are deleted ' + meta.retentionDays + ' days from now.')) return;
+        api('POST', '/api/ime/cases/' + encodeURIComponent(c.id) + '/report-submitted').then(function (r) {
+          if (!r.ok) out.appendChild(errBox(r.body.error || 'That could not be recorded.')); else showCase(c.id);
+        });
+      } }, 'Report Submitted') : null,
+      c.status === 'report_submitted' && meta.isAdmin ? h('button', { className: 'sec', onclick: function () {
+        var reason = prompt('Why is this case being reopened?');
+        if (!reason) return;
+        api('POST', '/api/ime/cases/' + encodeURIComponent(c.id) + '/reopen', { reason: reason }).then(function (r) {
+          if (!r.ok) out.appendChild(errBox(r.body.error || 'The case could not be reopened.')); else showCase(c.id);
+        });
+      } }, 'Reopen Case') : null
+    ]);
+    return h('div', { className: 'card' }, [
+      h('div', { className: 'row', style: 'justify-content:space-between' }, [h('h2', {}, c.referenceId), statusChip(c.status)]),
+      h('p', { className: 'mute' }, c.contractingEntityLabel + ' · Examiner: ' + (c.examinerName || '—') + ' · Created ' + when(c.createdAt)),
+      c.reportSubmittedAt ? h('div', { className: 'note' }, 'Report submitted ' + when(c.reportSubmittedAt) + '. The claim file and AI results are deleted after ' + when(c.purgeDueAt) + '.') : null,
+      c.status === 'purged' ? h('div', { className: 'note' }, 'Purged ' + when(c.purgedAt) + '. The claim file, the claimed conditions and every AI result are gone. Only the case metadata remains.') : null,
+      editable ? h('div', { className: 'grid2' }, [
+        h('div', {}, [h('label', { for: 'c-date' }, 'Exam date'), date]),
+        ex ? h('div', {}, [h('label', { for: 'c-ex' }, 'Examiner'), ex]) : null
+      ]) : null,
+      editable ? h('label', { for: 'c-cond' }, 'Claimed conditions (one per line)') : null,
+      editable ? conds : null,
+      actions, out
+    ]);
+  }
+
+  function uploadCard(c) {
+    var input = h('input', { type: 'file', multiple: true, accept: 'application/pdf,image/jpeg,image/png', id: 'u-files' });
+    var out = h('div');
+    var btn = h('button', { onclick: function () {
+      clear(out);
+      if (!input.files.length) { out.appendChild(errBox('Choose the files first.')); return; }
+      var fd = new FormData();
+      Array.prototype.forEach.call(input.files, function (f) { fd.append('files', f); });
+      btn.disabled = true; btn.textContent = 'Uploading…';
+      api('POST', '/api/ime/cases/' + encodeURIComponent(c.id) + '/documents', fd, true).then(function (r) {
+        btn.disabled = false; btn.textContent = 'Upload Files';
+        var res = r.body.results || [];
+        var bad = res.filter(function (x) { return !x.ok; });
+        if (!res.length) { out.appendChild(errBox(r.body.error || 'The upload failed.')); return; }
+        if (bad.length) {
+          out.appendChild(h('div', { className: 'err' }, [h('div', {}, (res.length - bad.length) + ' uploaded. These were not:'),
+            h('ul', {}, bad.map(function (b) { return h('li', {}, b.fileName + ': ' + b.error); }))]));
+          setTimeout(function () { showCase(c.id); }, 2500);
+        } else showCase(c.id);
+      });
+    } }, 'Upload Files');
+    return h('div', { className: 'card' }, [
+      h('h2', {}, 'Upload the claim file'),
+      h('p', { className: 'mute' }, 'PDF, JPG or PNG. Up to ' + meta.maxFilesPerUpload + ' files at a time, ' + kb(meta.maxFileBytes) + ' each. Scanned pages are fine; Gemini reads them.'),
+      h('label', { for: 'u-files' }, 'Files'), input,
+      h('div', { className: 'row', style: 'margin-top:12px' }, btn), out
+    ]);
+  }
+
+  // Opened through the app (every read is audited), at the cited page.
+  function openDoc(caseId, docId, page) {
+    var w = window.open('', '_blank');
+    fetch('/api/ime/cases/' + encodeURIComponent(caseId) + '/documents/' + encodeURIComponent(docId), { headers: { Authorization: 'Bearer ' + token } })
+      .then(function (r) { if (!r.ok) throw new Error(r.status === 401 ? 'Your session has ended.' : 'The file could not be opened.'); return r.blob(); })
+      .then(function (b) {
+        var url = URL.createObjectURL(b) + (page ? '#page=' + page : '');
+        if (w) w.location.href = url; else window.location.href = url;
+      })
+      .catch(function (e) { if (w) w.close(); alert(e.message); });
+  }
+
+  function documentsCard(c, docs) {
+    var out = h('div');
+    var live = docs.filter(function (d) { return !d.purgedAt; });
+    return h('div', { className: 'card' }, [
+      h('h2', {}, 'Claim file'),
+      live.length ? h('div', { className: 'tablewrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['File', 'Pages', 'Size', 'SHA-256', 'Uploaded', ''].map(function (t) { return h('th', {}, t); }))),
+        h('tbody', {}, live.map(function (d) {
+          return h('tr', {}, [
+            h('td', {}, [h('button', { className: 'link', onclick: function () { openDoc(c.id, d.id); } }, d.fileName || 'Document'),
+              d.hasTextLayer === false ? h('div', { className: 'mute' }, 'Scanned, no text layer') : null]),
+            h('td', {}, d.pageCount), h('td', {}, kb(d.size)),
+            h('td', { className: 'mute', title: d.sha256 }, d.sha256.slice(0, 12) + '…'),
+            h('td', { className: 'mute' }, (d.uploadedBy || '—') + ', ' + when(d.uploadedAt)),
+            h('td', {}, c.status === 'open' ? h('button', { className: 'link', onclick: function () {
+              if (!confirm('Remove this file from the case? It is deleted from storage.')) return;
+              api('DELETE', '/api/ime/cases/' + encodeURIComponent(c.id) + '/documents/' + encodeURIComponent(d.id)).then(function (r) {
+                if (!r.ok) out.appendChild(errBox(r.body.error || 'The file could not be removed.')); else showCase(c.id);
+              });
+            } }, 'Remove') : null)
+          ]);
+        }))
+      ])) : h('p', {}, c.status === 'purged' ? 'The claim file has been deleted.' : 'No files yet.'),
+      out
+    ]);
+  }
+
+  function analysisCard(c, analyses) {
+    var card = h('div', { className: 'card' }, h('h2', {}, 'AI summary'));
+    var out = h('div');
+    var latest = analyses[0] || null;
+    if (c.status === 'open') {
+      var run = h('button', { disabled: !meta.analysisAvailable || (latest && latest.status === 'running'), onclick: function () {
+        clear(out); run.disabled = true;
+        api('POST', '/api/ime/cases/' + encodeURIComponent(c.id) + '/analyses').then(function (r) {
+          if (!r.ok) { run.disabled = false; out.appendChild(errBox(r.body.error || 'The analysis could not start.')); return; }
+          showCase(c.id);
+        });
+      } }, latest ? 'Run Again' : 'Run Analysis');
+      card.appendChild(h('div', { className: 'row' }, [run,
+        !meta.analysisAvailable ? h('span', { className: 'mute' }, meta.isAdmin ? 'AI analysis is not switched on yet. What it waits on is listed on the All cases page.' : 'AI analysis is not switched on yet. An admin can see what it waits on.') : null]));
+    }
+    card.appendChild(out);
+    if (!latest) { card.appendChild(h('p', { className: 'mute', style: 'margin-top:10px' }, 'No analysis has been run on this case.')); return card; }
+    var body = h('div', { style: 'margin-top:12px' }, h('p', { className: 'mute' }, 'Loading…'));
+    card.appendChild(body);
+    loadAnalysis(c, latest.id, body);
+    if (analyses.length > 1) {
+      card.appendChild(h('p', { className: 'mute', style: 'margin-top:10px' }, 'Earlier runs: ' + analyses.slice(1).map(function (a) { return when(a.at) + ' (' + a.status + ')'; }).join(', ')));
+    }
+    return card;
+  }
+
+  function loadAnalysis(c, aid, body) {
+    api('GET', '/api/ime/cases/' + encodeURIComponent(c.id) + '/analyses/' + encodeURIComponent(aid)).then(function (r) {
+      clear(body);
+      if (!r.ok) { body.appendChild(errBox(r.body.error || 'The result could not be loaded.')); return; }
+      var a = r.body.analysis;
+      if (a.status === 'running') {
+        body.appendChild(h('div', { className: 'note' }, 'Reading the claim file' + (a.passes ? ': pass ' + (a.currentPass || 1) + ' of ' + a.passes : '') + '. A large file takes several minutes. This page updates on its own.'));
+        pollTimer = setTimeout(function () { loadAnalysis(c, aid, body); }, 8000);
+        return;
+      }
+      if (a.status === 'failed') {
+        body.appendChild(errBox('The analysis failed: ' + (a.error || 'no reason was given') + '.'));
+        if (a.blockers && a.blockers.length) body.appendChild(h('ul', {}, a.blockers.map(function (b) { return h('li', { className: 'mute' }, b); })));
+        return;
+      }
+      if (a.purgedAt || !a.output) { body.appendChild(h('p', {}, 'This result was deleted with the claim file.')); return; }
+      renderResult(c, a, r.body.banner, body);
+    });
+  }
+
+  function citeLine(c, row) {
+    var cite = row.citation;
+    var chip = row.quoteVerified ? h('span', { className: 'chip ok' }, 'Quote found on page')
+      : row.quoteCheck === 'not_on_page' ? h('span', { className: 'chip bad' }, 'Quote NOT found on that page')
+      : row.quoteCheck === 'no_text_layer' ? h('span', { className: 'chip warn' }, 'Scanned page, quote unverified')
+      : h('span', { className: 'chip warn' }, 'No quote given');
+    return h('div', { className: 'cite' }, [
+      h('button', { className: 'link', onclick: function () { openDoc(c.id, cite.documentId, cite.page); } },
+        (docNames[cite.documentId] || 'Document') + ', page ' + cite.page), ' ', chip
+    ]);
+  }
+  function itemEl(c, title, row, sub) {
+    return h('div', { className: 'item' }, [
+      h('div', {}, [row.date ? h('strong', {}, row.date + '  ') : null, title]),
+      sub ? h('div', { className: 'mute' }, sub) : null,
+      row.quote ? h('div', { className: 'q' }, '“' + row.quote + '”') : null,
+      citeLine(c, row)
+    ]);
+  }
+
+  var LIST_LABELS = { diagnosesRecorded: 'Diagnoses recorded', inServiceEvents: 'In-service events', treatment: 'Treatment', currentSeverity: 'Current severity', functionalImpact: 'Functional impact' };
+
+  function renderResult(c, a, banner, body) {
+    var o = a.output;
+    body.appendChild(h('div', { className: 'banner', role: 'note' }, banner));
+    var d = a.dropped || {};
+    var dropped = (d.uncited || 0) + (d.opinion || 0) + (d.restricted7332 || 0);
+    body.appendChild(h('p', { className: 'mute' }, 'Run ' + when(a.finishedAt) + ' by ' + (a.requestedBy || '—') + ', ' + (a.passesRun || a.passes || 1) + ' pass(es), model ' + (a.model || '—') + '.'));
+    if (dropped) {
+      body.appendChild(h('div', { className: 'note' }, dropped + ' item(s) were removed before you saw them: ' +
+        [d.uncited ? d.uncited + ' had no valid citation' : null, d.opinion ? d.opinion + ' used opinion language the record did not' : null,
+          d.restricted7332 ? d.restricted7332 + ' touched 38 U.S.C. 7332 records' : null].filter(Boolean).join(', ') + '.'));
+    }
+    if (!a.cleared7332) body.appendChild(h('p', { className: 'mute' }, 'Records of drug or alcohol abuse treatment, HIV and sickle cell anemia (38 U.S.C. 7332) were excluded from this reading until counsel confirms they may be used.'));
+
+    var panes = {};
+    var tabs = h('div', { className: 'tabs' });
+    var holder = h('div');
+    function tab(key, label) {
+      var b = h('button', { onclick: function () { show(key); } }, label);
+      b.dataset.k = key; tabs.appendChild(b);
+    }
+    function show(key) {
+      Array.prototype.forEach.call(tabs.children, function (b) { b.className = b.dataset.k === key ? 'on' : ''; });
+      clear(holder); holder.appendChild(panes[key]);
+    }
+
+    panes.cond = h('div', {}, o.byCondition.map(function (row) {
+      var kids = [h('h3', {}, row.claimedCondition)];
+      if (row.firstDocumented) kids.push(itemEl(c, 'First documented', row.firstDocumented));
+      Object.keys(LIST_LABELS).forEach(function (k) {
+        if (!row[k].length) return;
+        kids.push(h('div', { className: 'mute', style: 'margin-top:6px;font-weight:600' }, LIST_LABELS[k]));
+        row[k].forEach(function (it) { kids.push(itemEl(c, it.text, it)); });
+      });
+      var nf = o.notFound.filter(function (n) { return n.claimedCondition === row.claimedCondition; })[0];
+      if (nf) kids.push(h('div', { className: 'note' }, nf.note + (nf.searchedFor ? ' Searched for: ' + nf.searchedFor + '.' : '')));
+      return h('div', {}, kids);
+    }));
+    panes.chron = o.chronology.length ? h('div', {}, o.chronology.map(function (e) {
+      return itemEl(c, e.summary, e, [e.eventType.replace('_', ' '), e.facility, e.provider].filter(Boolean).join(' · '));
+    })) : h('p', {}, 'No dated events were cited.');
+    panes.meds = o.medications.length ? h('div', {}, o.medications.map(function (m) { return itemEl(c, m.name, m, m.dates); })) : h('p', {}, 'No medications were cited.');
+    panes.unread = o.unreadable.length ? h('ul', {}, o.unreadable.map(function (u) {
+      return h('li', {}, (u.documentId ? (docNames[u.documentId] || 'Document') : u.sourceId) + (u.pages ? ', pages ' + u.pages : '') + ': ' + u.why);
+    })) : h('p', {}, 'Every page was read.');
+
+    tab('cond', 'By Condition'); tab('chron', 'Chronology (' + o.chronology.length + ')');
+    tab('meds', 'Medications (' + o.medications.length + ')'); tab('unread', 'Not Read (' + o.unreadable.length + ')');
+    body.appendChild(tabs); body.appendChild(holder);
+    show('cond');
+  }
+
+  // ── start ──
+  api('GET', '/api/ime/meta').then(function (r) {
+    if (!r.ok) { clear(root); root.appendChild(errBox(r.body.error || 'This page could not be loaded.')); return; }
+    meta = r.body;
+    route();
+  });
+})();
+</script>
+</body>
+</html>

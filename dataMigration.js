@@ -72,6 +72,19 @@ const COLLECTION_REGISTRY = Object.freeze([
   // The IME roster: each veteran the vendor sends (name, date of birth, exam
   // date) and the provider they are assigned to.
   { key: 'veteran_roster', phi: true, owner: 'veterans check-in 10/2026' },
+  // The IME record analyzer (spec GFC_IME_Record_Analyzer_Spec_v1.md). A case
+  // is a contractor's anonymized reference id, the claimed conditions and the
+  // assigned examiner; documents are pointers to the claim file in Drive;
+  // analyses are the cited AI summaries. All are deleted N days after the
+  // exam report (GFC_IME_RETENTION_DAYS), keeping metadata only.
+  { key: 'ime_cases', phi: true, owner: 'IME-AI.1 11/2026' },
+  { key: 'ime_case_documents', phi: true, owner: 'IME-AI.1 11/2026' },
+  { key: 'ime_analyses', phi: true, owner: 'IME-AI.2 11/2026' },
+  // Content-free by design (spec §6): who, when, model, invocation ids,
+  // document hashes, page and item counts. Still marked PHI because a case id
+  // ties it to a veteran's exam.
+  { key: 'ime_analysis_audit', phi: true, owner: 'IME-AI.2 11/2026' },
+  { key: 'ime_deletion_log', phi: true, owner: 'IME-AI.1 11/2026' },
   // Which Google Calendar event mirrors which OpenEMR appointment eid.
   { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
   // Patient statements: copays and home care hours. Amounts and dates of
