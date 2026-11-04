@@ -2219,13 +2219,6 @@
 
     const UsersPage = ({ token, isSuperAdmin }) => {
       const [users, setUsers] = useState([]);
-      // Pay-rate changes waiting on the Super Admin. Read by the queue and the
-      // edit form on THIS page, so the state lives here.
-      const [financialPending, setFinancialPending] = useState([]);
-      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
-        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
-
-
       const [projects, setProjects] = useState([]);
       const [clients, setClients] = useState([]);
       const [clientPortals, setClientPortals] = useState([]);
