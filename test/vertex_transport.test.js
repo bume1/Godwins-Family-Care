@@ -313,3 +313,9 @@ test('a failed check carries Google\'s own reason, scrubbed', async () => {
   assert.match(r.failures[1], /Google said: 403 Permission storage\.buckets\.get denied/);
   assert.ok(!r.failures.join(' ').includes('jane@example.com'), 'an address in Google\'s message is scrubbed');
 });
+
+test('the output limit is explicit, never the model default', () => {
+  assert.equal(T.DEFAULT_MAX_OUTPUT_TOKENS, 65535);
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'vertexTransport.js'), 'utf8');
+  assert.match(src, /maxOutputTokens: \(input && input\.maxOutputTokens\) \|\| DEFAULT_MAX_OUTPUT_TOKENS/);
+});

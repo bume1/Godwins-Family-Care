@@ -472,6 +472,9 @@ const createEngine = ({ env, transport, liveChecks, logActivity, now } = {}) => 
       // PHI. Scrub before it reaches a caller or a log.
       const err = new Error(`Model call failed: ${scrubForLog(String(e && e.message || e))}`);
       err.code = 'MODEL_CALL_FAILED';
+      // Why the provider stopped (e.g. MODEL_FINISH_MAX_TOKENS), so a caller
+      // can respond to an answer that was too long by asking a smaller question.
+      err.causeCode = (e && typeof e.code === 'string') ? e.code : null;
       throw err;
     }
 

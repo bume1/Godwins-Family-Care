@@ -415,7 +415,34 @@ const enforceCitations = (output, manifest) => {
   };
 };
 
+
+// When the merge call's own answer is too long, the passes are joined here
+// instead. Nothing is de-duplicated, nothing is dropped: every finding and
+// timeline row keeps its citations, which are still enforced afterwards.
+// Urgent findings first, then attention, then info; the timeline by date.
+const PRIORITY_ORDER = { urgent: 0, attention: 1, info: 2 };
+const joinPassOutputs = (outputs) => {
+  const list = (outputs || []).filter(Boolean);
+  const all = (k) => list.flatMap(o => (Array.isArray(o[k]) ? o[k] : []));
+  const findings = all('findings').slice().sort((a, b) =>
+    (PRIORITY_ORDER[a && a.priority] ?? 3) - (PRIORITY_ORDER[b && b.priority] ?? 3));
+  const timeline = all('timeline').slice().sort((a, b) => {
+    const da = (a && a.date) || ''; const db = (b && b.date) || '';
+    if (!da) return 1; if (!db) return -1;
+    return da < db ? -1 : da > db ? 1 : 0;
+  });
+  const summary = list.map((o, i) => (o.summary ? `Pass ${i + 1}: ${o.summary}` : '')).filter(Boolean).join('\n\n').slice(0, 4000);
+  return {
+    summary,
+    timeline,
+    findings,
+    questionsForClinician: [...new Set(all('questionsForClinician'))],
+    notReviewed: [...new Set(all('notReviewed'))]
+  };
+};
+
 module.exports = {
+  joinPassOutputs,
   SECTION_KINDS, PREFIX, HEADER_KINDS, DRAFT_HEADING, NON_CLINICAL_KEYS, BUDGET_FRACTION,
   buildSections, buildManifest, manifestIds, splitIntoPasses, fitsInOnePass, enforceCitations,
   currentCarePlanId,
