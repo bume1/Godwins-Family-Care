@@ -443,25 +443,53 @@ const Incidents = ({ rows }) => (
 // ============================================================================
 // Documents — what caregivers sent the office
 // ============================================================================
-const Documents = ({ rows }) => (
-  <div className="card">
-    <h2>Caregiver documents</h2>
-    <p className="sub">LTC forms, certifications, receipts — whatever a caregiver sent in.</p>
-    {rows.length === 0
-      ? <Empty icon="file-off">Nothing sent yet.</Empty>
-      : rows.map(d => (
-        <div className="row" key={d.id}>
-          <div>
-            <b>{d.label}</b>
-            <div className="mu">{d.caregiverName} · {d.fileName} · {fmtWhen(d.uploadedAt)}</div>
+const Documents = ({ rows, reload, setErr, setOk }) => {
+  // The Super Admin, a manager or a care coordinator reviews what a caregiver
+  // sent (owner, 2026-11-03). Removing a document stays with the Super Admin.
+  const [why, setWhy] = useState({});
+  const review = async (d, decision) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/caregiver/documents/${encodeURIComponent(d.id)}/review`, {
+        method: 'POST', body: JSON.stringify({ decision, reason: why[d.id] || '' })
+      });
+      setOk(decision === 'accepted' ? 'Accepted.' : 'Sent back to the caregiver with your reason.');
+      await reload();
+    } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card">
+      <h2>Caregiver documents</h2>
+      <p className="sub">LTC forms, certifications, receipts — whatever a caregiver sent in.</p>
+      {rows.length === 0
+        ? <Empty icon="file-off">Nothing sent yet.</Empty>
+        : rows.map(d => (
+          <div className="row" key={d.id} style={{ display: 'block' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+              <div>
+                <b>{d.kindLabel || d.label}</b> <span className="mu">· {titleize(d.status || '')}</span>
+                <div className="mu">{d.caregiverName} · {d.fileName} · {fmtWhen(d.uploadedAt)}</div>
+                {d.reviewNote && <div className="mu">Note: {d.reviewNote}</div>}
+              </div>
+              <a className="btn sm ghost" style={{ textDecoration: 'none' }}
+                href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
+                target="_blank" rel="noreferrer">Open</a>
+            </div>
+            {d.status === 'received' && (
+              <div style={{ marginTop: 6 }}>
+                <input value={why[d.id] || ''} placeholder="Reason, if sending it back"
+                  onChange={e => setWhy({ ...why, [d.id]: e.target.value })} />
+                <div className="btns">
+                  <button className="btn sm" onClick={() => review(d, 'accepted')}>Accept</button>
+                  <button className="btn sm ghost" disabled={!(why[d.id] || '').trim()} onClick={() => review(d, 'rejected')}>Send Back</button>
+                </div>
+              </div>
+            )}
           </div>
-          <a className="btn sm ghost" style={{ textDecoration: 'none' }}
-            href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
-            target="_blank" rel="noreferrer">Open</a>
-        </div>
-      ))}
-  </div>
-);
+        ))}
+    </div>
+  );
+};
 
 // ============================================================================
 // Broadcast — a message onto every caregiver's Feed tab
@@ -591,7 +619,7 @@ const App = () => {
         {tab === 'logs' && <VisitLogs rows={visitLogs} reload={reload} setErr={setErr} setOk={setOk}
           status={logStatus} setStatus={setLogStatus} />}
         {tab === 'incidents' && <Incidents rows={incidents} />}
-        {tab === 'documents' && <Documents rows={documents} />}
+        {tab === 'documents' && <Documents rows={documents} reload={reload} setErr={setErr} setOk={setOk} />}
         {tab === 'broadcast' && <Broadcast setErr={setErr} setOk={setOk} />}
 
         <div className="note">

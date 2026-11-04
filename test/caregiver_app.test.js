@@ -665,14 +665,15 @@ test('SAFETY: a caregiver reaches only their OWN documents; staff reach all', ()
   const i = routeSrc.indexOf("router.get('/api/caregiver/documents'");
   assert.ok(i > 0, 'the document list route exists');
   const list = routeSrc.slice(i, i + 1400);
-  assert.match(list, /requireCaregiverOrAdmin/, 'nobody else reaches the list at all');
-  assert.match(list, /wanted = isAdmin \? \(req\.query\.caregiverId \|\| null\) : req\.user\.id/,
-    'a caregiver is pinned to their own rows; only an admin may name someone');
+  // Renamed 2026-11-03 when managers and coordinators joined the office.
+  assert.match(list, /requireCaregiverOrOffice/, 'nobody else reaches the list at all');
+  assert.match(list, /wanted = isOffice \? \(req\.query\.caregiverId \|\| null\) : req\.user\.id/,
+    'a caregiver is pinned to their own rows; only the office may name someone');
 
   const f = routeSrc.indexOf("router.get('/api/caregiver/documents/:id/file'");
   const file = routeSrc.slice(f, f + 1400);
   assert.match(file, /DOC_NOT_YOURS/, "opening another caregiver's document is refused");
-  assert.match(file, /!isAdmin && row\.caregiver_id !== req\.user\.id/,
+  assert.match(file, /!isOffice && row\.caregiver_id !== req\.user\.id/,
     'and the check is on the row, not on what was asked for');
 });
 

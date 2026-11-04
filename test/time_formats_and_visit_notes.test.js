@@ -167,7 +167,22 @@ test('no export puts a stored instant or a UTC date slice into a cell', () => {
   // browser formats it through gfc-time. A guard that cannot tell a
   // spreadsheet cell from an API field would have to be ignored, so it is
   // narrowed instead of relaxed.
+  // Payroll and billing rows are built once (buildPayrollRows,
+  // buildBillingRows, 2026-11-03) and read by the CSV and the on-screen view,
+  // so the guard reads the builder; my-hours still builds its own.
+  const BUILDERS = { '/api/scheduling/payroll.csv': 'const buildPayrollRows', '/api/scheduling/billing.csv': 'const buildBillingRows' };
   const bodyOf = (routePath) => {
+    if (BUILDERS[routePath]) {
+      const r = src.indexOf(`router.get('${routePath}'`);
+      assert.ok(r > 0, `${routePath} not found — the guard is pointed at nothing`);
+      assert.ok(src.slice(r, r + 900).includes(BUILDERS[routePath].replace('const ', '') + '('), `${routePath} reads its builder`);
+      const i = src.indexOf(BUILDERS[routePath]);
+      assert.ok(i > 0, `${BUILDERS[routePath]} not found`);
+      const next = src.indexOf('\n  const build', i + 10);
+      const stop = src.indexOf('\n  // GET /api/scheduling', i + 1);
+      const end = [next, stop].filter(n => n > i).sort((a, b) => a - b)[0];
+      return src.slice(i, end === undefined ? src.length : end);
+    }
     const i = src.indexOf(`router.get('${routePath}'`);
     assert.ok(i > 0, `${routePath} not found — the guard is pointed at nothing`);
     const next = src.indexOf('\n  // GET /api/scheduling', i + 1);

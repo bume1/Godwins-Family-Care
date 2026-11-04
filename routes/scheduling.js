@@ -28,6 +28,7 @@ const wpRepo = require('../welcomePacketRepository');
 const onboardingGate = require('../caregiverOnboardingGate');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
+const accountTypes = require('../accountTypes');
 // The office number. ORG in public/consent-text.js is the single source — it is
 // what prints into executed consent documents, so a refusal that tells a
 // caregiver to call cannot give a different number from the paperwork.
@@ -102,10 +103,13 @@ module.exports = function createSchedulingRoutes(deps) {
   // It covers THE WORK OF SCHEDULING — posting, editing, assigning, approving a
   // claim, cancelling, and reading the board to do any of it. It deliberately
   // does NOT cover three things that are admin's alone:
-  //   the money      — payroll and billing exports, manual hours, time-log
-  //                    corrections: those are payroll attestations, not shifts;
-  //   the client record — the location/geofence write edits a client, and a
-  //                    scheduling role has no business in a client's address;
+  //   the money      — payroll and billing FILE exports, manual hours, time-log
+  //                    corrections: those are payroll attestations, not shifts.
+  //                    Since 2026-11-03 a manager READS payroll and billing
+  //                    (JSON views) and REQUESTS a time correction; the Super
+  //                    Admin still downloads and approves;
+  //   (the client's location and geofence moved to managers and coordinators
+  //    on 2026-11-03 — they set up the visits that read it);
   //   the overrides  — scheduling a client who is not enrolled, or a caregiver
   //                    who is not cleared, is a compliance decision, not a
   //                    scheduling one.
@@ -133,11 +137,14 @@ module.exports = function createSchedulingRoutes(deps) {
   // office recorded this on their behalf" are different facts, and the second
   // one is what a caregiver needs to see to correct it if the office misheard.
   //
-  // Deliberately NOT managers: the owner picked the coordinator-and-admin
-  // option over the wider one that included them. One predicate to widen if
-  // that changes.
-  const isAvailabilityRecorder = (u) =>
-    !!u && (u.role === ROLES.ADMIN || u.role === ROLES.CASE_MANAGER);
+  // WHO RECORDS IT (owner decision, 2026-11-03, superseding 2026-10-27): the
+  // Super Admin, a manager and a care coordinator. Read by ACCOUNT TYPE, never
+  // by `role`: a coordinator is stored as `role: 'user'` with the manager flag,
+  // and the old check (`role === caseManager`) refused every one of them while
+  // handing the permission to LMSWs, who are the caseManager role. An LMSW is
+  // deliberately left out: the owner did not ask for it, and case management
+  // is clinical work, not the scheduling office.
+  const isAvailabilityRecorder = (u) => accountTypes.isHomeCareOffice(u);
 
   // MIDDLEWARE, not a check inside the handler, and that is deliberate. The
   // route sweep in test/scheduling.test.js proves every /api/scheduling route
@@ -156,7 +163,7 @@ module.exports = function createSchedulingRoutes(deps) {
   const requireAvailabilityOffice = (req, res, next) => {
     if (isAvailabilityRecorder(req.user) || isScheduleManager(req.user)) return next();
     return res.status(403).json({
-      error: 'An administrator or a care coordinator records availability.',
+      error: 'An administrator, a manager or a care coordinator records availability.',
       code: 'AVAILABILITY_RECORDER_ONLY'
     });
   };
@@ -166,7 +173,7 @@ module.exports = function createSchedulingRoutes(deps) {
     if (asked && asked !== req.user.id) {
       if (isAvailabilityRecorder(req.user)) return next();
       return res.status(403).json({
-        error: 'An administrator or a care coordinator records availability for someone else.',
+        error: 'An administrator, a manager or a care coordinator records availability for someone else.',
         code: 'AVAILABILITY_RECORDER_ONLY'
       });
     }
@@ -2673,9 +2680,81 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // PUT /api/scheduling/time-logs/:id — admin correction. A REASON IS
+  // ---- THE ONE WRITER OF A TIME LOG'S TIMES --------------------------------
+  // An admin's direct correction and an approved adjustment request both come
+  // through here (owner, 2026-11-03: "one code path writes time"). It checks
+  // the new times, writes them, and appends the edit trail. It returns the
+  // stored row, or `{ error }` and writes nothing.
+  const applyTimeLogEdit = async ({ timeLogId, clockInAt, clockOutAt, reason, actor, adjustment }) => {
+    const logs = await readRows('time_logs');
+    const idx = logs.findIndex(l => l && l.id === timeLogId);
+    if (idx === -1) return { error: { status: 404, error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' } };
+    const log = logs[idx];
+
+    const before = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
+    const nextIn = clockInAt !== undefined ? isoOrNull(clockInAt) : log.clock_in_at;
+    const nextOut = clockOutAt !== undefined ? isoOrNull(clockOutAt) : log.clock_out_at;
+    if (clockInAt !== undefined && !nextIn) {
+      return { error: { status: 400, error: 'That clock-in time is not a valid timestamp.', code: 'CLOCK_IN_INVALID' } };
+    }
+    if (clockOutAt !== undefined && clockOutAt !== null && !nextOut) {
+      return { error: { status: 400, error: 'That clock-out time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' } };
+    }
+    if (nextIn && nextOut && new Date(nextOut).getTime() < new Date(nextIn).getTime()) {
+      return { error: { status: 400, error: 'The clock-out is before the clock-in.', code: 'CLOCK_OUT_BEFORE_IN' } };
+    }
+
+    const at = nowIso();
+    const actorName = actor.name || actor.email;
+    if (adjustment) {
+      // The ORIGINAL values are kept on the row, never overwritten without a
+      // trace. A second adjustment keeps the first original: "what was clocked"
+      // has one answer however many times the row is corrected.
+      if (!log.adjusted) {
+        log.original_clock_in = log.clock_in_at;
+        log.original_clock_out = log.clock_out_at;
+        log.original_total_minutes = log.total_minutes;
+      }
+      log.adjusted = true;
+      log.adjustment_request_id = adjustment.requestId;
+      log.adjusted_by_id = adjustment.requestedById;
+      log.adjusted_by_name = adjustment.requestedByName;
+      log.approved_by_id = actor.id;
+      log.approved_by_name = actorName;
+      log.adjusted_at = at;
+      log.adjustment_reason = String(reason).slice(0, 1000);
+    }
+    log.clock_in_at = nextIn;
+    log.clock_out_at = nextOut;
+    log.total_minutes = sched.totalMinutes(nextIn, nextOut);
+    log.edited = true;
+    log.edit_reason = String(reason).slice(0, 1000);
+    log.edited_by = actor.id;
+    log.edited_by_name = actorName;
+    log.edited_at = at;
+    log.flags = Array.from(new Set((log.flags || []).concat(adjustment ? 'adjusted_on_request' : 'admin_edited')));
+    logs[idx] = log;
+    await db.set('time_logs', logs);
+
+    const after = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
+
+    // Append-only edit trail alongside the activity entry, so the sequence of
+    // corrections survives even if the log row is corrected again.
+    const edits = await readRows('time_log_edits');
+    edits.push({
+      id: uuidv4(), time_log_id: log.id, before, after, reason: log.edit_reason,
+      kind: adjustment ? 'adjustment_request' : 'admin_edit',
+      adjustment_request_id: adjustment ? adjustment.requestId : null,
+      by: actor.id, by_name: actorName, at
+    });
+    await db.set('time_log_edits', edits);
+    return { log, before, after };
+  };
+
+  // PUT /api/scheduling/time-logs/:id — Super Admin correction. A REASON IS
   // MANDATORY, and the before/after goes to the activity log. There is no path
-  // that edits a time log without leaving that trail.
+  // that edits a time log without leaving that trail. A manager or care
+  // coordinator raises an adjustment request instead (below).
   router.put('/api/scheduling/time-logs/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const body = req.body || {};
@@ -2683,47 +2762,11 @@ module.exports = function createSchedulingRoutes(deps) {
       if (!reason) {
         return res.status(400).json({ error: 'A time-log edit needs a reason.', code: 'EDIT_REASON_REQUIRED' });
       }
-
-      const logs = await readRows('time_logs');
-      const idx = logs.findIndex(l => l && l.id === req.params.id);
-      if (idx === -1) return res.status(404).json({ error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' });
-      const log = logs[idx];
-
-      const before = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
-      const nextIn = body.clockInAt !== undefined ? isoOrNull(body.clockInAt) : log.clock_in_at;
-      const nextOut = body.clockOutAt !== undefined ? isoOrNull(body.clockOutAt) : log.clock_out_at;
-      if (body.clockInAt !== undefined && !nextIn) {
-        return res.status(400).json({ error: 'That clock-in time is not a valid timestamp.', code: 'CLOCK_IN_INVALID' });
-      }
-      if (body.clockOutAt !== undefined && body.clockOutAt !== null && !nextOut) {
-        return res.status(400).json({ error: 'That clock-out time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' });
-      }
-      if (nextIn && nextOut && new Date(nextOut).getTime() < new Date(nextIn).getTime()) {
-        return res.status(400).json({ error: 'The clock-out is before the clock-in.', code: 'CLOCK_OUT_BEFORE_IN' });
-      }
-
-      log.clock_in_at = nextIn;
-      log.clock_out_at = nextOut;
-      log.total_minutes = sched.totalMinutes(nextIn, nextOut);
-      log.edited = true;
-      log.edit_reason = reason.slice(0, 1000);
-      log.edited_by = req.user.id;
-      log.edited_by_name = req.user.name || req.user.email;
-      log.edited_at = nowIso();
-      log.flags = Array.from(new Set((log.flags || []).concat('admin_edited')));
-      logs[idx] = log;
-      await db.set('time_logs', logs);
-
-      const after = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
-
-      // Append-only edit trail alongside the activity entry, so the sequence of
-      // corrections survives even if the log row is corrected again.
-      const edits = await readRows('time_log_edits');
-      edits.push({
-        id: uuidv4(), time_log_id: log.id, before, after, reason: log.edit_reason,
-        by: req.user.id, by_name: log.edited_by_name, at: log.edited_at
+      const out = await applyTimeLogEdit({
+        timeLogId: req.params.id, clockInAt: body.clockInAt, clockOutAt: body.clockOutAt, reason, actor: req.user
       });
-      await db.set('time_log_edits', edits);
+      if (out.error) return res.status(out.error.status).json({ error: out.error.error, code: out.error.code });
+      const { log, before, after } = out;
 
       await logActivity(req.user.id, log.edited_by_name, 'time_log_edited', 'time_log', log.id,
         { reason: log.edit_reason, before, after, caregiverId: log.caregiver_id, shiftId: log.shift_id });
@@ -2735,71 +2778,354 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // GET /api/scheduling/payroll.csv — admin only, date range.
+  // ---- TIME ADJUSTMENT REQUESTS (owner, 2026-11-03) ------------------------
+  // A manager or care coordinator who finds a wrong time log asks for it to be
+  // corrected; the Super Admin approves or declines. Approving applies the
+  // change through applyTimeLogEdit, the same writer the admin's own edit
+  // uses. Nothing else applies a request.
+  const ADJUSTMENT_STATUSES = Object.freeze(['pending', 'approved', 'declined']);
+  const publicAdjustment = (r) => r && ({
+    id: r.id, timeLogId: r.time_log_id, shiftId: r.shift_id,
+    caregiverId: r.caregiver_id, caregiverName: r.caregiver_name || null, clientName: r.client_name || null,
+    requestedById: r.requested_by_id, requestedByName: r.requested_by_name, requestedByRole: r.requested_by_role,
+    requestedAt: r.requested_at,
+    currentClockIn: r.current_clock_in, currentClockOut: r.current_clock_out,
+    requestedClockIn: r.requested_clock_in, requestedClockOut: r.requested_clock_out,
+    reason: r.reason, status: r.status,
+    decidedById: r.decided_by_id, decidedByName: r.decided_by_name, decidedAt: r.decided_at,
+    decisionNote: r.decision_note, history: r.history || []
+  });
+
+  // POST /api/scheduling/time-logs/:id/adjustment-requests — raise one.
+  router.post('/api/scheduling/time-logs/:id/adjustment-requests', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const reason = String(body.reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({ error: 'Say why this time needs changing.', code: 'ADJUSTMENT_REASON_REQUIRED' });
+      }
+      const logs = await readRows('time_logs');
+      const log = logs.find(l => l && l.id === req.params.id);
+      if (!log) return res.status(404).json({ error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' });
+
+      const reqIn = body.clockInAt !== undefined ? isoOrNull(body.clockInAt) : log.clock_in_at;
+      const reqOut = body.clockOutAt !== undefined ? isoOrNull(body.clockOutAt) : log.clock_out_at;
+      if (body.clockInAt !== undefined && !reqIn) {
+        return res.status(400).json({ error: 'That clock-in time is not a valid timestamp.', code: 'CLOCK_IN_INVALID' });
+      }
+      if (body.clockOutAt !== undefined && body.clockOutAt !== null && !reqOut) {
+        return res.status(400).json({ error: 'That clock-out time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' });
+      }
+      if (reqIn && reqOut && new Date(reqOut).getTime() < new Date(reqIn).getTime()) {
+        return res.status(400).json({ error: 'The clock-out is before the clock-in.', code: 'CLOCK_OUT_BEFORE_IN' });
+      }
+      if (reqIn === log.clock_in_at && reqOut === log.clock_out_at) {
+        return res.status(400).json({ error: 'Those are the times already on the log.', code: 'ADJUSTMENT_NO_CHANGE' });
+      }
+
+      const rows = await readRows('time_log_adjustment_requests');
+      const open = rows.find(r => r && r.time_log_id === log.id && r.status === 'pending');
+      if (open) {
+        return res.status(409).json({
+          error: `${open.requested_by_name} already asked for this time to be changed on ${time.fmtDateTime(open.requested_at)}. It is waiting on the Super Admin.`,
+          code: 'ADJUSTMENT_ALREADY_PENDING', request: publicAdjustment(open)
+        });
+      }
+
+      const at = nowIso();
+      const role = accountTypes.accountTypeOf(req.user);
+      const row = {
+        id: uuidv4(),
+        time_log_id: log.id,
+        shift_id: log.shift_id || null,
+        caregiver_id: log.caregiver_id,
+        caregiver_name: log.caregiver_name || null,
+        client_name: log.client_name || null,
+        requested_by_id: req.user.id,
+        requested_by_name: req.user.name || req.user.email,
+        requested_by_role: role,
+        requested_at: at,
+        current_clock_in: log.clock_in_at,
+        current_clock_out: log.clock_out_at,
+        requested_clock_in: reqIn,
+        requested_clock_out: reqOut,
+        reason: reason.slice(0, 1000),
+        status: 'pending',
+        decided_by_id: null, decided_by_name: null, decided_at: null, decision_note: null,
+        // Append-only status trail.
+        history: [{ status: 'pending', at, byId: req.user.id, byName: req.user.name || req.user.email }]
+      };
+      rows.push(row);
+      await db.set('time_log_adjustment_requests', rows);
+
+      await logActivity(req.user.id, row.requested_by_name, 'time_log_adjustment_requested', 'time_log', log.id, {
+        requestId: row.id, role, caregiverId: log.caregiver_id,
+        current: { clockInAt: row.current_clock_in, clockOutAt: row.current_clock_out },
+        requested: { clockInAt: reqIn, clockOutAt: reqOut }
+      });
+
+      for (const admin of (await getUsers()).filter(u => u.role === ROLES.ADMIN && u.email && u.accountStatus !== 'inactive')) {
+        await queueNotification('time_adjustment_requested', admin.id, admin.email, admin.name,
+          {
+            subject: 'A time adjustment is waiting for your approval',
+            body: `${row.requested_by_name} asked to change ${row.caregiver_name || 'a caregiver'}'s clocked time for ${time.fmtDateTime(row.current_clock_in)}. Their reason: "${row.reason}". Nothing changes until you approve it.`,
+            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
+          },
+          { relatedEntityId: `${row.id}:requested`, relatedEntityType: 'time_log', createdBy: req.user.id });
+      }
+
+      res.json({ request: publicAdjustment(row), message: 'Sent to the Super Admin. The time does not change until they approve it.' });
+    } catch (error) {
+      console.error('Adjustment request error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/adjustment-requests — the queue. Managers and
+  // coordinators see every request (so nobody raises a second one); the Super
+  // Admin works from the same list.
+  router.get('/api/scheduling/adjustment-requests', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      let rows = await readRows('time_log_adjustment_requests');
+      const status = req.query.status ? String(req.query.status) : null;
+      if (status && ADJUSTMENT_STATUSES.includes(status)) rows = rows.filter(r => r.status === status);
+      if (req.query.timeLogId) rows = rows.filter(r => r.time_log_id === String(req.query.timeLogId));
+      rows = rows.slice().sort((a, b) => {
+        // Pending first, oldest first within it: the one waiting longest is
+        // the one most likely forgotten.
+        if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+        return a.status === 'pending'
+          ? String(a.requested_at).localeCompare(String(b.requested_at))
+          : String(b.requested_at).localeCompare(String(a.requested_at));
+      });
+      res.json({
+        requests: rows.slice(0, 500).map(publicAdjustment),
+        pendingCount: rows.filter(r => r.status === 'pending').length,
+        canDecide: isAdmin(req.user)
+      });
+    } catch (error) {
+      console.error('Adjustment list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/adjustment-requests/:id/decide — Super Admin only.
+  router.post('/api/scheduling/adjustment-requests/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const decision = String(body.decision || '').trim();
+      if (!['approved', 'declined'].includes(decision)) {
+        return res.status(400).json({ error: 'Choose approved or declined.', code: 'ADJUSTMENT_DECISION_INVALID' });
+      }
+      const note = String(body.note || '').trim().slice(0, 1000) || null;
+      const rows = await readRows('time_log_adjustment_requests');
+      const idx = rows.findIndex(r => r && r.id === req.params.id);
+      if (idx === -1) return res.status(404).json({ error: 'Adjustment request not found.', code: 'ADJUSTMENT_NOT_FOUND' });
+      const row = rows[idx];
+      if (row.status !== 'pending') {
+        return res.status(409).json({ error: `This request was already ${row.status}.`, code: 'ADJUSTMENT_ALREADY_DECIDED' });
+      }
+
+      let timeLog = null;
+      if (decision === 'approved') {
+        // A log corrected since the request was raised is a different log: the
+        // requester reasoned about times that are no longer on it.
+        const current = (await readRows('time_logs')).find(l => l && l.id === row.time_log_id);
+        if (!current) return res.status(404).json({ error: 'That time log no longer exists.', code: 'TIME_LOG_NOT_FOUND' });
+        if (current.clock_in_at !== row.current_clock_in || current.clock_out_at !== row.current_clock_out) {
+          return res.status(409).json({
+            error: 'This time log has changed since the request was raised. Decline it and ask for a new one.',
+            code: 'ADJUSTMENT_STALE'
+          });
+        }
+        const out = await applyTimeLogEdit({
+          timeLogId: row.time_log_id,
+          clockInAt: row.requested_clock_in, clockOutAt: row.requested_clock_out,
+          reason: row.reason, actor: req.user,
+          adjustment: { requestId: row.id, requestedById: row.requested_by_id, requestedByName: row.requested_by_name }
+        });
+        if (out.error) return res.status(out.error.status).json({ error: out.error.error, code: out.error.code });
+        timeLog = out.log;
+        await logActivity(req.user.id, req.user.name || req.user.email, 'time_log_edited', 'time_log', timeLog.id, {
+          reason: timeLog.edit_reason, before: out.before, after: out.after,
+          caregiverId: timeLog.caregiver_id, shiftId: timeLog.shift_id, adjustmentRequestId: row.id
+        });
+      }
+
+      const at = nowIso();
+      row.status = decision;
+      row.decided_by_id = req.user.id;
+      row.decided_by_name = req.user.name || req.user.email;
+      row.decided_at = at;
+      row.decision_note = note;
+      row.history = (row.history || []).concat({ status: decision, at, byId: req.user.id, byName: row.decided_by_name, note });
+      // Re-read before writing, so a request raised meanwhile is not dropped.
+      const fresh = await readRows('time_log_adjustment_requests');
+      const fi = fresh.findIndex(r => r && r.id === row.id);
+      if (fi === -1) fresh.push(row); else fresh[fi] = row;
+      await db.set('time_log_adjustment_requests', fresh);
+
+      await logActivity(req.user.id, row.decided_by_name, `time_log_adjustment_${decision}`, 'time_log', row.time_log_id, {
+        requestId: row.id, requestedById: row.requested_by_id, caregiverId: row.caregiver_id, note
+      });
+
+      const requester = (await getUsers()).find(u => u.id === row.requested_by_id);
+      if (requester && requester.email) {
+        await queueNotification('time_adjustment_decided', requester.id, requester.email, requester.name,
+          {
+            subject: decision === 'approved' ? 'Your time adjustment was approved' : 'Your time adjustment was declined',
+            body: decision === 'approved'
+              ? `The Super Admin approved your change to ${row.caregiver_name || 'the caregiver'}'s time for ${time.fmtDateTime(row.current_clock_in)}. The time log now shows the new times and keeps the originals.`
+              : `The Super Admin declined your change to ${row.caregiver_name || 'the caregiver'}'s time for ${time.fmtDateTime(row.current_clock_in)}.${note ? ` Their note: "${note}".` : ''} The time log is unchanged.`,
+            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
+          },
+          { relatedEntityId: `${row.id}:${decision}`, relatedEntityType: 'time_log', createdBy: req.user.id });
+      }
+
+      res.json({ request: publicAdjustment(row), timeLog: timeLog ? publicTimeLog(timeLog) : null });
+    } catch (error) {
+      console.error('Adjustment decision error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ---- Payroll and billing rows ------------------------------------------
+  // ONE builder for each, read by the CSV export (Super Admin) and by the JSON
+  // view (manager, care coordinator). Two copies of "what payroll says" would
+  // be two answers to the same question the first time one of them changed.
+  const dateRangeError = (from, to) => {
+    if (!sched.isIsoDate(from) || !sched.isIsoDate(to)) {
+      return { status: 400, error: 'Give a from and to date (YYYY-MM-DD).', code: 'DATE_RANGE_REQUIRED' };
+    }
+    if (to < from) return { status: 400, error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' };
+    return null;
+  };
+
+  // The adjustment columns (owner, 2026-11-03). The caregiver who worked the
+  // shift stays the subject of the row; these say the time was changed, from
+  // what, by whom and who approved it. An unadjusted row reads "no" and blanks.
+  const adjustmentCells = (l) => {
+    if (!l || !l.adjusted) {
+      return { adjusted: 'no', originalHours: '', adjustedBy: '', approvedBy: '', adjustedAt: '', adjustmentReason: '' };
+    }
+    const local = sched.csvLocalDate(l.clock_in_at);
+    return {
+      adjusted: 'yes',
+      originalHours: sched.minutesToHours(l.original_total_minutes),
+      adjustedBy: l.adjusted_by_name || '',
+      approvedBy: l.approved_by_name || '',
+      adjustedAt: l.adjusted_at ? `${sched.csvDate(l.adjusted_at)} ${sched.csvTime(l.adjusted_at, local)}` : '',
+      adjustmentReason: l.adjustment_reason || ''
+    };
+  };
+
+  const buildPayrollRows = async (from, to) => {
+    // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
+    // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
+    // dropped the last evening of the range and pulled in the evening before
+    // it — and then handed the wrong date to the pay period.
+    const logs = (await readRows('time_logs')).filter(l => {
+      const d = sched.csvLocalDate(l.clock_in_at);
+      return d >= from && d <= to;
+    }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+    // Resolve each row's pay rate (owner request, 2026-09-13). A pay rate
+    // that payroll never reads is a number stored and left inert — the exact
+    // trap the competency ceiling was, one week earlier in this same repo.
+    const allUsers = await getUsers();
+    const usersById = new Map(allUsers.map(u => [u.id, u]));
+    const shiftRows = await readRows('shifts');
+    const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
+
+    return logs.map(l => {
+      const shiftDate = sched.csvLocalDate(l.clock_in_at);
+      const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
+      // Shift rate → this caregiver's rate for this client → their base rate.
+      const resolved = cg.resolvePayRate(
+        usersById.get(l.caregiver_id),
+        l.client_id,
+        shiftsById.get(l.shift_id)
+      );
+      const hoursNum = sched.minutesToHours(l.total_minutes);
+      // An unset rate prints EMPTY, never 0.00 — a blank cell is a question
+      // for whoever runs payroll; a zero is an answer, and the wrong one.
+      // Same for an open shift, where hours is null rather than zero.
+      const gross = (resolved.rate !== null && hoursNum !== null && hoursNum !== undefined)
+        ? (Math.round(resolved.rate * Number(hoursNum) * 100) / 100).toFixed(2)
+        : '';
+      return {
+        timeLogId: l.id,
+        caregiverId: l.caregiver_id,
+        payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
+        payRateSource: resolved.rate === null ? 'not set' : resolved.source,
+        grossPay: gross,
+        caregiverName: l.caregiver_name,
+        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+        clientName: l.client_name,
+        shiftDate: sched.csvDate(l.clock_in_at),
+        scheduledStart: sched.csvTime(l.scheduled_start, shiftDate),
+        scheduledEnd: sched.csvTime(l.scheduled_end, shiftDate),
+        clockInAt: sched.csvTime(l.clock_in_at, shiftDate),
+        clockOutAt: sched.csvTime(l.clock_out_at, shiftDate),
+        hours: sched.minutesToHours(l.total_minutes),
+        ...adjustmentCells(l),
+        flags: (l.flags || []).join(' '),
+        edited: l.edited ? 'yes' : '',
+        editReason: l.edit_reason || '',
+        source: l.entered_manually ? 'Manual entry' : 'Clocked',
+        enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
+        payPeriodStart: period.start,
+        payPeriodEnd: period.end
+      };
+    });
+  };
+
+  // What gets INVOICED, which is a different question from payroll: one line
+  // per COMPLETED visit, grouped by client. A shift still in progress has no
+  // final hours, so it is not billable and is not listed — a half-open visit
+  // on an invoice is a credit note waiting to happen.
+  const buildBillingRows = async (from, to, onlyClient) => {
+    const visitLogs = await readRows('caregiver_visit_logs');
+    const documentedShiftIds = new Set(visitLogs.filter(v => v && v.shift_id).map(v => String(v.shift_id)));
+
+    const logs = (await readRows('time_logs')).filter(l => {
+      if (!l || !l.clock_out_at) return false;          // not finished, not billable
+      if (onlyClient && String(l.client_id) !== onlyClient) return false;
+      const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
+      return d >= from && d <= to;
+    }).sort((a, b) =>
+      String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
+      String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+    return logs.map(l => ({
+      timeLogId: l.id,
+      caregiverId: l.caregiver_id,
+      clientName: l.client_name,
+      serviceDate: sched.csvDate(l.clock_in_at),
+      caregiverName: l.caregiver_name,
+      licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+      scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
+      scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
+      clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
+      clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
+      hours: sched.minutesToHours(l.total_minutes),
+      ...adjustmentCells(l),
+      // Says what the GPS check could actually establish, never more: an
+      // unverifiable clock-in is not the same claim as a verified one, and
+      // an invoice should not blur them.
+      verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
+      documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
+    }));
+  };
+
+  // GET /api/scheduling/payroll.csv — the FILE, Super Admin only.
   router.get('/api/scheduling/payroll.csv', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const from = String(req.query.from || '');
       const to = String(req.query.to || '');
-      if (!sched.isIsoDate(from) || !sched.isIsoDate(to)) {
-        return res.status(400).json({ error: 'Give a from and to date (YYYY-MM-DD).', code: 'DATE_RANGE_REQUIRED' });
-      }
-      if (to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
-
-      // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
-      // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
-      // dropped the last evening of the range and pulled in the evening before
-      // it — and then handed the wrong date to the pay period.
-      const logs = (await readRows('time_logs')).filter(l => {
-        const d = sched.csvLocalDate(l.clock_in_at);
-        return d >= from && d <= to;
-      }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
-
-      // Resolve each row's pay rate (owner request, 2026-09-13). A pay rate
-      // that payroll never reads is a number stored and left inert — the exact
-      // trap the competency ceiling was, one week earlier in this same repo.
-      const allUsers = await getUsers();
-      const usersById = new Map(allUsers.map(u => [u.id, u]));
-      const shiftRows = await readRows('shifts');
-      const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
-
-      const rows = logs.map(l => {
-        const shiftDate = sched.csvLocalDate(l.clock_in_at);
-        const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
-        // Shift rate → this caregiver's rate for this client → their base rate.
-        const resolved = cg.resolvePayRate(
-          usersById.get(l.caregiver_id),
-          l.client_id,
-          shiftsById.get(l.shift_id)
-        );
-        const hoursNum = sched.minutesToHours(l.total_minutes);
-        // An unset rate prints EMPTY, never 0.00 — a blank cell is a question
-        // for whoever runs payroll; a zero is an answer, and the wrong one.
-        // Same for an open shift, where hours is null rather than zero.
-        const gross = (resolved.rate !== null && hoursNum !== null && hoursNum !== undefined)
-          ? (Math.round(resolved.rate * Number(hoursNum) * 100) / 100).toFixed(2)
-          : '';
-        return {
-          payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
-          payRateSource: resolved.rate === null ? 'not set' : resolved.source,
-          grossPay: gross,
-          caregiverName: l.caregiver_name,
-          licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
-          clientName: l.client_name,
-          shiftDate: sched.csvDate(l.clock_in_at),
-          scheduledStart: sched.csvTime(l.scheduled_start, shiftDate),
-          scheduledEnd: sched.csvTime(l.scheduled_end, shiftDate),
-          clockInAt: sched.csvTime(l.clock_in_at, shiftDate),
-          clockOutAt: sched.csvTime(l.clock_out_at, shiftDate),
-          hours: sched.minutesToHours(l.total_minutes),
-          flags: (l.flags || []).join(' '),
-          edited: l.edited ? 'yes' : '',
-          editReason: l.edit_reason || '',
-          source: l.entered_manually ? 'Manual entry' : 'Clocked',
-          enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
-          payPeriodStart: period.start,
-          payPeriodEnd: period.end
-        };
-      });
+      const bad = dateRangeError(from, to);
+      if (bad) return res.status(bad.status).json({ error: bad.error, code: bad.code });
+      const rows = await buildPayrollRows(from, to);
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'payroll_csv_exported', 'time_log', null,
         { from, to, rows: rows.length });
@@ -2813,49 +3139,36 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // GET /api/scheduling/billing.csv — admin only. What gets INVOICED, which is
-  // a different question from what payroll.csv answers: one line per COMPLETED
-  // visit, grouped by client. A shift still in progress has no final hours, so
-  // it is not billable and is not listed — a half-open visit on an invoice is
-  // a credit note waiting to happen.
+  // GET /api/scheduling/payroll — the same rows as JSON, to READ on screen.
+  // Managers and care coordinators see the numbers; only the Super Admin
+  // downloads a file (owner, 2026-11-03). Individual pay rates are included,
+  // per the owner's assumed decision; drop the rate columns here if that
+  // changes. Each view is audited like the export.
+  router.get('/api/scheduling/payroll', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const from = String(req.query.from || '');
+      const to = String(req.query.to || '');
+      const bad = dateRangeError(from, to);
+      if (bad) return res.status(bad.status).json({ error: bad.error, code: bad.code });
+      const rows = await buildPayrollRows(from, to);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'payroll_viewed', 'time_log', null,
+        { from, to, rows: rows.length, role: accountTypes.accountTypeOf(req.user) });
+      res.json({ from, to, columns: sched.PAYROLL_CSV_COLUMNS, rows, canExport: isAdmin(req.user) });
+    } catch (error) {
+      console.error('Payroll view error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/billing.csv — the FILE, Super Admin only.
   router.get('/api/scheduling/billing.csv', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const from = String(req.query.from || '');
       const to = String(req.query.to || '');
-      if (!sched.isIsoDate(from) || !sched.isIsoDate(to)) {
-        return res.status(400).json({ error: 'Give a from and to date (YYYY-MM-DD).', code: 'DATE_RANGE_REQUIRED' });
-      }
-      if (to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
+      const bad = dateRangeError(from, to);
+      if (bad) return res.status(bad.status).json({ error: bad.error, code: bad.code });
       const onlyClient = req.query.clientId ? String(req.query.clientId) : null;
-
-      const visitLogs = await readRows('caregiver_visit_logs');
-      const documentedShiftIds = new Set(visitLogs.filter(v => v && v.shift_id).map(v => String(v.shift_id)));
-
-      const logs = (await readRows('time_logs')).filter(l => {
-        if (!l || !l.clock_out_at) return false;          // not finished, not billable
-        if (onlyClient && String(l.client_id) !== onlyClient) return false;
-        const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
-        return d >= from && d <= to;
-      }).sort((a, b) =>
-        String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
-        String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
-
-      const rows = logs.map(l => ({
-        clientName: l.client_name,
-        serviceDate: sched.csvDate(l.clock_in_at),
-        caregiverName: l.caregiver_name,
-        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
-        scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
-        scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
-        clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
-        clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
-        hours: sched.minutesToHours(l.total_minutes),
-        // Says what the GPS check could actually establish, never more: an
-        // unverifiable clock-in is not the same claim as a verified one, and
-        // an invoice should not blur them.
-        verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
-        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
-      }));
+      const rows = await buildBillingRows(from, to, onlyClient);
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'billing_csv_exported', 'time_log', null,
         { from, to, clientId: onlyClient, rows: rows.length });
@@ -2865,6 +3178,24 @@ module.exports = function createSchedulingRoutes(deps) {
       res.send(sched.toPayrollCsv(rows, sched.BILLING_CSV_COLUMNS));
     } catch (error) {
       console.error('Billing CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/billing — the same rows as JSON, read-only on screen.
+  router.get('/api/scheduling/billing', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const from = String(req.query.from || '');
+      const to = String(req.query.to || '');
+      const bad = dateRangeError(from, to);
+      if (bad) return res.status(bad.status).json({ error: bad.error, code: bad.code });
+      const onlyClient = req.query.clientId ? String(req.query.clientId) : null;
+      const rows = await buildBillingRows(from, to, onlyClient);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'billing_viewed', 'time_log', null,
+        { from, to, clientId: onlyClient, rows: rows.length, role: accountTypes.accountTypeOf(req.user) });
+      res.json({ from, to, columns: sched.BILLING_CSV_COLUMNS, rows, canExport: isAdmin(req.user) });
+    } catch (error) {
+      console.error('Billing view error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -2996,7 +3327,12 @@ module.exports = function createSchedulingRoutes(deps) {
           isManager: !!req.user.isManager,
           manageSchedule: isScheduleManager(req.user),
           managePay: isAdmin(req.user),
-          manageLocations: isAdmin(req.user),
+          manageLocations: isScheduleManager(req.user),
+          // Managers and coordinators READ payroll and billing; only the Super
+          // Admin downloads the file (owner, 2026-11-03).
+          viewPay: isScheduleManager(req.user),
+          exportPay: isAdmin(req.user),
+          decideAdjustments: isAdmin(req.user),
           canOverrideGates: isAdmin(req.user)
         }
       });
@@ -3006,14 +3342,16 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // PUT /api/scheduling/clients/:clientId/location — admin records the client's
-  // address coordinates and, optionally, a geofence radius for that address.
+  // PUT /api/scheduling/clients/:clientId/location — the office records the
+  // client's address coordinates and, optionally, a geofence radius.
   //
   // This is the missing half of the geofence: the check exists, the data did
   // not, so every clock-in recorded `unverifiable` and there was nowhere in the
-  // app to fix that. Admin-only, and it writes ONLY the location fields — a
-  // scheduling screen has no business touching the rest of a client record.
-  router.put('/api/scheduling/clients/:clientId/location', authenticateToken, requireAdmin, async (req, res) => {
+  // app to fix that. A manager or care coordinator may set it as well as the
+  // Super Admin (owner decision, 2026-11-03): they set up the visits, so they
+  // are the ones who find a clock-in landing as unverifiable. It still writes
+  // ONLY the location fields, never the rest of the client record.
+  router.put('/api/scheduling/clients/:clientId/location', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const { valid, errors, clean } = sched.validateClientLocation(req.body);
       if (!valid) {
@@ -3141,7 +3479,17 @@ module.exports = function createSchedulingRoutes(deps) {
     // reviewer can tell a typed entry from a clocked one without reading flags.
     enteredManually: !!l.entered_manually,
     entryReason: l.entry_reason || null,
-    enteredByName: l.entered_by_name || null
+    enteredByName: l.entered_by_name || null,
+    // An approved adjustment request (owner, 2026-11-03): the original times
+    // stay readable beside the new ones.
+    adjusted: !!l.adjusted,
+    originalClockIn: l.adjusted ? (l.original_clock_in || null) : null,
+    originalClockOut: l.adjusted ? (l.original_clock_out || null) : null,
+    originalHours: l.adjusted ? sched.minutesToHours(l.original_total_minutes) : null,
+    adjustedByName: l.adjusted_by_name || null,
+    approvedByName: l.approved_by_name || null,
+    adjustedAt: l.adjusted_at || null,
+    adjustmentReason: l.adjustment_reason || null
   });
 
   const normalizeGps = (gps) => {

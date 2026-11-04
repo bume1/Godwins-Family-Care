@@ -431,13 +431,13 @@ test('rejecting a document REQUIRES a reason, and the caregiver is told what it 
   assert.strictEqual(ok.status, 200);
 });
 
-test('only an admin reviews; a caregiver cannot accept their own timesheet', async (t) => {
+test('only the office reviews; a caregiver cannot accept their own timesheet', async (t) => {
   const store = {};
   const h = await mountCaregiver(t, { store });
   const { document } = await (await upload(h)).json();
   const res = await h.post(`/api/caregiver/documents/${document.id}/review`, { decision: 'accepted' });
   assert.strictEqual(res.status, 403);
-  assert.strictEqual((await res.json()).code, 'ADMIN_ONLY');
+  assert.strictEqual((await res.json()).code, 'CAREGIVER_OFFICE_ONLY');
 });
 
 test('the Drive id and stored name never leave the server', async (t) => {

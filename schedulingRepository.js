@@ -648,12 +648,21 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'caregiverName', header: 'Caregiver' },
   { key: 'licenseLevel', header: 'License Level' },
   { key: 'clientName', header: 'Client' },
+  // EARLY on purpose (owner, 2026-11-03): somebody scanning a pay run sees at
+  // a glance which rows had their time changed after an approved adjustment
+  // request. The caregiver stays the subject of the row either way.
+  { key: 'adjusted', header: 'Adjusted' },
   { key: 'shiftDate', header: 'Shift Date' },
   { key: 'scheduledStart', header: 'Scheduled Start' },
   { key: 'scheduledEnd', header: 'Scheduled End' },
   { key: 'clockInAt', header: 'Clock In' },
   { key: 'clockOutAt', header: 'Clock Out' },
   { key: 'hours', header: 'Hours' },
+  { key: 'originalHours', header: 'Original Hours' },
+  { key: 'adjustedBy', header: 'Adjusted By' },
+  { key: 'approvedBy', header: 'Approved By' },
+  { key: 'adjustedAt', header: 'Adjusted At' },
+  { key: 'adjustmentReason', header: 'Adjustment Reason' },
   // What we PAY, added 2026-09-13 once a caregiver pay rate existed to read.
   // An unset rate prints EMPTY, never 0.00: a blank cell is a question for
   // whoever runs payroll, a zero is an answer and the wrong one. `Rate Source`
@@ -684,11 +693,17 @@ const BILLING_CSV_COLUMNS = Object.freeze([
   { key: 'serviceDate', header: 'Service Date' },
   { key: 'caregiverName', header: 'Caregiver' },
   { key: 'licenseLevel', header: 'License Level' },
+  { key: 'adjusted', header: 'Adjusted' },
   { key: 'scheduledStart', header: 'Scheduled Start' },
   { key: 'scheduledEnd', header: 'Scheduled End' },
   { key: 'clockInAt', header: 'Actual In' },
   { key: 'clockOutAt', header: 'Actual Out' },
   { key: 'hours', header: 'Billable Hours' },
+  { key: 'originalHours', header: 'Original Hours' },
+  { key: 'adjustedBy', header: 'Adjusted By' },
+  { key: 'approvedBy', header: 'Approved By' },
+  { key: 'adjustedAt', header: 'Adjusted At' },
+  { key: 'adjustmentReason', header: 'Adjustment Reason' },
   { key: 'verification', header: 'Visit Verification' },
   { key: 'documented', header: 'Visit Documented' }
 ]);
