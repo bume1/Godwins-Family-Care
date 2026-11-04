@@ -70,8 +70,14 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
 const codeCatalog = require('./codeCatalog');
+const claimScrub = require('./claimScrub');       // the claim scrub + documentation gate (AI coding pipeline, Phase 1, 2026-11-04)
+const emLevels = require('./emLevels');           // THE E/M level table, verified 2026-11-04
+const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
+const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
+const serviceRules = require('./serviceRules');   // Phase 3b: selection for the codes that are not level-based
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
+const userFinancial = require('./userFinancialFields');   // the user fields that move money (owner, 2026-11-03)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
@@ -3088,7 +3094,14 @@ app.post('/api/auth/signup', authenticateToken, requireAdmin, async (req, res) =
 // same rule the competency catalog follows (2026-09-10): a second copy of the
 // vocabulary is a copy that drifts, and a drifting clinical role decides who
 // may prescribe. Build-enforced in test/clinical_roles.test.js.
-app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res) => {
+// A manager or care coordinator reads it too (owner, 2026-11-03), and is
+// served ONLY the account types they may pick (accountTypes.canManageAccountType).
+// The server still refuses anything else; the form just stops offering it.
+const requireUserFormReader = (req, res, next) => {
+  if (accountTypes.isHomeCareOffice(req.user)) return next();
+  return res.status(403).json({ error: 'Super Admin access required' });
+};
+app.get('/api/admin/clinical-roles', authenticateToken, requireUserFormReader, (req, res) => {
   res.json({
     roles: clinicalRoles.ALL_CLINICAL_ROLES.map(value => ({
       value,
@@ -3100,22 +3113,143 @@ app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res)
     capabilityLabels: clinicalRoles.CAPABILITY_REASONS,
     // The ONE account-type picker (owner, 2026-10-15), served so the form
     // never lists a type of its own.
-    accountTypes: accountTypes.ACCOUNT_TYPES.map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
+    accountTypes: accountTypes.ACCOUNT_TYPES
+      .filter(t => accountTypes.canManageAccountType(req.user, t.value))
+      .map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
     managerClinicalAccess: accountTypes.MANAGER_CLINICAL_ACCESS,
     defaultManagerClinicalAccess: accountTypes.DEFAULT_MANAGER_CLINICAL_ACCESS
   });
 });
 
 // Admin create user endpoint (Super Admin or Manager for client users only)
-app.post('/api/users', authenticateToken, async (req, res) => {
+// ---- USER ADMINISTRATION BY MANAGERS AND COORDINATORS (owner, 2026-11-03) --
+// The Super Admin manages every account. A manager or care coordinator may
+// create and edit caregiver, client and family accounts, under the ceiling in
+// accountTypes.checkUserWrite. Every route that writes a user runs this guard
+// or requireAdmin (build-enforced in test/phc_access.test.js), so a route
+// added later fails closed.
+//
+// Money is held, not saved: when a manager's or coordinator's edit carries a
+// field from userFinancialFields.js, the other changes save, the money ones do
+// not, and a request goes to the Super Admin (user_financial_change_requests).
+const guardUserWrite = async (req, res, next) => {
   try {
-    // Super Admin can create any user type, Managers can only create client users
-    const isSuperAdmin = req.user.role === config.ROLES.ADMIN;
-    const isCurrentUserManager = req.user.isManager || false;
-
-    if (!isSuperAdmin && !isCurrentUserManager) {
-      return res.status(403).json({ error: 'Admin or Manager access required' });
+    if (req.user.role === config.ROLES.ADMIN) return next();
+    let existing = null;
+    if (req.params.userId) {
+      existing = (await getUsers()).find(u => u.id === req.params.userId) || null;
+      if (!existing) return res.status(404).json({ error: 'User not found' });
     }
+    const verdict = accountTypes.checkUserWrite(req.user, { existing, body: req.body });
+    if (!verdict.ok) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'user_write_refused', 'user', existing ? existing.id : null, {
+        role: accountTypes.accountTypeOf(req.user), code: verdict.code,
+        targetType: existing ? accountTypes.accountTypeOf(existing) : null,
+        requestedType: (req.body || {}).accountType || (req.body || {}).role || null
+      });
+      return res.status(verdict.status).json({ error: verdict.error, code: verdict.code });
+    }
+    const { held, rest } = userFinancial.splitFinancial(verdict.body);
+    req.body = rest;
+    req.heldFinancial = held;
+    next();
+  } catch (error) {
+    console.error('User write guard error:', error);
+    res.status(500).json({ error: 'Authorization error' });
+  }
+};
+
+// Normalize one financial value the way the admin write path does, so "is this
+// a change?" and "what would be stored?" have one answer.
+function normalizeFinancialValue(field, value, actor) {
+  switch (field) {
+    case 'payRate': return { value: caregiverRepo.normalizePayRate(value) };
+    case 'clientPayRates': return { value: caregiverRepo.normalizeClientPayRates(value) };
+    case 'rateAgreement': {
+      if (!rateAgreementSupplied(value)) return { value: null, empty: true };
+      const built = buildRateAgreement(value, actor);
+      if (built.error) return { error: built.error, code: built.code };
+      return { value: built.rateAgreement };
+    }
+    case 'billingSettings': {
+      const n = billing.normalizeCopaySetting(value || {});
+      if (n.error) return { error: n.error, code: n.code };
+      return { value: { copayCents: n.value.copayCents } };
+    }
+    default: return { error: `${field} is not a financial field`, code: 'NOT_FINANCIAL' };
+  }
+}
+const financialComparable = (field, v) => {
+  if (v === null || v === undefined) return null;
+  if (field === 'rateAgreement') return JSON.stringify({ h: Number(v.hourlyRate), m: Number(v.dailyMinimumHours) });
+  if (field === 'billingSettings') return v.copayCents == null ? null : String(v.copayCents);
+  if (field === 'clientPayRates') return Object.keys(v).length ? JSON.stringify(Object.keys(v).sort().map(k => [k, v[k]])) : null;
+  return JSON.stringify(v);
+};
+
+// File a request for each held field that would actually change the record.
+// Returns { requests, held, ignored } for the response.
+async function raiseFinancialRequests(req, target, held, reason) {
+  const out = { requests: [], held: [], unchanged: [], invalid: [] };
+  const fields = Object.keys(held || {});
+  if (!fields.length) return out;
+  const rows = (await db.get('user_financial_change_requests')) || [];
+  const at = new Date().toISOString();
+  for (const field of fields) {
+    const n = normalizeFinancialValue(field, held[field], req.user);
+    if (n.error) { out.invalid.push({ field, error: n.error }); continue; }
+    const current = target[field] === undefined ? null : target[field];
+    const cur = field === 'billingSettings' ? (current ? { copayCents: current.copayCents ?? null } : null) : current;
+    if (financialComparable(field, n.value) === financialComparable(field, cur)) { out.unchanged.push(field); continue; }
+    const open = rows.find(r => r && r.user_id === target.id && r.field === field && r.status === 'pending');
+    if (open) { out.held.push({ field, label: userFinancial.LABELS[field], pendingRequestId: open.id, alreadyPending: true }); continue; }
+    const row = {
+      id: uuidv4(), user_id: target.id, user_name: target.name || target.email || null,
+      field, current_value: cur, requested_value: n.value,
+      reason: String(reason || '').trim().slice(0, 1000) || null,
+      requested_by_id: req.user.id, requested_by_name: req.user.name || req.user.email,
+      requested_by_role: accountTypes.accountTypeOf(req.user), requested_at: at,
+      status: 'pending', decided_by_id: null, decided_by_name: null, decided_at: null, decision_note: null,
+      history: [{ status: 'pending', at, byId: req.user.id, byName: req.user.name || req.user.email }]
+    };
+    rows.push(row);
+    out.requests.push(row);
+    out.held.push({ field, label: userFinancial.LABELS[field], requestId: row.id });
+  }
+  if (out.requests.length) {
+    await db.set('user_financial_change_requests', rows);
+    for (const r of out.requests) {
+      await logActivity(req.user.id, r.requested_by_name, 'user_financial_change_requested', 'user', r.user_id, {
+        requestId: r.id, field: r.field, role: r.requested_by_role
+      });
+    }
+    const admins = (await getUsers()).filter(u => u.role === config.ROLES.ADMIN && u.email && u.accountStatus !== 'inactive');
+    for (const admin of admins) {
+      await queueNotification('financial_change_requested', admin.id, admin.email, admin.name, {
+        subject: 'A pay or rate change is waiting for your approval',
+        body: `${req.user.name || req.user.email} asked to change ${out.requests.map(r => userFinancial.LABELS[r.field]).join(', ')} for ${target.name || 'a user'}. Nothing changes until you approve it.`,
+        ctaUrl: '/admin', ctaLabel: 'Open the Admin Hub'
+      }, { relatedEntityId: `${out.requests[0].id}:requested`, relatedEntityType: 'user', createdBy: req.user.id });
+    }
+  }
+  return out;
+}
+const financialHeldMessage = (f) => f && f.held.length
+  ? `Saved, except ${f.held.map(h => h.label).join(', ')}: ${f.held.length === 1 ? 'that is' : 'those are'} money, so ${f.held.length === 1 ? 'it was' : 'they were'} sent to the Super Admin to approve.`
+  : null;
+const publicFinancialRequest = (r) => r && ({
+  id: r.id, userId: r.user_id, userName: r.user_name, field: r.field, label: userFinancial.LABELS[r.field] || r.field,
+  currentValue: r.current_value, requestedValue: r.requested_value, reason: r.reason,
+  requestedById: r.requested_by_id, requestedByName: r.requested_by_name, requestedByRole: r.requested_by_role,
+  requestedAt: r.requested_at, status: r.status,
+  decidedById: r.decided_by_id, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note
+});
+
+app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
+  try {
+    // Who may create what is decided once, in guardUserWrite
+    // (accountTypes.checkUserWrite): the Super Admin anything, a manager or
+    // care coordinator a caregiver, client or family account (2026-11-03).
     const {
       name, practiceName, isNewClient, assignedProjects, logo,
       hasImplementationsAccess,
@@ -3140,10 +3274,6 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     const isManager = typed ? typed.isManager : req.body.isManager;
     const clinicalRole = typed ? typed.clinicalRole : req.body.clinicalRole;
 
-    // Managers can only create client users
-    if (isCurrentUserManager && !isSuperAdmin && role !== config.ROLES.CLIENT) {
-      return res.status(403).json({ error: 'Managers can only create client users' });
-    }
 
     // A patient whose POA handles everything may have no email of their own
     // (owner, 2026-10-20). They get a placeholder login nobody can use, the
@@ -3345,6 +3475,11 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     users.push(newUser);
     await db.set('users', users);
     invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'user_created', 'user', newUser.id, {
+      role: accountTypes.accountTypeOf(req.user), accountType: accountTypes.accountTypeOf(newUser), name: newUser.name
+    });
+    // A manager's or coordinator's money fields were held by guardUserWrite.
+    const financial = await raiseFinancialRequests(req, newUser, req.heldFinancial, (req.body || {}).financialChangeReason);
 
     // Send welcome email with login credentials (fire-and-forget, non-blocking).
     // A placeholder login has no inbox and no usable password.
@@ -3371,7 +3506,9 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       projectAccessLevels: newUser.projectAccessLevels,
       assignedClients: newUser.assignedClients,
       logo: newUser.logo || '',
-      createdAt: newUser.createdAt
+      createdAt: newUser.createdAt,
+      financialHeld: financial.held,
+      ...(financialHeldMessage(financial) ? { message: financialHeldMessage(financial) } : {})
     });
   } catch (error) {
     console.error('Admin create user error:', error);
@@ -4007,18 +4144,26 @@ app.post('/api/veterans/check-in', async (req, res) => {
 // The roster for a day. The office sees everyone's; a provider sees their own.
 app.get('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
   try {
-    const date = vetRoster.isoDate(req.query.date) || practiceToday();
+    // A WINDOW, and one day is the degenerate case: no parameters still means
+    // today only, which is what the exam-day screen asks for. `from`/`to`
+    // open the forward schedule. Both the date filter and the provider
+    // scoping live in `rowsInRange`, so neither can be left out here.
+    const today = practiceToday();
+    const range = vetRoster.rosterRange(req.query, today);
     const users = await getUsers();
     const office = vetRoster.isOffice(req.user);
     const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? u.name : null; };
-    const rows = ((await db.get('veteran_roster')) || [])
-      .filter(r => !r.removedAt && r.examDate === date && (office || r.providerUserId === req.user.id))
-      .sort((a, b) => (a.lastName || '').localeCompare(b.lastName || ''))
+    const rows = vetRoster.rowsInRange(await db.get('veteran_roster'), range, { providerUserId: office ? null : req.user.id })
       .map(r => vetRoster.publicRow(r, nameOf(r.providerUserId)));
     const providers = office
       ? veteranProviders(users).map(u => ({ id: u.id, name: u.name, hasPhone: !!require('./quoSms').toE164(u.phone), hasEmail: !!u.email }))
       : [{ id: req.user.id, name: req.user.name, hasPhone: !!require('./quoSms').toE164((users.find(u => u.id === req.user.id) || {}).phone), hasEmail: !!req.user.email }];
-    res.json({ date, today: practiceToday(), office, rows, providers, statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES });
+    res.json({
+      date: range.from, from: range.from, to: range.to, capped: range.capped,
+      today, office, rows, providers,
+      statuses: vetRoster.STATUS_LABELS, settable: vetRoster.SETTABLE_STATUSES,
+      maxRangeDays: vetRoster.RANGE_MAX_DAYS, defaultRangeDays: vetRoster.RANGE_DEFAULT_DAYS
+    });
   } catch (error) {
     console.error('Veteran roster read error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -4573,7 +4718,7 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
 
-app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res) => {
   try {
     const { userId } = req.params;
     const {
@@ -4880,6 +5025,14 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
 
     await db.set('users', users);
     invalidateUsersCache();
+    if (req.user.role !== config.ROLES.ADMIN) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'user_edited_by_office', 'user', users[idx].id, {
+        role: accountTypes.accountTypeOf(req.user), targetType: accountTypes.accountTypeOf(users[idx]),
+        fields: Object.keys(req.body || {}).filter(k => req.body[k] !== undefined && k !== 'password')
+      });
+    }
+    // A manager's or coordinator's money fields were held by guardUserWrite.
+    const financial = await raiseFinancialRequests(req, users[idx], req.heldFinancial, (req.body || {}).financialChangeReason);
 
     // If password was reset by admin, email the user a secure reset link
     if (passwordWasReset) {
@@ -4934,9 +5087,126 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       logo: users[idx].logo || '',
       hubspotCompanyId: users[idx].hubspotCompanyId || '',
       hubspotDealId: users[idx].hubspotDealId || '',
-      hubspotContactId: users[idx].hubspotContactId || ''
+      hubspotContactId: users[idx].hubspotContactId || '',
+      financialHeld: financial.held,
+      ...(financialHeldMessage(financial) ? { message: financialHeldMessage(financial) } : {})
     });
   } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ---- FINANCIAL CHANGE REQUESTS (owner, 2026-11-03) ------------------------
+// A manager or care coordinator asks for a pay or rate change; the Super Admin
+// approves or declines. Approving applies it through the same write the admin
+// edit uses (normalizeFinancialValue, and commitRate for a client's rate).
+const requireFinancialRequester = (req, res, next) => {
+  if (accountTypes.isHomeCareOffice(req.user)) return next();
+  return res.status(403).json({ error: 'The Super Admin, a manager or a care coordinator raises pay and rate changes.', code: 'FINANCIAL_REQUEST_FORBIDDEN' });
+};
+
+app.get('/api/users/financial-change-requests', authenticateToken, requireFinancialRequester, async (req, res) => {
+  try {
+    let rows = (await db.get('user_financial_change_requests')) || [];
+    if (req.query.userId) rows = rows.filter(r => r.user_id === String(req.query.userId));
+    if (req.query.status) rows = rows.filter(r => r.status === String(req.query.status));
+    rows = rows.slice().sort((a, b) => {
+      if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+      return a.status === 'pending' ? String(a.requested_at).localeCompare(String(b.requested_at)) : String(b.requested_at).localeCompare(String(a.requested_at));
+    });
+    res.json({ requests: rows.slice(0, 500).map(publicFinancialRequest), pendingCount: rows.filter(r => r.status === 'pending').length, canDecide: req.user.role === config.ROLES.ADMIN });
+  } catch (error) {
+    console.error('Financial request list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/users/:userId/financial-change-requests', authenticateToken, requireFinancialRequester, async (req, res) => {
+  try {
+    const { field, value, reason } = req.body || {};
+    if (!userFinancial.isFinancialField(field)) {
+      return res.status(400).json({ error: `field must be one of ${userFinancial.FINANCIAL_FIELDS.join(', ')}`, code: 'FINANCIAL_FIELD_INVALID' });
+    }
+    const target = (await getUsers()).find(u => u.id === req.params.userId);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (!accountTypes.canManageAccountType(req.user, accountTypes.accountTypeOf(target))) {
+      return res.status(403).json({ error: 'A Super Admin manages staff and clinical accounts.', code: 'USER_TYPE_NOT_MANAGEABLE' });
+    }
+    if (String(target.id) === String(req.user.id) && req.user.role !== config.ROLES.ADMIN) {
+      return res.status(403).json({ error: 'You cannot request a change to your own pay. Ask a Super Admin.', code: 'USER_SELF_EDIT_FORBIDDEN' });
+    }
+    const out = await raiseFinancialRequests(req, target, { [field]: value }, reason);
+    if (out.invalid.length) return res.status(400).json({ error: out.invalid[0].error, code: 'FINANCIAL_VALUE_INVALID' });
+    if (out.unchanged.length) return res.status(400).json({ error: 'That is the value already on the record.', code: 'FINANCIAL_NO_CHANGE' });
+    const already = out.held.find(h => h.alreadyPending);
+    if (already) return res.status(409).json({ error: `A change to ${already.label} is already waiting on the Super Admin.`, code: 'FINANCIAL_REQUEST_PENDING', pendingRequestId: already.pendingRequestId });
+    res.json({ request: publicFinancialRequest(out.requests[0]), message: 'Sent to the Super Admin. Nothing changes until they approve it.' });
+  } catch (error) {
+    console.error('Financial request error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/users/financial-change-requests/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const decision = String((req.body || {}).decision || '');
+    if (!['approved', 'declined'].includes(decision)) return res.status(400).json({ error: 'Choose approved or declined.', code: 'FINANCIAL_DECISION_INVALID' });
+    const note = String((req.body || {}).note || '').trim().slice(0, 1000) || null;
+    const rows = (await db.get('user_financial_change_requests')) || [];
+    const ri = rows.findIndex(r => r && r.id === req.params.id);
+    if (ri === -1) return res.status(404).json({ error: 'Request not found', code: 'FINANCIAL_REQUEST_NOT_FOUND' });
+    const row = rows[ri];
+    if (row.status !== 'pending') return res.status(409).json({ error: `This request was already ${row.status}.`, code: 'FINANCIAL_REQUEST_DECIDED' });
+
+    if (decision === 'approved') {
+      const users = await getUsers();
+      const idx = users.findIndex(u => u.id === row.user_id);
+      if (idx === -1) return res.status(404).json({ error: 'That user no longer exists.' });
+      const curRaw = users[idx][row.field] === undefined ? null : users[idx][row.field];
+      const cur = row.field === 'billingSettings' ? (curRaw ? { copayCents: curRaw.copayCents ?? null } : null) : curRaw;
+      if (financialComparable(row.field, cur) !== financialComparable(row.field, row.current_value)) {
+        return res.status(409).json({ error: 'This value has changed since the request was raised. Decline it and ask for a new one.', code: 'FINANCIAL_REQUEST_STALE' });
+      }
+      // The same writes an admin's own edit makes.
+      if (row.field === 'rateAgreement') {
+        await commitRate(users, idx, row.requested_value, req.user, { financialRequestId: row.id });
+      } else {
+        if (row.field === 'billingSettings') {
+          users[idx].billingSettings = { ...(users[idx].billingSettings || {}), copayCents: row.requested_value.copayCents, updatedAt: new Date().toISOString(), updatedBy: req.user.name || req.user.email };
+        } else {
+          users[idx][row.field] = row.requested_value;
+        }
+        await db.set('users', users);
+        invalidateUsersCache();
+      }
+    }
+    const at = new Date().toISOString();
+    row.status = decision;
+    row.decided_by_id = req.user.id;
+    row.decided_by_name = req.user.name || req.user.email;
+    row.decided_at = at;
+    row.decision_note = note;
+    row.history = (row.history || []).concat({ status: decision, at, byId: req.user.id, byName: row.decided_by_name, note });
+    const fresh = (await db.get('user_financial_change_requests')) || [];
+    const fi = fresh.findIndex(r => r && r.id === row.id);
+    if (fi === -1) fresh.push(row); else fresh[fi] = row;
+    await db.set('user_financial_change_requests', fresh);
+    await logActivity(req.user.id, row.decided_by_name, `user_financial_change_${decision}`, 'user', row.user_id, {
+      requestId: row.id, field: row.field, requestedById: row.requested_by_id, note
+    });
+    const requester = (await getUsers()).find(u => u.id === row.requested_by_id);
+    if (requester && requester.email) {
+      await queueNotification('financial_change_decided', requester.id, requester.email, requester.name, {
+        subject: decision === 'approved' ? 'Your pay or rate change was approved' : 'Your pay or rate change was declined',
+        body: decision === 'approved'
+          ? `The Super Admin approved the change to ${userFinancial.LABELS[row.field]} for ${row.user_name || 'the user'}. It is on their record now.`
+          : `The Super Admin declined the change to ${userFinancial.LABELS[row.field]} for ${row.user_name || 'the user'}.${note ? ` Their note: "${note}".` : ''} Nothing changed.`,
+        ctaUrl: '/admin', ctaLabel: 'Open the Admin Hub'
+      }, { relatedEntityId: `${row.id}:${decision}`, relatedEntityType: 'user', createdBy: req.user.id });
+    }
+    res.json({ request: publicFinancialRequest(row) });
+  } catch (error) {
+    console.error('Financial request decision error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -10762,7 +11032,9 @@ const appointmentSetupGap = (fields) => {
 // visit a clinician creates takes its POS from this copy instead of failing
 // into "this patient has no facility" (the owner report that started this).
 const FACILITY_SNAPSHOT_KEY = 'openemr_facility_snapshot';
-const FACILITY_SNAPSHOT_FIELDS = ['id', 'name', 'pos_code', 'service_location', 'billing_location', 'primary_business_entity', 'city', 'state'];
+// facility_npi, federal_ein and facility_taxonomy are what the claim scrub
+// checks on the billing facility (2026-11-04). Organisation identifiers, not PHI.
+const FACILITY_SNAPSHOT_FIELDS = ['id', 'name', 'pos_code', 'service_location', 'billing_location', 'primary_business_entity', 'city', 'state', 'facility_npi', 'federal_ein', 'facility_taxonomy'];
 const saveFacilitySnapshot = async (rows, user) => {
   const facilities = (rows || []).map(f => {
     const out = {};
@@ -13550,7 +13822,11 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
+    // The total time the documentation gate will read (2026-11-04): what was
+    // entered at signing, else the visit's recorded start and end.
+    const totalTime = await encounterTotalMinutes(record);
     res.json({
+      totalTime,
       encounter: emrRow ? {
         uuid: encounterUuid, eid: emrRow.eid != null ? String(emrRow.eid) : record.encounterEid, date: String(emrRow.date || '').slice(0, 10),
         reason: emrRow.reason, billingNote: emrRow.billing_note || null, providerId: emrRow.provider_id != null ? String(emrRow.provider_id) : null,
@@ -13601,6 +13877,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         canRefreshPos: canBill && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING
       },
       posMissingReason: canBill ? record.posMissingReason || null : undefined,
+      // Phase 3: the derived level. The flag only for billing.
+      emDerivation: emDerivationView(record, canBill),
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
@@ -15177,6 +15455,246 @@ app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, 
   }
 });
 
+// ── CLAIM SCRUB AND DOCUMENTATION GATE (AI coding pipeline, Phase 1, 2026-11-04) ──
+// The rules are claimScrub.js (pure). This block loads what they read: the
+// billing facility's NPI/EIN/taxonomy from the facility snapshot, the
+// encounter's facility and place of service from OpenEMR, the ICD-10 lookups,
+// the code catalog, the NCCI tables and the patient's primary payer.
+//
+// A scrub finding is BILLING's to read. Every route here is behind
+// requireBilling; nothing here reaches a clinician's screen. The one gate a
+// clinician meets is the documentation gate, and it names only what they can
+// fix while standing there: the time, a diagnosis, the note.
+
+// ICD-10 lookups, cached. Codes only, never a patient: { [code]: { exists,
+// description, unspecified, moreSpecific, checkedAt } }. OpenEMR's set is
+// reissued every October, so an answer older than 30 days is asked again.
+const ICD10_LOOKUPS_KEY = 'icd10_code_lookups';
+const ICD10_LOOKUP_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const loadIcd10Lookups = async () => (await db.get(ICD10_LOOKUPS_KEY)) || {};
+// Fills in any code not yet looked up (or looked up too long ago), with this
+// person's OpenEMR session. A failed search leaves the code unchecked, which
+// the scrub reports as NOT CHECKED and blocks; it is never read as "missing".
+const verifyIcd10Codes = async (user, codes, { max = 40 } = {}) => {
+  const cache = await loadIcd10Lookups();
+  const now = Date.now();
+  const want = Array.from(new Set((codes || []).map(c => clinicalRepo.normalizeIcd10(c)).filter(Boolean)))
+    .filter(c => !cache[c] || (now - Date.parse(cache[c].checkedAt || 0)) > ICD10_LOOKUP_TTL_MS)
+    .slice(0, max);
+  if (!want.length || !openemr.isConfigured()) return cache;
+  const emr = openemr.forActor(user);
+  let changed = false;
+  for (const code of want) {
+    try {
+      const parent = claimScrub.parentOf(code);
+      const [exact, category] = await Promise.all([
+        emr.searchCodes({ type: 'ICD10', search: code, limit: 25 }),
+        parent ? emr.searchCodes({ type: 'ICD10', search: parent, limit: 50 }) : Promise.resolve([])
+      ]);
+      cache[code] = { ...claimScrub.buildIcd10Lookup(code, exact, category), checkedAt: new Date().toISOString() };
+      changed = true;
+    } catch (e) {
+      console.warn(`[claim-scrub] ICD-10 lookup for ${code} failed: ${e.message}`);
+    }
+  }
+  if (changed) await db.set(ICD10_LOOKUPS_KEY, cache);
+  return cache;
+};
+
+// The billing facility, from the saved facility list. `fieldsRead` is false
+// when that copy predates the NPI/EIN/taxonomy fields, so "not read" is never
+// confused with "OpenEMR has none".
+const billingFacilityForScrub = async () => {
+  const snap = await getFacilitySnapshot();
+  const rows = (snap && Array.isArray(snap.facilities)) ? snap.facilities : [];
+  if (!rows.length) return { facilityListKnown: false, billingFacility: { id: null, error: 'OpenEMR\'s facility list has never been read; an admin presses Sync facilities' }, facilities: [] };
+  const resolved = clinicalRepo.resolveBillingFacility({ facilities: rows, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null });
+  const row = resolved.facilityId ? rows.find(f => String(f.id) === String(resolved.facilityId)) : null;
+  return {
+    facilityListKnown: true, facilities: rows,
+    billingFacility: row ? {
+      id: String(row.id), name: row.name || null,
+      fieldsRead: ['facility_npi', 'federal_ein', 'facility_taxonomy'].every(k => k in row),
+      npi: row.facility_npi, ein: row.federal_ein, taxonomy: row.facility_taxonomy
+    } : { id: null, error: resolved.warning || 'no billing facility is configured or flagged in OpenEMR' }
+  };
+};
+
+// The encounter's facility and place of service as OpenEMR holds them. Stored
+// on the record as `claimFacts` so the queue can show them without a read per
+// row; the detail view, Submit and Release always read live.
+const readClaimFacts = async (ctx) => {
+  try {
+    const row = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
+    if (!row) return { checked: false, error: 'OpenEMR returned no encounter row', readAt: new Date().toISOString() };
+    return {
+      checked: true, readAt: new Date().toISOString(),
+      facilityId: row.facility_id != null && row.facility_id !== '' ? String(row.facility_id) : null,
+      posCode: row.pos_code != null && row.pos_code !== '' ? String(row.pos_code) : null,
+      facilityName: row.facility_name || row.facility || null
+    };
+  } catch (e) {
+    return { checked: false, error: String(e.message || e).slice(0, 160), readAt: new Date().toISOString() };
+  }
+};
+
+// The rendering provider as the claim will name them: the live user record's
+// NPI where the user still exists (an NPI added after signing counts), else
+// the snapshot taken at signing.
+const renderingProviderForScrub = (record, users) => {
+  const rp = (record && record.renderingProvider) || {};
+  const live = rp.id ? (users || []).find(u => u && u.id === rp.id) : null;
+  return { name: (live && live.name) || rp.name || null, npi: (live && live.npi) || rp.npi || null };
+};
+
+// The app's own charge lines, with the fee OpenEMR reported when each posted.
+const linesFromRecord = (record) => {
+  const posted = (record && record.postedCharges) || [];
+  return ((record && record.services) || []).map(s => {
+    const mods = (s.modifiers || []).join(':');
+    const p = posted.find(c => c && c.code === s.code && (c.modifier || '') === mods) || posted.find(c => c && c.code === s.code);
+    return { code: s.code, modifiers: s.modifiers || [], units: s.units || 1, dxLinks: s.dxLinks || [], fee: p ? p.fee : null };
+  });
+};
+
+const sameDayOtherCodesFor = (record, allRecords) => {
+  const day = String((record && record.date) || '').slice(0, 10);
+  if (!day) return [];
+  return (allRecords || []).filter(r => r && r !== record && r.encounterUuid !== record.encounterUuid &&
+      String(r.clientId) === String(record.clientId) && String(r.date || '').slice(0, 10) === day && r.noteStatus !== 'voided')
+    .flatMap(r => (r.services || []).map(s => s.code));
+};
+
+const payerForScrub = (client) => {
+  const norm = insurance.normalizePayers(client);
+  const problem = norm.unresolved.find(u => ['PAYER_RANK_DUPLICATE_PRIMARY', 'PAYER_RANK_NOT_STATED', 'PAYER_RANK_MISSING'].includes(u.code));
+  return { payer: norm.primary || null, payerProblem: problem ? problem.message : null };
+};
+
+// One scrub, from the pieces. `lines` defaults to the app's own record.
+// Psychotherapy minutes, documented separately from E/M time on the visit's
+// recorded timing (myDay). null when none is recorded.
+const psychotherapyMinutesFor = (record, links, timings) => {
+  const link = (links || []).find(l => l && String(l.encounterUuid) === String(record.encounterUuid));
+  const t = link ? (timings || []).find(r => r && r.id === myDay.timingId(link.eid)) : null;
+  const m = t ? Number(t.psychotherapyMinutes) : NaN;
+  return Number.isFinite(m) && m > 0 ? m : null;
+};
+// This patient's other encounters' lines in the same calendar month (3b.4).
+const sameMonthOtherLinesFor = (record, allRecords) => {
+  const month = String((record && record.date) || '').slice(0, 7);
+  if (!month) return [];
+  return (allRecords || []).filter(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+      String(r.date || '').slice(0, 7) === month && r.noteStatus !== 'voided')
+    .flatMap(r => (r.services || []).map(sv => ({ code: sv.code, renderingProviderId: (r.renderingProvider && r.renderingProvider.id) || null })));
+};
+const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords, psychotherapyMinutes = null }) => {
+  const { payer, payerProblem } = payerForScrub(client);
+  const encounterFacility = facts && facts.checked && facts.facilityId
+    ? (facilityInfo.facilities || []).find(f => String(f.id) === String(facts.facilityId)) || null
+    : null;
+  return claimScrub.scrubClaim({
+    phase, today: practiceToday(),
+    encounter: { date: record.date, facts, visit: record.visit || null },
+    encounterFacility, facilityListKnown: facilityInfo.facilityListKnown,
+    billingFacility: facilityInfo.billingFacility,
+    renderingProvider: renderingProviderForScrub(record, users),
+    diagnoses: record.diagnoses || [],
+    lines: lines || linesFromRecord(record),
+    icd10, catalog, payer, payerProblem,
+    // getNcciTables names its fields for checkSignReadiness; the scrub reads
+    // the shape checkNcciBundling takes. Passed through unmapped, every claim
+    // read as "NCCI data never loaded" (caught by the HTTP probe, 2026-11-04).
+    ncci: { ptpEdits: ncci.ncciPtpEdits, mueByCode: ncci.ncciMue, sourceVersion: ncci.ncciSourceVersion },
+    sameDayOtherCodes: sameDayOtherCodesFor(record, allRecords),
+    sameMonthOtherLines: sameMonthOtherLinesFor(record, allRecords),
+    renderingProviderId: (record.renderingProvider && record.renderingProvider.id) || null,
+    psychotherapyMinutes, totalMinutes: record.totalMinutes || null,
+    emDerivation: record.emDerivation || null
+  });
+};
+
+// Everything one live scrub needs, read now with the requesting person's
+// session, then the scrub itself. Used by the detail view, Submit and Release.
+// Release ('final') reads the charge lines OpenEMR actually holds — that is
+// the check a Fee Sheet edit after signing cannot slip past.
+const liveClaimScrub = async (ctx, { phase, user }) => {
+  // Billing can read OpenEMR's facility list, so the saved copy is refreshed
+  // first: an NPI fixed in OpenEMR a minute ago must not still read as missing.
+  // A failed read keeps the saved copy, which is what the scrub then judges.
+  try { await readFacilities(ctx.emr, user); } catch (_) { /* the saved copy stands */ }
+  const [facts, facilityInfo, catalog, ncci, allRecords, links, timings] = await Promise.all([
+    readClaimFacts(ctx), billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), loadRows('encounter_billing'),
+    getAppointmentLinkage(), loadVisitTimings()
+  ]);
+  let lines = null; let chargeReadError = null;
+  if (phase === 'final') {
+    try { lines = claimScrub.linesFromCharges(await ctx.emr.getCharges(ctx.client.openEmrPatientId, ctx.encounterUuid)); }
+    catch (e) { chargeReadError = String(e.message || e).slice(0, 160); }
+  }
+  const dx = [...(ctx.record.diagnoses || []).map(d => d.code), ...((lines || []).flatMap(l => l.dxLinks))];
+  const icd10 = await verifyIcd10Codes(user, dx);
+  const scrub = runClaimScrub({ phase, record: ctx.record, client: ctx.client, users: ctx.users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords,
+    psychotherapyMinutes: psychotherapyMinutesFor(ctx.record, links, timings) });
+  return { scrub, facts, chargeReadError, lines: lines || linesFromRecord(ctx.record) };
+};
+
+// ---- The documentation gate (spec §1.4) -------------------------------------
+// MIDDLEWARE, so the route sweep sees it on both doors into the coding queue:
+// the billable signature and the clinician addendum. An RN or LMSW author
+// signature does not enter the queue (it waits for the addendum), so it passes.
+// A request the handler is about to refuse for its own reason (already signed,
+// discarded, wrong credential) passes too, so the person reads that reason
+// rather than a list of missing documentation.
+//
+// The total time: the number the clinician enters on the sign card, else the
+// visit's recorded start and end (My Day). Never the scheduled duration.
+const encounterTotalMinutes = async (record) => {
+  if (Number.isInteger(record.totalMinutes) && record.totalMinutes > 0) {
+    return { minutes: record.totalMinutes, source: record.totalMinutesSource || 'entered' };
+  }
+  const link = (await getAppointmentLinkage()).find(l => l && String(l.encounterUuid) === String(record.encounterUuid));
+  if (link) {
+    const t = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(link.eid));
+    const m = myDay.totalVisitMinutes(t);
+    if (m != null && m > 0) return { minutes: m, source: 'recorded_start_end' };
+  }
+  return null;
+};
+const requireCodingQueueReady = (door) => async (req, res, next) => {
+  try {
+    if (door === 'sign' && clinicalRoles.isAuthorSigner(req.user)) return next();
+    if (door === 'addendum' && !clinicalRoles.canCoSignEncounter(req.user)) return next();
+    const record = findBillingRecord(await loadRows('encounter_billing'), req.params.euuid);
+    if (!record || String(record.clientId) !== String(req.params.clientId)) return next();
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return next();
+    const att = (await loadRows('encounter_attestations')).find(a => a && a.encounterUuid === String(req.params.euuid)) || null;
+    if (door === 'sign' && clinicalRepo.isEncounterClosed(att)) return next();
+    if (door === 'addendum' && record.coSignStatus !== 'pending') return next();
+    if (!(req.body || {}).attest) return next();
+    if (door === 'sign' && record.note && !clinicalNotes.checkNoteForSigning(record.note).ok) return next();
+    if (door === 'addendum' && !claimScrub.hasWords((req.body || {}).text)) return next();
+    if (door === 'addendum' && clinicalRoles.disallowedServiceCodesFor(req.user, record.services || []).length) return next();
+    let time = null;
+    const typed = (req.body || {}).totalMinutes;
+    if (typed !== undefined && typed !== null && String(typed).trim() !== '') {
+      const parsed = claimScrub.parseTotalMinutes(typed);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error, code: 'TOTAL_TIME_NOT_A_NUMBER', missing: ['total_time'] });
+      time = { minutes: parsed.minutes, source: 'entered' };
+    } else {
+      time = await encounterTotalMinutes(record);
+    }
+    const gate = claimScrub.documentationGate({ record, totalMinutes: time ? time.minutes : null, noteState: door === 'addendum' ? 'signed' : 'draft' });
+    // SIGN_NO_DIAGNOSIS rides along so the sign card still offers "Go to Coding".
+    if (!gate.ok) return res.status(409).json({ error: gate.error, code: 'CODING_QUEUE_GATE', codes: ['CODING_QUEUE_GATE', ...(gate.missing.includes('diagnosis') ? ['SIGN_NO_DIAGNOSIS'] : [])], missing: gate.missing });
+    req.codingQueueEntry = { totalMinutes: time.minutes, totalMinutesSource: time.source };
+    next();
+  } catch (error) {
+    console.error('Coding queue gate error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 // ── Sign & close (Scope F, spec §3 normative) ─────────────────────────────
 // Refused with a specific code until the encounter has a note, ≥1 diagnosis,
 // ≥1 service (each linked) and a configured billing NPI. The signer becomes
@@ -15225,7 +15743,7 @@ const readinessFor = async (ctx, { billingChecks = true, gate, payer, ncci } = {
   return { ready, payer: p, completedSections };
 };
 
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, requireCodingQueueReady('sign'), async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -15286,6 +15804,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     await db.set('encounter_attestations', atts);
     // Rendering provider on the charge = signing clinician (spec §2.5)
     const record = { ...ctx.record, renderingProvider: attestation.signedBy, renderingProviderClinicalRole: signature.clinicalRole, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
+    // The total time on the date of service (documentation gate, 2026-11-04).
+    // A billable signature passed the gate with it; an author's signature may
+    // carry one too, kept for the clinician addendum.
+    const timeEntry = req.codingQueueEntry || (() => {
+      const p = claimScrub.parseTotalMinutes((req.body || {}).totalMinutes);
+      return p.ok ? { totalMinutes: p.minutes, totalMinutesSource: 'entered' } : null;
+    })();
+    if (timeEntry) { record.totalMinutes = timeEntry.totalMinutes; record.totalMinutesSource = timeEntry.totalMinutesSource; }
     // NCCI: an allowed-but-flagged PTP pair (a modifier was required and one
     // was present) does not block signing, but it must reach the signer HERE
     // rather than pass silently — this is exactly the case a biller cannot
@@ -15420,7 +15946,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
 // claim names the person certified to render the service (spec §2.5, billing
 // spec §4 item 4). The route keeps its path so an encounter held under the old
 // LMSW rule is cleared the same way.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, requireCodingQueueReady('addendum'), async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res, { createRecord: false });
     if (!ctx) return;
@@ -15478,6 +16004,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
     // Sent to billing; the charges post when billing submits.
     record.billingStatus = clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
     record.sentToBillingAt = now;
+    // The documentation gate's total time (2026-11-04), stored with the entry.
+    if (req.codingQueueEntry) { record.totalMinutes = req.codingQueueEntry.totalMinutes; record.totalMinutesSource = req.codingQueueEntry.totalMinutesSource; }
     record.chargesPosted = false;
     record.chargeError = null;
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
@@ -15620,7 +16148,21 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
     }
     const { ready, payer } = await readinessFor(ctx, { gate: 'billing' });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
-    warnings.push(...(ready.warnings || []));
+    // ready.warnings are the NCCI warnings; the scrub below reports the same
+    // ones with the line they concern, so they are not added twice.
+
+    // The claim scrub (2026-11-04), before anything posts. Every blocking
+    // finding is returned in full; nothing posts while one is open. Prices are
+    // OpenEMR's and exist only once a line posts, so they are checked at Release.
+    const pre = await liveClaimScrub(ctx, { phase: 'pre_post', user: req.user });
+    if (!pre.scrub.ok) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: pre.facts, lastScrub: { at: now, phase: 'pre_post', counts: pre.scrub.counts, findings: pre.scrub.findings } });
+      const blockers = pre.scrub.findings.filter(f => f.severity === claimScrub.SEVERITY.BLOCK);
+      return res.status(409).json({
+        error: `This claim has ${blockers.length} blocking finding${blockers.length === 1 ? '' : 's'}: ${blockers.map(f => `${f.fieldLabel}: ${f.message}`).join(' ')}`,
+        code: 'CLAIM_SCRUB_BLOCKED', findings: pre.scrub.findings, counts: pre.scrub.counts
+      });
+    }
 
     const record = {
       ...ctx.record,
@@ -15630,8 +16172,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       posMissingReason: null,
       // What the insurance check said when this claim was released (B1).
       insuranceCheck: { status: insuranceGate.status, override: insuranceGate.override || null, at: now },
+      claimFacts: pre.facts,
+      lastScrub: { at: now, phase: 'pre_post', counts: pre.scrub.counts, findings: pre.scrub.findings },
       updatedAt: now
     };
+    for (const f of pre.scrub.findings) warnings.push(`${f.fieldLabel}: ${f.message}`);
     // Rendering provider = the signing clinician (or the addendum author) —
     // never the person clicking submit.
     await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: record.renderingProvider });
@@ -15662,6 +16207,323 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
   } catch (error) {
     console.error('Billing submit error:', error);
     res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// ── Claim scrub: the review surface and the release (2026-11-04) ───────────
+// GET shows EVERY finding on one encounter, blockers first, each naming its
+// field. Billing's screen only. Before submission it scrubs the app's own
+// lines; after, it reads the charge lines OpenEMR actually holds.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/claim-scrub', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    const status = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    const hold = claimScrub.holdState(ctx.record, status);
+    const phase = status === clinicalRepo.BILLING_STATUS.BILLED ? 'final' : 'pre_post';
+    const out = await liveClaimScrub(ctx, { phase, user: req.user });
+    const at = new Date().toISOString();
+    await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub: { at, phase, counts: out.scrub.counts, findings: out.scrub.findings } });
+    res.json({
+      phase, billingStatus: status, holdState: hold,
+      findings: out.scrub.findings, counts: out.scrub.counts, ok: out.scrub.ok,
+      chargeReadError: out.chargeReadError,
+      lines: out.lines, totalMinutes: ctx.record.totalMinutes || null, totalMinutesSource: ctx.record.totalMinutesSource || null,
+      release: ctx.record.claimRelease || null, scrubbedAt: at
+    });
+  } catch (error) {
+    console.error('Claim scrub error:', error);
+    res.status(502).json({ error: `The claim scrub could not run: ${error.message}` });
+  }
+});
+
+// POST releases a held claim. A person does this, never the app. Refused while
+// any blocking finding is open, against the lines OpenEMR holds NOW, so a Fee
+// Sheet edited after signing is checked here. Every warning must be confirmed
+// as reviewed. Nothing transmits from this app; the release is the record
+// that a person reviewed the claim and let it go.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/claim-release', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    const status = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    const hold = claimScrub.holdState(ctx.record, status);
+    if (hold === 'released') return res.status(409).json({ error: `Already released ${ctx.record.claimRelease.at} by ${(ctx.record.claimRelease.by || {}).name || 'a biller'}.`, code: 'CLAIM_ALREADY_RELEASED' });
+    if (hold !== 'held') {
+      return res.status(409).json({ error: status === clinicalRepo.BILLING_STATUS.AWAITING_BILLING
+        ? 'Submit this visit to billing first. Its lines are priced and held when they post.'
+        : 'Only a visit submitted to billing, with charges posted, is held for release.', code: 'CLAIM_NOT_HELD' });
+    }
+    if (!ctx.record.chargesPosted) {
+      return res.status(409).json({ error: `The charges did not post to Billing Manager${ctx.record.chargeError ? ` (${ctx.record.chargeError})` : ''}. Re-post them before releasing.`, code: 'CLAIM_CHARGES_NOT_POSTED' });
+    }
+    const out = await liveClaimScrub(ctx, { phase: 'final', user: req.user });
+    const now = new Date().toISOString();
+    const lastScrub = { at: now, phase: 'final', counts: out.scrub.counts, findings: out.scrub.findings };
+    if (out.chargeReadError) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub });
+      return res.status(502).json({ error: `The charge lines OpenEMR holds could not be read (${out.chargeReadError}), so the final charge set cannot be checked. Nothing was released.`, code: 'CLAIM_CHARGES_UNREADABLE', findings: out.scrub.findings, counts: out.scrub.counts });
+    }
+    if (!out.scrub.ok) {
+      await saveBillingRecord(ctx.rows, { ...ctx.record, claimFacts: out.facts, lastScrub });
+      const blockers = out.scrub.findings.filter(f => f.severity === claimScrub.SEVERITY.BLOCK);
+      return res.status(409).json({
+        error: `Not released. ${blockers.length} blocking finding${blockers.length === 1 ? ' is' : 's are'} open: ${blockers.map(f => `${f.fieldLabel}: ${f.message}`).join(' ')}`,
+        code: 'CLAIM_SCRUB_BLOCKED', findings: out.scrub.findings, counts: out.scrub.counts
+      });
+    }
+    if (out.scrub.counts.warn && !(req.body || {}).warningsReviewed) {
+      return res.status(400).json({ error: `Confirm you reviewed the ${out.scrub.counts.warn} warning${out.scrub.counts.warn === 1 ? '' : 's'} on this claim before releasing it.`, code: 'CLAIM_WARNINGS_NOT_REVIEWED', findings: out.scrub.findings, counts: out.scrub.counts });
+    }
+    const by = clinicalRepo.actorRecord(ctx.actor);
+    const record = {
+      ...ctx.record, claimFacts: out.facts, lastScrub,
+      claimRelease: { at: now, by, warningCodes: out.scrub.findings.map(f => f.code), lines: out.lines.map(l => ({ code: l.code, modifiers: l.modifiers, units: l.units, fee: l.fee })) },
+      updatedAt: now
+    };
+    await saveBillingRecord(ctx.rows, record);
+    // Codes and counts only: the audit row is not a second copy of the claim.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'claim_released', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, lineCodes: out.lines.map(l => l.code), warningCodes: out.scrub.findings.map(f => f.code)
+    });
+    res.json({ message: 'Released. This claim leaves the hold queue.', release: record.claimRelease, findings: out.scrub.findings, counts: out.scrub.counts });
+  } catch (error) {
+    console.error('Claim release error:', error);
+    res.status(502).json({ error: `The release could not complete: ${error.message}` });
+  }
+});
+
+// ── AI coding pipeline, Phase 3: level derivation from confirmed facts ─────
+// (2026-11-04; the decision change is docs/decisions/2026-11-04-ai-assisted-coding.md)
+//
+// The clinician confirms FACTS about her own visit, never a code. Rules
+// (emMdm.js over emLevels.js) then derive the level. Every confirmation is an
+// append-only row in em_derivations: what was extracted, what was confirmed,
+// the derived level, the final level, who, when, and whether the clinician
+// chose the non-default candidate. The LEVEL_AMBIGUOUS flag is the coder's:
+// it is never returned to a clinician, it persists after release, and it is
+// resolved only by billing, with a note.
+const EM_DERIVATIONS = 'em_derivations';
+
+// Confirmed facts, held to the Phase 2 schema. A fact the clinician added has
+// no quote and is marked so; a fact carried from the extraction keeps its
+// quote. The source of each is decided HERE, by comparing against the
+// extraction, never taken from the page.
+const sanitizeConfirmedFacts = (input, extracted) => {
+  const checked = modelEngine.validateAgainstSchema(input || {}, mdmExtraction.MDM_SCHEMA);
+  if (checked.error) return { error: checked.error };
+  const v = checked.value;
+  const out = {};
+  for (const key of mdmExtraction.LIST_KEYS) {
+    const prior = (extracted && Array.isArray(extracted[key])) ? extracted[key] : [];
+    out[key] = (v[key] || []).map(item => {
+      const same = prior.find(p => p && p.quote && item.quote && p.quote === item.quote);
+      const unchanged = same && Object.keys(item).every(k => k === 'quote' || item[k] === same[k]);
+      return { ...item, source: !same ? 'added' : unchanged ? 'extracted' : 'edited', quote: same ? same.quote : null };
+    });
+  }
+  const t = v.time || { statementPresent: false };
+  out.time = { totalMinutes: t.statementPresent && typeof t.totalMinutes === 'number' ? Math.round(t.totalMinutes) : null, statementPresent: !!t.statementPresent };
+  return { facts: out };
+};
+
+// New or established. The visit type says which; an earlier signed GFC visit
+// within three years says otherwise, and then established (the lower family)
+// is used and the conflict is stated for the coder.
+const patientStatusFor = (record, records, attestations) => {
+  const isNewType = ((record.visit || {}).appointmentType) === 'pc_new_patient';
+  if (!isNewType) return { status: 'established', conflict: null };
+  const dos = String(record.date || '').slice(0, 10);
+  const threeYearsBefore = dos ? `${Number(dos.slice(0, 4)) - 3}${dos.slice(4)}` : '';
+  const signed = new Set((attestations || []).filter(a => a && a.signedAt).map(a => String(a.encounterUuid)));
+  const prior = (records || []).find(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+    r.noteStatus !== 'voided' && signed.has(String(r.encounterUuid)) && String(r.date || '') < dos && String(r.date || '') >= threeYearsBefore);
+  if (!prior) return { status: 'new', conflict: null };
+  return { status: 'established', conflict: `This is booked as a new-patient visit, but GFC has a signed visit for this patient on ${String(prior.date).slice(0, 10)}, within three years, so the established-patient family was used.` };
+};
+
+// What each audience sees. A clinician sees the code and how it was reached;
+// billing also sees the flag.
+const emDerivationView = (record, canBill) => {
+  const d = record && record.emDerivation;
+  if (!d) return null;
+  const { flag, ...rest } = d;
+  return canBill ? { ...rest, flag: flag || null } : rest;
+};
+
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const record = ctx.record;
+    if (!record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
+    if (clinicalRepo.isBillingSubmitted(record, ctx.attestation)) {
+      return res.status(409).json({ error: 'This visit was already submitted to billing. Its level is settled there.', code: 'BILLING_SUBMITTED' });
+    }
+    // "Her own visit": once signed, the rendering clinician; before, any
+    // clinician whose credential bills E/M.
+    if (record.renderingProvider && record.renderingProvider.id && ctx.closed && record.renderingProvider.id !== req.user.id) {
+      return res.status(403).json({ error: `These facts are confirmed by the clinician who signed the visit (${record.renderingProvider.name || 'the rendering clinician'}).`, code: 'EM_NOT_YOUR_VISIT' });
+    }
+    const body = req.body || {};
+    const extraction = (await loadAiReviews()).find(r => r && r.id === String(body.extractionId || '') && r.purpose === modelEngine.PURPOSES.MDM_EXTRACTION);
+    if (!extraction || String(extraction.encounterUuid) !== String(ctx.encounterUuid) || String(extraction.clientId) !== String(ctx.client.id)) {
+      return res.status(404).json({ error: 'That fact extraction is not one for this visit.', code: 'EM_NO_EXTRACTION' });
+    }
+    if (extraction.status !== 'done' || !extraction.output) return res.status(409).json({ error: 'The fact extraction has not finished.', code: 'EM_EXTRACTION_NOT_DONE' });
+    const sane = sanitizeConfirmedFacts(body.facts, extraction.output);
+    if (sane.error) return res.status(400).json({ error: `Those facts are not in the expected shape: ${sane.error}`, code: 'EM_FACTS_INVALID' });
+
+    const fam = apptTypes.resolveCodeFamily(record.visit || {});
+    const setting = fam.family && ['home', 'office'].includes(fam.family.key) ? fam.family.key : null;
+    if (!setting) return res.status(409).json({ error: 'This visit is not a home or office E/M visit, so there is no E/M level to derive.', code: 'EM_NO_FAMILY' });
+    const [allRecords, attestations] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+    const ps = patientStatusFor(record, allRecords, attestations);
+    const out = emMdm.deriveLevel({
+      facts: sane.facts, setting, patientStatus: ps.status,
+      chooseTime: !!body.chooseTime, affirmTime: !!body.affirmTime,
+      context: { enteredMinutes: record.totalMinutes || null, statusConflict: ps.conflict }
+    });
+    if (out.error) return res.status(409).json({ error: out.error, code: out.code });
+    // The credential that bills E/M. An LCSW's or RN's confirmation derives
+    // nothing a claim could carry.
+    if (clinicalRoles.disallowedServiceCodesFor(req.user, [{ code: out.finalCode }]).length) {
+      return res.status(403).json({ error: 'Your clinical credential does not bill E/M, so no E/M level is derived for your confirmation.', code: 'EM_CREDENTIAL' });
+    }
+    const at = new Date().toISOString();
+    const by = clinicalRepo.actorRecord(ctx.actor);
+    const event = {
+      id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, at, by,
+      extractionId: extraction.id, extractedFacts: extraction.output, confirmedFacts: sane.facts,
+      patientStatus: ps.status, setting, derivation: out,
+      derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override
+    };
+    await db.set(EM_DERIVATIONS, [...(await loadRows(EM_DERIVATIONS)), event]);
+    const summary = {
+      eventId: event.id, at, by, extractionId: extraction.id,
+      familyLabel: out.familyLabel, elements: out.elements, mdm: out.mdm, time: out.time,
+      candidates: out.candidates, defaultCode: out.defaultCode, finalCode: out.finalCode,
+      finalBasis: out.finalBasis, override: out.override, explanation: out.explanation,
+      flag: out.flag ? { ...out.flag, raisedAt: at, resolvedAt: null, resolvedBy: null, resolution: null } : null
+    };
+    await saveBillingRecord(ctx.rows, { ...record, emDerivation: summary, updatedAt: at });
+    // Codes and whether the default was overridden. Never a fact or a quote.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'em_level_derived', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override, flagged: !!out.flag
+    });
+    // The clinician's view: the code and how it was reached. Never the flag.
+    res.json({ message: 'Confirmed.', emDerivation: emDerivationView({ emDerivation: summary }, false) });
+  } catch (error) {
+    console.error('E/M derivation error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The coder resolves a LEVEL_AMBIGUOUS flag, with a note. The flag stays on
+// the record, resolved, so the history of the claim reads true.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation/flag/resolve', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const d = ctx.record && ctx.record.emDerivation;
+    if (!d || !d.flag) return res.status(404).json({ error: 'This visit has no level review flag.', code: 'EM_NO_FLAG' });
+    if (d.flag.resolvedAt) return res.status(409).json({ error: `Already resolved ${d.flag.resolvedAt}.`, code: 'EM_FLAG_RESOLVED' });
+    const note = String((req.body || {}).resolution || '').trim();
+    if (note.length < 3) return res.status(400).json({ error: 'Say how the flag was resolved.', code: 'EM_FLAG_NOTE_REQUIRED' });
+    const at = new Date().toISOString();
+    const flag = { ...d.flag, resolvedAt: at, resolvedBy: clinicalRepo.actorRecord(ctx.actor), resolution: note.slice(0, 1000) };
+    await saveBillingRecord(ctx.rows, { ...ctx.record, emDerivation: { ...d, flag }, updatedAt: at });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'em_level_flag_resolved', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    res.json({ message: 'Resolved.', flag });
+  } catch (error) {
+    console.error('E/M flag resolve error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── 3.6: E/M level distribution per clinician, this month against last ─────
+// A shift upward is the first thing an auditor looks at, and it is also the
+// detector that catches a wrong level table before a payer does. The flag rate
+// is counted beside it: a rising rate is a documentation problem.
+const monthOf = (d) => String(d || '').slice(0, 7);
+const priorMonth = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+};
+const emDistribution = (records, month) => {
+  const prev = priorMonth(month);
+  const byClinician = new Map();
+  const row = (rp) => {
+    const key = (rp && rp.id) || 'unknown';
+    if (!byClinician.has(key)) byClinician.set(key, { clinicianId: key, clinician: (rp && rp.name) || 'Unknown', months: { [month]: {}, [prev]: {} }, encounters: { [month]: 0, [prev]: 0 }, flagged: { [month]: 0, [prev]: 0 } });
+    return byClinician.get(key);
+  };
+  for (const r of records || []) {
+    if (!r || r.noteStatus === 'voided') continue;
+    const ym = monthOf(r.date);
+    if (ym !== month && ym !== prev) continue;
+    const em = (r.services || []).filter(s => emLevels.isEmCode(s.code));
+    if (!em.length && !(r.emDerivation)) continue;
+    const c = row(r.renderingProvider);
+    c.encounters[ym]++;
+    for (const s of em) c.months[ym][s.code] = (c.months[ym][s.code] || 0) + 1;
+    if (r.emDerivation && r.emDerivation.flag) c.flagged[ym]++;
+  }
+  return {
+    month, priorMonth: prev,
+    clinicians: [...byClinician.values()].map(c => ({
+      ...c,
+      flagRate: { [month]: c.encounters[month] ? c.flagged[month] / c.encounters[month] : null, [prev]: c.encounters[prev] ? c.flagged[prev] / c.encounters[prev] : null },
+      // Share of each month's E/M lines at the highest level of a family.
+      highestShare: Object.fromEntries([month, prev].map(m => {
+        const total = Object.values(c.months[m]).reduce((a, b) => a + b, 0);
+        const top = Object.entries(c.months[m]).filter(([code]) => emLevels.isHighestInFamily(code)).reduce((a, [, n]) => a + n, 0);
+        return [m, total ? top / total : null];
+      }))
+    }))
+  };
+};
+app.get('/api/clinical/reports/em-distribution', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const month = /^\d{4}-\d{2}$/.test(String(req.query.month || '')) ? String(req.query.month) : practiceToday().slice(0, 7);
+    res.json(emDistribution(await loadRows('encounter_billing'), month));
+  } catch (error) {
+    console.error('E/M distribution error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Phase 3b: service selection for the codes that are not level-based ────
+// Deterministic, no model. Each family's thresholds live in its own file under
+// serviceRules/. Billing's tool: the result is a suggestion with its reason and,
+// near a threshold, the same review flag as Phase 3. Nothing is written.
+app.get('/api/clinical/service-selection/families', authenticateToken, requireBilling, (req, res) => {
+  res.json({ families: serviceRules.FAMILIES.map(f => ({ family: f.FAMILY, label: f.label, fields: f.FIELDS })) });
+});
+app.post('/api/clinical/service-selection', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const input = { ...(body.input && typeof body.input === 'object' ? body.input : {}) };
+    // The AWV history is GFC's own billed AWVs for this patient, read here,
+    // never typed in.
+    if (body.family === 'annual_wellness') {
+      const clientId = String(body.clientId || '');
+      if (!clientId) return res.status(400).json({ error: 'Name the patient, so GFC\'s earlier AWVs can be read.', code: 'SERVICE_SELECTION_NO_CLIENT' });
+      const awv = require('./serviceRules/annualWellness');
+      input.priorAwvDates = (await loadRows('encounter_billing'))
+        .filter(r => r && String(r.clientId) === clientId && r.noteStatus !== 'voided' && (r.services || []).some(sv => awv.CODES.includes(sv.code)))
+        .map(r => r.date);
+      input.dos = String(input.dos || body.dos || practiceToday()).slice(0, 10);
+    }
+    const out = serviceRules.select(String(body.family || ''), input);
+    if (out.error) return res.status(400).json(out);
+    res.json(out);
+  } catch (error) {
+    console.error('Service selection error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -18370,7 +19232,7 @@ app.get('/api/clinical/patients/:clientId/calls/:callId/note', authenticateToken
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'held', 'level_flags', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
     let emrRows = null; let emrError = null;
     if (openemr.isConfigured()) {
@@ -18418,9 +19280,52 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         : String(b.date || '').localeCompare(String(a.date || '')));
     // Every encounter with a line that posted at $0, whatever the filter, so a
     // $0 charge is never hidden behind the wrong tab.
+    // ── The claim scrub on the queue (2026-11-04): every encounter in the hold
+    // queue carries its blocking and warning counts side by side. Only billing
+    // sees them; a clinician's queue carries none. Scrubbed from what the app
+    // holds — the encounter's facility as last read from OpenEMR, the posted
+    // fees — so the queue costs no OpenEMR read per row. Opening the encounter
+    // scrubs it live.
+    const canBill = clinicalRoles.canSubmitBilling(req.user);
+    let held = [];
+    if (canBill) {
+      const inQueue = rows.filter(r => !voided.has(String(r.encounterUuid)) && claimScrub.holdState(recByUuid.get(String(r.encounterUuid)) || null, r.billingStatus));
+      if (inQueue.length) {
+        const [facilityInfo, catalog, ncci, users, links, timings] = await Promise.all([billingFacilityForScrub(), codeCatalogService.load(), getNcciTables(), getUsers(), getAppointmentLinkage(), loadVisitTimings()]);
+        const clientRows = users;
+        const dx = inQueue.flatMap(r => ((recByUuid.get(String(r.encounterUuid)) || {}).diagnoses || []).map(d => d.code));
+        const icd10 = await verifyIcd10Codes(req.user, dx);
+        for (const r of inQueue) {
+          const record = recByUuid.get(String(r.encounterUuid));
+          const client = clientRows.find(u => u && String(u.id) === String(record.clientId)) || {};
+          const hold = claimScrub.holdState(record, r.billingStatus);
+          const facts = record.claimFacts || { checked: false, error: 'not read yet; open the encounter to read it' };
+          const scrub = runClaimScrub({ phase: hold === 'awaiting_billing' ? 'pre_post' : 'final', record, client, users, facts, icd10, catalog, ncci, facilityInfo, allRecords: records,
+            psychotherapyMinutes: psychotherapyMinutesFor(record, links, timings) });
+          r.holdState = hold;
+          r.scrub = { block: scrub.counts.block, warn: scrub.counts.warn, factsReadAt: record.claimFacts ? record.claimFacts.readAt : null };
+          r.totalMinutes = record.totalMinutes || null;
+        }
+        held = inQueue.filter(r => r.holdState !== 'released');
+      }
+    }
+    // Phase 3: every encounter with an open LEVEL_AMBIGUOUS flag, released or
+    // not. The flag lives in the coder's queue until a coder resolves it.
+    const levelFlags = canBill ? rows.filter(r => {
+      const rec = recByUuid.get(String(r.encounterUuid));
+      return rec && !voided.has(String(r.encounterUuid)) && rec.emDerivation && rec.emDerivation.flag && !rec.emDerivation.flag.resolvedAt;
+    }).map(r => { r.levelFlag = true; return r; }) : [];
+    if (filter === 'level_flags') {
+      filtered.length = 0;
+      filtered.push(...levelFlags.sort((a, b) => String(a.date || '').localeCompare(String(b.date || ''))));
+    }
+    if (filter === 'held') {
+      filtered.length = 0;
+      filtered.push(...held.sort((a, b) => (b.scrub.block - a.scrub.block) || String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))));
+    }
     const zeroFee = rows.filter(r => !voided.has(String(r.encounterUuid)) && r.zeroFeeCharges && r.zeroFeeCharges.length)
       .map(r => ({ encounterUuid: r.encounterUuid, clientId: r.clientId, patientName: r.patientName, date: r.date, codes: r.zeroFeeCharges.map(c => c.code) }));
-    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
+    res.json({ filter, encounters: filtered, zeroFee, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length, held: held.length, level_flags: levelFlags.length }, held: canBill ? { count: held.length, blocking: held.reduce((n, r) => n + r.scrub.block, 0), warnings: held.reduce((n, r) => n + r.scrub.warn, 0) } : null, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -20925,6 +21830,7 @@ const aiReviewListHandler = async (req, res) => {
       canRun: clinicalRoles.canClinicalWrite(req.user),
       reviews: rows.map(r => ({
         id: r.id, status: r.status, at: r.at, finishedAt: r.finishedAt || null,
+        purpose: r.purpose || null, encounterUuid: r.encounterUuid || null,
         requestedBy: r.requestedBy ? r.requestedBy.name : null,
         passes: r.passes || null, currentPass: r.currentPass || null,
         findings: r.output ? (r.output.findings || []).length : 0,
@@ -20955,6 +21861,8 @@ const aiReviewGetHandler = async (req, res) => {
         requestedBy: row.requestedBy ? row.requestedBy.name : null,
         passes: row.passes || null, currentPass: row.currentPass || null,
         model: row.model || null, focus: row.focus || null,
+        purpose: row.purpose || null, encounterUuid: row.encounterUuid || null,
+        quoteCounts: row.quoteCounts || null,
         manifest: row.manifest || null, output: row.output || null,
         findingDecisions: row.findingDecisions || [],
         droppedUncited: row.droppedUncited || 0,
@@ -21501,6 +22409,138 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
     res.status(202).json({ reviewId: row.id, status: row.status });
   } catch (error) {
     console.error('Records extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── AI coding pipeline, Phase 2: clinical fact extraction (2026-11-04) ─────
+//
+// THE MODEL EXTRACTS FACTS FROM ONE ENCOUNTER NOTE AND NAMES NO CODE. Rules
+// decide a level in Phase 3, after the clinician confirms the facts. Same
+// machinery as the records extraction: the one engine, a declared schema, a
+// background job on an ai_reviews row that the existing poll reads and the
+// existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
+// draft on the coding workflow, and the encounter record keeps only a pointer.
+// Rules, schema and quote checks: mdmExtraction.js.
+const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
+  try {
+    const notRead = [];
+    let narrativeText = '';
+    let problems = null; let medications = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const puuid = client.openEmrPatientId;
+      const [soap, probs, meds] = await Promise.allSettled([
+        record.narrativeNoteSid ? emr.getSoapNote(puuid, encounterUuid, record.narrativeNoteSid) : Promise.resolve(null),
+        emr.getProblems(puuid), emr.getMedicationRequests(puuid)
+      ]);
+      // The narrative is read by the RECORDED sid: getSoapNotes can return
+      // another encounter's notes (openemr.js), so it is never used here.
+      if (soap.status === 'fulfilled' && soap.value) {
+        const n = soap.value;
+        narrativeText = [n.subjective, n.objective, n.assessment, n.plan].filter(Boolean).join('\n');
+      } else if (soap.status === 'rejected') notRead.push({ sourceId: `enc:${encounterUuid}:narrative`, why: 'the OpenEMR copy of the note could not be read' });
+      if (probs.status === 'fulfilled') problems = probs.value.map(clinicalRepo.summarizeCondition);
+      else notRead.push({ sourceId: 'emr:problems', why: 'not returned by the clinician\'s own EMR session' });
+      if (meds.status === 'fulfilled') medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+      else notRead.push({ sourceId: 'emr:medications', why: 'not returned by the clinician\'s own EMR session' });
+    } else {
+      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
+    }
+
+    // Documents attached to THIS encounter, and only those.
+    const rawDocs = [];
+    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
+      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
+    for (const u of uploads) {
+      try {
+        rawDocs.push({
+          clientId: client.id, sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`, id: u.id,
+          title: u.fileName || u.kind || 'Document', date: u.at || u.uploadedAt || null,
+          mimeType: u.mimeType || 'application/pdf', bytes: await googledrive.downloadFileBuffer(u.driveFileId)
+        });
+      } catch (e) {
+        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
+      }
+    }
+    const documents = rawDocs.length ? chartPacket.buildSections({ clientId: client.id, documents: rawDocs }).documents : [];
+
+    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, documents, notRead });
+    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: packet.documents, notRead: packet.notRead, passes: 1 });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      input: { sections: packet.sections, documents: packet.documents },
+      schema: mdmExtraction.MDM_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'mdm_extraction',
+      sourceIds: [...packet.sections.map(s => s.sourceId), ...packet.documents.map(d => d.sourceId)]
+    });
+
+    // §2.4, on the SERVER, after the model: every item carries a quote that
+    // is really in the sources, or it is dropped and counted.
+    const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
+      sourceTexts: packet.sections.map(s => s.text), hasDocuments: packet.documents.length > 0
+    });
+    const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId, manifest,
+      output: { ...output, unreadable }, droppedUncited: dropped, quoteCounts: counts, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED, finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null, blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] MDM extraction failed:', (e && e.code) || e.message);
+  }
+};
+
+// POST …/encounters/:euuid/ai/extract-mdm — start one. Clinical write access.
+// The result is read through the existing GET …/ai/reviews/:id poll.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const encounterUuid = String(req.params.euuid || '');
+    const rows = await loadRows('encounter_billing');
+    const record = findBillingRecord(rows, encounterUuid);
+    if (!record || String(record.clientId) !== String(client.id)) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
+    // Refused BEFORE anything is gathered or sent.
+    if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
+      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' });
+    }
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({ error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
+    }
+    const row = {
+      id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id, encounterUuid,
+      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      passes: null, currentPass: null, invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    // A POINTER on the coding workflow, never the facts themselves.
+    await saveBillingRecord(rows, { ...record, latestMdmExtractionId: row.id });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
+      { reviewId: row.id, encounterUuid });
+    runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('MDM extraction start error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -29701,6 +30741,11 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
     // separate "dismissed" flag to fall out of sync with reality.
     const { ncciSourceVersion } = await getNcciTables();
     const billingDataRefresh = clinicalRepo.ncciRefreshReminder(ncciSourceVersion);
+    // The E/M level table's review date (emLevels.js, 2026-11-04). Admin hub
+    // only; clears when the file's nextReviewDue moves.
+    const emLevelReview = emLevels.reviewStatus(practiceToday());
+    // Phase 3b's threshold files share the same January review.
+    const serviceRulesReview = serviceRules.reviewStatus(practiceToday()).filter(r => r.overdue);
 
     // Get all open tickets across the app (feedback requests + password reset requests)
     const feedbackRequests = (await db.get('feedback_requests')) || [];
@@ -29727,7 +30772,9 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
       totalServiceReports: serviceReports.length,
       recentServiceReports: serviceReports.slice(0, 5),
       openTickets: totalOpenTickets,
-      billingDataRefresh
+      billingDataRefresh,
+      emLevelReview,
+      serviceRulesReview
     };
 
     res.json(stats);
@@ -29975,6 +31022,13 @@ process.on('unhandledRejection', (reason, promise) => {
 // gfc_billable_codes is seeded once, from the owner's OpenEMR export, the
 // first time the app boots without it. An empty list saved on purpose is left
 // alone; the NCCI loader then stops and says so.
+// The E/M level table has a known expiry (CPT 2027, 2027-01-01). Past its
+// review date it says so here, naming the file, and on the admin hub dashboard.
+// No clinician or coder ever sees a verification notice (spec §3.1).
+{
+  const emReview = emLevels.reviewStatus(practiceToday());
+  if (emReview.overdue) console.warn(`[em-levels] ${emReview.file} is past its review date (${emReview.nextReviewDue}; verified ${emReview.verifiedOn}). Re-verify it against the current CPT code set.`);
+}
 billableCodes.seedIfMissing(db).then(r => {
   if (r.seeded) console.log(`[billable-codes] Seeded gfc_billable_codes with ${r.count} codes from scripts/data/gfc_billable_codes_seed.json.`);
 }).catch(e => console.error('[billable-codes] Could not seed gfc_billable_codes:', e.message));

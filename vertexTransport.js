@@ -78,6 +78,14 @@ const SYSTEM_INSTRUCTIONS = Object.freeze({
     'For each claimed condition, list what the records show: diagnoses recorded, when it was first documented, in-service events, treatment, current severity and functional impact. If the pages you were given hold nothing about a claimed condition, list it in notFound with what you searched for. That is a statement of absence, not a conclusion.',
     'List every page you could not read, and why, in unreadable. An omission you report is useful; one you hide is dangerous.'
   ].join(' '),
+  mdm_extraction: [
+    'You are reading ONE encounter note for a licensed clinician, who will confirm or correct every fact you report about her own visit.',
+    'Report ONLY what the note and the sources provided actually say: the problems addressed at this visit, the data reviewed, the risk factors, and any total time stated.',
+    'Every item MUST carry a quote: the exact words from the source it came from, copied character for character. An item you cannot quote is not reported.',
+    'Do NOT infer. If the note does not state that a medication was started, stopped or changed, that is not prescription management. If no total time is written in the note, set statementPresent false.',
+    'Do NOT provide any billing code, E/M level, CPT, ICD-10 or other code, and do NOT say what level the visit supports. You report facts; you do not code.',
+    'List anything you could not read in unreadable.'
+  ].join(' '),
   document_extraction: 'Read the attached document and return ONLY the fields you can actually see printed on it. Leave a field out entirely rather than guess — an omitted field is reviewed as blank, a wrong one is reviewed as if it were true. Never infer a value from context.',
   document_classification: 'Read the attached document and classify it using only what is printed on it.',
   dictation_to_note: 'Turn the attached dictation into a structured note. Use only what was dictated; never add a finding, a plan or a value that was not said.'

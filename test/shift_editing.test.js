@@ -640,7 +640,10 @@ test('a manager reads the board and the roster; the money stays admin-only', asy
     // role out of the browser.
     assert.strictEqual(roster.body.access.manageSchedule, true);
     assert.strictEqual(roster.body.access.managePay, false);
-    assert.strictEqual(roster.body.access.manageLocations, false);
+    // Widened 2026-11-03: a manager sets a client's location and READS pay.
+    assert.strictEqual(roster.body.access.manageLocations, true);
+    assert.strictEqual(roster.body.access.viewPay, true);
+    assert.strictEqual(roster.body.access.exportPay, false);
     assert.strictEqual(roster.body.access.canOverrideGates, false);
 
     for (const url of ['/api/scheduling/payroll.csv', '/api/scheduling/billing.csv']) {

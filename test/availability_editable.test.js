@@ -76,16 +76,22 @@ test('the route asks the STORE whether this is a change, never the body', () => 
   assert.match(block, /\{ isChange \}/, 'and it must be passed to the validator');
 });
 
-test('only an admin or a care coordinator records for somebody else', () => {
+test('the Super Admin, a manager and a care coordinator record for somebody else, read by account type', () => {
   const src = stripComments(read('routes/scheduling.js'));
   const i = src.indexOf('const isAvailabilityRecorder');
   assert.ok(i > 0, 'the predicate must exist');
   const pred = src.slice(i, i + 220);
-  assert.match(pred, /ROLES\.ADMIN/);
-  assert.match(pred, /ROLES\.CASE_MANAGER/);
-  // The owner chose the coordinator-and-admin option over the wider one that
-  // included managers. One predicate to widen if that changes.
-  assert.ok(!/isManager/.test(pred), 'managers were deliberately not included');
+  // Owner decision, 2026-11-03, superseding 2026-10-27: managers record it too.
+  // It reads the ACCOUNT TYPE: the old `role === caseManager` check refused
+  // every coordinator (stored as role user + isManager) and admitted LMSWs.
+  assert.match(pred, /accountTypes\.isHomeCareOffice/);
+  assert.ok(!/CASE_MANAGER/.test(pred), 'an LMSW (the caseManager role) is not the scheduling office');
+  const at = require('../accountTypes');
+  assert.deepStrictEqual([...at.HOME_CARE_OFFICE_TYPES].sort(), ['admin', 'coordinator', 'manager']);
+  assert.strictEqual(at.isHomeCareOffice({ role: 'user', isManager: true, clinicalRole: 'coordinator' }), true);
+  assert.strictEqual(at.isHomeCareOffice({ role: 'user', isManager: true, clinicalRole: 'readOnly' }), true);
+  assert.strictEqual(at.isHomeCareOffice({ role: 'caseManager', clinicalRole: 'lmsw' }), false);
+  assert.strictEqual(at.isHomeCareOffice({ role: 'vendor', licenseLevel: 'cna' }), false);
 });
 
 test('the row stays the CAREGIVER\'s, with the recorder named beside it', () => {
@@ -179,8 +185,12 @@ function harness() {
   };
   const users = [
     { id: 'adm', email: 'a@g.test', name: 'GFC Admin', role: 'admin' },
-    { id: 'coord', email: 'c@g.test', name: 'Care Coordinator', role: 'caseManager' },
-    { id: 'mgr', email: 'm@g.test', name: 'Manager', role: 'user', isManager: true },
+    // Stored the way accountTypes.fieldsFor stores a coordinator. The old
+    // fixture used role caseManager, which is the LMSW type, and is why the
+    // live defect was invisible here.
+    { id: 'coord', email: 'c@g.test', name: 'Care Coordinator', role: 'user', isManager: true, clinicalRole: 'coordinator', accountType: 'coordinator' },
+    { id: 'lmsw', email: 'l@g.test', name: 'Courtney LMSW', role: 'caseManager', clinicalRole: 'lmsw', accountType: 'lmsw' },
+    { id: 'mgr', email: 'm@g.test', name: 'Manager', role: 'user', isManager: true, clinicalRole: 'readOnly', accountType: 'manager' },
     { id: 'cg1', email: 'g@g.test', name: 'Danielle Carter', role: 'vendor', licenseLevel: 'cna' },
     { id: 'cg2', email: 'h@g.test', name: 'New Starter', role: 'vendor', licenseLevel: 'cna' },
     { id: 'client-1', email: 'cl@g.test', name: 'Margaret Whitfield', role: 'client', enrollmentStatus: 'enrolled' }
@@ -200,6 +210,8 @@ function harness() {
       if (!u) return res.status(401).json({ error: 'no' });
       req.user = {
         id: u.id, email: u.email, name: u.name, role: u.role, isManager: u.isManager || false,
+        // What the real authenticateToken carries (server.js).
+        accountType: u.accountType || null, clinicalRole: u.clinicalRole || null,
         hasClinicalAccess: false, licenseLevel: u.licenseLevel || null,
         assignedClients: [], careTeam: null, familyOfClientId: null
       };
@@ -224,6 +236,18 @@ const call = (app, method, url, body, as) => new Promise((resolve, reject) => {
     req.on('error', e => { srv.close(); reject(e); });
     if (data) req.write(data); req.end();
   });
+});
+
+test('ROUTE: a manager records a change for a caregiver too', async () => {
+  const h = harness();
+  await h.db.set('caregiver_availability', []);
+  let r = await call(h.app, 'POST', '/api/scheduling/availability', { effectiveFrom: plus(20), windows: W }, 'cg1');
+  assert.equal(r.status, 200);
+  r = await call(h.app, 'POST', '/api/scheduling/availability',
+    { caregiverId: 'cg1', effectiveFrom: plus(3), windows: [{ day: 'Thu', start: '09:00', end: '13:00' }] }, 'mgr');
+  assert.equal(r.status, 200, `manager must get through, got ${JSON.stringify(r.body)}`);
+  assert.equal(r.body.availability.caregiverId, 'cg1', 'still the caregiver\'s row');
+  assert.equal(r.body.availability.enteredByName, 'Manager', 'the recorder is named beside it');
 });
 
 test('ROUTE: a care coordinator records a change for a caregiver', async () => {
@@ -262,7 +286,7 @@ test('ROUTE: a caregiver changes next week, which the old rule refused', async (
 test('ROUTE: who is refused recording for somebody else', async () => {
   const h = harness();
   await h.db.set('caregiver_availability', []);
-  for (const [who, why] of [['mgr', 'managers were not included'], ['cg2', 'another caregiver'], ['client-1', 'a client']]) {
+  for (const [who, why] of [['lmsw', 'an LMSW is not the scheduling office'], ['cg2', 'another caregiver'], ['client-1', 'a client']]) {
     const r = await call(h.app, 'POST', '/api/scheduling/availability',
       { caregiverId: 'cg1', effectiveFrom: plus(20), windows: W }, who);
     assert.equal(r.status, 403, why);

@@ -590,8 +590,9 @@ test('BUILD: the caregiver Feed\'s broadcast half has a screen', () => {
   assert.ok(/CaregiverFeedPanel/.test(hub), 'the composer exists');
   assert.ok(/\/api\/caregiver\/broadcasts/.test(hub), 'and posts to the route that feeds it');
   const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
-  assert.ok(/router\.post\('\/api\/caregiver\/broadcasts', authenticateToken, requireAdmin/.test(routes),
-    'and only an admin may post one');
+  // Widened 2026-11-03 to the caregiver office (Super Admin, manager, coordinator).
+  assert.ok(/router\.post\('\/api\/caregiver\/broadcasts', authenticateToken, requireCaregiverOffice/.test(routes),
+    'and only the caregiver office may post one');
 });
 
 test('BUILD: the component asks the server which clients a user may message about', () => {

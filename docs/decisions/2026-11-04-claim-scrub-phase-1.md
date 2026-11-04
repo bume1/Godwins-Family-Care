@@ -1,0 +1,34 @@
+# Claim scrub, documentation gate and hold queue (AI coding pipeline, Phase 1)
+
+_2026-11-04 · owner-directed · spec: GFC_AI_Coding_Pipeline_ClaudeCode_Spec.md, Phase 1_
+
+**What was wrong.** Nothing checked a claim as a whole before it reached Billing Manager. A missing facility NPI, a $0 line, an MBI in the wrong shape or a Fee Sheet edited after signing all went through quietly. Visits could also reach billing with no total time recorded.
+
+**What changed.**
+
+- **`claimScrub.js`**, pure, no I/O. Takes the encounter, its lines, the payer, the facility records, the rendering provider, the code catalog, the ICD-10 lookups and the NCCI tables. Returns findings `{ severity: block | warn, code, message, field, fieldLabel }`, blockers first.
+- **Blocking:** billing facility NPI (with the CMS check digit), federal EIN, taxonomy · rendering provider's NPI · encounter facility, with the POS equal to that facility record's POS · every line points at a diagnosis on the encounter · every pointed-at diagnosis is in OpenEMR's ICD-10 table · every code in OpenEMR's catalog and active · price > $0 (at release) · MUE over the cap when MAI is 2 (or unknown) · NCCI PTP on the final charge set · a primary payer with a policy number · Original Medicare's number in CMS's MBI format · date of service not in the future and within twelve months.
+- **Warnings:** MUE over the cap at MAI 1 or 3 (asks for the documentation) · modifier 25 with no other billable service that date · unspecified ICD-10 where OpenEMR lists a more specific code in the category · the highest E/M level in its family · a PTP pair billed under a modifier · a stale code catalog, with its date.
+- **A fact the app could not read is NOT CHECKED and blocks.** It is never read as a pass (an unread encounter, an unchecked ICD-10 code, no facility list).
+- **The hold queue.** `awaiting_billing` (signed, not submitted) → **Submit to billing** runs the scrub first and posts nothing while a blocker is open → `held` (posted) → **Release Claim** re-reads the lines OpenEMR holds NOW, prices included, and refuses while a blocker is open. Every warning must be confirmed as reviewed. A released claim leaves the queue. Nothing transmits from the app: the release is the record that a person reviewed the claim.
+- **Release is where a Fee Sheet edit after signing is caught.** It reads `GET …/billing` from OpenEMR, not the app's copy.
+- **MUE rule changed in `checkNcciBundling`** (the sign and billing gates too): only MAI 2, or an unknown MAI, blocks. MAI 1 and 3 warn. Existing tests repointed, two added.
+- **Documentation gate: `requireCodingQueueReady`, middleware** on the sign route and the clinician-addendum route (the two doors into the queue). It needs a total time in minutes (a number, never prose), ≥1 ICD-10 diagnosis and a signed or sign-ready note, and names exactly what is missing (`CODING_QUEUE_GATE`, `missing: [...]`). The time is what the clinician types on the sign card, else the start and end recorded on My Day. **Never the scheduled duration.** An RN/LMSW author signature passes (it does not enter the queue). A request the handler will refuse for its own reason (no attestation, already signed, unreviewed carried text, blank addendum, wrong credential) passes, so that reason is what the person reads. Stored as `totalMinutes` / `totalMinutesSource` on the encounter.
+- **Surfaces.** Billing's encounter card shows every finding in full, blockers first, each with its field, plus Check Again and Release Claim. The coding queue shows blocking and warning counts side by side on every held row, and a new **Hold Queue** tab is the batch view (most blockers first). Clinicians see only the time field on the sign card. Findings never reach a clinician's screen (the routes are `requireBilling`; the queue omits counts for non-billing).
+- **`emLevels.js`** holds the verified E/M table (16 codes, MDM, time thresholds, provenance, `nextReviewDue: 2027-01-01`). Phase 1 reads only "highest in family". It is registered in `codeCatalog.RULE_LISTS`, so a level missing or inactive in OpenEMR fails `/healthz/code-catalog`. Past its review date it logs at boot and shows on the admin-hub dashboard only. The deleted home-visit new-patient code appears nowhere, comments included.
+- **Data:** the facility snapshot now keeps `facility_npi`, `federal_ein`, `facility_taxonomy`. New KV `icd10_code_lookups` (codes only, not PHI, 30-day cache, registered). The MBI regex gained its CMS citation.
+
+**Must not undo:**
+- A finding states what the record does or does not say. It never says what to document to reach a code.
+- The live scrub re-reads OpenEMR's facility list with billing's session before judging it, so a fix in OpenEMR shows on the next check.
+- The scrub reads `getNcciTables()` through an explicit field mapping. Passed through unmapped, every claim read as "NCCI data never loaded" (caught by the HTTP probe, guarded by a test).
+
+**Open for the owner:**
+1. **Tell clinicians:** every billable signature now needs a total time in minutes, unless they recorded start and end on My Day.
+2. After deploying, an admin presses **Sync facilities** once. Then fill in facility 3's **NPI (1538078357), federal EIN and taxonomy** in OpenEMR if any are blank. Until then every claim shows those blockers, by name.
+3. **The release lives in the app; OpenEMR's Billing Manager can still generate a claim for an unreleased encounter.** Operating rule: generate claims only for released encounters.
+4. **Original Medicare without a PTAN:** the scrub does not know PTAN status. Say whether Release should refuse Original Medicare until the PTAN arrives.
+5. A price exists only once a line posts, so price is judged at Release, not at Submit.
+6. Edits made in OpenEMR after a release are not watched.
+
+**Verified.** `test/claim_scrub.test.js` 40 tests: one per rule (fires, and a clean claim passes), the gate middleware lifted out of `server.js` and run against production-shaped fakes. **47 mutations, each confirmed to fail a test**; four survived the first pass (a "missing" check whose fallback format check produced the same code) and the tests now assert the sentence, since missing and malformed are different fixes. `scripts/verify_note_lifecycle.js` **219/219** over real HTTP (was 182/15 on main: it never cached the code catalog, fixed here), including the time gate, a scrub blocker at Submit, a $0 line and a Fee Sheet edit each refused at Release, and a clean release. `verify_telehealth_visits.js` unchanged from main (76/83, its 7 time-of-day failures). Full suite 2799 pass, 0 fail. Both edited pages compile. **Not proven live:** OpenEMR's facility API returning `facility_npi`/`federal_ein`/`facility_taxonomy` (standard columns, read via the existing facility route), and the ICD-10 search on the deployed instance.

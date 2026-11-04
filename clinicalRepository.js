@@ -2039,13 +2039,14 @@ const checkNcciBundling = (services, visit, ncci) => {
   if (!list.length) return NCCI_NO_CHECK; // nursing documentation, no charge — nothing to bundle-check
 
   const stale = ncciStaleness(ncci.sourceVersion);
-  if (stale) return { ok: false, message: `Cannot sign: the NCCI/MUE reference data is stale — ${stale.error}`, codes: [stale.code], missing: ['ncci_bundling'], warnings: [] };
+  if (stale) return { ok: false, message: `Cannot sign: the NCCI/MUE reference data is stale — ${stale.error}`, codes: [stale.code], missing: ['ncci_bundling'], warnings: [], stale };
 
   const ptpEdits = Array.isArray(ncci.ptpEdits) ? ncci.ptpEdits : [];
   const mueByCode = (ncci.mueByCode && typeof ncci.mueByCode === 'object') ? ncci.mueByCode : {};
 
   const blocked = [];        // indicator 0 — no modifier fixes this
   const modifierNeeded = []; // indicator 1 — fixable, but nothing did
+  const flagged = [];        // indicator 1 — a modifier was present
   const warnings = [];
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
@@ -2059,6 +2060,7 @@ const checkNcciBundling = (services, visit, ncci) => {
       if (indicator === 1) {
         const unlocked = hasUnbundlingModifier(resolvedModifierSet(a, visit)) || hasUnbundlingModifier(resolvedModifierSet(b, visit));
         if (unlocked) {
+          flagged.push([a.code, b.code]);
           warnings.push(`${a.code} and ${b.code} required a modifier to bill together, and one was present — confirm this pair is genuinely separately identifiable before this claim goes out.`);
         } else {
           modifierNeeded.push([a.code, b.code]);
@@ -2069,12 +2071,25 @@ const checkNcciBundling = (services, visit, ncci) => {
 
   const unitsByCode = new Map();
   for (const s of list) { if (s && s.code) unitsByCode.set(s.code, (unitsByCode.get(s.code) || 0) + (Number(s.units) > 0 ? Number(s.units) : 1)); }
-  const mueExceeded = [];
+  // MUE adjudication indicator (CMS MUE overview, https://www.cms.gov/medicare/coding-billing/national-correct-coding-initiative-ncci-edits/medicare-ncci-medically-unlikely-edits):
+  // MAI 2 is an ABSOLUTE date-of-service limit that no documentation overcomes,
+  // so it blocks. MAI 1 and 3 may be exceeded when the record supports it, so
+  // they are WARNINGS that ask for that documentation (AI coding pipeline
+  // spec §1.2/§1.3, 2026-11-04). An unknown MAI blocks: a cap whose kind is
+  // not known is treated as the absolute one.
+  const mueExceeded = []; const mueOverDocumentable = [];
   for (const [code, units] of unitsByCode) {
     const mue = mueByCode[code];
     if (!mue || mue.mueValue == null) continue;
-    if (units > Number(mue.mueValue)) mueExceeded.push({ code, units, cap: Number(mue.mueValue), mai: mue.mai || null });
+    if (units <= Number(mue.mueValue)) continue;
+    const row = { code, units, cap: Number(mue.mueValue), mai: mue.mai ? String(mue.mai) : null };
+    if (row.mai === '1' || row.mai === '3') mueOverDocumentable.push(row);
+    else mueExceeded.push(row);
   }
+  for (const m of mueOverDocumentable) {
+    warnings.push(`${m.code} is billed at ${m.units} units, over its MUE of ${m.cap} (MAI ${m.mai}). MAI ${m.mai} can be exceeded when the record supports it; the documentation supporting the extra units must be on file.`);
+  }
+  const details = { blocked, modifierNeeded, flagged, mueExceeded, mueOverDocumentable };
 
   const codes = []; const sentences = [];
   if (blocked.length) {
@@ -2089,8 +2104,8 @@ const checkNcciBundling = (services, visit, ncci) => {
     codes.push('MUE_EXCEEDED');
     sentences.push(`Cannot sign: ${mueExceeded.map(m => `${m.code} is billed at ${m.units} unit${m.units === 1 ? '' : 's'}, over its ${m.cap}-unit Medicare cap${m.mai ? ` (MAI ${m.mai})` : ''}`).join('; ')}.`);
   }
-  if (!codes.length) return { ok: true, message: null, codes: [], missing: [], warnings };
-  return { ok: false, message: sentences.join(' '), codes, missing: ['ncci_bundling'], warnings };
+  if (!codes.length) return { ok: true, message: null, codes: [], missing: [], warnings, details };
+  return { ok: false, message: sentences.join(' '), codes, missing: ['ncci_bundling'], warnings, details };
 };
 
 // The app's order lifecycle is ordered → sent → resulted (or cancelled); the
@@ -3032,6 +3047,7 @@ module.exports = {
   checkNcciBundling,
   NCCI_REFRESH_REMINDER_DAYS,
   ncciRefreshReminder,
+  ncciStaleness,
   buildOrderPayload,
   orderStatusToEmr,
   TEST_ORDER_TYPES,

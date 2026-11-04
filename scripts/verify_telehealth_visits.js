@@ -309,7 +309,8 @@ const COUSIN = {
   console.log('\n── C2. Signing WARNS about the checks and never blocks ──');
   r = await call('PUT', `${P}/encounters/${euuid}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
   check('coding saves', r.status === 200, r.body);
-  r = await call('POST', `${P}/encounters/${euuid}/sign`, tok.fnp, { attest: true });
+  // A started video visit with no end has no total time; the clinician enters it (2026-11-04).
+  r = await call('POST', `${P}/encounters/${euuid}/sign`, tok.fnp, { attest: true, totalMinutes: '25' });
   check('the note SIGNS with two checks outstanding', r.status === 200, r.body);
   check('and the signature carries a warning naming them',
     (r.body.warnings || []).some(w => /pre-join checks not recorded/i.test(w)), r.body.warnings);

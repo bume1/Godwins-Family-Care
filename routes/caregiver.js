@@ -37,6 +37,8 @@ const onboardingGate = require('../caregiverOnboardingGate');
 const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
 
+const accountTypes = require('../accountTypes');
+
 module.exports = function createCaregiverRoutes(deps) {
   const {
     db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
@@ -97,12 +99,37 @@ module.exports = function createCaregiverRoutes(deps) {
     return res.status(403).json({ error: 'Administrator access required.', code: 'ADMIN_ONLY' });
   };
 
+  // THE CAREGIVER OFFICE (owner decision, 2026-11-03): the Super Admin, a
+  // manager and a care coordinator run caregiver management — documents,
+  // competencies, the Feed. Read by ACCOUNT TYPE (accountTypes.js), never by
+  // `role`, because a coordinator is stored as `role: 'user'`.
+  const isCaregiverOffice = (u) => accountTypes.isHomeCareOffice(u);
+
+  const requireCaregiverOffice = (req, res, next) => {
+    if (isCaregiverOffice(req.user)) return next();
+    return res.status(403).json({
+      error: 'The Super Admin, a manager or a care coordinator manages caregivers.', code: 'CAREGIVER_OFFICE_ONLY'
+    });
+  };
+
   // Caregiver documents serve two audiences from one route: a caregiver reads
-  // their OWN rows, an admin reads everyone's. This gates the door; which rows
-  // you get is decided per row inside, because that needs the row.
-  const requireCaregiverOrAdmin = (req, res, next) => {
-    if (req.user.role === ROLES.ADMIN || cg.isCaregiver(req.user)) return next();
-    return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
+  // their OWN rows, the office reads everyone's. This gates the door; which
+  // rows you get is decided per row inside, because that needs the row.
+  // (Was requireCaregiverOrOffice; renamed when managers and coordinators were
+  // added, so the name says who it admits.)
+  const requireCaregiverOrOffice = (req, res, next) => {
+    if (isCaregiverOffice(req.user) || cg.isCaregiver(req.user)) return next();
+    return res.status(403).json({ error: 'Caregiver or caregiver-office access required.', code: 'CAREGIVER_ONLY' });
+  };
+
+  // Every document the office opens or lists is audited with who, as what,
+  // whose document, and through which route (as case-manager clinical reads are).
+  const auditOfficeDocRead = async (req, row, route) => {
+    await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'caregiver_document',
+      row ? row.id : null, {
+        kind: row ? row.kind : null, owner: row ? row.caregiver_id : (req.query.caregiverId || null),
+        role: accountTypes.accountTypeOf(req.user), route
+      });
   };
 
   // ---- THE WELCOME PACKET GATE (2026-09-13) -------------------------------
@@ -868,8 +895,9 @@ module.exports = function createCaregiverRoutes(deps) {
     }
   });
 
-  // POST /api/caregiver/broadcasts — admin posts to the Feed.
-  router.post('/api/caregiver/broadcasts', authenticateToken, requireAdmin, async (req, res) => {
+  // POST /api/caregiver/broadcasts — the office posts to the Feed (Super
+  // Admin, manager or care coordinator, 2026-11-03).
+  router.post('/api/caregiver/broadcasts', authenticateToken, requireCaregiverOffice, async (req, res) => {
     try {
       const { title, body } = req.body || {};
       if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.', code: 'TITLE_REQUIRED' });
@@ -911,7 +939,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // The vocabulary lives in caregiverRepository.js and is served rather than
   // restated in the browser: a second copy in a page is the thing that drifts,
   // and a drifting competency list decides what a CNA may document.
-  router.get('/api/caregiver/admin/competencies', authenticateToken, requireAdmin, (req, res) => {
+  router.get('/api/caregiver/admin/competencies', authenticateToken, requireCaregiverOffice, (req, res) => {
     res.json({
       competencies: cg.COMPETENCIES.map(task => ({ task, label: cg.COMPETENCY_LABELS[task] || task }))
     });
@@ -923,7 +951,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // user form because the parallel-build protocol keeps this session inside its
   // own files; a later wiring session can surface it in the hub UI.
   // ==========================================================================
-  router.put('/api/caregiver/admin/caregivers/:userId/competencies', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/caregiver/admin/caregivers/:userId/competencies', authenticateToken, requireCaregiverOffice, async (req, res) => {
     try {
       const incoming = (req.body || {}).skilledCompetencies;
       if (!Array.isArray(incoming)) {
@@ -936,6 +964,10 @@ module.exports = function createCaregiverRoutes(deps) {
       const users = await getUsers();
       const idx = users.findIndex(u => u.id === req.params.userId);
       if (idx === -1) return res.status(404).json({ error: 'User not found.' });
+      // A manager or coordinator records competencies on a CAREGIVER only.
+      if (req.user.role !== ROLES.ADMIN && accountTypes.accountTypeOf(users[idx]) !== accountTypes.TYPES.CAREGIVER) {
+        return res.status(403).json({ error: 'A manager or care coordinator records competencies on caregiver accounts only.', code: 'NOT_A_CAREGIVER' });
+      }
 
       users[idx].skilledCompetencies = incoming.map(e => ({
         task: String(e.task).trim(),
@@ -1087,13 +1119,13 @@ module.exports = function createCaregiverRoutes(deps) {
     { kind: 'welcome_packet', label: 'Completed welcome packet', needsPeriod: false, payroll: false, onboarding: true }
   ];
 
-  router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiverOrAdmin, (req, res) => {
+  router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiverOrOffice, (req, res) => {
     // SERVED, not restated in the page — the same rule the competency catalog
     // follows, so the list cannot drift between the form and the validator.
     res.json({ kinds: CAREGIVER_DOC_KINDS });
   });
 
-  router.post('/api/caregiver/documents', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
+  router.post('/api/caregiver/documents', authenticateToken, requireCaregiverOrOffice, async (req, res) => {
     try {
       const { kind, fileName, fileDataB64, note, periodStart, periodEnd, shiftId, caregiverId } = req.body || {};
       if (!kind || !fileName || !fileDataB64) {
@@ -1130,8 +1162,11 @@ module.exports = function createCaregiverRoutes(deps) {
       // file their own: passing someone else's id does not widen anything,
       // the same rule the list route follows.
       const isAdmin = req.user.role === ROLES.ADMIN;
+      // The office (admin, manager, coordinator) files FOR a named caregiver;
+      // anybody else files their own.
+      const isOffice = isCaregiverOffice(req.user);
       let me;
-      if (isAdmin) {
+      if (isOffice) {
         if (!caregiverId) {
           return res.status(400).json({ error: 'Say which caregiver this belongs to.', code: 'CAREGIVER_ID_REQUIRED' });
         }
@@ -1189,13 +1224,13 @@ module.exports = function createCaregiverRoutes(deps) {
         // The checklist item never ticked, so the office chased a caregiver
         // for a document the office had itself uploaded. A safety net with a
         // dead end in it is the shape this repo keeps paying for.
-        status: isAdmin ? 'accepted' : 'received',
+        status: isOffice ? 'accepted' : 'received',
         uploaded_at: new Date().toISOString(),
         // "The caregiver sent this" and "the office filed it for them" are
         // different facts, and for a W9 the difference is the whole point.
         uploaded_by_id: req.user.id,
         uploaded_by_name: req.user.name || req.user.email || null,
-        uploaded_by_office: isAdmin,
+        uploaded_by_office: isOffice,
         reviewed_at: null, reviewed_by_name: null, review_note: null
       };
       rows.push(row);
@@ -1203,7 +1238,7 @@ module.exports = function createCaregiverRoutes(deps) {
 
       // The activity log records THAT a document arrived, never its contents.
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_uploaded', 'caregiver_document', row.id,
-        { kind, caregiverId: me.id, filedByOffice: isAdmin, periodStart: row.period_start, periodEnd: row.period_end });
+        { kind, caregiverId: me.id, filedByOffice: isOffice, role: accountTypes.accountTypeOf(req.user), periodStart: row.period_start, periodEnd: row.period_end });
 
       res.json({ message: 'Document received', document: publicCaregiverDoc(row) });
     } catch (error) {
@@ -1215,14 +1250,15 @@ module.exports = function createCaregiverRoutes(deps) {
   // A caregiver reads only their OWN documents. Admin reads everyone's and may
   // filter to one caregiver; the filter is admin-only, so a caregiver cannot
   // widen their view by passing someone else's id.
-  router.get('/api/caregiver/documents', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
+  router.get('/api/caregiver/documents', authenticateToken, requireCaregiverOrOffice, async (req, res) => {
     try {
-      const isAdmin = req.user.role === ROLES.ADMIN;
+      const isOffice = isCaregiverOffice(req.user);
       const rows = (await db.get('caregiver_documents')) || [];
-      const wanted = isAdmin ? (req.query.caregiverId || null) : req.user.id;
+      const wanted = isOffice ? (req.query.caregiverId || null) : req.user.id;
       const mine = rows
         .filter(r => r && (!wanted || r.caregiver_id === wanted))
         .sort((a, b) => String(b.uploaded_at).localeCompare(String(a.uploaded_at)));
+      if (isOffice && req.user.role !== ROLES.ADMIN) await auditOfficeDocRead(req, null, 'GET /api/caregiver/documents');
       res.json({ documents: mine.map(publicCaregiverDoc) });
     } catch (error) {
       console.error('Caregiver document list error:', error);
@@ -1232,13 +1268,14 @@ module.exports = function createCaregiverRoutes(deps) {
 
   // The bytes, read back through the app so every read is audited and no file
   // is ever link-shared. A caregiver may open only their own.
-  router.get('/api/caregiver/documents/:id/file', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
+  router.get('/api/caregiver/documents/:id/file', authenticateToken, requireCaregiverOrOffice, async (req, res) => {
     try {
       const isAdmin = req.user.role === ROLES.ADMIN;
+      const isOffice = isCaregiverOffice(req.user);
       const rows = (await db.get('caregiver_documents')) || [];
       const row = rows.find(r => r && r.id === req.params.id);
       if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
-      if (!isAdmin && row.caregiver_id !== req.user.id) {
+      if (!isOffice && row.caregiver_id !== req.user.id) {
         return res.status(403).json({ error: 'That document belongs to someone else.', code: 'DOC_NOT_YOURS' });
       }
       // A row with no stored file is a DIFFERENT fact from Google refusing one,
@@ -1270,8 +1307,7 @@ module.exports = function createCaregiverRoutes(deps) {
           ...(isAdmin ? { reason: d.reason, hint: d.hint, setup: 'docs/DRIVE_ACCESS_SETUP.md' } : {})
         });
       }
-      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'caregiver_document', row.id,
-        { kind: row.kind, owner: row.caregiver_id });
+      await auditOfficeDocRead(req, row, 'GET /api/caregiver/documents/:id/file');
       res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
       res.setHeader('Content-Disposition', contentDisposition('inline', row.file_name));
       res.send(buf);
@@ -1281,11 +1317,12 @@ module.exports = function createCaregiverRoutes(deps) {
     }
   });
 
-  // Admin marks a document reviewed (or sends it back). A rejection REQUIRES a
+  // The office (Super Admin, manager, care coordinator) marks a document
+  // reviewed (or sends it back). A rejection REQUIRES a
   // reason and the caregiver is told what it was — a caregiver told only "not
   // accepted" re-sends the same blurry photo, which is the exact failure the
   // client-side document rejection was written to prevent.
-  router.post('/api/caregiver/documents/:id/review', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/caregiver/documents/:id/review', authenticateToken, requireCaregiverOffice, async (req, res) => {
     try {
       const { decision, reason } = req.body || {};
       if (!['accepted', 'rejected'].includes(decision)) {
@@ -1307,7 +1344,7 @@ module.exports = function createCaregiverRoutes(deps) {
       };
       await db.set('caregiver_documents', rows);
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_reviewed', 'caregiver_document', rows[i].id,
-        { decision, caregiverId: rows[i].caregiver_id });
+        { decision, caregiverId: rows[i].caregiver_id, role: accountTypes.accountTypeOf(req.user) });
 
       res.json({ message: `Document ${decision}`, document: publicCaregiverDoc(rows[i]) });
     } catch (error) {
@@ -1316,7 +1353,9 @@ module.exports = function createCaregiverRoutes(deps) {
     }
   });
 
-  // Remove a document. Admin only, and the Drive file goes with the row — a
+  // Remove a document. SUPER ADMIN ONLY, and it stays that way (owner,
+  // 2026-11-03): a credential document is evidence of compliance, so removing
+  // one should be hard. The Drive file goes with the row — a
   // superseded W9 has no value and a stale copy of someone's photo ID is the
   // worse thing to leave lying around. This is payroll paperwork, not a
   // clinical record, so the append-only rule that governs visit logs does not

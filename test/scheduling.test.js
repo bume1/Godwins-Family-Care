@@ -579,14 +579,35 @@ test('the money and the client record stay ADMIN-only', () => {
     ['get', '/api/scheduling/billing.csv'],
     ['post', '/api/scheduling/time-logs'],
     ['put', '/api/scheduling/time-logs/:id'],
-    ['put', '/api/scheduling/clients/:clientId/location']
+    // Deciding an adjustment request applies a time change: the Super Admin's.
+    ['post', '/api/scheduling/adjustment-requests/:id/decide']
   ]) {
     const marker = `router.${method}('${route}'`;
     const idx = routeSrc.indexOf(marker);
     assert.ok(idx !== -1, `${marker} should exist`);
     const decl = routeSrc.slice(idx, idx + 200);
     assert.ok(decl.includes('requireAdmin') && !decl.includes('requireScheduleManager'),
-      `${method.toUpperCase()} ${route} must be admin-only: payroll and the client record are not a scheduling role's`);
+      `${method.toUpperCase()} ${route} must be admin-only: the payroll files and writing time are the Super Admin's`);
+  }
+});
+
+// Owner decision, 2026-11-03: a manager and a care coordinator READ payroll
+// and billing, set a client's location, and REQUEST a time correction. Each is
+// the schedule-manager gate, never wider.
+test('payroll and billing VIEWS, the client location and adjustment requests are admin OR manager', () => {
+  for (const [method, route] of [
+    ['get', '/api/scheduling/payroll'],
+    ['get', '/api/scheduling/billing'],
+    ['put', '/api/scheduling/clients/:clientId/location'],
+    ['post', '/api/scheduling/time-logs/:id/adjustment-requests'],
+    ['get', '/api/scheduling/adjustment-requests']
+  ]) {
+    const marker = `router.${method}('${route}'`;
+    const idx = routeSrc.indexOf(marker);
+    assert.ok(idx !== -1, `${marker} should exist`);
+    const decl = routeSrc.slice(idx, idx + 200);
+    assert.ok(decl.includes('requireScheduleManager') && !decl.includes('requireAdmin'),
+      `${method.toUpperCase()} ${route} is the schedule-manager gate`);
   }
 });
 
@@ -669,7 +690,8 @@ test('SAFETY: the location route writes only location fields, and never logs the
   const idx = routeSrc.indexOf("'/api/scheduling/clients/:clientId/location'");
   assert.ok(idx !== -1, 'the route exists');
   const handler = routeSrc.slice(idx, idx + 3000);
-  assert.ok(handler.includes('requireAdmin'), 'admin only');
+  // Widened to managers and coordinators on 2026-11-03; still never wider.
+  assert.ok(handler.slice(0, 200).includes('requireScheduleManager'), 'the office only');
 
   // It touches address + the radius and nothing else on the client record.
   const assignments = (handler.match(/users\[idx\]\.(\w+)\s*=/g) || [])
@@ -896,13 +918,19 @@ test('the billing CSV carries no clinical content either', () => {
 });
 
 test('SAFETY: billing lists only COMPLETED visits, and says what verification could establish', () => {
+  // The rows are built ONCE (buildBillingRows) and read by the CSV and the
+  // on-screen view, so the rule is asserted on the builder.
+  const b = routeSrc.indexOf('const buildBillingRows');
+  assert.ok(b > 0, 'the billing builder exists');
+  const builder = routeSrc.slice(b, b + 2600);
+  assert.match(builder, /!l\.clock_out_at.*return false/s,
+    'a shift still in progress has no final hours and must not reach an invoice');
+  assert.match(builder, /verification/, 'each line states what the geofence could establish');
   const i = routeSrc.indexOf("'/api/scheduling/billing.csv'");
   assert.ok(i > 0, 'the billing route exists');
-  const handler = routeSrc.slice(i, i + 2600);
-  assert.match(handler, /!l\.clock_out_at.*return false/s,
-    'a shift still in progress has no final hours and must not reach an invoice');
-  assert.match(handler, /verification/, 'each line states what the geofence could establish');
-  assert.match(handler, /requireAdmin/, 'billing is admin-only');
+  const handler = routeSrc.slice(i, i + 900);
+  assert.match(handler.slice(0, 200), /requireAdmin/, 'the billing FILE is admin-only');
+  assert.match(handler, /buildBillingRows\(/, 'and reads the one builder');
 });
 
 test('SAFETY: a caregiver\'s hours export can only ever return their OWN rows', () => {
