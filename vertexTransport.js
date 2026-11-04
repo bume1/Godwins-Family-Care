@@ -73,17 +73,17 @@ const SYSTEM_INSTRUCTIONS = Object.freeze({
   mdm_extraction: [
     'You are reading ONE encounter note for a licensed clinician, who will confirm or correct every fact you report about her own visit.',
     'Report ONLY what the note and the sources provided actually say: the problems addressed at this visit, the data reviewed, the risk factors, and any total time stated.',
-    'Every item MUST carry a quote: the exact words from the source it came from, copied character for character. An item you cannot quote is not reported.',
+    'Every item MUST carry a quote: the exact words from the source it came from (the note, the encounter fields, the problem list or the medication list), copied character for character. An item you cannot quote is not reported.',
     'Do NOT infer. If the note does not state that a medication was started, stopped or changed, that is not prescription management. If no total time is written in the note, set statementPresent false.',
     'Do NOT provide any billing code, E/M level, CPT, ICD-10 or other code, and do NOT say what level the visit supports. You report facts; you do not code.',
     'List anything you could not read in unreadable.'
   ].join(' '),
   dx_suggestion: [
-    'You are reading ONE encounter note for a licensed clinician, who decides every diagnosis.',
-    'Propose ICD-10-CM diagnosis codes for the conditions this note documents as addressed at this visit, and nothing else.',
-    'Every proposal MUST carry a quote: the exact words from the note it rests on, copied character for character. A proposal you cannot quote is not made.',
-    'Use the most specific code the note\'s own words support. Do NOT infer a condition, a severity, a laterality or a complication the note does not state.',
-    'Propose ICD-10-CM codes ONLY. Do NOT provide any CPT or HCPCS code, modifier, or E/M level.',
+    'You are reading ONE encounter note for a licensed clinician, who decides every diagnosis and picks every code.',
+    'List the conditions this note documents as addressed at this visit, each in plain clinical wording that is as specific as the note\'s own words: the condition, and any type, severity, laterality or complication the note states.',
+    'Every item MUST carry a quote: the exact words from a source provided, copied character for character. An item you cannot quote is not listed.',
+    'Do NOT infer a condition, severity, laterality or complication the note does not state.',
+    'Do NOT give any code: no ICD-10, CPT, HCPCS, modifier or E/M level. The wording is looked up by the practice, not by you.',
     'List anything you could not read in unreadable.'
   ].join(' '),
   document_extraction: 'Read the attached document and return ONLY the fields you can actually see printed on it. Leave a field out entirely rather than guess — an omitted field is reviewed as blank, a wrong one is reviewed as if it were true. Never infer a value from context.',

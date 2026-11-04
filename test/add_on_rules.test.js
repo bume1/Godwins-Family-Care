@@ -135,91 +135,105 @@ test('the clinician records a modifier reason; TCM dates are clinical or billing
   assert.doesNotMatch(route.slice(route.indexOf('logActivity')), /text/, 'no reason text in the activity log');
 });
 
-// ---- 4.1 diagnosis suggestions ----
+// ---- 4.1 diagnosis suggestions, in the owner's wording-first design ----
+// (2026-11-04-coding-pipeline-gemini-alignment.md item 5: the model never
+// names a code; the app looks the wording up in OpenEMR; the clinician picks.)
 const NOTE = ['Assessment: Type 2 diabetes, A1c 8.4, uncontrolled. Essential hypertension, stable.'];
-const LOOK = {
-  'E11.65': { exists: true, description: 'Type 2 diabetes mellitus with hyperglycemia', unspecified: false, moreSpecific: [] },
-  'E11.9': { exists: true, description: 'Type 2 diabetes mellitus without complications', unspecified: false, moreSpecific: [] },
-  I10: { exists: true, description: 'Essential (primary) hypertension', unspecified: false, moreSpecific: [] },
-  'R51.9': { exists: true, description: 'Headache, unspecified', unspecified: true, moreSpecific: ['R51.0'] },
-  'Z99.99': { exists: false }
-};
-const enforce = (diagnoses, extra = {}) => DX.enforce({ diagnoses }, { sourceTexts: NOTE, lookups: LOOK, ...extra });
-test('a quoted suggestion that resolves in OpenEMR\'s table is kept, with OpenEMR\'s description', () => {
-  const r = enforce([{ code: 'E11.65', description: 'DM2 high sugar', quote: 'Type 2 diabetes, A1c 8.4, uncontrolled.' }]);
-  assert.equal(r.dropped, 0);
-  assert.equal(r.output.diagnoses[0].description, 'Type 2 diabetes mellitus with hyperglycemia');
-  assert.equal(r.output.diagnoses[0].quoteVerified, true);
-});
-test('dropped and counted: no quote, an invented quote, a bad code, a code not in the table, one not checked, a duplicate', () => {
-  const r = enforce([
-    { code: 'I10', description: 'HTN' },
-    { code: 'I10', description: 'HTN', quote: 'Hypertension, worsening.' },
-    { code: 'NOTACODE', description: 'x', quote: 'Essential hypertension, stable.' },
-    { code: 'Z99.99', description: 'x', quote: 'Essential hypertension, stable.' },
-    { code: 'J18.9', description: 'x', quote: 'Essential hypertension, stable.' },
-    { code: 'I10', description: 'HTN', quote: 'Essential hypertension, stable.' },
-    { code: 'I10', description: 'HTN', quote: 'Essential hypertension, stable.' }
-  ]);
-  assert.deepEqual(r.output.diagnoses.map(d => d.code), ['I10']);
-  assert.deepEqual(r.counts, { noQuote: 1, quoteNotFound: 1, badCode: 1, notInTable: 1, notChecked: 1, duplicate: 1, unverifiedQuote: 0 });
-  assert.equal(r.dropped, 6);
-});
-test('an unspecified code is flagged with OpenEMR\'s more specific siblings; one already on the visit is marked', () => {
-  const r = DX.enforce({ diagnoses: [{ code: 'R51.9', description: 'Headache', quote: 'Headache for two days.' }, { code: 'I10', description: 'HTN', quote: 'hypertension' }] },
-    { sourceTexts: ['Headache for two days. Essential hypertension'], lookups: LOOK, existingCodes: ['I10'] });
-  assert.equal(r.output.diagnoses[0].unspecified, true);
-  assert.deepEqual(r.output.diagnoses[0].moreSpecific, ['R51.0']);
-  assert.equal(r.output.diagnoses[1].alreadyOnEncounter, true);
-});
-test('the suggestion schema has one code field, and the instruction confines it to ICD-10', () => {
-  assert.deepEqual(Object.keys(DX.DX_SCHEMA.fields.diagnoses.items), ['code', 'description', 'quote']);
+const LIST = ['Problem list: Chronic kidney disease stage 3a'];
+const Q = (diagnoses) => DX.enforceQuotes({ diagnoses }, { noteTexts: NOTE, contextTexts: LIST });
+test('the schema has NO code field, and the instruction forbids every kind of code', () => {
+  assert.deepEqual(Object.keys(DX.DX_SCHEMA.fields.diagnoses.items), ['wording', 'quote']);
+  const blob = JSON.stringify(DX.DX_SCHEMA);
+  for (const f of ['code', 'icd', 'cpt', 'hcpcs']) assert.ok(!new RegExp(f, 'i').test(blob), f);
   assert.equal(M.validateSchemaShape(DX.DX_SCHEMA, 'schema'), null);
-  assert.equal(M.PURPOSES.DX_SUGGESTION, 'dx_suggestion');
+  const r = M.validateAgainstSchema({ diagnoses: [{ wording: 'HTN', quote: 'q', code: 'I10' }], icd10: 'I10' }, DX.DX_SCHEMA);
+  assert.deepEqual(Object.keys(r.value.diagnoses[0]), ['wording', 'quote'], 'a code the model adds anyway is dropped');
   const vt = fs.readFileSync(path.join(ROOT, 'vertexTransport.js'), 'utf8');
   const instr = vt.slice(vt.indexOf('dx_suggestion: ['), vt.indexOf('].join', vt.indexOf('dx_suggestion: [')));
-  assert.match(instr, /Propose ICD-10-CM codes ONLY\. Do NOT provide any CPT or HCPCS code, modifier, or E\/M level\./);
+  assert.match(instr, /Do NOT give any code: no ICD-10, CPT, HCPCS, modifier or E\/M level\./);
   assert.match(instr, /MUST carry a quote/);
-  const r = M.validateAgainstSchema({ diagnoses: [{ code: 'I10', description: 'x', quote: 'q', cpt: '99214' }], emLevel: '99214' }, DX.DX_SCHEMA);
-  assert.deepEqual(Object.keys(r.value), ['diagnoses']);
-  assert.deepEqual(Object.keys(r.value.diagnoses[0]), ['code', 'description', 'quote']);
 });
-test('a suggestion is decided per item: accepted or dismissed, recorded against the review', () => {
+test('quotes: from the note kept as note, from a list kept as list, none or invented dropped and counted', () => {
+  const r = Q([
+    { wording: 'Type 2 diabetes mellitus with hyperglycemia', quote: 'Type 2 diabetes, A1c 8.4, uncontrolled.' },
+    { wording: 'Chronic kidney disease, stage 3a', quote: 'Chronic kidney disease stage 3a' },
+    { wording: 'Essential hypertension' },
+    { wording: 'Heart failure', quote: 'CHF exacerbation' },
+    { wording: 'type 2 diabetes mellitus with hyperglycemia', quote: 'Type 2 diabetes, A1c 8.4, uncontrolled.' }
+  ]);
+  assert.deepEqual(r.wordings.map(w => w.quoteSource), ['note', 'list']);
+  assert.deepEqual(r.counts, { noQuote: 1, quoteNotFound: 1, duplicate: 1 });
+});
+test('resolution: OpenEMR\'s rows become candidates; nothing found or a failed search drops the wording', () => {
+  const wordings = [{ wording: 'A' }, { wording: 'B' }, { wording: 'C' }];
+  const r = DX.resolve(wordings, {
+    A: [{ code: 'E11.65', code_text: 'Type 2 diabetes mellitus with hyperglycemia' }, { code: 'E11.65', code_text: 'dup' }, { code: 'NOTACODE' }],
+    B: [], C: { error: 'timeout' }
+  }, { existingCodes: ['E11.65'] });
+  assert.deepEqual(r.suggestions.map(x => x.wording), ['A']);
+  assert.deepEqual(r.suggestions[0].candidates.map(c => c.code), ['E11.65'], 'ICD-10 in shape, each once');
+  assert.equal(r.suggestions[0].candidates[0].alreadyOnEncounter, true);
+  assert.deepEqual(r.counts, { notInTable: 1, notChecked: 1 });
+});
+test('an unspecified candidate is flagged when OpenEMR returned a more specific one beside it', () => {
+  const c = DX.candidatesFrom([{ code: 'R51.9', code_text: 'Headache, unspecified' }, { code: 'R51.0', code_text: 'Headache with orthostatic component' }]);
+  assert.equal(c[0].moreSpecificListed, true);
+  assert.equal(c[1].moreSpecificListed, false);
+  assert.equal(DX.candidatesFrom([{ code: 'R51.9', code_text: 'Headache, unspecified' }])[0].moreSpecificListed, false);
+});
+test('an accepted suggestion must name a code OpenEMR returned for it, and the decision goes to the permanent audit', () => {
   const d = serverSrc.slice(serverSrc.indexOf("app.post('/api/clinical/ai/reviews/:id/decisions'"));
-  assert.match(d.slice(0, 2500), /const allowedDecisions = isDx \? \['accepted', 'dismissed'\]/);
+  const body = d.slice(0, 4000);
+  assert.match(body, /const allowedDecisions = isDx \? \['accepted', 'dismissed'\]/);
+  assert.match(body, /if \(!chosen \|\| !\(sug\.candidates \|\| \[\]\)\.some\(c => c\.code === chosen\)\) \{\s*return res\.status\(400\)\.json\(\{ error: 'Pick one of the codes OpenEMR returned for that diagnosis\.', code: 'AI_DX_NOT_A_CANDIDATE'/, 'the code must be one OpenEMR returned for that wording');
+  assert.match(body, /type: 'dx_suggestion_decided'/);
   assert.ok(require('../clinicalRepository').buildEncounterDiagnoses([{ code: 'I10', source: 'ai_suggestion' }]).diagnoses[0].source === 'ai_suggestion', 'an added suggestion keeps its provenance');
 });
 
-// RUN the job with a fake engine and fake lookups.
+// RUN the job with a fake engine and a fake OpenEMR search.
 const liftDx = (deps) => {
-  const a = serverSrc.indexOf('const gatherEncounterNotePacket = async'); const aEnd = serverSrc.indexOf('const runMdmExtraction = async');
+  const a = serverSrc.indexOf('const gatherCodingPacket = async'); const aEnd = serverSrc.indexOf('const runMdmExtraction = async');
   const b = serverSrc.indexOf('const runDxSuggestion = async'); const bEnd = serverSrc.indexOf('// POST …/encounters/:euuid/ai/suggest-diagnoses');
   assert.ok(a > 0 && b > 0);
   // eslint-disable-next-line no-new-func
   return new Function(...Object.keys(deps), `${serverSrc.slice(a, aEnd)}\n${serverSrc.slice(b, bEnd)}\nreturn runDxSuggestion;`)(...Object.values(deps));
 };
-test('RUN: suggestions are resolved against OpenEMR, unresolved ones dropped, nothing written to the chart', async () => {
-  const saved = {}; const writes = []; const looked = [];
+const runDx = async (proposal) => {
+  const saved = {}; const writes = []; const searched = []; const audit = []; const sent = [];
   const emr = new Proxy({}, { get(_t, p) {
     if (p === 'getSoapNote') return async () => ({ assessment: 'Essential hypertension, stable.' });
     if (p === 'getProblems' || p === 'getMedicationRequests') return async () => [];
+    if (p === 'searchCodes') return async ({ type, search }) => { searched.push(`${type}:${search}`); return /hypertension/i.test(search) ? [{ code: 'I10', code_text: 'Essential (primary) hypertension' }] : []; };
     return async () => { writes.push(String(p)); throw new Error('no'); };
   } });
   const job = liftDx({
-    openemr: { isConfigured: () => true, forActor: () => emr }, clinicalRepo: require('../clinicalRepository'), docRules: require('../clientDocuments'),
-    db: { get: async () => [] }, chartPacket: require('../chartPacket'), googledrive: {}, mdmExtraction: require('../mdmExtraction'),
+    openemr: { isConfigured: () => true, forActor: () => emr }, clinicalRepo: require('../clinicalRepository'),
+    chartPacket: require('../chartPacket'), mdmExtraction: require('../mdmExtraction'),
     saveAiReview: async (id, p) => Object.assign(saved, p),
-    gfcModelEngine: { invoke: async (args) => ({ invocationId: 'i', modelId: 'm', proposal: { diagnoses: [
-      { code: 'I10', description: 'HTN', quote: 'Essential hypertension, stable.' },
-      { code: 'Z99.99', description: 'invented', quote: 'Essential hypertension, stable.' }
-    ] } }) },
-    verifyIcd10Codes: async (user, list) => { looked.push(...list); return LOOK; },
+    gfcModelEngine: { invoke: async (args) => { sent.push(args); return { invocationId: 'i', modelId: 'm', proposal }; } },
+    appendCodingAuditEvent: async (e) => { audit.push(e); },
     dxSuggestion: DX, modelEngine: M, AI_REVIEW_STATUS: { DONE: 'done', FAILED: 'failed' }, console: { error() {} }
   });
-  await job({ reviewId: 'r', req: { user: { id: 'u' } }, client: { id: 'c', openEmrPatientId: 'p' }, encounterUuid: 'e', record: { narrativeNoteSid: '1', diagnoses: [], note: { assessment: 'Essential hypertension, stable.' } } });
+  await job({ reviewId: 'r', req: { user: { id: 'u', name: 'B' } }, client: { id: 'c', openEmrPatientId: 'p' }, encounterUuid: 'e',
+    record: { narrativeNoteSid: '1', diagnoses: [{ code: 'E11.9', description: 'Type 2 diabetes' }], services: [{ code: '99349' }], note: { assessment: 'Essential hypertension, stable.' } } });
+  return { saved, writes, searched, audit, sent };
+};
+test('RUN: the model is sent no code and no document; the wording is searched in OpenEMR; nothing is written to the chart', async () => {
+  const { saved, writes, searched, audit, sent } = await runDx({ diagnoses: [
+    { wording: 'Essential hypertension', quote: 'Essential hypertension, stable.' },
+    { wording: 'Gout', quote: 'Essential hypertension, stable.' },
+    { wording: 'Asthma', quote: 'Wheezing at night.' }
+  ] });
+  const prompt = JSON.stringify(sent[0].input);
+  for (const c of ['E11.9', '99349']) assert.ok(!prompt.includes(c), `${c} must not be sent`);
+  assert.deepEqual(sent[0].input.documents, []);
   assert.equal(saved.status, 'done');
-  assert.deepEqual(looked.sort(), ['I10', 'Z99.99'], 'every proposed code is looked up with the clinician\'s session');
-  assert.deepEqual(saved.output.diagnoses.map(d => d.code), ['I10']);
-  assert.equal(saved.quoteCounts.notInTable, 1);
+  assert.deepEqual(searched, ['ICD10:Essential hypertension', 'ICD10:Gout'], 'only quoted wordings are searched, by wording, in the ICD-10 table');
+  assert.deepEqual(saved.output.diagnoses.map(d => d.wording), ['Essential hypertension']);
+  assert.deepEqual(saved.output.diagnoses[0].candidates.map(c => c.code), ['I10']);
+  assert.deepEqual(saved.quoteCounts, { noQuote: 0, quoteNotFound: 1, duplicate: 0, notInTable: 1, notChecked: 0 });
   assert.deepEqual(writes, []);
+  assert.equal(audit.length, 1, 'the full proposal goes to the permanent audit');
+  assert.equal(audit[0].type, 'dx_wording_proposed');
+  assert.equal(audit[0].proposal.diagnoses.length, 3, 'dropped items included');
 });

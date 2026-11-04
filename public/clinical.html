@@ -7963,8 +7963,10 @@
       decision_re_surgery: 'Decision about surgery', drug_therapy_monitoring: 'Drug therapy needing intensive monitoring for toxicity',
       social_determinants: 'Care limited by social determinants of health', otc_management: 'Over-the-counter drug management', other: 'Other'
     });
+    // quoteSource 'list' means the words came from the problem or medication
+    // list, not this visit's note (owner decision, 2026-11-04): shown, always.
     const FactQuote = ({ item }) => item.quote
-      ? <div className="text-[11px] text-stone-500 italic mt-0.5">“{item.quote}”{item.quoteVerified === false ? ' (from an attached document, not checked against the note)' : ''}</div>
+      ? <div className="text-[11px] text-stone-500 italic mt-0.5">“{item.quote}”{item.quoteSource === 'list' ? <b className="not-italic text-amber-800"> From the problem or medication list, not this visit's note.</b> : ''}</div>
       : <div className="text-[11px] text-stone-400 mt-0.5">Added by you</div>;
     const FactSelect = ({ value, labels, onChange }) => (
       <select className="inp !py-1 text-xs" value={value} onChange={e => onChange(e.target.value)}>
@@ -8179,9 +8181,10 @@
       const start = () => { setBusy(true); setErr(''); api.suggestDiagnoses(patientId, euuid).then(r => setRun({ id: r.reviewId, status: r.status })).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
       const decide = (i, decision) => api.decideAiFindings(run.id, [{ index: i, decision }]).then(() => setDecided(m => ({ ...m, [i]: decision }))).catch(e => setErr(e.message));
       const has = (code) => diagnoses.some(d => d.code === code);
-      const accept = (s, i) => {
-        if (!has(s.code)) setDiagnoses([...diagnoses, { code: s.code, description: s.description || '', source: 'ai_suggestion', problemUuid: null, primary: diagnoses.length === 0 }]);
-        decide(i, 'accepted');
+      // The clinician picks the code, from what OpenEMR returned for the wording.
+      const accept = (c, i) => {
+        if (!has(c.code)) setDiagnoses([...diagnoses, { code: c.code, description: c.description || '', source: 'ai_suggestion', problemUuid: null, primary: diagnoses.length === 0 }]);
+        api.decideAiFindings(run.id, [{ index: i, decision: 'accepted', code: c.code }]).then(() => setDecided(m => ({ ...m, [i]: 'accepted' }))).catch(e => setErr(e.message));
       };
       const list = (run && run.status === 'done' && run.output && run.output.diagnoses) || [];
       return (
@@ -8192,21 +8195,26 @@
           {run && run.status === 'done' && (
             <>
               <div className="border-2 border-amber-400 bg-amber-50 rounded-lg p-2 text-[12px] text-amber-900">
-                <b>Suggested by AI from your note.</b> Unverified and not saved to the chart. Each one is added only if you add it and save.
+                <b>Drafted by AI from your note.</b> Unverified and not saved to the chart. The AI names no code: the codes below are OpenEMR's, and one is added only if you pick it and save.
               </div>
               {!list.length && <p className="text-xs text-stone-500">No suggestion survived the checks against the note and OpenEMR's ICD-10 table.</p>}
               {list.map((s, i) => (
-                <div key={s.code} className="border border-stone-200 rounded-lg p-2 text-xs grid gap-0.5">
-                  <div><b>{s.code}</b> {s.description}</div>
-                  <div className="text-[11px] text-stone-500 italic">“{s.quote}”{s.quoteVerified ? '' : ' (from an attached document, not checked against the note)'}</div>
-                  {s.unspecified && s.moreSpecific.length > 0 && <div className="text-[11px] text-amber-800">Unspecified. OpenEMR lists more specific codes in this category: {s.moreSpecific.join(', ')}.</div>}
-                  <div className="flex gap-2 mt-0.5">
-                    {has(s.code) || decided[i] === 'accepted'
-                      ? <span className="text-emerald-700">Added</span>
-                      : decided[i] === 'dismissed' ? <span className="text-stone-400">Dismissed</span>
-                        : <><button className="btn !py-0.5 !px-2 text-xs" onClick={() => accept(s, i)}>Add</button>
-                          <button className="btn ghost !py-0.5 !px-2 text-xs" onClick={() => decide(i, 'dismissed')}>Dismiss</button></>}
-                  </div>
+                <div key={i} className="border border-stone-200 rounded-lg p-2 text-xs grid gap-1">
+                  <div><b>{s.wording}</b></div>
+                  <FactQuote item={s} />
+                  {decided[i] === 'accepted' ? <span className="text-emerald-700">Added</span>
+                    : decided[i] === 'dismissed' ? <span className="text-stone-400">Dismissed</span>
+                      : <>
+                        <span className="text-[11px] text-stone-600">OpenEMR's ICD-10 table returned these. Pick the one that fits, or dismiss.</span>
+                        {s.candidates.map(c => (
+                          <div key={c.code} className="flex flex-wrap items-center gap-2">
+                            <button className="btn !py-0.5 !px-2 text-xs" disabled={has(c.code)} onClick={() => accept(c, i)}>{has(c.code) ? 'On This Visit' : 'Add'}</button>
+                            <span><b>{c.code}</b> {c.description}</span>
+                            {c.moreSpecificListed && <span className="text-[11px] text-amber-800">Unspecified; a more specific code is listed here.</span>}
+                          </div>
+                        ))}
+                        <button className="btn ghost w-fit !py-0.5 !px-2 text-xs" onClick={() => decide(i, 'dismissed')}>Dismiss</button>
+                      </>}
                 </div>
               ))}
             </>
