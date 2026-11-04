@@ -15656,6 +15656,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes, signedAs: authorSignature ? 'author' : 'billing',
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
+    // AI coding pipeline: a billable signature starts the fact extraction as
+    // the signing clinician. An author's signature waits for the addendum.
+    if (!authorSignature) await autoStartMdmExtraction({ req, client: ctx.client, encounterUuid: ctx.encounterUuid, rows: ctx.rows, record });
     res.json({
       message: record.coSignStatus === 'pending'
         ? 'Signed as the note\'s author — it is locked. It is not billable until a provider (or an LCSW, for behavioral health) adds the clinician addendum.'
@@ -15762,6 +15765,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
       services: (record.services || []).map(x => x.code),
       chargesPosted: !!record.chargesPosted, chargeError: record.chargeError || null
     });
+    await autoStartMdmExtraction({ req, client: ctx.client, encounterUuid: ctx.encounterUuid, rows: ctx.rows, record });
     res.json({ message: 'Clinician addendum added; the note is signed and sent to billing', record, addendum, coSignStatus: 'cleared', billable: true, billingStatus: clinicalRepo.BILLING_STATUS.AWAITING_BILLING, chargesPosted: false, warnings });
   } catch (error) {
     console.error('Clinician addendum error:', error);
@@ -21960,6 +21964,13 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
 // existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
 // draft on the coding workflow, and the encounter record keeps only a pointer.
 // Rules, schema and quote checks: mdmExtraction.js.
+// Append-only. No route, no purge and no job ever rewrites or deletes a row.
+const appendCodingAuditEvent = async (event) => {
+  const row = { id: `cae_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, at: new Date().toISOString(), ...event };
+  await db.set('coding_audit_events', [...(await loadRows('coding_audit_events')), row]);
+  return row;
+};
+
 const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
   try {
     const notRead = [];
@@ -21986,41 +21997,41 @@ const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }
       notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
     }
 
-    // Documents attached to THIS encounter, and only those.
-    const rawDocs = [];
-    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
-      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
-    for (const u of uploads) {
-      try {
-        rawDocs.push({
-          clientId: client.id, sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`, id: u.id,
-          title: u.fileName || u.kind || 'Document', date: u.at || u.uploadedAt || null,
-          mimeType: u.mimeType || 'application/pdf', bytes: await googledrive.downloadFileBuffer(u.driveFileId)
-        });
-      } catch (e) {
-        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
-      }
-    }
-    const documents = rawDocs.length ? chartPacket.buildSections({ clientId: client.id, documents: rawDocs }).documents : [];
-
-    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, documents, notRead });
-    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: packet.documents, notRead: packet.notRead, passes: 1 });
+    // Documents attached to the visit are NOT sent (2026-11-04): coding is
+    // payment, and an attached document is where a 42 CFR Part 2 record
+    // received for treatment sits. A counted fact must be quoted from the note.
+    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, notRead });
+    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: [], notRead: packet.notRead, passes: 1 });
     await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
 
     const r = await gfcModelEngine.invoke({
       purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
-      input: { sections: packet.sections, documents: packet.documents },
+      input: { sections: packet.sections, documents: [] },
       schema: mdmExtraction.MDM_SCHEMA,
       actor: req.user, patientId: client.id, feature: 'mdm_extraction',
-      sourceIds: [...packet.sections.map(s => s.sourceId), ...packet.documents.map(d => d.sourceId)]
+      sourceIds: packet.sections.map(s => s.sourceId)
     });
 
     // §2.4, on the SERVER, after the model: every item carries a quote that
-    // is really in the sources, or it is dropped and counted.
+    // is really in a text section sent (note, fields, problem or medication
+    // list), or it is dropped and counted. Each kept item says which.
     const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
-      sourceTexts: packet.sections.map(s => s.text), hasDocuments: packet.documents.length > 0
+      noteTexts: mdmExtraction.documentationTexts(packet.sections),
+      contextTexts: mdmExtraction.contextTexts(packet.sections)
     });
     const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    // THE ONLY RECORD OF WHAT THE MODEL PROPOSED. Google-side request logging
+    // is off, so nothing at Google can reconstruct it. Written FIRST, append
+    // only, and never on the 180-day AI purge: the full proposal as the model
+    // returned it (dropped items included), what survived, and why the rest
+    // did not. Phase 3 appends the clinician's confirmation to this collection.
+    await appendCodingAuditEvent({
+      type: 'mdm_extraction_proposed', reviewId, clientId: client.id, encounterUuid,
+      actor: { id: req.user.id, name: req.user.name || req.user.email },
+      invocationId: r.invocationId, model: r.modelId,
+      sourceIds: packet.sections.map(s => s.sourceId),
+      proposal: r.proposal || null, kept: { ...output, unreadable }, dropped, quoteCounts: counts
+    });
     await saveAiReview(reviewId, {
       status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
       invocationIds: [r.invocationId], model: r.modelId, manifest,
@@ -22036,8 +22047,60 @@ const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }
   }
 };
 
-// POST …/encounters/:euuid/ai/extract-mdm — start one. Clinical write access.
-// The result is read through the existing GET …/ai/reviews/:id poll.
+// One way to start an extraction, shared by the button and by signing.
+// Returns { row } or { refused: { status, body } }. Nothing is gathered, sent
+// or written before the refusals.
+const startMdmExtraction = async ({ req, client, encounterUuid, rows, record, trigger }) => {
+  if (!record || String(record.clientId) !== String(client.id)) return { refused: { status: 404, body: { error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' } } };
+  if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return { refused: { status: 409, body: { error: 'This encounter was deleted.', code: 'NOTE_VOIDED' } } };
+  if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
+    return { refused: { status: 409, body: { error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' } } };
+  }
+  const st = gfcModelEngine.status();
+  if (!st.configured) {
+    return { refused: { status: 503, body: { error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers } } };
+  }
+  const row = {
+    id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    clientId: client.id, encounterUuid,
+    purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+    status: AI_REVIEW_STATUS.RUNNING,
+    requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+    trigger: trigger || 'manual',
+    at: new Date().toISOString(),
+    passes: null, currentPass: null, invocationIds: [], model: st.modelId,
+    manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+  };
+  await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+  // A POINTER on the coding workflow, never the facts themselves.
+  record.latestMdmExtractionId = row.id;
+  await saveBillingRecord(rows, record);
+  await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
+    { reviewId: row.id, encounterUuid, trigger: row.trigger });
+  runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+  return { row };
+};
+
+// At a BILLABLE signature (a provider's or LCSW's sign, or the clinician
+// addendum on an author's note). The signing clinician is the actor, so
+// the Gemini rule that only licensed clinicians run the model holds, and
+// billing staff never need to. Best-effort and silent: the model being off,
+// or any failure here, never touches the signature, and none of it is shown
+// on the clinician's screen (nothing there for them to act on).
+const autoStartMdmExtraction = async ({ req, client, encounterUuid, rows, record }) => {
+  try {
+    const out = await startMdmExtraction({ req, client, encounterUuid, rows, record, trigger: 'signed' });
+    if (out.refused && out.refused.body.code !== 'MODEL_BOUNDARY_REFUSED') {
+      console.warn('[AI] MDM extraction not started at signing:', out.refused.body.code);
+    }
+  } catch (e) {
+    console.warn('[AI] MDM extraction could not start at signing:', (e && e.code) || (e && e.message));
+  }
+};
+
+// POST …/encounters/:euuid/ai/extract-mdm — start one by hand (a re-run).
+// Clinical write access. The result is read through the existing
+// GET …/ai/reviews/:id poll.
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -22050,33 +22113,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', au
     const encounterUuid = String(req.params.euuid || '');
     const rows = await loadRows('encounter_billing');
     const record = findBillingRecord(rows, encounterUuid);
-    if (!record || String(record.clientId) !== String(client.id)) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
-    if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
-    // Refused BEFORE anything is gathered or sent.
-    if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
-      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' });
-    }
-    const st = gfcModelEngine.status();
-    if (!st.configured) {
-      return res.status(503).json({ error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
-    }
-    const row = {
-      id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      clientId: client.id, encounterUuid,
-      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
-      status: AI_REVIEW_STATUS.RUNNING,
-      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
-      at: new Date().toISOString(),
-      passes: null, currentPass: null, invocationIds: [], model: st.modelId,
-      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
-    };
-    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
-    // A POINTER on the coding workflow, never the facts themselves.
-    await saveBillingRecord(rows, { ...record, latestMdmExtractionId: row.id });
-    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
-      { reviewId: row.id, encounterUuid });
-    runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
-    res.status(202).json({ reviewId: row.id, status: row.status });
+    const out = await startMdmExtraction({ req, client, encounterUuid, rows, record, trigger: 'manual' });
+    if (out.refused) return res.status(out.refused.status).json(out.refused.body);
+    res.status(202).json({ reviewId: out.row.id, status: out.row.status });
   } catch (error) {
     console.error('MDM extraction start error:', error);
     res.status(500).json({ error: 'Server error' });
