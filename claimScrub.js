@@ -33,6 +33,7 @@ const chronicCare = require('./serviceRules/chronicCare');
 const transitionalCare = require('./serviceRules/transitionalCare');
 const remoteMonitoring = require('./serviceRules/remoteMonitoring');
 const psychotherapy = require('./serviceRules/psychotherapy');
+const addOnRules = require('./addOnRules');
 
 const SEVERITY = Object.freeze({ BLOCK: 'block', WARN: 'warn' });
 const PHASES = Object.freeze(['pre_post', 'final']);
@@ -390,9 +391,19 @@ const scrubClaim = (input = {}) => {
     }
   }
 
+  // ---- Add-on codes and modifiers (Phase 4.2). Offers are returned beside
+  // the findings and are never applied by anything.
+  const addOn = addOnRules.evaluate({
+    lines, visit: enc.visit || null, emDerivation: input.emDerivation || null,
+    totalMinutes: input.totalMinutes, continuingCare: !!input.continuingCare,
+    justifications: input.modifierJustifications || {}, tcm: input.tcm || null,
+    priorAwvDates: input.priorAwvDates || [], dos, sameDayOtherCodes: input.sameDayOtherCodes || []
+  });
+  findings.push(...addOn.findings);
+
   const sorted = sortFindings(findings);
   const counts = countFindings(sorted);
-  return { phase, findings: sorted, counts, ok: counts.block === 0 };
+  return { phase, findings: sorted, counts, ok: counts.block === 0, offers: addOn.offers };
 };
 
 // ---- ICD-10 lookups -----------------------------------------------------------

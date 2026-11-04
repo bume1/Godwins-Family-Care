@@ -424,6 +424,10 @@
       extractMdm: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/ai/extract-mdm`, { method: 'POST', body: '{}' }),
       emDerive: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation`, { method: 'POST', body: JSON.stringify(body) }),
       resolveEmFlag: (id, euuid, resolution) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/em-derivation/flag/resolve`, { method: 'POST', body: JSON.stringify({ resolution }) }),
+      // Phase 4: diagnosis suggestions, modifier reasons, TCM dates.
+      suggestDiagnoses: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/ai/suggest-diagnoses`, { method: 'POST', body: '{}' }),
+      justifyModifier: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/modifier-justification`, { method: 'POST', body: JSON.stringify(body) }),
+      saveTcmDates: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/tcm-dates`, { method: 'PUT', body: JSON.stringify(body) }),
       serviceFamilies: () => authedFetch('/api/clinical/service-selection/families'),
       selectService: (body) => authedFetch('/api/clinical/service-selection', { method: 'POST', body: JSON.stringify(body) }),
       emDistribution: (month) => authedFetch(`/api/clinical/reports/em-distribution${month ? `?month=${encodeURIComponent(month)}` : ''}`),
@@ -8010,6 +8014,474 @@
       );
     };
 
+    // ── Phase 3: the clinician confirms FACTS, never a code (2026-11-04) ──
+    // AI reads the note into facts (Phase 2); the clinician confirms, corrects
+    // or adds them; rules derive the level. The code appears only after
+    // confirmation, with a sentence saying how it was reached. No dollar
+    // amount anywhere. The draft notice is always shown in full while the AI
+    // output is on screen (Gemini spec standing requirement).
+    const MDM_STATUS_LABELS = Object.freeze({
+      stable: 'Stable chronic illness', worsening: 'Chronic illness, worsening (exacerbation, progression or side effects)',
+      new: 'New problem', resolved: 'Resolved, or self-limited or minor', unclear: 'Unclear'
+    });
+    const MDM_MANAGEMENT_LABELS = Object.freeze({ observation: 'Observation', medication: 'Medication', referral: 'Referral', testing: 'Testing', procedure: 'Procedure', other: 'Other' });
+    const MDM_DATA_LABELS = Object.freeze({
+      lab: 'Lab result reviewed or ordered', imaging: 'Imaging reviewed or ordered', outside_record: 'Outside record reviewed',
+      prior_note: 'Prior GFC note reviewed', independent_historian: 'Independent historian', discussion_with_clinician: 'Discussion with another clinician',
+      test_interpretation: 'Independent interpretation of a test'
+    });
+    const MDM_RISK_LABELS = Object.freeze({
+      prescription_management: 'Prescription drug management', decision_re_hospitalization: 'Decision about hospitalization',
+      decision_re_surgery: 'Decision about surgery', drug_therapy_monitoring: 'Drug therapy needing intensive monitoring for toxicity',
+      social_determinants: 'Care limited by social determinants of health', otc_management: 'Over-the-counter drug management', other: 'Other'
+    });
+    // quoteSource 'list' means the words came from the problem or medication
+    // list, not this visit's note (owner decision, 2026-11-04): shown, always.
+    const FactQuote = ({ item }) => item.quote
+      ? <div className="text-[11px] text-stone-500 italic mt-0.5">“{item.quote}”{item.quoteSource === 'list' ? <b className="not-italic text-amber-800"> From the problem or medication list, not this visit's note.</b> : ''}</div>
+      : <div className="text-[11px] text-stone-400 mt-0.5">Added by you</div>;
+    const FactSelect = ({ value, labels, onChange }) => (
+      <select className="inp !py-1 text-xs" value={value} onChange={e => onChange(e.target.value)}>
+        {Object.entries(labels).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+    );
+    const VisitFactsPanel = ({ patientId, euuid, derivation, onChanged }) => {
+      const [run, setRun] = useState(null);       // the latest extraction for this visit
+      const [facts, setFacts] = useState(null);   // what the clinician is confirming
+      const [result, setResult] = useState(derivation || null);
+      const [busy, setBusy] = useState('');
+      const [err, setErr] = useState('');
+      const [affirm, setAffirm] = useState(false);
+      const adopt = (rv) => {
+        setRun(rv);
+        if (rv && rv.status === 'done' && rv.output) {
+          const o = rv.output;
+          setFacts({
+            problemsAddressed: (o.problemsAddressed || []).map(x => ({ ...x })), dataReviewed: (o.dataReviewed || []).map(x => ({ ...x })),
+            risk: (o.risk || []).map(x => ({ ...x })),
+            time: { statementPresent: !!(o.time && o.time.statementPresent), totalMinutes: o.time && o.time.totalMinutes != null ? String(o.time.totalMinutes) : '', quote: o.time && o.time.quote }
+          });
+        }
+      };
+      const findLatest = () => api.aiReviews(patientId).then(r => {
+        const mine = (r.reviews || []).filter(x => x.purpose === 'mdm_extraction' && x.encounterUuid === euuid);
+        return mine.length ? api.aiReview(patientId, mine[0].id).then(x => adopt(x.review)) : null;
+      }).catch(e => setErr(e.message));
+      useEffect(() => { findLatest(); }, [patientId, euuid]);
+      useEffect(() => {
+        if (!run || run.status !== 'running') return undefined;
+        const t = setInterval(() => { api.aiReview(patientId, run.id).then(x => { if (x.review.status !== 'running') adopt(x.review); }).catch(() => {}); }, 4000);
+        return () => clearInterval(t);
+      }, [run && run.id, run && run.status]);
+      const start = () => {
+        setBusy('read'); setErr('');
+        api.extractMdm(patientId, euuid).then(r => setRun({ id: r.reviewId, status: r.status })).catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      const setItem = (key, i, patch) => setFacts(f => ({ ...f, [key]: f[key].map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+      const dropItem = (key, i) => setFacts(f => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }));
+      const addItem = (key, blank) => setFacts(f => ({ ...f, [key]: [...f[key], blank] }));
+      const payload = () => ({
+        problemsAddressed: facts.problemsAddressed.filter(x => String(x.description || '').trim()).map(({ description, status, management, quote }) => ({ description, status, management, ...(quote ? { quote } : {}) })),
+        dataReviewed: facts.dataReviewed.filter(x => String(x.detail || '').trim()).map(({ kind, detail, quote }) => ({ kind, detail, ...(quote ? { quote } : {}) })),
+        risk: facts.risk.filter(x => String(x.detail || '').trim()).map(({ factor, detail, quote }) => ({ factor, detail, ...(quote ? { quote } : {}) })),
+        time: facts.time.statementPresent && /^\d+$/.test(String(facts.time.totalMinutes)) ? { statementPresent: true, totalMinutes: Number(facts.time.totalMinutes) } : { statementPresent: false }
+      });
+      const confirm = (extra) => {
+        setBusy('confirm'); setErr('');
+        api.emDerive(patientId, euuid, { extractionId: run.id, facts: payload(), ...(extra || {}) })
+          .then(r => { setResult(r.emDerivation); setAffirm(false); onChanged && onChanged(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      const timeCand = result && (result.candidates || []).find(c => c.basis === 'time');
+      const canChooseTime = result && timeCand && result.finalBasis !== 'time' && result.candidates.findIndex(c => c === timeCand) > -1 &&
+        timeCand.code !== result.defaultCode && result.time && result.time.statementPresent;
+      return (
+        <div className="card mb-4">
+          <div className="card-h"><h2><i className="ti ti-list-check mr-1 text-accent" />Visit Facts</h2></div>
+          <div className="p-4 grid gap-3 text-sm">
+            <p className="text-xs text-stone-600">Confirm the facts of your visit: the problems you addressed, the data you reviewed, the risk, and the time. The level is worked out from what you confirm.</p>
+            {!run && <button className="btn w-fit" disabled={!!busy} onClick={start}><i className="ti ti-sparkles" />{busy === 'read' ? 'Starting…' : 'Read My Note'}</button>}
+            {run && run.status === 'running' && <p className="text-xs text-stone-500">Reading your note…</p>}
+            {run && run.status === 'failed' && <p className="text-xs text-red-600">The note could not be read{run.error ? `: ${run.error}` : ''}. <button className="underline" onClick={start}>Try again</button></p>}
+            {facts && (
+              <>
+                <div className="border-2 border-amber-400 bg-amber-50 rounded-lg p-2.5 text-[12.5px] text-amber-900">
+                  <b>Drafted by AI from your note.</b> Unverified and not saved to the chart. Confirm, correct or remove each fact, and add anything it missed.
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Problems addressed</b>
+                  {facts.problemsAddressed.map((x, i) => (
+                    <div key={`p${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <input className="inp !py-1 text-xs" value={x.description || ''} onChange={e => setItem('problemsAddressed', i, { description: e.target.value })} placeholder="Problem" />
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.status} labels={MDM_STATUS_LABELS} onChange={v => setItem('problemsAddressed', i, { status: v })} />
+                        <FactSelect value={x.management} labels={MDM_MANAGEMENT_LABELS} onChange={v => setItem('problemsAddressed', i, { management: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('problemsAddressed', i)}>Remove</button>
+                      </div>
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('problemsAddressed', { description: '', status: 'stable', management: 'observation' })}><i className="ti ti-plus" />Add Problem</button>
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Data reviewed</b>
+                  {facts.dataReviewed.map((x, i) => (
+                    <div key={`d${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.kind} labels={MDM_DATA_LABELS} onChange={v => setItem('dataReviewed', i, { kind: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('dataReviewed', i)}>Remove</button>
+                      </div>
+                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('dataReviewed', i, { detail: e.target.value })} placeholder="What was reviewed" />
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('dataReviewed', { kind: 'lab', detail: '' })}><i className="ti ti-plus" />Add Data</button>
+                </div>
+                <div className="grid gap-2">
+                  <b className="text-primary text-[13px]">Risk</b>
+                  {facts.risk.map((x, i) => (
+                    <div key={`r${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
+                      <div className="flex flex-wrap gap-2">
+                        <FactSelect value={x.factor} labels={MDM_RISK_LABELS} onChange={v => setItem('risk', i, { factor: v })} />
+                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('risk', i)}>Remove</button>
+                      </div>
+                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('risk', i, { detail: e.target.value })} placeholder="What it was" />
+                      <FactQuote item={x} />
+                    </div>
+                  ))}
+                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('risk', { factor: 'prescription_management', detail: '' })}><i className="ti ti-plus" />Add Risk</button>
+                </div>
+                <div className="grid gap-1">
+                  <b className="text-primary text-[13px]">Time</b>
+                  <label className="flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={facts.time.statementPresent} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, statementPresent: e.target.checked } }))} />
+                    <span>The note states a total time for this date</span>
+                  </label>
+                  {facts.time.statementPresent && <input className="inp w-32 !py-1 text-xs" inputMode="numeric" value={facts.time.totalMinutes} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, totalMinutes: e.target.value.replace(/[^0-9]/g, '').slice(0, 4) } }))} placeholder="Minutes" />}
+                  {facts.time.quote && <div className="text-[11px] text-stone-500 italic">“{facts.time.quote}”</div>}
+                </div>
+                <button className="btn gold w-fit" disabled={!!busy} onClick={() => confirm()}><i className="ti ti-check" />{busy === 'confirm' ? 'Confirming…' : 'Confirm Facts'}</button>
+              </>
+            )}
+            {result && (
+              <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-2.5 grid gap-1.5">
+                <div className="text-[13px] text-emerald-900"><b>{result.finalCode}</b>, confirmed {fmtTs(result.at)}{result.by ? ` by ${result.by.name}` : ''}.</div>
+                <div className="text-[12px] text-emerald-900">{result.explanation}</div>
+                {canChooseTime && (
+                  <div className="grid gap-1.5 border-t border-emerald-200 pt-1.5">
+                    <div className="text-[12px] text-stone-700">Your note also states {result.time.minutes} minutes, which supports {timeCand.code} by time. The lower of the two is used unless you choose time.</div>
+                    <label className="flex items-start gap-2 text-xs">
+                      <input type="checkbox" className="mt-0.5" checked={affirm} onChange={e => setAffirm(e.target.checked)} />
+                      <span>I affirm I spent a total of {result.time.minutes} minutes on this patient's care on this date.</span>
+                    </label>
+                    <button className="btn w-fit" disabled={!affirm || !!busy || !facts} onClick={() => confirm({ chooseTime: true, affirmTime: true })}>Use the Time-Based Level</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {err && <p className="text-xs text-red-600">{err}</p>}
+          </div>
+        </div>
+      );
+    };
+
+    // Billing's view of the derived level: what the clinician confirmed, both
+    // candidates, and the coder's flag with the evidence that was absent. The
+    // flag is resolved here, with a note, and stays on the record resolved.
+    const BillingLevelPanel = ({ patientId, euuid, derivation, onChanged }) => {
+      const [note, setNote] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      if (!derivation) return <p className="text-xs text-stone-500">The clinician has not confirmed the visit facts, so no E/M level has been derived.</p>;
+      const f = derivation.flag;
+      const resolve = () => { setBusy(true); setErr(''); api.resolveEmFlag(patientId, euuid, note).then(() => { setNote(''); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+      return (
+        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
+          <b className="text-primary text-[13px]"><i className="ti ti-stairs mr-1" />Derived E/M level: {derivation.finalCode}</b>
+          <div className="text-stone-600">{derivation.explanation}</div>
+          <div className="text-stone-600">Candidates: {(derivation.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} min)` : `MDM (${c.mdm})`}`).join(' · ')}. Default {derivation.defaultCode}{derivation.override ? `; the clinician chose ${derivation.finalCode} by time and affirmed it` : ''}.</div>
+          {f && (
+            <div className={`rounded px-2 py-1.5 border-l-2 ${f.resolvedAt ? 'border-stone-300 bg-stone-50' : 'border-amber-400 bg-amber-50'}`}>
+              <b className={f.resolvedAt ? 'text-stone-700' : 'text-amber-900'}>Level review {f.resolvedAt ? `resolved ${fmtTs(f.resolvedAt)}${f.resolvedBy ? ` by ${f.resolvedBy.name}` : ''}` : 'open'}</b>
+              {(f.absent || []).map((a, i) => <div key={i} className="text-stone-700">{a}</div>)}
+              {(f.elements || []).map(e => (
+                <div key={e.element} className="mt-1"><b className="text-stone-700">{e.element === 'problems' ? 'Problems' : e.element === 'data' ? 'Data' : 'Risk'}: {e.level}</b>
+                  {(e.facts || []).map((x, i) => <div key={i} className="text-stone-600">{x.description || x.detail}{x.quote ? <i> — “{x.quote}”</i> : <i> — added by the clinician</i>}</div>)}
+                </div>
+              ))}
+              {f.resolvedAt && <div className="text-stone-600 mt-1">{f.resolution}</div>}
+              {!f.resolvedAt && (
+                <div className="grid gap-1.5 mt-1.5">
+                  <input className="inp" value={note} maxLength={1000} onChange={e => setNote(e.target.value)} placeholder="How it was resolved" />
+                  <button className="btn w-fit" disabled={busy || note.trim().length < 3} onClick={resolve}>Resolve Flag</button>
+                </div>
+              )}
+            </div>
+          )}
+          {err && <p className="text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
+    // ── Phase 4.1: ICD-10 suggestions from the note (2026-11-04) ──
+    // Each is quoted from the note and resolved against OpenEMR's ICD-10
+    // table. The clinician adds one to this visit's diagnoses herself, and it
+    // is not saved until she saves the coding. The draft notice is always shown
+    // in full while suggestions are on screen.
+    const DxSuggestionsPanel = ({ patientId, euuid, diagnoses, setDiagnoses }) => {
+      const [run, setRun] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [decided, setDecided] = useState({});
+      const load = (id) => api.aiReview(patientId, id).then(x => setRun(x.review)).catch(e => setErr(e.message));
+      useEffect(() => {
+        api.aiReviews(patientId).then(r => {
+          const mine = (r.reviews || []).filter(x => x.purpose === 'dx_suggestion' && x.encounterUuid === euuid);
+          if (mine.length) load(mine[0].id);
+        }).catch(() => {});
+      }, [patientId, euuid]);
+      useEffect(() => {
+        if (!run || run.status !== 'running') return undefined;
+        const t = setInterval(() => load(run.id), 4000);
+        return () => clearInterval(t);
+      }, [run && run.id, run && run.status]);
+      useEffect(() => {
+        const m = {};
+        for (const d of ((run && run.findingDecisions) || [])) m[d.index] = d.decision;
+        setDecided(m);
+      }, [run && run.id, run && run.findingDecisions && run.findingDecisions.length]);
+      const start = () => { setBusy(true); setErr(''); api.suggestDiagnoses(patientId, euuid).then(r => setRun({ id: r.reviewId, status: r.status })).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+      const decide = (i, decision) => api.decideAiFindings(run.id, [{ index: i, decision }]).then(() => setDecided(m => ({ ...m, [i]: decision }))).catch(e => setErr(e.message));
+      const has = (code) => diagnoses.some(d => d.code === code);
+      // The clinician picks the code, from what OpenEMR returned for the wording.
+      const accept = (c, i) => {
+        if (!has(c.code)) setDiagnoses([...diagnoses, { code: c.code, description: c.description || '', source: 'ai_suggestion', problemUuid: null, primary: diagnoses.length === 0 }]);
+        api.decideAiFindings(run.id, [{ index: i, decision: 'accepted', code: c.code }]).then(() => setDecided(m => ({ ...m, [i]: 'accepted' }))).catch(e => setErr(e.message));
+      };
+      const list = (run && run.status === 'done' && run.output && run.output.diagnoses) || [];
+      return (
+        <div className="mt-2 grid gap-1.5">
+          {!run && <button className="btn ghost w-fit !py-1 text-xs" disabled={busy} onClick={start}><i className="ti ti-sparkles" />{busy ? 'Starting…' : 'Suggest Diagnoses From My Note'}</button>}
+          {run && run.status === 'running' && <p className="text-xs text-stone-500">Reading your note…</p>}
+          {run && run.status === 'failed' && <p className="text-xs text-red-600">The note could not be read{run.error ? `: ${run.error}` : ''}. <button className="underline" onClick={start}>Try again</button></p>}
+          {run && run.status === 'done' && (
+            <>
+              <div className="border-2 border-amber-400 bg-amber-50 rounded-lg p-2 text-[12px] text-amber-900">
+                <b>Drafted by AI from your note.</b> Unverified and not saved to the chart. The AI names no code: the codes below are OpenEMR's, and one is added only if you pick it and save.
+              </div>
+              {!list.length && <p className="text-xs text-stone-500">No suggestion survived the checks against the note and OpenEMR's ICD-10 table.</p>}
+              {list.map((s, i) => (
+                <div key={i} className="border border-stone-200 rounded-lg p-2 text-xs grid gap-1">
+                  <div><b>{s.wording}</b></div>
+                  <FactQuote item={s} />
+                  {decided[i] === 'accepted' ? <span className="text-emerald-700">Added</span>
+                    : decided[i] === 'dismissed' ? <span className="text-stone-400">Dismissed</span>
+                      : <>
+                        <span className="text-[11px] text-stone-600">OpenEMR's ICD-10 table returned these. Pick the one that fits, or dismiss.</span>
+                        {s.candidates.map(c => (
+                          <div key={c.code} className="flex flex-wrap items-center gap-2">
+                            <button className="btn !py-0.5 !px-2 text-xs" disabled={has(c.code)} onClick={() => accept(c, i)}>{has(c.code) ? 'On This Visit' : 'Add'}</button>
+                            <span><b>{c.code}</b> {c.description}</span>
+                            {c.moreSpecificListed && <span className="text-[11px] text-amber-800">Unspecified; a more specific code is listed here.</span>}
+                          </div>
+                        ))}
+                        <button className="btn ghost w-fit !py-0.5 !px-2 text-xs" onClick={() => decide(i, 'dismissed')}>Dismiss</button>
+                      </>}
+                </div>
+              ))}
+            </>
+          )}
+          {err && <p className="text-xs text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
+    // ── Phase 4.2: the clinician's reason for a modifier (2026-11-04) ──
+    // 25, 59 and the X modifiers sit on a line only with the rendering
+    // clinician's recorded reason. She records it here; the claim does not
+    // release without it.
+    const ModifierReasonsPanel = ({ patientId, euuid, items, onChanged }) => {
+      const [text, setText] = useState({});
+      const [busy, setBusy] = useState('');
+      const [err, setErr] = useState('');
+      const open = (items || []).filter(x => !x.justification);
+      if (!open.length) return null;
+      const save = (x) => {
+        setBusy(x.key); setErr('');
+        api.justifyModifier(patientId, euuid, { code: x.code, modifier: x.modifier, text: text[x.key] || '' })
+          .then(() => { setText(t => ({ ...t, [x.key]: '' })); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      return (
+        <div className="card mb-4 border-amber-300">
+          <div className="card-h"><h2><i className="ti ti-pencil mr-1 text-accent" />Modifier Reasons</h2></div>
+          <div className="p-4 grid gap-2 text-sm">
+            {open.map(x => (
+              <div key={x.key} className="grid gap-1">
+                <span className="text-xs text-stone-700">Modifier <b>{x.modifier}</b> is on <b>{x.code}</b>. Say why it applies, in your words.</span>
+                <textarea className="inp text-xs" rows={2} maxLength={1000} value={text[x.key] || ''} onChange={e => setText(t => ({ ...t, [x.key]: e.target.value }))} />
+                <button className="btn w-fit !py-1 text-xs" disabled={busy === x.key || String(text[x.key] || '').trim().length < 10} onClick={() => save(x)}>Record Reason</button>
+              </div>
+            ))}
+            {err && <p className="text-xs text-red-600">{err}</p>}
+          </div>
+        </div>
+      );
+    };
+
+    // ── Phase 4.2: what billing MAY add, and the TCM dates (2026-11-04) ──
+    // Offers are never applied by the app. A person adds the code or modifier
+    // on the coding screen, or does not.
+    const OffersList = ({ offers }) => (!offers || !offers.length) ? null : (
+      <div className="grid gap-1">
+        <b className="text-[12px] text-stone-700">May apply, never added automatically</b>
+        {offers.map((o, i) => <div key={i} className="text-xs border-l-2 border-sky-400 bg-sky-50 rounded px-2 py-1 text-sky-900">{o.message}</div>)}
+      </div>
+    );
+    const TcmDatesForm = ({ patientId, euuid, tcm, onSaved }) => {
+      const [f, setF] = useState({ dischargeDate: (tcm && tcm.dischargeDate) || '', contactDate: (tcm && tcm.contactDate) || '', faceToFaceDate: (tcm && tcm.faceToFaceDate) || '', complexity: (tcm && tcm.complexity) || '' });
+      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      const save = () => { setBusy(true); setErr(''); api.saveTcmDates(patientId, euuid, f).then(() => onSaved && onSaved()).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+      return (
+        <div className="grid gap-1 text-xs border border-stone-200 rounded-lg p-2">
+          <b className="text-stone-700">Transitional care dates</b>
+          {[['dischargeDate', 'Discharge'], ['contactDate', 'Interactive contact'], ['faceToFaceDate', 'Face-to-face (blank: this visit\'s date)']].map(([k, l]) => (
+            <label key={k} className="flex items-center gap-2"><span className="w-56">{l}</span><input type="date" className="inp !py-1 text-xs" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} /></label>
+          ))}
+          <label className="flex items-center gap-2"><span className="w-56">Medical decision making</span>
+            <select className="inp !py-1 text-xs" value={f.complexity} onChange={e => setF({ ...f, complexity: e.target.value })}>
+              <option value="">From the derived level</option><option value="moderate">Moderate</option><option value="high">High</option>
+            </select></label>
+          <button className="btn w-fit !py-1 text-xs" disabled={busy} onClick={save}>Save Dates</button>
+          {err && <p className="text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
+    // ── Phase 3b: the code helper, billing's tool (2026-11-04) ──
+    // For the codes that are not level-based. The families and their inputs
+    // come from the server (serviceRules/), so this page names no code and no
+    // threshold. The answer is a suggestion with its reason; nothing is saved.
+    const CodeHelperPanel = ({ patientId, dos }) => {
+      const [fams, setFams] = useState(null);
+      const [family, setFamily] = useState('');
+      const [input, setInput] = useState({});
+      const [out, setOut] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => { api.serviceFamilies().then(r => setFams(r.families)).catch(e => setErr(e.message)); }, []);
+      if (!fams) return err ? <p className="text-xs text-red-600">{err}</p> : null;
+      const fam = fams.find(f => f.family === family);
+      const shown = (fld) => !fld.when || Object.entries(fld.when).every(([k, vals]) => vals.includes(input[k] != null ? input[k] : ((fam.fields.find(x => x.key === k) || {}).options || [[]])[0][0]));
+      const valueOf = (fld) => (input[fld.key] != null ? input[fld.key] : (fld.type === 'select' ? fld.options[0][0] : fld.type === 'boolean' ? false : ''));
+      const run = () => {
+        setErr(''); setOut(null);
+        const body = {};
+        for (const fld of fam.fields.filter(shown)) {
+          const v = valueOf(fld);
+          body[fld.key] = fld.type === 'number' ? (String(v).trim() === '' ? null : Number(v)) : v;
+        }
+        api.selectService({ family, input: { ...body, dos }, clientId: patientId, dos }).then(setOut).catch(e => setErr(e.message));
+      };
+      return (
+        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
+          <b className="text-primary text-[13px]"><i className="ti ti-calculator mr-1" />Code helper</b>
+          <select className="inp !py-1 text-xs w-fit" value={family} onChange={e => { setFamily(e.target.value); setInput({}); setOut(null); }}>
+            <option value="">Choose a service family…</option>
+            {fams.map(f => <option key={f.family} value={f.family}>{f.label}</option>)}
+          </select>
+          {fam && fam.fields.filter(shown).map(fld => (
+            <label key={fld.key} className="flex items-center gap-2">
+              {fld.type === 'boolean'
+                ? <><input type="checkbox" checked={!!valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.checked }))} /><span>{fld.label}</span></>
+                : <><span className="w-56">{fld.label}</span>
+                    {fld.type === 'select'
+                      ? <select className="inp !py-1 text-xs" value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.value }))}>{fld.options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                      : <input className="inp !py-1 text-xs w-36" type={fld.type === 'date' ? 'date' : 'text'} inputMode={fld.type === 'number' ? 'numeric' : undefined} value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: fld.type === 'number' ? e.target.value.replace(/[^0-9]/g, '').slice(0, 4) : e.target.value }))} />}
+                  </>}
+            </label>
+          ))}
+          {fam && <button className="btn w-fit !py-1 text-xs" onClick={run}>Work It Out</button>}
+          {out && (
+            <div className="grid gap-1">
+              <div><b>{out.codes.length ? out.codes.map(c => (c.units > 1 ? `${c.code} × ${c.units}` : c.code)).join(', ') : 'No code'}</b>: {out.explanation}</div>
+              {out.reviewFlag && <div className="border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1 text-amber-900">Level review: {(out.reviewFlag.absent || []).join(' ')}</div>}
+              {(out.notes || []).map((n, i) => <div key={i} className="text-stone-600">{n}</div>)}
+            </div>
+          )}
+          {err && <p className="text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
+    // ── The claim scrub, billing's review surface (2026-11-04) ──
+    // EVERY finding, in full: blockers first, then warnings, each naming the
+    // field it concerns and what is wrong. Nothing is collapsed behind a count;
+    // the person on this screen is here to work the list. Before submission it
+    // checks the visit's own lines; after, the lines OpenEMR holds now, prices
+    // included, and that is the check Release runs again.
+    const ClaimScrubPanel = ({ patientId, euuid, refreshKey, onReleased }) => {
+      const [s, setS] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState('');
+      const [reviewed, setReviewed] = useState(false);
+      const [msg, setMsg] = useState('');
+      const load = () => { setBusy('scan'); setErr(''); return api.claimScrub(patientId, euuid).then(r => { setS(r); setReviewed(false); }).catch(e => setErr(e.message)).finally(() => setBusy('')); };
+      useEffect(() => { setS(null); setMsg(''); load(); }, [patientId, euuid, refreshKey]);
+      const release = () => {
+        setBusy('release'); setErr(''); setMsg('');
+        api.claimRelease(patientId, euuid, { warningsReviewed: reviewed })
+          .then(r => { setMsg(r.message); onReleased && onReleased(r); return load(); })
+          .catch(e => { setErr(e.message); return load(); })
+          .finally(() => setBusy(''));
+      };
+      if (!s) return <div className="text-xs text-stone-500">{err ? <span className="text-red-600">{err}</span> : 'Running the claim scrub…'}</div>;
+      const blocks = s.findings.filter(f => f.severity === 'block');
+      const warns = s.findings.filter(f => f.severity === 'warn');
+      return (
+        <div className="grid gap-2 border border-stone-200 rounded-lg p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <b className="text-primary text-[13px]"><i className="ti ti-checklist mr-1" />Claim scrub</b>
+            <span className={`chip ${blocks.length ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{blocks.length} blocking</span>
+            <span className={`chip ${warns.length ? 'bg-amber-50 text-amber-800' : 'bg-stone-50 text-stone-600'}`}>{warns.length} warning{warns.length === 1 ? '' : 's'}</span>
+            <button className="btn ghost !py-1 !px-2.5 text-xs ml-auto" disabled={!!busy} onClick={load}><i className="ti ti-refresh" />{busy === 'scan' ? 'Checking…' : 'Check Again'}</button>
+          </div>
+          <p className="text-[11px] text-stone-500">{s.phase === 'final'
+            ? 'Checked against the charge lines OpenEMR holds now, prices included.'
+            : 'Checked against the codes on this visit. Prices are checked once the lines post, at Release.'}</p>
+          {s.chargeReadError && <p className="text-xs text-red-600">OpenEMR's charge lines could not be read ({s.chargeReadError}). The final charge set is unchecked.</p>}
+          {s.findings.length === 0 && <p className="text-xs text-emerald-700">No findings.</p>}
+          {s.needsTcmDates && <TcmDatesForm patientId={patientId} euuid={euuid} tcm={s.tcm} onSaved={load} />}
+          {blocks.map((f, i) => (
+            <div key={`b${i}`} className="text-xs border-l-2 border-red-400 bg-red-50 rounded px-2 py-1.5">
+              <b className="text-red-800">{f.fieldLabel}</b><span className="text-red-800"> — {f.message}</span>
+            </div>
+          ))}
+          {warns.map((f, i) => (
+            <div key={`w${i}`} className="text-xs border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1.5">
+              <b className="text-amber-900">{f.fieldLabel}</b><span className="text-amber-900"> — {f.message}</span>
+            </div>
+          ))}
+          <OffersList offers={s.offers} />
+          {s.holdState === 'held' && (
+            <div className="grid gap-2 mt-1">
+              {warns.length > 0 && (
+                <label className="flex items-start gap-2 text-xs">
+                  <input type="checkbox" className="mt-0.5" checked={reviewed} onChange={e => setReviewed(e.target.checked)} />
+                  <span>I reviewed every warning above.</span>
+                </label>
+              )}
+              <button className="btn gold w-fit" disabled={!!busy || blocks.length > 0 || (warns.length > 0 && !reviewed)} onClick={release}>
+                <i className="ti ti-lock-open" />{busy === 'release' ? 'Releasing…' : 'Release Claim'}
+              </button>
+              <p className="text-[10.5px] text-stone-400">Release re-reads the lines in OpenEMR and refuses if anything blocking is open. Nothing transmits from this app; the release records that you reviewed the claim and let it go.</p>
+            </div>
+          )}
+          {s.holdState === 'released' && s.release && <p className="text-xs text-emerald-700">Released {fmtTs(s.release.at)}{s.release.by ? ` by ${s.release.by.name}` : ''}.</p>}
+          {msg && <p className="text-xs text-emerald-700">{msg}</p>}
+          {err && <p className="text-xs text-red-600">{err}</p>}
+        </div>
+      );
+    };
+
     // The encounter panel: coding, Rx, orders, sign & close, addenda.
     // ── Session 4.12 Scope F5 — act from inside the encounter ──────────────
     // Mid-visit a clinician needs the rest of the chart: what this patient is
@@ -8383,336 +8855,6 @@
           {Object.entries(n.sections || {}).map(([k, m]) => block(labelOf(k), m))}
           <SignatureBlock signature={signature} />
           <NoteHistory revisions={revisions} />
-        </div>
-      );
-    };
-
-    // ── Phase 3: the clinician confirms FACTS, never a code (2026-11-04) ──
-    // AI reads the note into facts (Phase 2); the clinician confirms, corrects
-    // or adds them; rules derive the level. The code appears only after
-    // confirmation, with a sentence saying how it was reached. No dollar
-    // amount anywhere. The draft notice is always shown in full while the AI
-    // output is on screen (Gemini spec standing requirement).
-    const MDM_STATUS_LABELS = Object.freeze({
-      stable: 'Stable chronic illness', worsening: 'Chronic illness, worsening (exacerbation, progression or side effects)',
-      new: 'New problem', resolved: 'Resolved, or self-limited or minor', unclear: 'Unclear'
-    });
-    const MDM_MANAGEMENT_LABELS = Object.freeze({ observation: 'Observation', medication: 'Medication', referral: 'Referral', testing: 'Testing', procedure: 'Procedure', other: 'Other' });
-    const MDM_DATA_LABELS = Object.freeze({
-      lab: 'Lab result reviewed or ordered', imaging: 'Imaging reviewed or ordered', outside_record: 'Outside record reviewed',
-      prior_note: 'Prior GFC note reviewed', independent_historian: 'Independent historian', discussion_with_clinician: 'Discussion with another clinician',
-      test_interpretation: 'Independent interpretation of a test'
-    });
-    const MDM_RISK_LABELS = Object.freeze({
-      prescription_management: 'Prescription drug management', decision_re_hospitalization: 'Decision about hospitalization',
-      decision_re_surgery: 'Decision about surgery', drug_therapy_monitoring: 'Drug therapy needing intensive monitoring for toxicity',
-      social_determinants: 'Care limited by social determinants of health', otc_management: 'Over-the-counter drug management', other: 'Other'
-    });
-    const FactQuote = ({ item }) => item.quote
-      ? <div className="text-[11px] text-stone-500 italic mt-0.5">“{item.quote}”{item.quoteVerified === false ? ' (from an attached document, not checked against the note)' : ''}</div>
-      : <div className="text-[11px] text-stone-400 mt-0.5">Added by you</div>;
-    const FactSelect = ({ value, labels, onChange }) => (
-      <select className="inp !py-1 text-xs" value={value} onChange={e => onChange(e.target.value)}>
-        {Object.entries(labels).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-      </select>
-    );
-    const VisitFactsPanel = ({ patientId, euuid, derivation, onChanged }) => {
-      const [run, setRun] = useState(null);       // the latest extraction for this visit
-      const [facts, setFacts] = useState(null);   // what the clinician is confirming
-      const [result, setResult] = useState(derivation || null);
-      const [busy, setBusy] = useState('');
-      const [err, setErr] = useState('');
-      const [affirm, setAffirm] = useState(false);
-      const adopt = (rv) => {
-        setRun(rv);
-        if (rv && rv.status === 'done' && rv.output) {
-          const o = rv.output;
-          setFacts({
-            problemsAddressed: (o.problemsAddressed || []).map(x => ({ ...x })), dataReviewed: (o.dataReviewed || []).map(x => ({ ...x })),
-            risk: (o.risk || []).map(x => ({ ...x })),
-            time: { statementPresent: !!(o.time && o.time.statementPresent), totalMinutes: o.time && o.time.totalMinutes != null ? String(o.time.totalMinutes) : '', quote: o.time && o.time.quote }
-          });
-        }
-      };
-      const findLatest = () => api.aiReviews(patientId).then(r => {
-        const mine = (r.reviews || []).filter(x => x.purpose === 'mdm_extraction' && x.encounterUuid === euuid);
-        return mine.length ? api.aiReview(patientId, mine[0].id).then(x => adopt(x.review)) : null;
-      }).catch(e => setErr(e.message));
-      useEffect(() => { findLatest(); }, [patientId, euuid]);
-      useEffect(() => {
-        if (!run || run.status !== 'running') return undefined;
-        const t = setInterval(() => { api.aiReview(patientId, run.id).then(x => { if (x.review.status !== 'running') adopt(x.review); }).catch(() => {}); }, 4000);
-        return () => clearInterval(t);
-      }, [run && run.id, run && run.status]);
-      const start = () => {
-        setBusy('read'); setErr('');
-        api.extractMdm(patientId, euuid).then(r => setRun({ id: r.reviewId, status: r.status })).catch(e => setErr(e.message)).finally(() => setBusy(''));
-      };
-      const setItem = (key, i, patch) => setFacts(f => ({ ...f, [key]: f[key].map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
-      const dropItem = (key, i) => setFacts(f => ({ ...f, [key]: f[key].filter((_, j) => j !== i) }));
-      const addItem = (key, blank) => setFacts(f => ({ ...f, [key]: [...f[key], blank] }));
-      const payload = () => ({
-        problemsAddressed: facts.problemsAddressed.filter(x => String(x.description || '').trim()).map(({ description, status, management, quote }) => ({ description, status, management, ...(quote ? { quote } : {}) })),
-        dataReviewed: facts.dataReviewed.filter(x => String(x.detail || '').trim()).map(({ kind, detail, quote }) => ({ kind, detail, ...(quote ? { quote } : {}) })),
-        risk: facts.risk.filter(x => String(x.detail || '').trim()).map(({ factor, detail, quote }) => ({ factor, detail, ...(quote ? { quote } : {}) })),
-        time: facts.time.statementPresent && /^\d+$/.test(String(facts.time.totalMinutes)) ? { statementPresent: true, totalMinutes: Number(facts.time.totalMinutes) } : { statementPresent: false }
-      });
-      const confirm = (extra) => {
-        setBusy('confirm'); setErr('');
-        api.emDerive(patientId, euuid, { extractionId: run.id, facts: payload(), ...(extra || {}) })
-          .then(r => { setResult(r.emDerivation); setAffirm(false); onChanged && onChanged(); })
-          .catch(e => setErr(e.message)).finally(() => setBusy(''));
-      };
-      const timeCand = result && (result.candidates || []).find(c => c.basis === 'time');
-      const canChooseTime = result && timeCand && result.finalBasis !== 'time' && result.candidates.findIndex(c => c === timeCand) > -1 &&
-        timeCand.code !== result.defaultCode && result.time && result.time.statementPresent;
-      return (
-        <div className="card mb-4">
-          <div className="card-h"><h2><i className="ti ti-list-check mr-1 text-accent" />Visit Facts</h2></div>
-          <div className="p-4 grid gap-3 text-sm">
-            <p className="text-xs text-stone-600">Confirm the facts of your visit: the problems you addressed, the data you reviewed, the risk, and the time. The level is worked out from what you confirm.</p>
-            {!run && <button className="btn w-fit" disabled={!!busy} onClick={start}><i className="ti ti-sparkles" />{busy === 'read' ? 'Starting…' : 'Read My Note'}</button>}
-            {run && run.status === 'running' && <p className="text-xs text-stone-500">Reading your note…</p>}
-            {run && run.status === 'failed' && <p className="text-xs text-red-600">The note could not be read{run.error ? `: ${run.error}` : ''}. <button className="underline" onClick={start}>Try again</button></p>}
-            {facts && (
-              <>
-                <div className="border-2 border-amber-400 bg-amber-50 rounded-lg p-2.5 text-[12.5px] text-amber-900">
-                  <b>Drafted by AI from your note.</b> Unverified and not saved to the chart. Confirm, correct or remove each fact, and add anything it missed.
-                </div>
-                <div className="grid gap-2">
-                  <b className="text-primary text-[13px]">Problems addressed</b>
-                  {facts.problemsAddressed.map((x, i) => (
-                    <div key={`p${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
-                      <input className="inp !py-1 text-xs" value={x.description || ''} onChange={e => setItem('problemsAddressed', i, { description: e.target.value })} placeholder="Problem" />
-                      <div className="flex flex-wrap gap-2">
-                        <FactSelect value={x.status} labels={MDM_STATUS_LABELS} onChange={v => setItem('problemsAddressed', i, { status: v })} />
-                        <FactSelect value={x.management} labels={MDM_MANAGEMENT_LABELS} onChange={v => setItem('problemsAddressed', i, { management: v })} />
-                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('problemsAddressed', i)}>Remove</button>
-                      </div>
-                      <FactQuote item={x} />
-                    </div>
-                  ))}
-                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('problemsAddressed', { description: '', status: 'stable', management: 'observation' })}><i className="ti ti-plus" />Add Problem</button>
-                </div>
-                <div className="grid gap-2">
-                  <b className="text-primary text-[13px]">Data reviewed</b>
-                  {facts.dataReviewed.map((x, i) => (
-                    <div key={`d${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
-                      <div className="flex flex-wrap gap-2">
-                        <FactSelect value={x.kind} labels={MDM_DATA_LABELS} onChange={v => setItem('dataReviewed', i, { kind: v })} />
-                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('dataReviewed', i)}>Remove</button>
-                      </div>
-                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('dataReviewed', i, { detail: e.target.value })} placeholder="What was reviewed" />
-                      <FactQuote item={x} />
-                    </div>
-                  ))}
-                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('dataReviewed', { kind: 'lab', detail: '' })}><i className="ti ti-plus" />Add Data</button>
-                </div>
-                <div className="grid gap-2">
-                  <b className="text-primary text-[13px]">Risk</b>
-                  {facts.risk.map((x, i) => (
-                    <div key={`r${i}`} className="border border-stone-200 rounded-lg p-2 grid gap-1">
-                      <div className="flex flex-wrap gap-2">
-                        <FactSelect value={x.factor} labels={MDM_RISK_LABELS} onChange={v => setItem('risk', i, { factor: v })} />
-                        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => dropItem('risk', i)}>Remove</button>
-                      </div>
-                      <input className="inp !py-1 text-xs" value={x.detail || ''} onChange={e => setItem('risk', i, { detail: e.target.value })} placeholder="What it was" />
-                      <FactQuote item={x} />
-                    </div>
-                  ))}
-                  <button className="btn ghost w-fit !py-1 text-xs" onClick={() => addItem('risk', { factor: 'prescription_management', detail: '' })}><i className="ti ti-plus" />Add Risk</button>
-                </div>
-                <div className="grid gap-1">
-                  <b className="text-primary text-[13px]">Time</b>
-                  <label className="flex items-center gap-2 text-xs">
-                    <input type="checkbox" checked={facts.time.statementPresent} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, statementPresent: e.target.checked } }))} />
-                    <span>The note states a total time for this date</span>
-                  </label>
-                  {facts.time.statementPresent && <input className="inp w-32 !py-1 text-xs" inputMode="numeric" value={facts.time.totalMinutes} onChange={e => setFacts(f => ({ ...f, time: { ...f.time, totalMinutes: e.target.value.replace(/[^0-9]/g, '').slice(0, 4) } }))} placeholder="Minutes" />}
-                  {facts.time.quote && <div className="text-[11px] text-stone-500 italic">“{facts.time.quote}”</div>}
-                </div>
-                <button className="btn gold w-fit" disabled={!!busy} onClick={() => confirm()}><i className="ti ti-check" />{busy === 'confirm' ? 'Confirming…' : 'Confirm Facts'}</button>
-              </>
-            )}
-            {result && (
-              <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-2.5 grid gap-1.5">
-                <div className="text-[13px] text-emerald-900"><b>{result.finalCode}</b>, confirmed {fmtTs(result.at)}{result.by ? ` by ${result.by.name}` : ''}.</div>
-                <div className="text-[12px] text-emerald-900">{result.explanation}</div>
-                {canChooseTime && (
-                  <div className="grid gap-1.5 border-t border-emerald-200 pt-1.5">
-                    <div className="text-[12px] text-stone-700">Your note also states {result.time.minutes} minutes, which supports {timeCand.code} by time. The lower of the two is used unless you choose time.</div>
-                    <label className="flex items-start gap-2 text-xs">
-                      <input type="checkbox" className="mt-0.5" checked={affirm} onChange={e => setAffirm(e.target.checked)} />
-                      <span>I affirm I spent a total of {result.time.minutes} minutes on this patient's care on this date.</span>
-                    </label>
-                    <button className="btn w-fit" disabled={!affirm || !!busy || !facts} onClick={() => confirm({ chooseTime: true, affirmTime: true })}>Use the Time-Based Level</button>
-                  </div>
-                )}
-              </div>
-            )}
-            {err && <p className="text-xs text-red-600">{err}</p>}
-          </div>
-        </div>
-      );
-    };
-
-    // Billing's view of the derived level: what the clinician confirmed, both
-    // candidates, and the coder's flag with the evidence that was absent. The
-    // flag is resolved here, with a note, and stays on the record resolved.
-    const BillingLevelPanel = ({ patientId, euuid, derivation, onChanged }) => {
-      const [note, setNote] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState('');
-      if (!derivation) return <p className="text-xs text-stone-500">The clinician has not confirmed the visit facts, so no E/M level has been derived.</p>;
-      const f = derivation.flag;
-      const resolve = () => { setBusy(true); setErr(''); api.resolveEmFlag(patientId, euuid, note).then(() => { setNote(''); onChanged && onChanged(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
-      return (
-        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
-          <b className="text-primary text-[13px]"><i className="ti ti-stairs mr-1" />Derived E/M level: {derivation.finalCode}</b>
-          <div className="text-stone-600">{derivation.explanation}</div>
-          <div className="text-stone-600">Candidates: {(derivation.candidates || []).map(c => `${c.code} by ${c.basis === 'time' ? `time (${c.minutes} min)` : `MDM (${c.mdm})`}`).join(' · ')}. Default {derivation.defaultCode}{derivation.override ? `; the clinician chose ${derivation.finalCode} by time and affirmed it` : ''}.</div>
-          {f && (
-            <div className={`rounded px-2 py-1.5 border-l-2 ${f.resolvedAt ? 'border-stone-300 bg-stone-50' : 'border-amber-400 bg-amber-50'}`}>
-              <b className={f.resolvedAt ? 'text-stone-700' : 'text-amber-900'}>Level review {f.resolvedAt ? `resolved ${fmtTs(f.resolvedAt)}${f.resolvedBy ? ` by ${f.resolvedBy.name}` : ''}` : 'open'}</b>
-              {(f.absent || []).map((a, i) => <div key={i} className="text-stone-700">{a}</div>)}
-              {(f.elements || []).map(e => (
-                <div key={e.element} className="mt-1"><b className="text-stone-700">{e.element === 'problems' ? 'Problems' : e.element === 'data' ? 'Data' : 'Risk'}: {e.level}</b>
-                  {(e.facts || []).map((x, i) => <div key={i} className="text-stone-600">{x.description || x.detail}{x.quote ? <i> — “{x.quote}”</i> : <i> — added by the clinician</i>}</div>)}
-                </div>
-              ))}
-              {f.resolvedAt && <div className="text-stone-600 mt-1">{f.resolution}</div>}
-              {!f.resolvedAt && (
-                <div className="grid gap-1.5 mt-1.5">
-                  <input className="inp" value={note} maxLength={1000} onChange={e => setNote(e.target.value)} placeholder="How it was resolved" />
-                  <button className="btn w-fit" disabled={busy || note.trim().length < 3} onClick={resolve}>Resolve Flag</button>
-                </div>
-              )}
-            </div>
-          )}
-          {err && <p className="text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
-    // ── Phase 3b: the code helper, billing's tool (2026-11-04) ──
-    // For the codes that are not level-based. The families and their inputs
-    // come from the server (serviceRules/), so this page names no code and no
-    // threshold. The answer is a suggestion with its reason; nothing is saved.
-    const CodeHelperPanel = ({ patientId, dos }) => {
-      const [fams, setFams] = useState(null);
-      const [family, setFamily] = useState('');
-      const [input, setInput] = useState({});
-      const [out, setOut] = useState(null);
-      const [err, setErr] = useState('');
-      useEffect(() => { api.serviceFamilies().then(r => setFams(r.families)).catch(e => setErr(e.message)); }, []);
-      if (!fams) return err ? <p className="text-xs text-red-600">{err}</p> : null;
-      const fam = fams.find(f => f.family === family);
-      const shown = (fld) => !fld.when || Object.entries(fld.when).every(([k, vals]) => vals.includes(input[k] != null ? input[k] : ((fam.fields.find(x => x.key === k) || {}).options || [[]])[0][0]));
-      const valueOf = (fld) => (input[fld.key] != null ? input[fld.key] : (fld.type === 'select' ? fld.options[0][0] : fld.type === 'boolean' ? false : ''));
-      const run = () => {
-        setErr(''); setOut(null);
-        const body = {};
-        for (const fld of fam.fields.filter(shown)) {
-          const v = valueOf(fld);
-          body[fld.key] = fld.type === 'number' ? (String(v).trim() === '' ? null : Number(v)) : v;
-        }
-        api.selectService({ family, input: { ...body, dos }, clientId: patientId, dos }).then(setOut).catch(e => setErr(e.message));
-      };
-      return (
-        <div className="grid gap-1.5 border border-stone-200 rounded-lg p-3 text-xs">
-          <b className="text-primary text-[13px]"><i className="ti ti-calculator mr-1" />Code helper</b>
-          <select className="inp !py-1 text-xs w-fit" value={family} onChange={e => { setFamily(e.target.value); setInput({}); setOut(null); }}>
-            <option value="">Choose a service family…</option>
-            {fams.map(f => <option key={f.family} value={f.family}>{f.label}</option>)}
-          </select>
-          {fam && fam.fields.filter(shown).map(fld => (
-            <label key={fld.key} className="flex items-center gap-2">
-              {fld.type === 'boolean'
-                ? <><input type="checkbox" checked={!!valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.checked }))} /><span>{fld.label}</span></>
-                : <><span className="w-56">{fld.label}</span>
-                    {fld.type === 'select'
-                      ? <select className="inp !py-1 text-xs" value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: e.target.value }))}>{fld.options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
-                      : <input className="inp !py-1 text-xs w-36" type={fld.type === 'date' ? 'date' : 'text'} inputMode={fld.type === 'number' ? 'numeric' : undefined} value={valueOf(fld)} onChange={e => setInput(i => ({ ...i, [fld.key]: fld.type === 'number' ? e.target.value.replace(/[^0-9]/g, '').slice(0, 4) : e.target.value }))} />}
-                  </>}
-            </label>
-          ))}
-          {fam && <button className="btn w-fit !py-1 text-xs" onClick={run}>Work It Out</button>}
-          {out && (
-            <div className="grid gap-1">
-              <div><b>{out.codes.length ? out.codes.map(c => (c.units > 1 ? `${c.code} × ${c.units}` : c.code)).join(', ') : 'No code'}</b>: {out.explanation}</div>
-              {out.reviewFlag && <div className="border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1 text-amber-900">Level review: {(out.reviewFlag.absent || []).join(' ')}</div>}
-              {(out.notes || []).map((n, i) => <div key={i} className="text-stone-600">{n}</div>)}
-            </div>
-          )}
-          {err && <p className="text-red-600">{err}</p>}
-        </div>
-      );
-    };
-
-    // ── The claim scrub, billing's review surface (2026-11-04) ──
-    // EVERY finding, in full: blockers first, then warnings, each naming the
-    // field it concerns and what is wrong. Nothing is collapsed behind a count;
-    // the person on this screen is here to work the list. Before submission it
-    // checks the visit's own lines; after, the lines OpenEMR holds now, prices
-    // included, and that is the check Release runs again.
-    const ClaimScrubPanel = ({ patientId, euuid, refreshKey, onReleased }) => {
-      const [s, setS] = useState(null);
-      const [err, setErr] = useState('');
-      const [busy, setBusy] = useState('');
-      const [reviewed, setReviewed] = useState(false);
-      const [msg, setMsg] = useState('');
-      const load = () => { setBusy('scan'); setErr(''); return api.claimScrub(patientId, euuid).then(r => { setS(r); setReviewed(false); }).catch(e => setErr(e.message)).finally(() => setBusy('')); };
-      useEffect(() => { setS(null); setMsg(''); load(); }, [patientId, euuid, refreshKey]);
-      const release = () => {
-        setBusy('release'); setErr(''); setMsg('');
-        api.claimRelease(patientId, euuid, { warningsReviewed: reviewed })
-          .then(r => { setMsg(r.message); onReleased && onReleased(r); return load(); })
-          .catch(e => { setErr(e.message); return load(); })
-          .finally(() => setBusy(''));
-      };
-      if (!s) return <div className="text-xs text-stone-500">{err ? <span className="text-red-600">{err}</span> : 'Running the claim scrub…'}</div>;
-      const blocks = s.findings.filter(f => f.severity === 'block');
-      const warns = s.findings.filter(f => f.severity === 'warn');
-      return (
-        <div className="grid gap-2 border border-stone-200 rounded-lg p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <b className="text-primary text-[13px]"><i className="ti ti-checklist mr-1" />Claim scrub</b>
-            <span className={`chip ${blocks.length ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{blocks.length} blocking</span>
-            <span className={`chip ${warns.length ? 'bg-amber-50 text-amber-800' : 'bg-stone-50 text-stone-600'}`}>{warns.length} warning{warns.length === 1 ? '' : 's'}</span>
-            <button className="btn ghost !py-1 !px-2.5 text-xs ml-auto" disabled={!!busy} onClick={load}><i className="ti ti-refresh" />{busy === 'scan' ? 'Checking…' : 'Check Again'}</button>
-          </div>
-          <p className="text-[11px] text-stone-500">{s.phase === 'final'
-            ? 'Checked against the charge lines OpenEMR holds now, prices included.'
-            : 'Checked against the codes on this visit. Prices are checked once the lines post, at Release.'}</p>
-          {s.chargeReadError && <p className="text-xs text-red-600">OpenEMR's charge lines could not be read ({s.chargeReadError}). The final charge set is unchecked.</p>}
-          {s.findings.length === 0 && <p className="text-xs text-emerald-700">No findings.</p>}
-          {blocks.map((f, i) => (
-            <div key={`b${i}`} className="text-xs border-l-2 border-red-400 bg-red-50 rounded px-2 py-1.5">
-              <b className="text-red-800">{f.fieldLabel}</b><span className="text-red-800"> — {f.message}</span>
-            </div>
-          ))}
-          {warns.map((f, i) => (
-            <div key={`w${i}`} className="text-xs border-l-2 border-amber-400 bg-amber-50 rounded px-2 py-1.5">
-              <b className="text-amber-900">{f.fieldLabel}</b><span className="text-amber-900"> — {f.message}</span>
-            </div>
-          ))}
-          {s.holdState === 'held' && (
-            <div className="grid gap-2 mt-1">
-              {warns.length > 0 && (
-                <label className="flex items-start gap-2 text-xs">
-                  <input type="checkbox" className="mt-0.5" checked={reviewed} onChange={e => setReviewed(e.target.checked)} />
-                  <span>I reviewed every warning above.</span>
-                </label>
-              )}
-              <button className="btn gold w-fit" disabled={!!busy || blocks.length > 0 || (warns.length > 0 && !reviewed)} onClick={release}>
-                <i className="ti ti-lock-open" />{busy === 'release' ? 'Releasing…' : 'Release Claim'}
-              </button>
-              <p className="text-[10.5px] text-stone-400">Release re-reads the lines in OpenEMR and refuses if anything blocking is open. Nothing transmits from this app; the release records that you reviewed the claim and let it go.</p>
-            </div>
-          )}
-          {s.holdState === 'released' && s.release && <p className="text-xs text-emerald-700">Released {fmtTs(s.release.at)}{s.release.by ? ` by ${s.release.by.name}` : ''}.</p>}
-          {msg && <p className="text-xs text-emerald-700">{msg}</p>}
-          {err && <p className="text-xs text-red-600">{err}</p>}
         </div>
       );
     };
@@ -9149,6 +9291,7 @@
                 <span className="lblu block mb-1">Diagnoses (ICD-10-CM)</span>
                 <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked || billerEditing}
                   addToProblemList={addToProblemList} setAddToProblemList={setAddToProblemList} />
+                {!(codingLocked || billerEditing) && canWrite && <DxSuggestionsPanel patientId={patient.id} euuid={euuid} diagnoses={diagnoses} setDiagnoses={setDiagnoses} />}
                 {d.candidatesError && <p className="text-[11px] text-amber-700 mt-1">Problem list unavailable: {d.candidatesError}</p>}
                 {billerEditing && <Hint className="mt-1">The diagnoses are the signing clinician's. Link services to them below; a change to a diagnosis goes back to the clinician as an addendum.</Hint>}
               </div>
@@ -9351,6 +9494,9 @@
           {/* Phase 3: the clinician confirms the facts of her visit; the level is
               derived from them. Not for an author signer (RN, LMSW), and gone
               once billing has submitted. */}
+          {on('sign') && canWrite && !na.signsAsAuthor && (!d.record.renderingProvider || d.record.renderingProvider.id === (d.me || {}).id) && (
+            <ModifierReasonsPanel patientId={patient.id} euuid={euuid} items={d.modifierJustifications} onChanged={load} />
+          )}
           {on('sign') && canWrite && !na.signsAsAuthor && !['billed', 'no_charge'].includes(d.billingStatus) && (
             <VisitFactsPanel patientId={patient.id} euuid={euuid} derivation={d.emDerivation} onChanged={load} />
           )}

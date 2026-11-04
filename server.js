@@ -75,6 +75,8 @@ const emLevels = require('./emLevels');           // THE E/M level table, verifi
 const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
 const serviceRules = require('./serviceRules');   // Phase 3b: selection for the codes that are not level-based
+const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and modifiers, offered, never applied
+const dxSuggestion = require('./dxSuggestion');   // Phase 4.1: diagnosis wording from the note; OpenEMR supplies the codes
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const userFinancial = require('./userFinancialFields');   // the user fields that move money (owner, 2026-11-03)
@@ -13879,6 +13881,10 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       posMissingReason: canBill ? record.posMissingReason || null : undefined,
       // Phase 3: the derived level. The flag only for billing.
       emDerivation: emDerivationView(record, canBill),
+      // Phase 4.2: the modifiers on this visit that need the rendering
+      // clinician's recorded reason (25, 59, the X modifiers), each saying
+      // whether it has one. The clinician can act on this; billing reads it.
+      modifierJustifications: modifierJustificationsView(record),
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
@@ -13939,7 +13945,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       },
       codeCatalog: { loaded: codeCatalog.isLoaded(catalog), fetchedAt: codeCatalog.isLoaded(catalog) ? catalog.fetchedAt : null, stale: codeCatalog.isStale(catalog) },
       billingNpiUsed: payer.billing_npi_used, billingNpiSource: payer.source,
-      me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null },
+      me: { id: req.user.id, name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null },
       warnings: [...attestationWarnings, ...(record.structuredNoteError ? [`GFC structured note not synced to OpenEMR: ${record.structuredNoteError}`] : [])],
       orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, orderStatuses: clinicalRepo.ORDER_STATUSES, orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
       rxRoutes: clinicalRepo.RX_ROUTES,
@@ -15588,6 +15594,21 @@ const sameMonthOtherLinesFor = (record, allRecords) => {
       String(r.date || '').slice(0, 7) === month && r.noteStatus !== 'voided')
     .flatMap(r => (r.services || []).map(sv => ({ code: sv.code, renderingProviderId: (r.renderingProvider && r.renderingProvider.id) || null })));
 };
+// Phase 4.2: GFC is the patient's continuing source of care when the patient
+// is on a clinical line and GFC has a care plan or an earlier signed visit.
+const continuingCareFor = (record, client, allRecords) => {
+  if (!client || !isClinicalServiceLine(client.serviceLine)) return false;
+  if (client.carePlan) return true;
+  const day = String(record.date || '').slice(0, 10);
+  return (allRecords || []).some(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+    r.noteStatus !== 'voided' && r.closedAt && String(r.date || '').slice(0, 10) < day);
+};
+// The AWVs GFC has billed for this patient, before this visit.
+const priorAwvDatesFor = (record, allRecords) => {
+  const awv = require('./serviceRules/annualWellness');
+  return (allRecords || []).filter(r => r && r.encounterUuid !== record.encounterUuid && String(r.clientId) === String(record.clientId) &&
+    r.noteStatus !== 'voided' && (r.services || []).some(sv => awv.CODES.includes(sv.code))).map(r => String(r.date || '').slice(0, 10)).filter(Boolean);
+};
 const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, catalog, ncci, facilityInfo, allRecords, psychotherapyMinutes = null }) => {
   const { payer, payerProblem } = payerForScrub(client);
   const encounterFacility = facts && facts.checked && facts.facilityId
@@ -15610,7 +15631,12 @@ const runClaimScrub = ({ phase, record, client, users, facts, lines, icd10, cata
     sameMonthOtherLines: sameMonthOtherLinesFor(record, allRecords),
     renderingProviderId: (record.renderingProvider && record.renderingProvider.id) || null,
     psychotherapyMinutes, totalMinutes: record.totalMinutes || null,
-    emDerivation: record.emDerivation || null
+    emDerivation: record.emDerivation || null,
+    // Phase 4.2 inputs.
+    continuingCare: continuingCareFor(record, client, allRecords),
+    modifierJustifications: record.modifierJustifications || {},
+    tcm: record.tcm || null,
+    priorAwvDates: priorAwvDatesFor(record, allRecords)
   });
 };
 
@@ -15921,6 +15947,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes, signedAs: authorSignature ? 'author' : 'billing',
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
+    // AI coding pipeline: a billable signature starts the fact extraction as
+    // the signing clinician. An author's signature waits for the addendum.
+    if (!authorSignature) await autoStartMdmExtraction({ req, client: ctx.client, encounterUuid: ctx.encounterUuid, rows: ctx.rows, record });
     res.json({
       message: record.coSignStatus === 'pending'
         ? 'Signed as the note\'s author — it is locked. It is not billable until a provider (or an LCSW, for behavioral health) adds the clinician addendum.'
@@ -16027,6 +16056,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
       services: (record.services || []).map(x => x.code),
       chargesPosted: !!record.chargesPosted, chargeError: record.chargeError || null
     });
+    await autoStartMdmExtraction({ req, client: ctx.client, encounterUuid: ctx.encounterUuid, rows: ctx.rows, record });
     res.json({ message: 'Clinician addendum added; the note is signed and sent to billing', record, addendum, coSignStatus: 'cleared', billable: true, billingStatus: clinicalRepo.BILLING_STATUS.AWAITING_BILLING, chargesPosted: false, warnings });
   } catch (error) {
     console.error('Clinician addendum error:', error);
@@ -16228,6 +16258,10 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/claim-scrub', authen
     res.json({
       phase, billingStatus: status, holdState: hold,
       findings: out.scrub.findings, counts: out.scrub.counts, ok: out.scrub.ok,
+      // Phase 4.2: what billing MAY add. Never applied by the app.
+      offers: out.scrub.offers || [],
+      tcm: ctx.record.tcm || null,
+      needsTcmDates: out.lines.some(l => require('./serviceRules/transitionalCare').CODES.includes(String(l.code).toUpperCase())),
       chargeReadError: out.chargeReadError,
       lines: out.lines, totalMinutes: ctx.record.totalMinutes || null, totalMinutesSource: ctx.record.totalMinutesSource || null,
       release: ctx.record.claimRelease || null, scrubbedAt: at
@@ -16402,6 +16436,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation', aut
       derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override
     };
     await db.set(EM_DERIVATIONS, [...(await loadRows(EM_DERIVATIONS)), event]);
+    // The permanent coding audit (2026-11-04 alignment, item 4): the
+    // confirmation joins the proposal it answers.
+    await appendCodingAuditEvent({ type: 'em_level_confirmed', reviewId: extraction.id, clientId: ctx.client.id, encounterUuid: ctx.encounterUuid,
+      actor: { id: req.user.id, name: req.user.name || req.user.email }, confirmedFacts: sane.facts,
+      derivedCode: out.defaultCode, finalCode: out.finalCode, finalBasis: out.finalBasis, override: out.override, flagged: !!out.flag });
     const summary = {
       eventId: event.id, at, by, extractionId: extraction.id,
       familyLabel: out.familyLabel, elements: out.elements, mdm: out.mdm, time: out.time,
@@ -16492,6 +16531,75 @@ app.get('/api/clinical/reports/em-distribution', authenticateToken, requireBilli
     res.json(emDistribution(await loadRows('encounter_billing'), month));
   } catch (error) {
     console.error('E/M distribution error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Phase 4.2: modifier justifications and TCM dates (2026-11-04) ─────────
+// Modifier 25, 59 and the X modifiers sit on a line only with the RENDERING
+// clinician's recorded reason (addOnRules.js). Recorded here, by her, and kept
+// with who and when. The text never reaches the activity log.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/modifier-justification', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const record = ctx.record;
+    if (!record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (record.claimRelease && record.claimRelease.at) return res.status(409).json({ error: 'This claim was already released.', code: 'CLAIM_ALREADY_RELEASED' });
+    const body = req.body || {};
+    const code = String(body.code || '').trim().toUpperCase();
+    const modifier = String(body.modifier || '').trim().toUpperCase();
+    if (!addOnRules.NEEDS_JUSTIFICATION.includes(modifier)) return res.status(400).json({ error: `Modifier ${modifier || '(none)'} does not take a recorded justification here.`, code: 'MODIFIER_NOT_JUSTIFIABLE' });
+    const line = (record.services || []).find(sv => sv.code === code && (sv.modifiers || []).map(m => String(m).toUpperCase()).includes(modifier));
+    if (!line) return res.status(404).json({ error: `${code}-${modifier} is not on this visit.`, code: 'MODIFIER_LINE_NOT_FOUND' });
+    const rp = record.renderingProvider;
+    if (rp && rp.id && rp.id !== req.user.id) return res.status(403).json({ error: `The reason is recorded by the clinician who rendered the visit (${rp.name || 'the rendering clinician'}).`, code: 'MODIFIER_NOT_YOUR_VISIT' });
+    const text = String(body.text || '').trim();
+    if (text.length < 10) return res.status(400).json({ error: 'Say, in a sentence, why the modifier applies.', code: 'MODIFIER_JUSTIFICATION_REQUIRED' });
+    const at = new Date().toISOString();
+    const key = `${code}-${modifier}`;
+    const modifierJustifications = { ...(record.modifierJustifications || {}), [key]: { text: text.slice(0, 1000), by: clinicalRepo.actorRecord(ctx.actor), at } };
+    await saveBillingRecord(ctx.rows, { ...record, modifierJustifications, updatedAt: at });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'modifier_justification_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, line: key });
+    res.json({ message: 'Recorded.', key, justification: modifierJustifications[key] });
+  } catch (error) {
+    console.error('Modifier justification error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+const modifierJustificationsView = (record) => {
+  const recorded = (record && record.modifierJustifications) || {};
+  const out = [];
+  for (const sv of ((record && record.services) || [])) {
+    for (const m of (sv.modifiers || []).map(x => String(x).toUpperCase()).filter(x => addOnRules.NEEDS_JUSTIFICATION.includes(x))) {
+      const key = `${sv.code}-${m}`;
+      out.push({ key, code: sv.code, modifier: m, justification: recorded[key] || null });
+    }
+  }
+  return out;
+};
+
+// The dates a TCM code rests on: discharge, the interactive contact, and the
+// face-to-face (the encounter's own date when not given).
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/tcm-dates', authenticateToken, requireClinicalWriteOrBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (ctx.record.claimRelease && ctx.record.claimRelease.at) return res.status(409).json({ error: 'This claim was already released.', code: 'CLAIM_ALREADY_RELEASED' });
+    const body = req.body || {};
+    const date = (v) => (v === undefined || v === null || v === '' ? null : (/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v) : undefined));
+    const tcm = { dischargeDate: date(body.dischargeDate), contactDate: date(body.contactDate), faceToFaceDate: date(body.faceToFaceDate),
+      complexity: ['moderate', 'high'].includes(body.complexity) ? body.complexity : null };
+    const bad = Object.entries(tcm).filter(([, v]) => v === undefined).map(([k]) => k);
+    if (bad.length) return res.status(400).json({ error: `Not a date (YYYY-MM-DD): ${bad.join(', ')}.`, code: 'TCM_BAD_DATE' });
+    const at = new Date().toISOString();
+    await saveBillingRecord(ctx.rows, { ...ctx.record, tcm: { ...tcm, by: clinicalRepo.actorRecord(ctx.actor), at }, updatedAt: at });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'tcm_dates_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    res.json({ message: 'Recorded.', tcm });
+  } catch (error) {
+    console.error('TCM dates error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -21908,7 +22016,11 @@ app.post('/api/clinical/ai/reviews/:id/decisions', authenticateToken, requireCli
     const decisions = Array.isArray((req.body || {}).decisions) ? req.body.decisions : [];
     if (!decisions.length) return res.status(400).json({ error: 'No decisions were sent.', code: 'AI_NO_DECISIONS' });
 
-    const total = (row.output && (row.output.findings || []).length) || 0;
+    // A diagnosis suggestion (Phase 4.1) is decided per suggestion: accepted
+    // into the encounter's diagnoses by the clinician, or dismissed.
+    const isDx = row.purpose === modelEngine.PURPOSES.DX_SUGGESTION;
+    const total = (row.output && (isDx ? (row.output.diagnoses || []) : (row.output.findings || [])).length) || 0;
+    const allowedDecisions = isDx ? ['accepted', 'dismissed'] : ['noted', 'dismissed'];
     const kept = [...(row.findingDecisions || [])];
     const at = new Date().toISOString();
     for (const d of decisions) {
@@ -21917,20 +22029,35 @@ app.post('/api/clinical/ai/reviews/:id/decisions', authenticateToken, requireCli
       if (!Number.isInteger(index) || index < 0 || index >= total) {
         return res.status(400).json({ error: `There is no finding ${index} in this review.`, code: 'AI_NO_SUCH_FINDING' });
       }
-      if (!['noted', 'dismissed'].includes(decision)) {
+      if (!allowedDecisions.includes(decision)) {
         return res.status(400).json({ error: `"${decision}" is not a decision.`, code: 'AI_BAD_DECISION' });
       }
       const i = kept.findIndex(k => k.index === index);
       const entry = { index, decision, by: { id: req.user.id, name: req.user.name || req.user.email }, at };
+      // Phase 4.1: an accepted suggestion names the code the clinician picked,
+      // which must be one OpenEMR returned for that wording.
+      if (isDx && decision === 'accepted') {
+        const sug = row.output.diagnoses[index];
+        const chosen = clinicalRepo.normalizeIcd10(d && d.code);
+        if (!chosen || !(sug.candidates || []).some(c => c.code === chosen)) {
+          return res.status(400).json({ error: 'Pick one of the codes OpenEMR returned for that diagnosis.', code: 'AI_DX_NOT_A_CANDIDATE' });
+        }
+        entry.code = chosen;
+      }
       if (i >= 0) kept[i] = entry; else kept.push(entry);
     }
 
     const complete = total > 0 && kept.length === total;
     await saveAiReview(row.id, { findingDecisions: kept });
+    if (isDx) {
+      await appendCodingAuditEvent({ type: 'dx_suggestion_decided', reviewId: row.id, clientId: row.clientId, encounterUuid: row.encounterUuid,
+        actor: { id: req.user.id, name: req.user.name || req.user.email },
+        decisions: decisions.map(d => ({ index: Number(d.index), decision: String(d.decision), code: d.code ? clinicalRepo.normalizeIcd10(d.code) : null })) });
+    }
     // Only once every finding has been decided: a partial review tells us
     // nothing about whether the output was useful.
     if (complete) {
-      const anyNoted = kept.some(k => k.decision === 'noted');
+      const anyNoted = kept.some(k => k.decision === 'noted' || k.decision === 'accepted');
       for (const invocationId of (row.invocationIds || [])) {
         await gfcModelEngine.recordOutcome({
           invocationId,
@@ -22225,67 +22352,82 @@ app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToke
 // existing 180-day purge removes. NEVER WRITTEN TO THE CHART: the row is a
 // draft on the coding workflow, and the encounter record keeps only a pointer.
 // Rules, schema and quote checks: mdmExtraction.js.
+// Append-only. No route, no purge and no job ever rewrites or deletes a row.
+const appendCodingAuditEvent = async (event) => {
+  const row = { id: `cae_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, at: new Date().toISOString(), ...event };
+  await db.set('coding_audit_events', [...(await loadRows('coding_audit_events')), row]);
+  return row;
+};
+
+// One encounter's coding packet for the AI readers (Phase 2 facts, Phase 4.1
+// diagnosis wording): the note, its OpenEMR copy by recorded sid, the
+// encounter's fields, and the problem and medication lists, read with the
+// clinician's own session. No document and no code is ever put in it.
+const gatherCodingPacket = async ({ req, client, encounterUuid, record }) => {
+  const notRead = [];
+  let narrativeText = '';
+  let problems = null; let medications = null;
+  if (client.openEmrPatientId && openemr.isConfigured()) {
+    const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
+    const [soap, probs, meds] = await Promise.allSettled([
+      record.narrativeNoteSid ? emr.getSoapNote(puuid, encounterUuid, record.narrativeNoteSid) : Promise.resolve(null),
+      emr.getProblems(puuid), emr.getMedicationRequests(puuid)
+    ]);
+    // The narrative is read by the RECORDED sid: getSoapNotes can return
+    // another encounter's notes (openemr.js), so it is never used here.
+    if (soap.status === 'fulfilled' && soap.value) {
+      const n = soap.value;
+      narrativeText = [n.subjective, n.objective, n.assessment, n.plan].filter(Boolean).join('\n');
+    } else if (soap.status === 'rejected') notRead.push({ sourceId: `enc:${encounterUuid}:narrative`, why: 'the OpenEMR copy of the note could not be read' });
+    if (probs.status === 'fulfilled') problems = probs.value.map(clinicalRepo.summarizeCondition);
+    else notRead.push({ sourceId: 'emr:problems', why: 'not returned by the clinician\'s own EMR session' });
+    if (meds.status === 'fulfilled') medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+    else notRead.push({ sourceId: 'emr:medications', why: 'not returned by the clinician\'s own EMR session' });
+  } else {
+    notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
+  }
+
+  // Documents attached to the visit are NOT sent (2026-11-04): coding is
+  // payment, and an attached document is where a 42 CFR Part 2 record
+  // received for treatment sits. A counted fact must be quoted from the note.
+  const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, notRead });
+  const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: [], notRead: packet.notRead, passes: 1 });
+  return { packet, manifest };
+};
 const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }) => {
   try {
-    const notRead = [];
-    let narrativeText = '';
-    let problems = null; let medications = null;
-    if (client.openEmrPatientId && openemr.isConfigured()) {
-      const emr = openemr.forActor(req.user);
-      const puuid = client.openEmrPatientId;
-      const [soap, probs, meds] = await Promise.allSettled([
-        record.narrativeNoteSid ? emr.getSoapNote(puuid, encounterUuid, record.narrativeNoteSid) : Promise.resolve(null),
-        emr.getProblems(puuid), emr.getMedicationRequests(puuid)
-      ]);
-      // The narrative is read by the RECORDED sid: getSoapNotes can return
-      // another encounter's notes (openemr.js), so it is never used here.
-      if (soap.status === 'fulfilled' && soap.value) {
-        const n = soap.value;
-        narrativeText = [n.subjective, n.objective, n.assessment, n.plan].filter(Boolean).join('\n');
-      } else if (soap.status === 'rejected') notRead.push({ sourceId: `enc:${encounterUuid}:narrative`, why: 'the OpenEMR copy of the note could not be read' });
-      if (probs.status === 'fulfilled') problems = probs.value.map(clinicalRepo.summarizeCondition);
-      else notRead.push({ sourceId: 'emr:problems', why: 'not returned by the clinician\'s own EMR session' });
-      if (meds.status === 'fulfilled') medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
-      else notRead.push({ sourceId: 'emr:medications', why: 'not returned by the clinician\'s own EMR session' });
-    } else {
-      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so the problem and medication lists were not read' });
-    }
-
-    // Documents attached to THIS encounter, and only those.
-    const rawDocs = [];
-    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
-      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
-    for (const u of uploads) {
-      try {
-        rawDocs.push({
-          clientId: client.id, sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`, id: u.id,
-          title: u.fileName || u.kind || 'Document', date: u.at || u.uploadedAt || null,
-          mimeType: u.mimeType || 'application/pdf', bytes: await googledrive.downloadFileBuffer(u.driveFileId)
-        });
-      } catch (e) {
-        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
-      }
-    }
-    const documents = rawDocs.length ? chartPacket.buildSections({ clientId: client.id, documents: rawDocs }).documents : [];
-
-    const packet = mdmExtraction.buildMdmInput({ encounterUuid, record, narrativeText, problems, medications, documents, notRead });
-    const manifest = chartPacket.buildManifest({ sections: packet.sections, documents: packet.documents, notRead: packet.notRead, passes: 1 });
+    const { packet, manifest } = await gatherCodingPacket({ req, client, encounterUuid, record });
     await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
 
     const r = await gfcModelEngine.invoke({
       purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
-      input: { sections: packet.sections, documents: packet.documents },
+      input: { sections: packet.sections, documents: [] },
       schema: mdmExtraction.MDM_SCHEMA,
       actor: req.user, patientId: client.id, feature: 'mdm_extraction',
-      sourceIds: [...packet.sections.map(s => s.sourceId), ...packet.documents.map(d => d.sourceId)]
+      sourceIds: packet.sections.map(s => s.sourceId)
     });
 
     // §2.4, on the SERVER, after the model: every item carries a quote that
-    // is really in the sources, or it is dropped and counted.
+    // is really in a text section sent (note, fields, problem or medication
+    // list), or it is dropped and counted. Each kept item says which.
     const { output, dropped, counts } = mdmExtraction.enforceQuotes(r.proposal, {
-      sourceTexts: packet.sections.map(s => s.text), hasDocuments: packet.documents.length > 0
+      noteTexts: mdmExtraction.documentationTexts(packet.sections),
+      contextTexts: mdmExtraction.contextTexts(packet.sections)
     });
     const unreadable = [...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    // THE ONLY RECORD OF WHAT THE MODEL PROPOSED. Google-side request logging
+    // is off, so nothing at Google can reconstruct it. Written FIRST, append
+    // only, and never on the 180-day AI purge: the full proposal as the model
+    // returned it (dropped items included), what survived, and why the rest
+    // did not. Phase 3 appends the clinician's confirmation to this collection.
+    await appendCodingAuditEvent({
+      type: 'mdm_extraction_proposed', reviewId, clientId: client.id, encounterUuid,
+      actor: { id: req.user.id, name: req.user.name || req.user.email },
+      invocationId: r.invocationId, model: r.modelId,
+      sourceIds: packet.sections.map(s => s.sourceId),
+      proposal: r.proposal || null, kept: { ...output, unreadable }, dropped, quoteCounts: counts
+    });
     await saveAiReview(reviewId, {
       status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
       invocationIds: [r.invocationId], model: r.modelId, manifest,
@@ -22301,9 +22443,142 @@ const runMdmExtraction = async ({ reviewId, req, client, encounterUuid, record }
   }
 };
 
-// POST …/encounters/:euuid/ai/extract-mdm — start one. Clinical write access.
-// The result is read through the existing GET …/ai/reviews/:id poll.
+// One way to start an extraction, shared by the button and by signing.
+// Returns { row } or { refused: { status, body } }. Nothing is gathered, sent
+// or written before the refusals.
+const startMdmExtraction = async ({ req, client, encounterUuid, rows, record, trigger }) => {
+  if (!record || String(record.clientId) !== String(client.id)) return { refused: { status: 404, body: { error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' } } };
+  if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return { refused: { status: 409, body: { error: 'This encounter was deleted.', code: 'NOTE_VOIDED' } } };
+  if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
+    return { refused: { status: 409, body: { error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' } } };
+  }
+  const st = gfcModelEngine.status();
+  if (!st.configured) {
+    return { refused: { status: 503, body: { error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers } } };
+  }
+  const row = {
+    id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    clientId: client.id, encounterUuid,
+    purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+    status: AI_REVIEW_STATUS.RUNNING,
+    requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+    trigger: trigger || 'manual',
+    at: new Date().toISOString(),
+    passes: null, currentPass: null, invocationIds: [], model: st.modelId,
+    manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+  };
+  await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+  // A POINTER on the coding workflow, never the facts themselves.
+  record.latestMdmExtractionId = row.id;
+  await saveBillingRecord(rows, record);
+  await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
+    { reviewId: row.id, encounterUuid, trigger: row.trigger });
+  runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+  return { row };
+};
+
+// At a BILLABLE signature (a provider's or LCSW's sign, or the clinician
+// addendum on an author's note). The signing clinician is the actor, so
+// the Gemini rule that only licensed clinicians run the model holds, and
+// billing staff never need to. Best-effort and silent: the model being off,
+// or any failure here, never touches the signature, and none of it is shown
+// on the clinician's screen (nothing there for them to act on).
+const autoStartMdmExtraction = async ({ req, client, encounterUuid, rows, record }) => {
+  try {
+    const out = await startMdmExtraction({ req, client, encounterUuid, rows, record, trigger: 'signed' });
+    if (out.refused && out.refused.body.code !== 'MODEL_BOUNDARY_REFUSED') {
+      console.warn('[AI] MDM extraction not started at signing:', out.refused.body.code);
+    }
+  } catch (e) {
+    console.warn('[AI] MDM extraction could not start at signing:', (e && e.code) || (e && e.message));
+  }
+};
+
+// POST …/encounters/:euuid/ai/extract-mdm — start one by hand (a re-run).
+// Clinical write access. The result is read through the existing
+// GET …/ai/reviews/:id poll.
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const encounterUuid = String(req.params.euuid || '');
+    const rows = await loadRows('encounter_billing');
+    const record = findBillingRecord(rows, encounterUuid);
+    const out = await startMdmExtraction({ req, client, encounterUuid, rows, record, trigger: 'manual' });
+    if (out.refused) return res.status(out.refused.status).json(out.refused.body);
+    res.status(202).json({ reviewId: out.row.id, status: out.row.status });
+  } catch (error) {
+    console.error('MDM extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── AI coding pipeline, Phase 4.1: diagnosis suggestions (2026-11-04) ─────
+// In the owner's design (2026-11-04-coding-pipeline-gemini-alignment.md, item
+// 5): Gemini extracts diagnosis WORDING with a quote, and NEVER a code. The app
+// looks each wording up in OpenEMR's ICD-10 table with the clinician's own
+// session, no model involved, and the clinician picks the code. Never written
+// to the chart. Every proposal goes to coding_audit_events, the permanent
+// record. Rules: dxSuggestion.js.
+const runDxSuggestion = async ({ reviewId, req, client, encounterUuid, record }) => {
+  try {
+    const { packet, manifest } = await gatherCodingPacket({ req, client, encounterUuid, record });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.DX_SUGGESTION,
+      input: { sections: packet.sections, documents: [] },
+      schema: dxSuggestion.DX_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'dx_suggestion',
+      sourceIds: packet.sections.map(x => x.sourceId)
+    });
+    const q = dxSuggestion.enforceQuotes(r.proposal, {
+      noteTexts: mdmExtraction.documentationTexts(packet.sections),
+      contextTexts: mdmExtraction.contextTexts(packet.sections)
+    });
+    // The lookup: OpenEMR's own ICD-10 search, by wording, no model.
+    const searches = {};
+    const emr = openemr.isConfigured() ? openemr.forActor(req.user) : null;
+    for (const w of q.wordings) {
+      try { searches[w.wording] = emr ? await emr.searchCodes({ type: 'ICD10', search: w.wording, limit: 25 }) : { error: 'EMR not configured' }; }
+      catch (e) { searches[w.wording] = { error: String(e.message || e).slice(0, 120) }; }
+    }
+    const res = dxSuggestion.resolve(q.wordings, searches, { existingCodes: (record.diagnoses || []).map(d => d.code) });
+    const counts = { ...q.counts, ...res.counts };
+    const dropped = counts.noQuote + counts.quoteNotFound + counts.duplicate + counts.notInTable + counts.notChecked;
+    const unreadable = [...new Set([...((r.proposal && r.proposal.unreadable) || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])];
+    const output = { diagnoses: res.suggestions, unreadable };
+    // Written FIRST, append-only, never purged: the proposal exactly as the
+    // model returned it, what survived, and why the rest did not.
+    await appendCodingAuditEvent({
+      type: 'dx_wording_proposed', reviewId, clientId: client.id, encounterUuid,
+      actor: { id: req.user.id, name: req.user.name || req.user.email },
+      invocationId: r.invocationId, model: r.modelId,
+      sourceIds: packet.sections.map(x => x.sourceId),
+      proposal: r.proposal || null, kept: output, dropped, quoteCounts: counts
+    });
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE, finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId, manifest,
+      output, droppedUncited: dropped, quoteCounts: counts, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED, finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null, blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] diagnosis suggestion failed:', (e && e.code) || e.message);
+  }
+};
+
+// POST …/encounters/:euuid/ai/suggest-diagnoses — start one. Read through the
+// existing GET …/ai/reviews/:id poll; decided through …/ai/reviews/:id/decisions.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/suggest-diagnoses', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) {
@@ -22317,18 +22592,17 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', au
     const record = findBillingRecord(rows, encounterUuid);
     if (!record || String(record.clientId) !== String(client.id)) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
     if (record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(409).json({ error: 'This encounter was deleted.', code: 'NOTE_VOIDED' });
-    // Refused BEFORE anything is gathered or sent.
     if (!record.narrativeNoteSid && !mdmExtraction.noteToText(record.note)) {
-      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'MDM_NO_NOTE' });
+      return res.status(409).json({ error: 'This encounter has no note yet, so there is nothing to read.', code: 'DX_NO_NOTE' });
     }
     const st = gfcModelEngine.status();
     if (!st.configured) {
-      return res.status(503).json({ error: 'Reading notes with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
+      return res.status(503).json({ error: 'Suggesting diagnoses with AI is not switched on yet.', code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers });
     }
     const row = {
-      id: `aimdm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      id: `aidx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       clientId: client.id, encounterUuid,
-      purpose: modelEngine.PURPOSES.MDM_EXTRACTION,
+      purpose: modelEngine.PURPOSES.DX_SUGGESTION,
       status: AI_REVIEW_STATUS.RUNNING,
       requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
       at: new Date().toISOString(),
@@ -22336,14 +22610,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/ai/extract-mdm', au
       manifest: null, output: null, findingDecisions: [], droppedUncited: 0
     };
     await db.set('ai_reviews', [...(await loadAiReviews()), row]);
-    // A POINTER on the coding workflow, never the facts themselves.
-    await saveBillingRecord(rows, { ...record, latestMdmExtractionId: row.id });
-    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_mdm_extraction_started', 'client', client.id,
-      { reviewId: row.id, encounterUuid });
-    runMdmExtraction({ reviewId: row.id, req, client, encounterUuid, record });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_dx_suggestion_started', 'client', client.id, { reviewId: row.id, encounterUuid });
+    runDxSuggestion({ reviewId: row.id, req, client, encounterUuid, record });
     res.status(202).json({ reviewId: row.id, status: row.status });
   } catch (error) {
-    console.error('MDM extraction start error:', error);
+    console.error('Diagnosis suggestion start error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

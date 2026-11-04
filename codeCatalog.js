@@ -48,7 +48,9 @@ const RULE_LISTS = Object.freeze([
   // active in OpenEMR, or the table describes codes nobody can bill.
   { file: 'emLevels.js', list: 'FAMILIES', codes: emLevels.FAMILIES.flatMap(f => f.levels.map(l => l.code)) },
   // Phase 3b's rule files. RTM is loaded inactive in OpenEMR and is left out.
-  ...serviceRules.ruleLists()
+  ...serviceRules.ruleLists(),
+  // Phase 4.2's add-on codes.
+  { file: 'addOnRules.js', list: 'ADD_ON_CODES', codes: [require('./addOnRules').G2211, require('./addOnRules').G0318.code] }
 ]);
 
 const upper = (v) => String(v == null ? '' : v).trim().toUpperCase();

@@ -50,7 +50,10 @@ const PURPOSES = Object.freeze({
   RECORDS_EXTRACTION: 'records_extraction',
   // AI coding pipeline Phase 2 (2026-11-04): facts from one encounter note.
   // It names no code; rules decide a level later, after a clinician confirms.
-  MDM_EXTRACTION: 'mdm_extraction'
+  MDM_EXTRACTION: 'mdm_extraction',
+  // Phase 4.1: diagnosis WORDING from one note, each quoted. Never a code:
+  // the app looks the wording up in OpenEMR and the clinician picks.
+  DX_SUGGESTION: 'dx_suggestion'
 });
 
 // What a caller does with what came back. This is the evaluation signal §10.3
