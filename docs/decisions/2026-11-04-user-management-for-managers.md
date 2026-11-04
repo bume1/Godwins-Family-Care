@@ -1,0 +1,10 @@
+# Managers and coordinators open the Admin Hub for User Management only (owner, 2026-11-04)
+
+PR #225 gave managers and coordinators the server side of user administration (caregiver, client and family accounts), but the user form lived in the Admin Hub, which was Super Admin only. Owner chose to open the Admin Hub to them, showing User Management and nothing else.
+
+- **Sign-in and page:** the Admin Hub admits `accountType` manager or coordinator (`isHubOffice`). For them the page renders `UsersPage` whatever page is asked for, and the menu shows User Management only. The External Apps links are Super Admin only.
+- **The list shows only caregiver, client and family accounts** (`OFFICE_MANAGED_TYPES`, kept equal to `accountTypes.OFFICE_MANAGEABLE_TYPES` by a test). The same goes for the export and the user count. Delete, Bulk Reset, the Password Resets tab, Account recovery (MFA reset, OpenEMR disconnect), View as, and the staff-only amber banners stay Super Admin. The add/edit form already offered them only the three types (served by the server, PR #225).
+- **The rest of the Admin Hub API stays Super Admin** (`requireAdminHubAccess` unchanged). The server refuses anything outside their ceiling whatever the page shows.
+- **A User Management tile** (`id: 'users'`, path `/admin`) is on the manager and coordinator hub, in `accountTypes.hubTilesFor` and the login page's fallback.
+- **A crash from PR #225, found by rendering:** the pay-change state was declared in the Inbox page, not the user page, so **User Management threw "financialPending is not defined" for the Super Admin too**. It is now declared in `UsersPage`. A regression test checks that, and that it is declared only once.
+- **Verified:** rendered in headless Chromium against the real server. As a manager: User Management only, caregivers listed, the provider and admin not listed, the form offering Caregiver, Client and Family, no page errors. As the Super Admin: User Management loads with every account, Bulk Reset and Password Resets present, no page errors. `test/phc_access.test.js` 29 passing; full suite 2911, 0 failing.

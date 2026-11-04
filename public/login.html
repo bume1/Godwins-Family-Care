@@ -323,6 +323,7 @@
         enrollment: { icon: Icons.clientPortal, color: 'from-primary-500 to-teal-600', description: 'Intake, consents, documents, approvals and patient accounts' },
         messages: { icon: Icons.portal, color: 'from-primary-500 to-primary-700', description: 'Support conversations and admin broadcasts' },
         billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600', description: 'Claims waiting on billing, patient statements, copays and home care hours' },
+        users: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Add and edit caregivers, clients and family contacts' },
         caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
         caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' }
       };
@@ -338,7 +339,8 @@
         if (isAdmin) return [{ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billing,
           { id: 'service', name: 'Service Portal', path: '/service-portal' },
           { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
-        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' }];
+        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' },
+          { id: 'users', name: 'User Management', path: '/admin' }];
         return [];
       };
       const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();

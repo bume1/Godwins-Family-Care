@@ -117,6 +117,14 @@
       return response.json();
     };
 
+    // Owner, 2026-11-04: a manager or care coordinator opens the Admin Hub for
+    // User Management and nothing else. Everything else here stays the Super
+    // Admin's; the server still refuses what they may not do.
+    const HUB_OFFICE_TYPES = ['manager', 'coordinator'];
+    const isHubOffice = (u) => !!u && u.role !== 'admin' && HUB_OFFICE_TYPES.includes(u.accountType);
+    // The account types a manager or coordinator manages (accountTypes.js E1).
+    const OFFICE_MANAGED_TYPES = ['caregiver', 'client', 'family'];
+
     const api = {
       adminLogin: (email, password) =>
         fetch(`${API_URL}/api/auth/login`, {
@@ -124,8 +132,9 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
-          // The Admin Hub is the Super Admin's alone (owner, 2026-10-15).
-          if (result.user && result.user.role !== 'admin') {
+          // The Admin Hub is the Super Admin's (owner, 2026-10-15), with User
+          // Management open to managers and coordinators (owner, 2026-11-04).
+          if (result.user && result.user.role !== 'admin' && !isHubOffice(result.user)) {
             return { error: 'Access denied. Admin Hub access required.' };
           }
           return result;
@@ -683,14 +692,16 @@
         { id: 'notifications', label: 'Notifications', icon: Icons.bell, color: 'text-primary-500', superAdminOnly: false },
       ];
 
-      // Filter menu items: Super Admin sees all, Manager only sees non-superAdminOnly items
+      // Super Admin sees all. A manager or care coordinator sees User
+      // Management only (owner, 2026-11-04).
       const menuItems = isSuperAdmin
         ? allMenuItems
-        : allMenuItems.filter(item => !item.superAdminOnly);
+        : allMenuItems.filter(item => item.id === 'users');
 
       // Determine user role label
       const getRoleLabel = () => {
         if (isSuperAdmin) return 'Super Admin';
+        if (user && user.accountType === 'coordinator') return 'Care Coordinator';
         if (isManager) return 'Manager';
         return 'Admin Hub User';
       };
@@ -740,6 +751,7 @@
 
               {/* "Implementations" entry removed (Session 3.5): the launch tracker is
                   deactivated per strip-list decision §7 — code retained, nav hidden. */}
+              {isSuperAdmin && (<>
               <p className="px-4 py-2 mt-6 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">External Apps</p>
               <div className="space-y-1">
                 <button onClick={() => openExternalApp('/portal')} className="w-full text-left px-4 py-3 rounded-xl sidebar-link flex items-center gap-3 text-gray-600 hover:text-gray-900 group">
@@ -748,6 +760,7 @@
                   <span className="ml-auto opacity-0 group-hover:opacity-100 transition">{Icons.externalLink}</span>
                 </button>
               </div>
+              </>)}
             </nav>
 
             {/* Portal Hub & Sign Out */}
@@ -1384,13 +1397,8 @@
         loadData();
       }, [token]);
 
-      const [financialPending, setFinancialPending] = useState([]);
-      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
-        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
-
       const loadData = async () => {
         setLoading(true);
-        loadFinancial();
         const [feedbackData, resetData] = await Promise.all([
           canSeeAdminInbox ? api.getFeedback(token) : Promise.resolve([]),
           canSeeAdminInbox ? api.getPasswordResetRequests(token) : Promise.resolve([])
@@ -2347,8 +2355,13 @@
         });
       }, [token]);
 
+      const [financialPending, setFinancialPending] = useState([]);
+      const loadFinancial = () => fetch('/api/users/financial-change-requests?status=pending', { headers: { 'Authorization': `Bearer ${token}` } })
+        .then(r => r.json()).then(r => setFinancialPending(Array.isArray(r.requests) ? r.requests : [])).catch(() => {});
+
       const loadData = async () => {
         setLoading(true);
+        loadFinancial();
         const [usersRes, projectsRes, resetsRes, portalsRes] = await Promise.all([
           api.getUsers(token),
           api.getProjects(token),
@@ -2643,7 +2656,7 @@
         const getRoleDisplay = (user) => accountTypeLabel(user);
 
         const clientNameById = new Map(users.filter(u => u.role === 'client').map(u => [u.id, u.name]));
-        const exportData = users.map(user => ({
+        const exportData = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).map(user => ({
           'Name': user.name || '',
           'Email': user.email || '',
           'Account Type': getRoleDisplay(user),
@@ -2701,7 +2714,7 @@
         XLSX.writeFile(wb, filename);
       };
 
-      const filteredUsers = users.filter(user => {
+      const filteredUsers = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).filter(user => {
         // String(): one record with a malformed name must not blank the whole list.
         const q = String(searchTerm || '').toLowerCase();
         const matchesSearch = String(user.name || '').toLowerCase().includes(q) || String(user.email || '').toLowerCase().includes(q);
@@ -2730,7 +2743,7 @@
               names them too, but the log scrubber redacts the addresses and a
               console line is not where an admin works. This banner stands
               until each role has been confirmed. */}
-          {pendingTypeReview.length > 0 && (
+          {isSuperAdmin && pendingTypeReview.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
               <p className="font-semibold text-amber-900">
                 {pendingTypeReview.length} account{pendingTypeReview.length === 1 ? '' : 's'} need{pendingTypeReview.length === 1 ? 's' : ''} an account type
@@ -2749,7 +2762,7 @@
               </div>
             </div>
           )}
-          {pendingRoleReview.length > 0 && (
+          {isSuperAdmin && pendingRoleReview.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
               <p className="font-semibold text-amber-900">
                 {pendingRoleReview.length} clinical role{pendingRoleReview.length === 1 ? '' : 's'} still need{pendingRoleReview.length === 1 ? 's' : ''} confirming
@@ -2770,7 +2783,7 @@
             </div>
           )}
           {/* Session 4.11 B2 — patients are told a name with no title */}
-          {missingPatientFacingCredential.length > 0 && (
+          {isSuperAdmin && missingPatientFacingCredential.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
               <p className="font-semibold text-amber-900">
                 {missingPatientFacingCredential.length} clinician{missingPatientFacingCredential.length === 1 ? '' : 's'} appear
@@ -2802,10 +2815,12 @@
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all border border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
                   {Icons.download} Export
                 </button>
+                {isSuperAdmin && (
                 <button onClick={() => { setShowBulkReset(true); setBulkResetResults(null); }}
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100">
                   {Icons.key} Bulk Reset
                 </button>
+                )}
                 <button onClick={() => { setShowForm(true); setEditingUser(null); setFormData(defaultFormData); setCompetencies([]); setEmrStatus(null); }}
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all"
                   style={{backgroundColor: '#033D50', color: 'white'}}>
@@ -2817,11 +2832,11 @@
             {/* Tabs */}
             <div className="mt-4 flex gap-2 border-b">
               <button onClick={() => setActiveTab('list')} className={`px-4 py-2 font-medium ${activeTab === 'list' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
-                Users ({users.length})
+                Users ({isSuperAdmin ? users.length : users.filter(u => OFFICE_MANAGED_TYPES.includes(u.accountType)).length})
               </button>
-              <button onClick={() => setActiveTab('resets')} className={`px-4 py-2 font-medium ${activeTab === 'resets' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
+              {isSuperAdmin && <button onClick={() => setActiveTab('resets')} className={`px-4 py-2 font-medium ${activeTab === 'resets' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
                 Password Resets {passwordResets.length > 0 && <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{passwordResets.length}</span>}
-              </button>
+              </button>}
             </div>
 
             {message && <div className={`mt-4 p-3 rounded-lg ${message.includes('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>{message}</div>}
@@ -3215,8 +3230,9 @@
                       reset, Session 5.2 OpenEMR disconnect) with no button
                       anywhere in the app. This is that button. Only shown
                       when editing an existing user — there is nothing to
-                      recover for one that does not exist yet. */}
-                  {editingUser && (
+                      recover for one that does not exist yet. Super Admin
+                      only: MFA reset and EMR disconnect stay theirs. */}
+                  {editingUser && isSuperAdmin && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-1">Account recovery</h3>
                       <p className="text-sm text-gray-500 mb-3">
@@ -3993,7 +4009,7 @@
                               >
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
                               </button>
-                              <button onClick={() => handleDelete(user.id)} className="p-1 text-red-600 hover:bg-red-50 rounded" title="Delete">{Icons.trash}</button>
+                              {isSuperAdmin && <button onClick={() => handleDelete(user.id)} className="p-1 text-red-600 hover:bg-red-50 rounded" title="Delete">{Icons.trash}</button>}
                             </div>
                           </td>
                         </tr>
@@ -5462,14 +5478,14 @@
           return null;
         }
       });
-      const [activePage, setActivePage] = useState('dashboard');
+      const [activePage, setActivePage] = useState(() => (isHubOffice(user) ? 'users' : 'dashboard'));
       const [isMobileOpen, setIsMobileOpen] = useState(false);
 
       // Super Admin only until these areas are revised (owner, 2026-10-15). A
       // non-admin who still holds a session from before is sent to the sign-in
       // page, which routes them to their own area.
       useEffect(() => {
-        if (user && user.role !== 'admin') window.location.replace('/login');
+        if (user && user.role !== 'admin' && !isHubOffice(user)) window.location.replace('/login');
       }, [user]);
 
       // Handle browser back/forward cache (bfcache) - re-validate auth when page is restored
@@ -5502,24 +5518,15 @@
 
       // Check if user is a Super Admin (role === 'admin') - full access
       const isSuperAdmin = user?.role === 'admin';
-      // Check if user is a Manager - limited access (no inbox/user management)
-      const isManager = user?.isManager && !isSuperAdmin;
+      // A manager or care coordinator sees User Management and nothing else.
+      const officeOnly = isHubOffice(user);
 
-      // Navigation guard: Managers cannot access inbox or users pages
       const handleNavigation = (page) => {
-        if (isManager && (page === 'inbox' || page === 'users')) {
-          // Redirect managers to dashboard if they try to access restricted pages
-          setActivePage('dashboard');
-        } else {
-          setActivePage(page);
-        }
+        setActivePage(officeOnly ? 'users' : page);
       };
 
       const renderPage = () => {
-        // Additional protection: if manager somehow gets to restricted page, show dashboard
-        if (isManager && (activePage === 'inbox' || activePage === 'users')) {
-          return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
-        }
+        if (officeOnly) return <UsersPage token={token} isSuperAdmin={false} />;
 
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
