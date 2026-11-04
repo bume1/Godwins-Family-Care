@@ -1,0 +1,10 @@
+# The abuse-monitoring exception is no longer a gate on sending patient data to Gemini
+
+Owner decision, 2026-11-04: "the app should be able to send patient data regardless of the abuse-monitoring."
+
+- **Changes decision 3 of `2026-10-12-gemini-and-meet.md`.** That decision listed "the abuse-monitoring exception is granted" as one of the conditions for zero data retention, and the setup guide (§3.3, Part 5) told the owner to leave `VERTEX_ZERO_DATA_RETENTION` off until Google approved it. Both are withdrawn. The exception is still requested, because it is free and narrows what Google can keep, but the app goes live without waiting on it.
+- **What still gates every call, unchanged:** the Google Cloud BAA accepted on the project; data caching off, checked live every day (a check older than 24 hours, or one that could not run, is a blocker); `us` location only; released models only; Workload Identity Federation, never a key file; the staging bucket deleting within a day; no grounding, search, request-response logging or stored-session features.
+- **No code changed.** `modelEngine.js` never read the exception's status; the gate lived only in the decision text and the setup guide's instruction for the setting. `VERTEX_ZERO_DATA_RETENTION=true` now means "caching is off and the retention-bearing features above are not in use", and the owner sets it once Part 3.2 is done.
+- **What this accepts, stated plainly:** until the exception is granted, Google's safety system may keep a prompt it flags for up to 90 days. That retention is covered by the Google Cloud BAA, so it is permitted under HIPAA, but "zero data retention" is not literally true for flagged prompts in that window. Nothing in the app or its documents should claim otherwise to a patient or an auditor.
+- **Must not undo:** a later session must not re-add the exception as a blocker in `modelEngine.status()` without a new owner decision.
+- **Open for the owner:** submit the exception request anyway (setup guide §3.3) and record the approval date when it comes; it closes the 90-day window.
