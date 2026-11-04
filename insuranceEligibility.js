@@ -64,6 +64,9 @@ const BLOCKS = Object.freeze(['medicare', 'medicaid', 'commercial', 'ltc']);
 // 5, 1, 0, 1, 8 and 2. CMS publishes this format; it is not a checksum, so a
 // well-formed MBI can still belong to somebody else. That is what the
 // eligibility check is for.
+// Source: CMS, "Understanding the Medicare Beneficiary Identifier (MBI)
+// Format", https://www.cms.gov/medicare/new-medicare-card/understanding-the-mbi-with-format.pdf
+// (positions 2, 5, 8, 9 letters; 1, 4, 7, 10, 11 numbers; 3 and 6 either).
 const MBI_LETTER = '[ACDEFGHJKMNPQRTUVWXY]';
 const MBI_ALNUM = '[ACDEFGHJKMNPQRTUVWXY0-9]';
 const MBI_RE = new RegExp(`^[1-9]${MBI_LETTER}${MBI_ALNUM}[0-9]${MBI_LETTER}${MBI_ALNUM}[0-9]${MBI_LETTER}${MBI_LETTER}[0-9][0-9]$`);

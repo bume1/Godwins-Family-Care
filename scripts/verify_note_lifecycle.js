@@ -50,8 +50,19 @@ const rows = (k) => STORE.get(k) || [];
 
 // ---- a stateful fake OpenEMR --------------------------------------------------
 const EMR = { seq: 100, encounters: new Map(), soap: new Map(), vitals: [], charges: [], documents: [], encounterUpdates: [], soapUpdates: 0, insurance: [] };
+// OpenEMR's fee schedule, as the 6B controller prices a posted line (2026-10-28).
+// 99349 starts with no price, so it posts at $0 — the gap the scrub must catch.
+const PRICES = { '99349': 0, '99345': 310 };
+// OpenEMR's ICD-10 table, as main_code_set_search answers it.
+const ICD10_TABLE = [
+  ['I10', 'Essential (primary) hypertension'], ['I95.1', 'Orthostatic hypotension'],
+  ['E11.9', 'Type 2 diabetes mellitus without complications'], ['E11.65', 'Type 2 diabetes mellitus with hyperglycemia'],
+  ['Z63.6', 'Dependent relative needing care at home']
+];
+// The billing facility carries the NPI, federal EIN and taxonomy the claim
+// scrub checks (2026-11-04), as OpenEMR's facility record does.
 const FACILITIES = [
-  { id: '3', name: 'Vinings office', pos_code: '11', service_location: '1', billing_location: '1', primary_business_entity: '1' },
+  { id: '3', name: 'Vinings office', pos_code: '11', service_location: '1', billing_location: '1', primary_business_entity: '1', facility_npi: '1538078357', federal_ein: '12-3456789', facility_taxonomy: '363LF0000X' },
   { id: '5', name: 'Private Residence', pos_code: '12', service_location: '1', billing_location: '0', primary_business_entity: '0' }
 ];
 const APPOINTMENTS = {
@@ -104,7 +115,21 @@ openemr.forActor = (actor) => new Proxy({}, {
       case 'getSoapNote': return async (puuid, euuid, sid) => EMR.soap.get(String(sid)) || null;
       case 'getSoapNotes': return async (puuid, euuid) => [...EMR.soap.values()].filter(n => n.euuid === euuid);
       case 'addVitals': return async (puuid, euuid, v) => { EMR.vitals.push({ euuid, ...v }); return {}; };
-      case 'postCharge': return async (puuid, euuid, p) => { const id = String(++EMR.seq); EMR.charges.push({ id, euuid, ...p }); return { id }; };
+      case 'postCharge': return async (puuid, euuid, p) => {
+        const id = String(++EMR.seq); const fee = (PRICES[p.code] || 0) * (p.units || 1);
+        EMR.charges.push({ id, euuid, ...p, fee }); return { id, fee_used: fee, fee_source: PRICES[p.code] ? 'price_level' : 'none' };
+      };
+      // What OpenEMR's Billing Manager holds for the encounter NOW, the way the
+      // 6B GET route returns it: active rows, justify X12-shaped.
+      case 'getCharges': return async (puuid, euuid) => EMR.charges.filter(c => c.euuid === euuid && c.activity !== 0).map(c => ({
+        id: c.id, code: c.code, code_type: c.code_type, modifier: c.modifier || '', units: c.units || 1, fee: c.fee,
+        justify: (c.diagnoses || []).map(d => `ICD10|${d.code}`).join(':') + ':'
+      }));
+      case 'searchCodes': return async ({ type, search }) => {
+        if (String(type).toUpperCase() !== 'ICD10') return [];
+        const q = String(search || '').toUpperCase().replace('.', '');
+        return ICD10_TABLE.filter(([c]) => c.replace('.', '').startsWith(q)).map(([code, code_text]) => ({ code, code_text }));
+      };
       case 'uploadPatientDocument': return async (puuid, fileName, buffer) => { EMR.documents.push({ puuid, fileName, bytes: buffer.length, head: buffer.slice(0, 5).toString() }); return true; };
       case 'getFacilities': return async () => {
         const billing = actor && (actor.role === 'admin' || actor.isManager === true);
@@ -189,6 +214,10 @@ const HP_NOTE = {
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   const fresh = new Date().toISOString();
   STORE.set('gfc_ncci_source_version', { ptp: { quarter: '2026Q4', loadedAt: fresh }, mue: { quarter: '2026Q4', loadedAt: fresh } });
+  // OpenEMR's CPT4/HCPCS catalog as an admin's Refresh Catalog caches it. The
+  // live app has one; without it every service code is refused (2026-10-28).
+  STORE.set('openemr_code_catalog', { fetchedAt: fresh, inactive: [], codes: ['99345', '99347', '99348', '99349', '99350', '90834', '90837']
+    .map(code => ({ code, modifier: '', codeType: 'CPT4', shortLabel: code, longLabel: code })) });
 
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 3000));
@@ -264,11 +293,11 @@ const HP_NOTE = {
   check('the author cannot recode a locked note', r.status === 409 || r.status === 403, r.body);
   r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.rn, { attest: true, text: 'Self review' });
   check('an RN cannot add the billable addendum', r.status === 403 && r.body.code === 'CO_SIGN_CREDENTIAL', r.body);
-  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.fnp, { attest: true, text: '' });
+  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.fnp, { attest: true, totalMinutes: '40', text: '' });
   check('the addendum needs text', r.status === 400, r.body);
-  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.lcsw, { attest: true, text: 'Reviewed' });
+  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.lcsw, { attest: true, totalMinutes: '40', text: 'Reviewed' });
   check('an LCSW cannot bill an E/M note', r.status === 403 && r.body.code === 'CLINICAL_CODE_SET', r.body);
-  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.fnp, { attest: true, text: 'Seen with the RN. I agree with the **assessment**; hold the diuretic.' });
+  r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.fnp, { attest: true, totalMinutes: '40', text: 'Seen with the RN. I agree with the **assessment**; hold the diuretic.' });
   check('the FNP adds the clinician addendum', r.status === 200, r.body);
   check('the FNP is now the rendering clinician', record(hp).renderingProvider && record(hp).renderingProvider.id === FNP.id && record(hp).coSignStatus === 'cleared');
   check('nothing posts on the addendum — it goes to billing', EMR.charges.filter(c => c.euuid === hp).length === 0 && record(hp).billingStatus === 'awaiting_billing');
@@ -302,7 +331,7 @@ const HP_NOTE = {
   check('a new note is started from it', r.status === 200 && !!cf, r.body);
   check('every carried field is pending review', r.body && r.body.carriedPending.includes('assessment') && r.body.carriedPending.includes('hp.systemsExam'), r.body && r.body.carriedPending);
   r = await call('PUT', `${P}/encounters/${cf}/coding`, tok.fnp, { diagnoses: [{ code: 'I95.1' }], services: [{ code: '99349', dxLinks: ['I95.1'] }] });
-  r = await call('POST', `${P}/encounters/${cf}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${P}/encounters/${cf}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('it cannot be signed while carried text is unreviewed', r.status === 409 && r.body.code === 'NOTE_CARRIED_FORWARD_UNREVIEWED', r.body);
   const pendingNow = record(cf).note.carriedForward ? Object.keys(record(cf).note.carriedForward.fields) : [];
   r = await call('PUT', `${P}/encounters/${cf}/note`, tok.fnp, {
@@ -310,7 +339,7 @@ const HP_NOTE = {
     confirmCarried: pendingNow.filter(k => k !== 'assessment')
   });
   check('editing one field and confirming the rest clears the hold', r.status === 200 && r.body.carriedPending.length === 0, r.body && r.body.carriedPending);
-  r = await call('POST', `${P}/encounters/${cf}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${P}/encounters/${cf}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('the FNP signs it directly — sent to billing, nothing posted yet', r.status === 200 && record(cf).coSignStatus === 'not_required' && record(cf).billingStatus === 'awaiting_billing' && !EMR.charges.some(c => c.euuid === cf), r.body);
 
   console.log('\n── 8. Attach a note to an appointment booked afterwards ──');
@@ -340,7 +369,7 @@ const HP_NOTE = {
   r = await call('POST', `${P}/encounters/${second}/note/void`, tok.rn, { reason: 'Started on the wrong patient visit' });
   check('the draft is discarded', r.status === 200 && record(second).noteStatus === 'voided', r.body);
   check('OpenEMR says so in words', /ENTERED IN ERROR — encounter deleted by Ruth Nolan/.test(narrativeText(second)));
-  r = await call('POST', `${P}/encounters/${second}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${P}/encounters/${second}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('a discarded draft cannot be signed', r.status === 409 && r.body.code === 'NOTE_VOIDED', r.body);
   r = await call('GET', '/api/clinical/work-queues', tok.fnp);
   const unsigned = r.body && (r.body.unsignedEncounters || (r.body.queues && r.body.queues.unsignedEncounters));
@@ -472,15 +501,23 @@ const HP_NOTE = {
   check('the FNP saves a note although her login cannot read facilities', r.status === 200 && !!bv, r.body);
   check('no place-of-service warning reaches the clinician', !/place of service|facility|POS/i.test(JSON.stringify((r.body && r.body.warnings) || [])), r.body && r.body.warnings);
   check('the reason is kept for billing instead', !!(record(bv) && record(bv).posMissingReason), record(bv) && record(bv).posMissingReason);
-  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true });
-  check('with no ICD-10 the sign is refused, naming ICD-10 only', r.status === 409 && r.body.code === 'SIGN_NO_DIAGNOSIS' && /ICD-10/.test(r.body.error) && !/CPT|place of service|POS/i.test(r.body.error), r.body);
+  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
+  check('with no ICD-10 the sign is refused, naming ICD-10 only', r.status === 409 && (r.body.codes || [r.body.code]).includes('SIGN_NO_DIAGNOSIS') && /ICD-10/.test(r.body.error) && !/CPT|place of service|POS/i.test(r.body.error), r.body);
   r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
   check('she adds the diagnosis', r.status === 200, r.body);
   r = await call('GET', `${B}/encounters/${bv}`, tok.fnp);
   check('her view carries no place of service at all', r.status === 200 && !('posCode' in (r.body.encounter || {})) && !('facilityId' in (r.body.encounter || {})) && r.body.billingReadiness === null, r.body && r.body.encounter);
   check('and she is ready to sign with no CPT', r.body.signReadiness && r.body.signReadiness.ok === true, r.body.signReadiness);
+  // The documentation gate (2026-11-04): no total time and no recorded start
+  // and end, so the visit cannot go to the coding queue. Prose is not a time.
   r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true });
+  check('with no total time the sign is refused, naming the time and nothing else', r.status === 409 && r.body.code === 'CODING_QUEUE_GATE' && JSON.stringify(r.body.missing) === '["total_time"]' && /total time in minutes/.test(r.body.error), r.body);
+  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true, totalMinutes: 'about forty' });
+  check('prose is refused as prose', r.status === 400 && r.body.code === 'TOTAL_TIME_NOT_A_NUMBER', r.body);
+  check('and neither refusal signed anything', record(bv).billingStatus !== 'awaiting_billing' && !rows('encounter_attestations').some(a => a.encounterUuid === bv));
+  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('the FNP signs with an ICD-10 and no CPT — THE OWNER REPORT, FIXED', r.status === 200 && record(bv).billingStatus === 'awaiting_billing', r.body);
+  check('the total time is stored on the encounter as a number', record(bv).totalMinutes === 40 && record(bv).totalMinutesSource === 'entered', { m: record(bv).totalMinutes, s: record(bv).totalMinutesSource });
   check('nothing is billed yet', !EMR.charges.some(c => c.euuid === bv));
   r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.fnp, { diagnoses: [{ code: 'I10' }], services: [{ code: '99349', dxLinks: ['I10'] }] });
   check('the note is locked to clinicians: she cannot add codes after signing', r.status === 409 && r.body.code === 'ENCOUNTER_WITH_BILLING', r.body);
@@ -536,6 +573,13 @@ const HP_NOTE = {
   const insRow = EMR.insurance.find(x => x.puuid === 'uuid-bill-patient');
   check('and the row reaches OpenEMR as the primary policy, self-subscriber, no SSN', insRow && insRow.type === 'primary' && insRow.provider === '33' && insRow.policy_number === '1EG4TE5MK72' && insRow.subscriber_relationship === 'self' && insRow.date === '2025-01-01' && !('subscriber_ss' in insRow), insRow);
   check('the verification is kept as history', (STORE.get('insurance_verification_events') || []).filter(e => e.clientId === BILLPATIENT.id).length === 2);
+  // The claim scrub at Submit (2026-11-04): the billing facility's NPI is gone
+  // from its OpenEMR record, so nothing may post.
+  FACILITIES[0].facility_npi = '';
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('a scrub blocker refuses Submit, naming the field', r.status === 409 && r.body.code === 'CLAIM_SCRUB_BLOCKED' && (r.body.findings || []).some(f => f.code === 'BILLING_FACILITY_NPI' && /Vinings office/.test(f.fieldLabel)), r.body);
+  check('and nothing posted', record(bv).billingStatus === 'awaiting_billing' && !EMR.charges.some(c => c.euuid === bv));
+  FACILITIES[0].facility_npi = '1538078357';
   r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
   check('billing submits', r.status === 200 && record(bv).billingStatus === 'billed' && record(bv).insuranceCheck.status === 'verified', r.body);
   check('the place of service was stamped from the patient\'s facility with billing\'s login', EMR.encounters.get(bv).pos_code === '12' && String(EMR.encounters.get(bv).facility_id) === '5', EMR.encounters.get(bv));
@@ -545,6 +589,116 @@ const HP_NOTE = {
   check('it cannot be submitted twice', r.status === 409 && r.body.code === 'BILLING_SUBMITTED', r.body);
   r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.mgr, { diagnoses: [{ code: 'I10' }], services: [] });
   check('codes lock for everyone once submitted', r.status === 409 && r.body.code === 'BILLING_SUBMITTED', r.body);
+
+  console.log('\n── 13c. The hold queue: scrub, a Fee Sheet edit, and a person releases (2026-11-04) ──');
+  r = await call('GET', `${B}/encounters/${bv}/claim-scrub`, tok.fnp);
+  check('the scrub is billing\'s screen, never a clinician\'s', r.status === 403, r.body);
+  r = await call('GET', `${B}/encounters/${bv}/claim-scrub`, tok.mgr);
+  const sc = r.body || {};
+  check('after submission it checks the lines OpenEMR holds', r.status === 200 && sc.phase === 'final' && sc.holdState === 'held', sc);
+  check('the $0 line blocks, naming the line', (sc.findings || []).some(f => f.severity === 'block' && f.code === 'LINE_PRICE_ZERO' && /Line 1 \(99349\)/.test(f.fieldLabel)), sc.findings);
+  check('modifier 25 alone is a warning, listed in full', (sc.findings || []).some(f => f.severity === 'warn' && f.code === 'MODIFIER_25_ALONE'), sc.findings);
+  check('blockers come first, and every finding names its field', (sc.findings || []).every(f => f.field && f.fieldLabel && f.message) && sc.findings[0].severity === 'block', sc.findings);
+  r = await call('GET', '/api/clinical/encounters/queue?state=held', tok.mgr);
+  const qrow = r.body && (r.body.encounters || []).find(e => e.encounterUuid === bv);
+  check('the hold queue lists it with both counts side by side', r.status === 200 && qrow && qrow.scrub && qrow.scrub.block >= 1 && qrow.scrub.warn >= 1 && qrow.holdState === 'held' && r.body.held.count >= 1, r.body);
+  r = await call('GET', '/api/clinical/encounters/queue?state=all', tok.fnp);
+  check('a clinician\'s queue carries no scrub at all', r.status === 200 && !(r.body.encounters || []).some(e => e.scrub) && r.body.held === null, r.body && r.body.held);
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
+  check('release is refused while the $0 line is open', r.status === 409 && r.body.code === 'CLAIM_SCRUB_BLOCKED' && /LINE|price|\$0/i.test(r.body.error), r.body);
+  check('and nothing was released', !record(bv).claimRelease);
+  // Billing Manager: the price is corrected, and then someone edits the Fee
+  // Sheet directly, adding a line that may never be billed with 99349.
+  EMR.charges.find(c => c.euuid === bv && c.code === '99349').fee = 180;
+  STORE.set('gfc_ncci_ptp_edits', [{ column1Code: '99349', column2Code: '99350', modifierIndicator: 0 }]);
+  EMR.charges.push({ id: String(++EMR.seq), euuid: bv, code: '99350', code_type: 'CPT4', units: 1, modifier: '', fee: 245, diagnoses: [{ code_type: 'ICD10', code: 'I10' }] });
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
+  check('A FEE SHEET EDIT AFTER SUBMISSION IS CAUGHT AT RELEASE', r.status === 409 && (r.body.findings || []).some(f => f.code === 'NCCI_PTP_BLOCKED') && !(r.body.findings || []).some(f => f.code === 'LINE_PRICE_ZERO'), r.body);
+  EMR.charges.find(c => c.euuid === bv && c.code === '99350').activity = 0;
+  STORE.set('gfc_ncci_ptp_edits', []);
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, {});
+  check('the warnings must be confirmed as reviewed', r.status === 400 && r.body.code === 'CLAIM_WARNINGS_NOT_REVIEWED', r.body);
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.fnp, { warningsReviewed: true });
+  check('a clinician cannot release a claim', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
+  check('a person releases it once it is clean', r.status === 200 && record(bv).claimRelease && record(bv).claimRelease.by.id === MGR.id && record(bv).claimRelease.lines[0].fee === 180, r.body);
+  const relLog = rows('activity_log').find(a => a.action === 'claim_released');
+  check('the release is logged with codes only, no patient name', relLog && relLog.details.lineCodes.includes('99349') && !JSON.stringify(relLog.details).includes('Probe Patient'), relLog);
+  r = await call('POST', `${B}/encounters/${bv}/claim-release`, tok.mgr, { warningsReviewed: true });
+  check('it cannot be released twice', r.status === 409 && r.body.code === 'CLAIM_ALREADY_RELEASED', r.body);
+  console.log('\n── 13d. Clinical fact extraction: the route and its refusals (Phase 2, 2026-11-04) ──');
+  r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.mgr, {});
+  check('starting an extraction needs clinical write access', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/no-such-encounter/ai/extract-mdm`, tok.fnp, {});
+  check('an unknown encounter is refused by name', r.status === 404 && r.body.code === 'ENCOUNTER_NOT_FOUND', r.body);
+  const aiBefore = rows('ai_reviews').length;
+  r = await call('POST', `${B}/encounters/${bv}/ai/extract-mdm`, tok.fnp, {});
+  check('with Gemini not configured it is refused, naming the blockers', r.status === 503 && r.body.code === 'MODEL_BOUNDARY_REFUSED' && Array.isArray(r.body.blockers) && r.body.blockers.length > 0, r.body);
+  check('and the refusal wrote no row and no pointer', rows('ai_reviews').length === aiBefore && !record(bv).latestMdmExtractionId);
+  console.log('\n── 13e. Phase 3: the clinician confirms facts, rules derive the level (2026-11-04) ──');
+  r = await call('POST', `${B}/notes`, tok.fnp, { note: { kind: 'followup', chiefConcern: 'BP recheck', assessment: 'HTN worsening', plan: 'Stop lisinopril. Total time 65 minutes.' } });
+  const lvx = r.body && r.body.encounterUuid;
+  check('a visit to derive a level for', r.status === 200 && !!lvx, r.body);
+  r = await call('PUT', `${B}/encounters/${lvx}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+  // A finished extraction, exactly as the Phase 2 job stores it (no Gemini here).
+  const exId = 'aimdm_probe_1';
+  STORE.set('ai_reviews', rows('ai_reviews').concat([{ id: exId, clientId: BILLPATIENT.id, encounterUuid: lvx, purpose: 'mdm_extraction', status: 'done', at: new Date().toISOString(),
+    output: { problemsAddressed: [{ description: 'Hypertension', status: 'worsening', management: 'medication', quote: 'HTN worsening', quoteVerified: true }],
+      dataReviewed: [], risk: [{ factor: 'prescription_management', detail: 'Stopped lisinopril', quote: 'Stop lisinopril.', quoteVerified: true }],
+      time: { totalMinutes: 65, statementPresent: true, quote: 'Total time 65 minutes.', quoteVerified: true }, unreadable: [] } }]));
+  const confirmed = { problemsAddressed: [{ description: 'Hypertension', status: 'worsening', management: 'medication', quote: 'HTN worsening' }],
+    dataReviewed: [], risk: [{ factor: 'prescription_management', detail: 'Stopped lisinopril', quote: 'Stop lisinopril.' }], time: { statementPresent: true, totalMinutes: 65 } };
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.mgr, { extractionId: exId, facts: confirmed });
+  check('confirming facts needs clinical write access', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: 'nope', facts: confirmed });
+  check('an extraction from another visit is refused', r.status === 404 && r.body.code === 'EM_NO_EXTRACTION', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed });
+  const der = r.body && r.body.emDerivation;
+  check('the FNP confirms; MDM moderate gives the lower level by default', r.status === 200 && der && der.finalCode === '99349' && der.defaultCode === '99349' && /reached from medical decision making, which was moderate/.test(der.explanation), r.body);
+  check('both candidates are presented to her', der && der.candidates.map(c => `${c.basis}:${c.code}`).join(',') === 'mdm:99349,time:99350', der && der.candidates);
+  check('SHE IS NEVER SHOWN THE FLAG', der && !('flag' in der), der);
+  check('but it is on the record, for the coder', record(lvx).emDerivation.flag && record(lvx).emDerivation.flag.code === 'LEVEL_AMBIGUOUS');
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed, chooseTime: true });
+  check('choosing the time level without affirming it is refused', r.status === 409 && r.body.code === 'EM_TIME_NOT_AFFIRMED', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation`, tok.fnp, { extractionId: exId, facts: confirmed, chooseTime: true, affirmTime: true });
+  check('affirmed, the time level is chosen and recorded as an override', r.status === 200 && r.body.emDerivation.finalCode === '99350' && r.body.emDerivation.override === true, r.body);
+  const evs = rows('em_derivations').filter(e => e.encounterUuid === lvx);
+  check('every confirmation is an audit row: extracted, confirmed, derived, final, who, override', evs.length === 2 && evs[1].derivedCode === '99349' && evs[1].finalCode === '99350' && evs[1].override === true && evs[1].by.id === FNP.id && evs[1].extractedFacts && evs[1].confirmedFacts, evs);
+  r = await call('GET', `${B}/encounters/${lvx}`, tok.fnp);
+  check('her encounter view carries the level and no flag', r.status === 200 && r.body.emDerivation && r.body.emDerivation.finalCode === '99350' && !('flag' in r.body.emDerivation), r.body && r.body.emDerivation);
+  r = await call('GET', `${B}/encounters/${lvx}`, tok.mgr);
+  check('billing\'s view carries the flag and its absences', r.body.emDerivation && r.body.emDerivation.flag && r.body.emDerivation.flag.candidates.length === 2, r.body && r.body.emDerivation);
+  r = await call('GET', '/api/clinical/encounters/queue?state=level_flags', tok.mgr);
+  check('the coder\'s Level Review lists it', r.status === 200 && (r.body.encounters || []).some(e => e.encounterUuid === lvx && e.levelFlag), r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.fnp, { resolution: 'ok' });
+  check('a clinician cannot resolve the flag', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.mgr, { resolution: '' });
+  check('resolving needs a note', r.status === 400 && r.body.code === 'EM_FLAG_NOTE_REQUIRED', r.body);
+  r = await call('POST', `${B}/encounters/${lvx}/em-derivation/flag/resolve`, tok.mgr, { resolution: 'Time statement confirmed against the note.' });
+  check('billing resolves it; it stays on the record, resolved', r.status === 200 && record(lvx).emDerivation.flag.resolvedAt && record(lvx).emDerivation.flag.resolvedBy.id === MGR.id);
+  r = await call('GET', '/api/clinical/encounters/queue?state=level_flags', tok.mgr);
+  check('a resolved flag leaves Level Review', !(r.body.encounters || []).some(e => e.encounterUuid === lvx));
+  r = await call('GET', '/api/clinical/reports/em-distribution', tok.fnp);
+  check('the distribution report is billing\'s', r.status === 403, r.body);
+  r = await call('GET', `/api/clinical/reports/em-distribution?month=${new Date().toISOString().slice(0, 7)}`, tok.mgr);
+  check('billing reads it, per clinician, against last month', r.status === 200 && Array.isArray(r.body.clinicians) && !!r.body.priorMonth, r.body);
+  const derLog = rows('activity_log').filter(a => a.action === 'em_level_derived');
+  check('the activity log carries codes, never a fact or a quote', derLog.length >= 2 && !JSON.stringify(derLog).includes('lisinopril'), derLog);
+
+  console.log('\n── 13f. Phase 3b: service selection (2026-11-04) ──');
+  r = await call('GET', '/api/clinical/service-selection/families', tok.fnp);
+  check('the code helper is billing\'s', r.status === 403, r.body);
+  r = await call('GET', '/api/clinical/service-selection/families', tok.mgr);
+  check('billing gets every family with the fields it asks for', r.status === 200 && r.body.families.length === 8 && r.body.families.every(f => Array.isArray(f.fields)), r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'psychotherapy', input: { minutes: 35 } });
+  check('35 minutes of psychotherapy is 90832, flagged near 90834', r.status === 200 && r.body.codes[0].code === '90832' && r.body.reviewFlag && r.body.reviewFlag.next === '90834', r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'annual_wellness', clientId: BILLPATIENT.id, input: {} });
+  check('an AWV with none on file is G0438, and says another practice\'s claim is not seen', r.status === 200 && r.body.codes[0].code === 'G0438' && /Palmetto eServices/.test(r.body.notes[0]), r.body);
+  r = await call('POST', '/api/clinical/service-selection', tok.mgr, { family: 'invented', input: {} });
+  check('an unknown family is refused by name', r.status === 400 && r.body.code === 'SERVICE_FAMILY_UNKNOWN', r.body);
+
+  r = await call('GET', '/api/clinical/encounters/queue?state=held', tok.mgr);
+  check('a released claim leaves the hold queue', r.status === 200 && !(r.body.encounters || []).some(e => e.encounterUuid === bv), r.body);
 
   console.log('\n── 14. The saved facility list gives clinicians\' visits their POS ──');
   check('billing\'s read saved a copy of the facility list', ((STORE.get('openemr_facility_snapshot') || {}).facilities || []).some(f => f.id === '5' && f.pos_code === '12'));
@@ -556,7 +710,7 @@ const HP_NOTE = {
   r = await call('POST', '/api/clinical/facilities/sync', tok.mgr, {});
   check('a manager syncs it', r.status === 200 && /Synced 2/.test(r.body.message), r.body);
   r = await call('PUT', `${B}/encounters/${bv2}/coding`, tok.fnp, { diagnoses: [{ code: 'I10' }], services: [] });
-  r = await call('POST', `${B}/encounters/${bv2}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${B}/encounters/${bv2}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('signed and sent to billing', r.status === 200 && record(bv2).billingStatus === 'awaiting_billing', r.body);
   r = await call('POST', `${B}/encounters/${bv2}/billing-submit`, tok.mgr, { noCharge: true, reason: '' });
   check('no charge needs a reason', r.status === 400 && r.body.code === 'NO_CHARGE_REASON', r.body);
@@ -582,7 +736,7 @@ const HP_NOTE = {
   r = await call('PUT', `${PH}/encounters/${ph}/note`, tok.fnp, { note: { ...PHONE_NOTE, sections: { callNote: PHONE_NOTE.sections.callNote + ' Continue lisinopril; call back in 4 weeks. 22 minutes.' } }, baseVersion: 1 });
   check('the one call note is updated', r.status === 200, r.body);
   check('the call is one section and nothing else', JSON.stringify(Object.keys(record(ph).note.sections || {})) === '["callNote"]' && !record(ph).note.assessment && !record(ph).note.plan, record(ph).note);
-  r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('the phone note signs and goes to billing', r.status === 200 && record(ph).billingStatus === 'awaiting_billing', r.body);
   check('no vitals row was written for a phone call', !EMR.vitals.some(v => v.euuid === ph));
   check('nothing was billed by signing', !EMR.charges.some(c => c.euuid === ph));
@@ -610,11 +764,11 @@ const HP_NOTE = {
   check('the encounter lists the screening and says the note is sections-only', r.status === 200 && (r.body.screenings || []).length === 1 && r.body.sectionsOnly === true, { s: r.body.screenings, so: r.body.sectionsOnly });
   r = await call('PUT', `${PH}/encounters/${sw}/coding`, tok.lcsw, { diagnoses: [{ code: 'Z63.6', description: 'Dependent relative needing care at home' }], services: [] });
   check('the LCSW codes a diagnosis', r.status === 200, r.body);
-  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true });
+  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true, totalMinutes: '40' });
   check('signing waits for the risk assessment item 9 calls for', r.status === 409 && r.body.code === 'SIGN_SCREENING_NEEDS_RISK', r.body);
   r = await call('POST', `${PH}/encounters/${sw}/risk-assessment`, tok.lcsw, { suicide: 'low', homicide: 'none', selfNeglect: 'none', protectiveFactors: 'Faith, family' });
   check('the LCSW records the risk assessment', r.status === 200, r.body);
-  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true });
+  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true, totalMinutes: '40' });
   check('the LCSW signs the psychosocial assessment', r.status === 200 && record(sw).billingStatus === 'awaiting_billing', r.body);
   check('no vitals row was written for a social work note', !EMR.vitals.some(v => v.euuid === sw));
 
@@ -645,7 +799,7 @@ const HP_NOTE = {
   check('by video, vitals and exam are offered, not required', (r.body.noteSections || []).filter(s => ['vitals', 'physicalExam'].includes(s.key)).every(s => s.required === false && s.patientReported === true));
   check('medication reconciliation is in OpenEMR\'s Objective field', /MEDICATION RECONCILIATION/.test((narrative(fu) || {}).objective || '') && !/MEDICATION RECONCILIATION/.test((narrative(fu) || {}).subjective || ''), narrative(fu));
   r = await call('PUT', `${PH}/encounters/${fu}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
-  r = await call('POST', `${PH}/encounters/${fu}/sign`, tok.fnp, { attest: true });
+  r = await call('POST', `${PH}/encounters/${fu}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
   check('it signs with NO blood pressure in either arm', r.status === 200 && record(fu).billingStatus === 'awaiting_billing', r.body);
 
   console.log('\n── 18. A Care Coordinator prepares and saves notes; a clinician signs ──');
@@ -666,7 +820,7 @@ const HP_NOTE = {
     check('the coordinator reopens it and may edit it', r.status === 200 && r.body.canEdit !== false, r.body && { canEdit: r.body.canEdit, canSign: r.body.noteActions && r.body.noteActions.canSign });
     r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.coord, { note: { ...CN, plan: 'Continue current plan; call Friday' }, baseVersion: 1 });
     check('the coordinator saves an edit', r.status === 200 && record(cn).noteVersion === 2 && /Friday/.test(record(cn).note.plan), r.body);
-    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.coord, { attest: true });
+    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.coord, { attest: true, totalMinutes: '40' });
     check('the coordinator cannot sign', r.status === 403, r.body);
     r = await call('POST', `${PH}/encounters/${cn}/co-signatures`, tok.coord, {});
     check('the coordinator cannot co-sign', r.status === 403, r.body);
@@ -675,7 +829,7 @@ const HP_NOTE = {
     r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.fnp, { note: { ...record(cn).note, assessment: 'Stable; BP at goal' }, baseVersion: 2 });
     check('the clinician picks up the coordinator\'s draft', r.status === 200 && record(cn).noteVersion === 3, r.body);
     r = await call('PUT', `${PH}/encounters/${cn}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
-    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.fnp, { attest: true });
+    r = await call('POST', `${PH}/encounters/${cn}/sign`, tok.fnp, { attest: true, totalMinutes: '40' });
     check('the clinician signs it', r.status === 200, r.body);
     check('the coordinator is named as preparer, never as a signer', /Prepared by Cora Lane/.test(narrativeText(cn)) && !/Cora Lane[^\n]*— (AUTHOR|SIGNED)/.test(narrativeText(cn)), narrativeText(cn).slice(-600));
     r = await call('PUT', `${PH}/encounters/${cn}/note`, tok.coord, { note: CN, baseVersion: 3 });

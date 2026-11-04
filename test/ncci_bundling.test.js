@@ -124,10 +124,13 @@ test('a telehealth visit resolves its auto-derived 95 as the unbundling modifier
 });
 
 // ---- D2.5 — MUE cap exceeded ----
-test('a code billed past its MUE cap blocks signing and states the code, units and cap', () => {
+// 2026-11-04 (AI coding pipeline spec §1.2/§1.3): only MAI 2 — an absolute
+// limit documentation cannot exceed — blocks. MAI 1 and 3 warn and ask for the
+// documentation. An unknown MAI blocks, as the absolute kind.
+test('a code billed past its MAI 2 MUE cap blocks signing and states the code, units and cap', () => {
   const rec = coded([{ code: '99213', units: 3, dxLinks: ['E11.9'] }]);
   const ready = R.checkSignReadiness(readyArgs(rec, {
-    ncciMue: { '99213': { mueValue: 1, mai: '3' } }
+    ncciMue: { '99213': { mueValue: 1, mai: '2' } }
   }));
   assert.equal(ready.ok, false);
   assert.ok(ready.codes.includes('MUE_EXCEEDED'));
@@ -144,10 +147,25 @@ test('units under the cap sign cleanly, and units repeated across two lines of t
     { code: '99213', units: 1, dxLinks: ['E11.9'] },
     { code: '99213', units: 1, dxLinks: ['E11.9'] }
   ]);
-  const blocked = R.checkSignReadiness(readyArgs(twoLines, { ncciMue: { 99213: { mueValue: 1, mai: '3' } } }));
+  const blocked = R.checkSignReadiness(readyArgs(twoLines, { ncciMue: { 99213: { mueValue: 1, mai: '2' } } }));
   assert.equal(blocked.ok, false);
   assert.ok(blocked.codes.includes('MUE_EXCEEDED'));
   assert.ok(!blocked.codes.includes('NCCI_PTP_BLOCKED'), 'identical codes on two lines are not a PTP pair');
+});
+
+test('MAI 1 and MAI 3 over the cap WARN and ask for documentation; they do not block', () => {
+  for (const mai of ['1', '3']) {
+    const rec = coded([{ code: '99213', units: 3, dxLinks: ['E11.9'] }]);
+    const ready = R.checkSignReadiness(readyArgs(rec, { ncciMue: { '99213': { mueValue: 1, mai } } }));
+    assert.equal(ready.ok, true, `MAI ${mai} must not block`);
+    assert.ok(ready.warnings.some(w => /99213/.test(w) && new RegExp(`MAI ${mai}`).test(w) && /documentation/.test(w)), `MAI ${mai} must warn and ask for documentation`);
+  }
+});
+test('an MUE whose MAI is unknown blocks, as the absolute kind', () => {
+  const rec = coded([{ code: '99213', units: 3, dxLinks: ['E11.9'] }]);
+  const ready = R.checkSignReadiness(readyArgs(rec, { ncciMue: { '99213': { mueValue: 1, mai: null } } }));
+  assert.equal(ready.ok, false);
+  assert.ok(ready.codes.includes('MUE_EXCEEDED'));
 });
 
 // ---- D2.6 — unloaded/stale reference data blocks regardless of the codes ----
@@ -265,7 +283,8 @@ test('build-enforced: the /sign route threads NCCI warnings into its own respons
 // ---- checkNcciBundling's own return shape (B5) ----
 test('checkNcciBundling returns the documented shape on both outcomes', () => {
   const ok = R.checkNcciBundling([{ code: '99213', units: 1 }], VISIT, { ptpEdits: [], mueByCode: {}, sourceVersion: FRESH() });
-  assert.deepEqual(Object.keys(ok).sort(), ['codes', 'message', 'missing', 'ok', 'warnings'].sort());
+  // `details` (2026-11-04) carries the pairs and units behind the outcome, for the claim scrub.
+  assert.deepEqual(Object.keys(ok).sort(), ['codes', 'details', 'message', 'missing', 'ok', 'warnings'].sort());
   assert.equal(ok.ok, true);
   const blocked = R.checkNcciBundling(
     [{ code: '99213', units: 1 }, { code: '36415', units: 1 }], VISIT,

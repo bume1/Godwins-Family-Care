@@ -1086,6 +1086,25 @@
               — there is no dismiss button, on purpose: a reminder someone can
               click away without doing the work is worse than no reminder. Every
               admin and manager lands here, so both see it. */}
+          {/* The E/M level table (emLevels.js) has a known expiry: CPT changes every
+              January. Admin hub only, never a clinician or coder screen. */}
+          {(stats?.serviceRulesReview || []).length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">Service selection rules are past their review date</p>
+              <p className="text-sm text-amber-800 mt-1">
+                {stats.serviceRulesReview.map(r => `serviceRules/${r.family} (due ${r.nextReviewDue})`).join(', ')}. Re-verify each against the current CPT code set and CMS booklets, then update verifiedOn and nextReviewDue.
+              </p>
+            </div>
+          )}
+          {stats?.emLevelReview?.overdue && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">E/M level table is past its review date</p>
+              <p className="text-sm text-amber-800 mt-1">
+                {stats.emLevelReview.file} was verified {stats.emLevelReview.verifiedOn} and was due for review {stats.emLevelReview.nextReviewDue}.
+                Re-verify it against the current CPT code set, then update verifiedOn and nextReviewDue in the file.
+              </p>
+            </div>
+          )}
           {stats?.billingDataRefresh?.due && (
             <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
               <p className="font-semibold text-amber-900">
