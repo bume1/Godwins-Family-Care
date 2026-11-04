@@ -20,6 +20,8 @@ const { createZip } = require('../zipWriter');
 const L = require('../scripts/load_ncci_tables');
 
 const mem = () => dataStore.createStore({ adapter: 'memory', env: { NODE_ENV: 'test' } });
+// gfc_billable_codes is required by the loader since 2026-11-04.
+const billable = (codes) => codes.map(code => ({ code, source: 'manual', updatedAt: '2026-11-04T00:00:00.000Z' }));
 
 // ---- quarter arithmetic ----
 test('computeTargetQuarter targets the NEXT quarter once within 45 days of it', () => {
@@ -124,6 +126,7 @@ test('extractTextLines refuses a zip with no .txt or .csv member, naming what it
 test('main() end to end: MUE fetched (mocked), PTP found locally, both stored and read back', async () => {
   const db = mem();
   await db.set('clinical_settings', { serviceCodeFavorites: [{ code: '99213' }] });
+  await db.set('gfc_billable_codes', billable(['99213']));
   const mueZipBuf = createZip([{ name: 'mue.txt', data: '99213\t2\t3\trationale\n' }]);
   const ptpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfc-ncci-ptp-'));
   fs.writeFileSync(path.join(ptpDir, 'ptp_range1.zip'),
@@ -150,6 +153,7 @@ test('main() end to end: MUE fetched (mocked), PTP found locally, both stored an
 
 test('main() reports PTP as not-found, and names the CMS page, when no local zips exist', async () => {
   const db = mem();
+  await db.set('gfc_billable_codes', billable(['99350']));
   const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfc-ncci-empty-'));
   try {
     const summary = await L.main({
@@ -167,6 +171,7 @@ test('main() reports PTP as not-found, and names the CMS page, when no local zip
 
 test('a fetch failure on the MUE half is reported, never thrown past main()', async () => {
   const db = mem();
+  await db.set('gfc_billable_codes', billable(['99350']));
   const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfc-ncci-empty2-'));
   try {
     const summary = await L.main({ db, ptpDir: emptyDir, quarter: '2026Q4', fetchMueZip: async () => { throw new Error('ETIMEDOUT'); } });
@@ -182,6 +187,7 @@ test('a fetch failure on the MUE half is reported, never thrown past main()', as
 test('re-running with the same data leaves the stored table identical, not doubled', async () => {
   const db = mem();
   await db.set('clinical_settings', { serviceCodeFavorites: [{ code: '99213' }] });
+  await db.set('gfc_billable_codes', billable(['99213']));
   const ptpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfc-ncci-ptp2-'));
   fs.writeFileSync(path.join(ptpDir, 'ptp.zip'), createZip([{ name: 'ptp.txt', data: '99213\t36415\t*\t*\t*\t0\tr\n' }]));
   const fetchMueZip = async () => createZip([{ name: 'mue.txt', data: '99213\t1\t1\tr\n' }]);

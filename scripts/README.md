@@ -3,6 +3,30 @@
 One-shot / manually-invoked scripts. None of these run automatically — they
 are run by hand when needed.
 
+## billable_codes.js
+
+Keeps `gfc_billable_codes` in step with OpenEMR's `codes` table. That list is
+the code universe `load_ncci_tables.js` filters CMS's files against, and the
+loader stops if it is empty. OpenEMR cannot be read headlessly (no service
+account), so this is done by hand: after entering, deleting or switching codes
+in OpenEMR's fee schedule, update the list, then re-run the NCCI loader.
+
+```bash
+node scripts/billable_codes.js list
+node scripts/billable_codes.js add 99211 G0511     # codes newly entered in OpenEMR
+node scripts/billable_codes.js remove 99211        # a code deleted from OpenEMR
+node scripts/billable_codes.js from-catalog        # copy every code from the catalog the app cached
+node scripts/billable_codes.js seed                # the 2026-11-04 export, only if the list is empty
+node scripts/billable_codes.js seed --replace      # overwrite the list with that export
+node scripts/load_ncci_tables.js
+```
+
+`from-catalog` is the easy route: an admin presses **Refresh Catalog** in the
+admin hub (that reads OpenEMR as them), then this copies every code in it,
+active and inactive. It adds and never removes. The app also seeds the list
+from `scripts/data/gfc_billable_codes_seed.json` on first boot if it has
+never been set.
+
 ## export_billing_codes.js
 
 Reports the CPT4/HCPCS codes and modifiers GFC actually bills, for hand-entry
