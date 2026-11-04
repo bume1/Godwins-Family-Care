@@ -129,28 +129,35 @@ test('an MDM-only visit: one candidate, no flag', () => {
   assert.equal(r.candidates.length, 1);
   assert.equal(r.flag, null);
 });
-test('time higher than MDM: both presented, the LOWER is the default, and the flag is raised', () => {
+test('time higher than MDM: both presented, the HIGHER supported level is the default, and the flag is raised (owner, 2026-11-04)', () => {
   const r = derive({ facts: FACTS({ time: { statementPresent: true, totalMinutes: 65 } }) });
   assert.deepEqual(r.candidates.map(c => `${c.basis}:${c.code}`), ['mdm:99349', 'time:99350']);
-  assert.equal(r.defaultCode, '99349');
-  assert.equal(r.finalCode, '99349');
-  assert.equal(r.flag.code, 'LEVEL_AMBIGUOUS');
+  assert.equal(r.defaultCode, '99350');
+  assert.equal(r.finalCode, '99350');
+  assert.equal(r.finalBasis, 'time');
+  assert.equal(r.override, false, 'the default is not an override');
+  assert.equal(r.flag.code, 'LEVEL_AMBIGUOUS', 'a biller still reviews the disagreement');
   assert.ok(r.flag.reasons.includes('candidates_disagree'));
 });
-test('time lower than MDM: time is the default, because the lower wins', () => {
+test('time lower than MDM: MDM is the default, because the higher supported level wins', () => {
   const r = derive({ facts: FACTS({ time: { statementPresent: true, totalMinutes: 25 } }) });
-  assert.equal(r.defaultCode, '99347');
-  assert.equal(r.finalCode, '99347');
+  assert.equal(r.defaultCode, '99349');
+  assert.equal(r.finalCode, '99349');
+  assert.equal(r.finalBasis, 'mdm');
 });
-test('the higher time level is chosen only when the note states it AND the clinician affirms it', () => {
+test('the clinician may take the MDM level instead, recorded as an override; no time statement means no time candidate', () => {
   const facts = FACTS({ time: { statementPresent: true, totalMinutes: 65 } });
-  assert.equal(derive({ facts, chooseTime: true }).code, 'EM_TIME_NOT_AFFIRMED');
-  const ok = derive({ facts, chooseTime: true, affirmTime: true });
-  assert.equal(ok.finalCode, '99350');
-  assert.equal(ok.override, true);
-  assert.equal(ok.flag.code, 'LEVEL_AMBIGUOUS', 'a chosen higher level still goes to the coder');
-  const noStatement = derive({ facts: FACTS({ time: { statementPresent: false, totalMinutes: 65 } }), chooseTime: true, affirmTime: true });
-  assert.equal(noStatement.code, 'EM_TIME_NOT_HIGHER', 'with no time statement there is no time candidate at all');
+  const mdm = derive({ facts, chooseMdm: true });
+  assert.equal(mdm.finalCode, '99349');
+  assert.equal(mdm.override, true);
+  const noStatement = derive({ facts: FACTS({ time: { statementPresent: false, totalMinutes: 65 } }) });
+  assert.equal(noStatement.finalCode, '99349', 'minutes without a time statement never raise the level');
+  assert.equal(noStatement.time.code, null);
+});
+test('a level the note does NOT support is never the default: "possible" levels only raise a flag', () => {
+  const r = derive({ facts: FACTS({ problemsAddressed: [P('new', 'Chest pain')] }) });
+  assert.equal(r.finalCode, r.mdm.code, 'the final code is what the confirmed facts support');
+  assert.ok(r.flag && r.flag.reasons.includes('thin_evidence'));
 });
 test('thin evidence flags only when what is missing could change the level', () => {
   // A new problem with uncertain prognosis would make problems moderate; with
@@ -190,7 +197,7 @@ test('the family follows setting and patient status; an unknown one derives noth
 });
 test('the explanation says how the code was reached, in plain words', () => {
   assert.match(derive().explanation, /^99349 was reached from medical decision making, which was moderate/);
-  assert.match(derive({ facts: FACTS({ time: { statementPresent: true, totalMinutes: 65 } }), chooseTime: true, affirmTime: true }).explanation, /^99350 was reached from total time: 65 minutes/);
+  assert.match(derive({ facts: FACTS({ time: { statementPresent: true, totalMinutes: 65 } }) }).explanation, /^99350 was reached from total time: 65 minutes/);
 });
 
 // ---- the claim scrub reads the derivation ----
