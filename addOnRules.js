@@ -79,7 +79,7 @@ const isOfficeEm = (c) => { const f = emLevels.familyOf(c); return !!f && f.key.
 const evaluate = (input = {}) => {
   const findings = []; const offers = [];
   const add = (severity, code, field, fieldLabel, message) => findings.push({ severity, code, field, fieldLabel, message });
-  const offer = (code, kind, target, message) => offers.push({ code, kind, target, message });
+  const offer = (code, kind, target, message, extra) => offers.push({ code, kind, target, message, ...(extra || {}) });
   const lines = (Array.isArray(input.lines) ? input.lines : []).filter(Boolean);
   const codes = lines.map(l => upper(l.code));
   const modsOf = (l) => (Array.isArray(l.modifiers) ? l.modifiers : []).map(upper);
@@ -118,7 +118,7 @@ const evaluate = (input = {}) => {
     else if (!allowed) add('block', 'G0318_UNDER_THRESHOLD', `lines[${g0318At}].units`, label(g0318At), `G0318 is billed, and the total time documented (${Number.isFinite(total) ? total : 'none'} minutes) does not reach ${threshold}.`);
     else if (units > allowed) add('block', 'G0318_TOO_MANY_UNITS', `lines[${g0318At}].units`, label(g0318At), `G0318 is billed at ${units} units; ${total} minutes supports ${allowed}.`);
   } else if (allowed) {
-    offer(G0318.code, 'add_on', base, `G0318 × ${allowed} may apply: ${base} was selected by time and ${total} minutes are documented.`);
+    offer(G0318.code, 'add_on', base, `G0318 × ${allowed} may apply: ${base} was selected by time and ${total} minutes are documented.`, { units: allowed });
   }
 
   // ---- modifier 25: offered, never applied; justification recorded ----

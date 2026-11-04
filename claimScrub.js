@@ -391,6 +391,15 @@ const scrubClaim = (input = {}) => {
     }
   }
 
+  // ---- Lines the app pre-filled (2026-11-04). A warning, one per line, so
+  // the biller reviews each before submitting; saving the coding clears it.
+  lines.forEach((l, i) => {
+    if (l && l.suggested) {
+      warn('LINE_SUGGESTED', `lines[${i}]`, `Line ${i + 1} (${upper(l.code)})`,
+        `${upper(l.code)}${(l.modifiers || []).length ? `-${l.modifiers.join('-')}` : ''} was suggested by the app from the clinician's confirmed facts and the add-on rules. Review it, then save the coding to accept it.`);
+    }
+  });
+
   // ---- Add-on codes and modifiers (Phase 4.2). Offers are returned beside
   // the findings and are never applied by anything.
   const addOn = addOnRules.evaluate({

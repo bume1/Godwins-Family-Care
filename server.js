@@ -75,7 +75,7 @@ const emLevels = require('./emLevels');           // THE E/M level table, verifi
 const mdmExtraction = require('./mdmExtraction'); // facts from one note, never a code (AI coding pipeline, Phase 2)
 const emMdm = require('./emMdm');                 // the E/M level from confirmed facts (AI coding pipeline, Phase 3)
 const serviceRules = require('./serviceRules');   // Phase 3b: selection for the codes that are not level-based
-const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and modifiers, offered, never applied
+const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and modifiers; pre-filled as suggestions for a biller (claimPrefill.js)
 const dxSuggestion = require('./dxSuggestion');   // Phase 4.1: diagnosis wording from the note; OpenEMR supplies the codes
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
@@ -104,7 +104,8 @@ const clinicalResults = require('./clinicalResults'); // the RESULTS path — re
 // Session 4.11 — the day-before visit reminder, CAPTURED AT WRITE TIME because
 // per-clinician OpenEMR auth means no background job can read the calendar.
 const visitReminders = require('./visitReminders');
-const avs = require('./afterVisitSummary');         // after-visit summary: one assembler for staff, patient and paper
+const avs = require('./afterVisitSummary');
+const claimPrefill = require('./claimPrefill');                // pre-filled claim lines after the clinician confirms         // after-visit summary: one assembler for staff, patient and paper
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const appLinks = require('./appLinks');               // the ONE place that answers "where does this person go?"
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
@@ -15559,7 +15560,7 @@ const linesFromRecord = (record) => {
   return ((record && record.services) || []).map(s => {
     const mods = (s.modifiers || []).join(':');
     const p = posted.find(c => c && c.code === s.code && (c.modifier || '') === mods) || posted.find(c => c && c.code === s.code);
-    return { code: s.code, modifiers: s.modifiers || [], units: s.units || 1, dxLinks: s.dxLinks || [], fee: p ? p.fee : null };
+    return { code: s.code, modifiers: s.modifiers || [], units: s.units || 1, dxLinks: s.dxLinks || [], fee: p ? p.fee : null, suggested: !!s.suggested };
   });
 };
 
@@ -16418,7 +16419,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation', aut
     const ps = patientStatusFor(record, allRecords, attestations);
     const out = emMdm.deriveLevel({
       facts: sane.facts, setting, patientStatus: ps.status,
-      chooseTime: !!body.chooseTime, affirmTime: !!body.affirmTime,
+      chooseMdm: !!body.chooseMdm,
       context: { enteredMinutes: record.totalMinutes || null, statusConflict: ps.conflict }
     });
     if (out.error) return res.status(409).json({ error: out.error, code: out.code });
@@ -16448,7 +16449,24 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/em-derivation', aut
       finalBasis: out.finalBasis, override: out.override, explanation: out.explanation,
       flag: out.flag ? { ...out.flag, raisedAt: at, resolvedAt: null, resolvedBy: null, resolution: null } : null
     };
-    await saveBillingRecord(ctx.rows, { ...record, emDerivation: summary, updatedAt: at });
+    // PRE-FILLED CLAIM LINES (owner decision, 2026-11-04): the derived E/M
+    // and every add-on code and modifier the rules offer, each marked
+    // `suggested`. A person's own lines are never touched; a human biller
+    // reviews, and saving the coding is the acceptance. claimPrefill.js.
+    const prefilled = { ...record, emDerivation: summary };
+    const fill = claimPrefill.prefillClaimLines({
+      services: record.services || [], emDerivation: summary, diagnoses: record.diagnoses || [],
+      isEmCode: (c) => emLevels.isEmCode(String(c || '').toUpperCase()),
+      classify: clinicalRepo.classifyServiceCode,
+      evaluateOffers: (lines) => addOnRules.evaluate({
+        lines, visit: record.visit || null, emDerivation: summary, totalMinutes: record.totalMinutes || null,
+        continuingCare: continuingCareFor(prefilled, ctx.client, allRecords),
+        justifications: record.modifierJustifications || {}, tcm: record.tcm || null,
+        priorAwvDates: priorAwvDatesFor(prefilled, allRecords), dos: record.date,
+        sameDayOtherCodes: sameDayOtherCodesFor(prefilled, allRecords)
+      }).offers
+    });
+    await saveBillingRecord(ctx.rows, { ...prefilled, services: fill.services, claimPrefill: { at, added: fill.added }, updatedAt: at });
     // Codes and whether the default was overridden. Never a fact or a quote.
     await logActivity(req.user.id, req.user.name || req.user.email, 'em_level_derived', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, derivedCode: out.defaultCode, finalCode: out.finalCode, override: out.override, flagged: !!out.flag
