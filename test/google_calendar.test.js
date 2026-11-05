@@ -70,7 +70,14 @@ test('build guard: every route that changes a visit mirrors it, and the reschedu
   const noshow = server.slice(server.indexOf("app.post('/api/clinical/appointments/:eid/no-show'"), server.indexOf("app.post('/api/clinical/appointments/:eid/no-show'") + 4000);
   assert.match(noshow, /status: 'no_show'/);
   // Nothing calls Google in a way that can fail a booking.
-  assert.match(server, /const mirrorVisitToGoogle = async[\s\S]{0,1200}catch \(e\) \{ console\.warn\('\[CALENDAR\] mirror error \(non-fatal\):'/);
+  // ANCHORED ON THE FUNCTION, NOT ON A CHARACTER BUDGET. This read
+  // `[\s\S]{0,1200}` and broke the moment the function grew past it — a
+  // bounded scan is a guard that works only on the code it was written
+  // against, which this repo has paid for several times.
+  const mirror = server.slice(server.indexOf('const mirrorVisitToGoogle = async'));
+  const mirrorFn = mirror.slice(0, mirror.indexOf('\n};') + 3);
+  assert.ok(mirrorFn.length > 300 && mirrorFn.length < 4000, 'the mirror slice looks wrong');
+  assert.match(mirrorFn, /catch \(e\) \{ console\.warn\('\[CALENDAR\] mirror error \(non-fatal\):'/);
 });
 
 // ── The provider's PHI-free invite (owner, 2026-11-05) ─────────────────────
@@ -215,8 +222,13 @@ test('server: both halves go through one mirror, and cancelling withdraws the in
   // must not happen is a second idea of what an invite IS. Every caller goes
   // through the one shared writer and none builds a body itself.
   assert.ok((src.match(/googleCalendar\.upsertInvite\(/g) || []).length >= 1, 'at least one caller');
-  assert.ok(!/attendees\s*:/.test(src),
-    'server.js must not assemble an invite body — that lives in googleCalendar.buildInvite');
+  // Scoped to the MIRROR, not the whole file: `attendees:` legitimately
+  // appears where the appointment list is shaped for the screen. What must
+  // not happen is server.js building a Google attendee body of its own.
+  assert.ok(!/attendees\s*:\s*\[/.test(fn),
+    'the mirror must not assemble an invite body — that lives in googleCalendar.buildInvite');
+  assert.ok(!/attendees\s*:\s*\[\s*\{\s*email/.test(src),
+    'nowhere in server.js may build a Google attendee list');
   assert.strictEqual((fs.readFileSync(path.join(__dirname, '..', 'googleCalendar.js'), 'utf8')
     .match(/function buildInvite\(/g) || []).length, 1, 'one definition of what an invite is');
 });
@@ -337,4 +349,92 @@ test('server: the Veterans board writes to Google and NEVER to OpenEMR', () => {
     'an invite is sent only for a timed exam');
   assert.match(fn, /:\s*await googleCalendar\.removeInvite\(db, `ime:\$\{row\.id\}`\)/,
     'and an exam with no time has its invitation withdrawn');
+});
+
+// ── Other clinical team members on a visit (owner, 2026-11-05) ────────────
+// "Other team members can be added to appointment as scheduled, for example,
+// family meetings." One event, several guests — never one event each.
+
+test('the guest list folds the clinician and the team into one invite', () => {
+  const inv = G.buildInvite({
+    eid: '5', title: 'Family meeting', date: '2026-11-10', startTime: '15:00',
+    durationMinutes: 60, location: 'office',
+    providerEmail: 'doc@gmail.com', attendeeEmails: ['CM@gmail.com', ' sw@gmail.com ', 'doc@gmail.com']
+  });
+  // De-duplicated and case-folded: the clinician appears once even when also
+  // picked from the list, which is the obvious way to double-invite someone.
+  assert.deepStrictEqual(inv.attendees, [{ email: 'doc@gmail.com' }, { email: 'cm@gmail.com' }, { email: 'sw@gmail.com' }]);
+  // ONE event with three guests, not three events.
+  assert.strictEqual(typeof inv.summary, 'string');
+  // Still no patient, with a longer guest list than before.
+  assert.ok(!/Juanita|Guess|Evergreen/i.test(JSON.stringify(inv)));
+  // Guests cannot see each other: who else attends a patient's care meeting
+  // is itself something a recipient has no need to learn from an invitation.
+  assert.strictEqual(inv.guestsCanSeeOtherGuests, false);
+});
+
+test('one bad address does not stop the rest of the team being told', () => {
+  const inv = G.buildInvite({
+    eid: '5', title: 'Family meeting', date: '2026-11-10', startTime: '15:00',
+    attendeeEmails: ['good@gmail.com', 'rubbish', '', null, 'also@gmail.com']
+  });
+  assert.deepStrictEqual(inv.attendees.map(a => a.email), ['good@gmail.com', 'also@gmail.com']);
+  // But an invitation with nobody left on it is not sent at all.
+  assert.strictEqual(G.buildInvite({ eid: '5', date: '2026-11-10', startTime: '15:00', attendeeEmails: ['rubbish'] }), null);
+  assert.deepStrictEqual(G.inviteEmails({}), []);
+});
+
+test('⚠️ only clinical team members can be put on a visit — never a patient\'s family', () => {
+  const roles = require('../clinicalRoles');
+  const yes = [
+    { role: 'user', clinicalRole: 'provider', clinicalRoleConfirmed: true, hasClinicalAccess: true },
+    { role: 'caseManager', clinicalRole: 'readOnly', clinicalRoleConfirmed: true },
+    { role: 'user', clinicalRole: 'lcsw', clinicalRoleConfirmed: true, hasClinicalAccess: true },
+    { role: 'admin' }
+  ];
+  // A patient's own family is a DIFFERENT privacy decision and an open one:
+  // their mailbox is not covered, and even a PHI-free invitation on a
+  // daughter's calendar says this patient had a care meeting.
+  const no = [{ role: 'client' }, { role: 'family' }, { role: 'family', familyIsPoa: true },
+    { role: 'vendor', licenseLevel: 'PCA' }, { role: 'admin', accountStatus: 'inactive' }];
+  for (const u of yes) assert.strictEqual(roles.canAttendVisit(u), true, JSON.stringify(u));
+  for (const u of no) assert.strictEqual(roles.canAttendVisit(u), false, JSON.stringify(u));
+});
+
+test('server: the attendee route refuses anyone ineligible BY NAME, and the list is served', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.put('/api/clinical/appointments/:eid/attendees'");
+  assert.ok(i > 0, 'attendees route not found');
+  const route = src.slice(i, src.indexOf("app.get('/api/clinical/attendee-candidates'"));
+  // Silently dropping somebody leaves them off a meeting they were added to.
+  assert.match(route, /if \(resolved\.invalid\.length\) \{[\s\S]{0,400}?ATTENDEE_NOT_ELIGIBLE/,
+    'the refusal must be reachable, not just present — `if (false)` passed until this pinned the condition');
+  assert.match(route, /invalid: resolved\.invalid/);
+  assert.match(route, /mirrorVisitToGoogle\(/, 'saving the list must send the invitations');
+  // ⚠️ The patient must survive an attendee change. Passing a null clientId
+  // here would PATCH THE CLINICAL EVENT WITH NO PATIENT AND NO ADDRESS —
+  // stripping the patient off the calendar because somebody joined a meeting.
+  assert.match(route, /clinicalClientsByPuuid\(\)\)\.get\(String\(row\.puuid\)\)/);
+  assert.match(route, /clientId: appClient \? appClient\.clientId : null/);
+  // Eligibility is asked of clinicalRoles, not restated in the route.
+  assert.ok(/clinicalRoles\.canAttendVisit\(/.test(src), 'one predicate decides who may attend');
+  // A reschedule gives the visit a new eid, so the guest list follows it.
+  assert.ok(/const moveAttendees = async \(fromEid, toEid\)/.test(src));
+  assert.ok(/await moveAttendees\(previousEid, eid\)/.test(src), 'the mirror moves the list with the visit');
+});
+
+test('page: the picker renders from the SERVED list and warns about a missing email', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.ok(/^    const VisitAttendees = /m.test(src), 'must sit at module scope (react_input_focus)');
+  const i = src.indexOf('const VisitAttendees =');
+  const comp = src.slice(i, src.indexOf('const DayScheduleRow', i));
+  assert.match(comp, /api\.attendeeCandidates\(\)/, 'the eligible list is served, never named in the page');
+  // A screen with its own idea of who may attend drifts from the gate.
+  for (const role of ["'provider'", "'lcsw'", "'caseManager'", "'readOnly'"]) {
+    assert.ok(!comp.includes(role), `the page must not name ${role}`);
+  }
+  // Said plainly rather than letting the invite fail quietly.
+  assert.match(comp, /no email on file/);
+  assert.match(comp, /carries no patient details/);
+  assert.match(src, /<VisitAttendees appt=\{appt\}/, 'and it is actually rendered');
 });

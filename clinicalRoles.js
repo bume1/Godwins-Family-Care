@@ -652,9 +652,26 @@ const canFileChartDocuments = (u) => isActive(u) &&
 const canApproveChartDocuments = (u) => isActive(u) &&
   (u.role === 'admin' || isCoordinator(u));
 
+// ── Who can be put on a visit as an attendee (owner, 2026-11-05) ───────────
+// "Other clinical team members… for example, family meetings." A family
+// meeting is a clinician plus whoever else belongs in the room: a case
+// manager, a social worker, the coordinator.
+//
+// ⚠️ STAFF ONLY, DELIBERATELY. A patient's own family is a different privacy
+// question and not this one: their mailbox is not covered by the BAA, and
+// even a PHI-free invitation sitting on a daughter's calendar says that this
+// patient had a care meeting. That is the owner's decision to make, and it is
+// open — nobody outside this list can be invited until it is made.
+//
+// Anyone with a clinical role (read-only included, since a case manager
+// attends), plus an admin or a manager — the same people who may already read
+// the chart. A client, a family member or a caregiver is never on this list.
+const canAttendVisit = (u) => isActive(u) && canFileChartDocuments(u);
+
 module.exports = {
   canFileChartDocuments,
   canApproveChartDocuments,
+  canAttendVisit,
   CLINICAL_ROLES,
   ALL_CLINICAL_ROLES,
   LICENSED_CLINICAL_ROLES,
