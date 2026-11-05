@@ -211,6 +211,130 @@ test('server: both halves go through one mirror, and cancelling withdraws the in
     assert.ok(!call.includes(field), `the invite call must not pass ${field}`);
   }
   assert.ok(/removeInvite\(/.test(src), 'cancelling must withdraw the invitation');
-  assert.strictEqual((src.match(/googleCalendar\.upsertInvite\(/g) || []).length, 1,
-    'exactly one invite writer — a second would drift from this one');
+  // Two callers now (clinical visits and IME exams), and that is fine — what
+  // must not happen is a second idea of what an invite IS. Every caller goes
+  // through the one shared writer and none builds a body itself.
+  assert.ok((src.match(/googleCalendar\.upsertInvite\(/g) || []).length >= 1, 'at least one caller');
+  assert.ok(!/attendees\s*:/.test(src),
+    'server.js must not assemble an invite body — that lives in googleCalendar.buildInvite');
+  assert.strictEqual((fs.readFileSync(path.join(__dirname, '..', 'googleCalendar.js'), 'utf8')
+    .match(/function buildInvite\(/g) || []).length, 1, 'one definition of what an invite is');
+});
+
+// ── An IME exam on the clinical calendar (owner, 2026-11-05) ───────────────
+// The exam line is billed to the contracting vendor, not claimed, so it keeps
+// its own record and never reaches OpenEMR. It does reach the clinical
+// calendar and My Day.
+
+test('an exam event names the veteran — the clinical calendar is inside the BAA', () => {
+  const e = G.buildExamEvent({
+    examId: 'x1', firstName: 'James', lastName: "O'Brien", examDate: '2026-11-10',
+    examTime: '11:00', durationMinutes: 60, siteLabel: 'Savannah clinic', providerName: 'Bethel Godwins'
+  });
+  assert.strictEqual(e.summary, "IME Exam · O'Brien, James");
+  assert.strictEqual(e.location, 'Savannah clinic');
+  assert.match(e.description, /Independent medical examination/);
+  assert.match(e.description, /With Bethel Godwins/);
+  assert.match(e.description, /Change it there, not here/);
+  assert.strictEqual(e.start.dateTime, '2026-11-10T11:00:00');
+  assert.strictEqual(e.end.dateTime, '2026-11-10T12:00:00');
+  assert.strictEqual(e.extendedProperties.private.gfcKind, 'ime');
+  // Nobody is invited to THIS event: the provider's copy is the PHI-free one.
+  assert.strictEqual(e.attendees, undefined);
+});
+
+test('an exam with no time gets no event rather than a made-up hour', () => {
+  assert.strictEqual(G.buildExamEvent({ examId: 'x', lastName: 'Ames', examDate: '2026-11-10' }), null);
+  assert.strictEqual(G.buildExamEvent({ examId: 'x', lastName: 'Ames', examDate: '2026-11-10', examTime: '' }), null);
+  // A roster row has always been allowed to carry no time, and a clinic that
+  // runs first-come has nothing to enter. Placing one at a guessed hour puts
+  // a clinician somewhere nobody said to be.
+  assert.ok(G.buildExamEvent({ examId: 'x', lastName: 'Ames', examDate: '2026-11-10', examTime: '09:00' }));
+  // No length recorded is an hour on the calendar — a block has to have an
+  // end — but the roster still stores no length. The event is the only place
+  // that figure exists, which is why it is not written back.
+  const e = G.buildExamEvent({ examId: 'x', lastName: 'Ames', examDate: '2026-11-10', examTime: '09:00' });
+  assert.strictEqual(e.end.dateTime, '2026-11-10T10:00:00');
+});
+
+test('adding, moving, un-timing and removing an exam', async () => {
+  const store = new Map();
+  const db = { get: async (k) => store.get(k) || null, set: async (k, v) => { store.set(k, v); return true; } };
+  const calls = [];
+  G.setClientForTests({ events: {
+    insert: async (a) => { calls.push(['insert', a]); return { data: { id: 'ex1' } }; },
+    patch: async (a) => { calls.push(['patch', a]); return { data: { id: 'ex1' } }; },
+    delete: async (a) => { calls.push(['delete', a]); return {}; }
+  } });
+  try {
+    const exam = { examId: 'r1', firstName: 'Ann', lastName: 'Lee', examDate: '2026-11-10', examTime: '09:00', durationMinutes: 45, siteLabel: 'Savannah clinic' };
+    assert.strictEqual((await G.upsertExam(db, exam)).synced, true);
+    assert.strictEqual(calls[0][0], 'insert');
+
+    // Moving the time moves the same event, not a second one.
+    assert.strictEqual((await G.upsertExam(db, { ...exam, examTime: '13:00' })).synced, true);
+    assert.strictEqual(calls[1][0], 'patch');
+    assert.deepStrictEqual((await db.get(G.EXAM_COLLECTION)).map(r => r.examId), ['r1']);
+
+    // ⚠️ CLEARING THE TIME TAKES IT OFF THE CALENDAR. Leaving the event behind
+    // would show an hour nobody is holding.
+    const cleared = await G.upsertExam(db, { ...exam, examTime: null });
+    assert.strictEqual(cleared.removed, true);
+    assert.strictEqual(calls[2][0], 'delete');
+    assert.deepStrictEqual(await db.get(G.EXAM_COLLECTION), []);
+
+    // An exam that never had a time and still has none is a no-op, not a
+    // delete of somebody else's event.
+    const none = await G.upsertExam(db, { examId: 'r2', lastName: 'Ames', examDate: '2026-11-10' });
+    assert.strictEqual(none.synced, false);
+    assert.strictEqual(none.reason, 'no_time');
+    assert.strictEqual(calls.length, 3, 'nothing was sent to Google for an untimed exam');
+
+    await G.upsertExam(db, exam);
+    assert.strictEqual((await G.removeExam(db, 'r1')).removed, true);
+    assert.deepStrictEqual(await db.get(G.EXAM_COLLECTION), []);
+  } finally { G.setClientForTests(null); }
+});
+
+test('exam events are their own map — not an eid pretending to be one', () => {
+  assert.notStrictEqual(G.EXAM_COLLECTION, G.COLLECTION);
+  assert.notStrictEqual(G.EXAM_COLLECTION, G.INVITE_COLLECTION);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'googleCalendar.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async function upsertExam('), src.indexOf('async function removeExam('));
+  // An exam has no OpenEMR appointment, so storing its id in a field named
+  // `eid` would be a lie in the data a later reader would act on.
+  assert.ok(/examId: String\(exam\.examId\)/.test(fn), 'keyed on the roster row id');
+  assert.ok(!/\beid\b/.test(fn), 'an exam has no eid');
+});
+
+test('server: the Veterans board writes to Google and NEVER to OpenEMR', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf('const mirrorExamToGoogle =');
+  assert.ok(i > 0, 'mirrorExamToGoogle not found');
+  const fn = src.slice(i, src.indexOf('\nconst unmirrorExamFromGoogle', i));
+  assert.ok(/googleCalendar\.upsertExam\(/.test(fn));
+  assert.ok(/googleCalendar\.upsertInvite\(/.test(fn), 'the provider gets the same PHI-free invite a visit sends');
+  // ⚠️ The owner's rule: OpenEMR's calendar holds clinical appointments only.
+  assert.ok(!/openemr|postAppointmentRow|createAppointmentRow/i.test(fn),
+    'an exam must never reach OpenEMR');
+  // Every roster write keeps the calendar in step, and removal takes both off.
+  for (const after of ['veteran_added', 'veteran_updated']) {
+    const at = src.indexOf(`'${after}'`);
+    assert.ok(/mirrorExamToGoogle\(/.test(src.slice(at, at + 400)), `${after} must mirror`);
+  }
+  const rm = src.indexOf("'veteran_removed'");
+  assert.ok(/unmirrorExamFromGoogle\(/.test(src.slice(rm, rm + 400)), 'removal takes it off the calendar');
+  // The invite for an exam carries no veteran: it is handed a title, not a name.
+  const call = fn.slice(fn.indexOf('upsertInvite('));
+  for (const leak of ['firstName', 'lastName']) {
+    assert.ok(!call.includes(leak), `the exam invite must not pass ${leak}`);
+  }
+  // ⚠️ CLEARING AN EXAM'S TIME WITHDRAWS THE INVITATION. Without this the
+  // provider keeps an invite to a slot that no longer exists — buildInvite
+  // refuses to make a timeless one, so nothing new is sent and the stale one
+  // just sits there. Caught by a mutation that removed the condition.
+  assert.match(fn, /row\.examTime\s*\n?\s*\?\s*await googleCalendar\.upsertInvite\(/,
+    'an invite is sent only for a timed exam');
+  assert.match(fn, /:\s*await googleCalendar\.removeInvite\(db, `ime:\$\{row\.id\}`\)/,
+    'and an exam with no time has its invitation withdrawn');
 });

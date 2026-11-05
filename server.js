@@ -4174,6 +4174,47 @@ app.get('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (r
   }
 });
 
+// ── An IME exam on the clinical calendar (owner, 2026-11-05) ───────────────
+// ⚠️ THE EXAM NEVER REACHES OPENEMR: the owner's rule is that OpenEMR's
+// calendar holds clinical appointments only. An exam goes to the clinical
+// calendar and to My Day, and nowhere else. Build-enforced in
+// test/veteran_roster.test.js that no roster route touches the EMR.
+//
+// The clinical calendar is BAA-covered, so the event names the veteran. The
+// provider's own copy is the same PHI-free invite a clinical visit sends.
+// Both are best-effort: a Google failure never undoes a roster row.
+const mirrorExamToGoogle = async (row) => {
+  try {
+    if (!row || row.removedAt) return { synced: false };
+    const users = await getUsers();
+    const provider = users.find(u => u && u.id === row.providerUserId) || null;
+    const r = await googleCalendar.upsertExam(db, {
+      examId: row.id, firstName: row.firstName, lastName: row.lastName,
+      examDate: row.examDate, examTime: row.examTime, durationMinutes: row.durationMinutes,
+      siteLabel: vetRoster.SITES[row.site] || row.site,
+      providerName: provider ? provider.name : null
+    });
+    if (!r.synced && !['not_configured', 'no_time', 'no_event'].includes(r.reason)) {
+      console.warn(`[CALENDAR] exam ${row.id} not mirrored: ${r.reason}`);
+    }
+    // The invite carries no veteran, the same rule a visit's invite follows.
+    const inv = row.examTime
+      ? await googleCalendar.upsertInvite(db, {
+        eid: `ime:${row.id}`, title: 'IME Exam', date: row.examDate, startTime: row.examTime,
+        durationMinutes: row.durationMinutes || 60, location: 'office',
+        providerEmail: provider ? provider.email : null
+      })
+      : await googleCalendar.removeInvite(db, `ime:${row.id}`);
+    return { ...r, invite: inv };
+  } catch (e) { console.warn('[CALENDAR] exam mirror error (non-fatal):', e.message); return { synced: false }; }
+};
+const unmirrorExamFromGoogle = async (examId) => {
+  try {
+    await googleCalendar.removeExam(db, String(examId));
+    await googleCalendar.removeInvite(db, `ime:${examId}`);
+  } catch (e) { console.warn('[CALENDAR] exam removal error (non-fatal):', e.message); }
+};
+
 app.post('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (req, res) => {
   try {
     const n = vetRoster.normalizeRosterInput(req.body, { today: practiceToday() });
@@ -4194,6 +4235,7 @@ app.post('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (
     rows.push(row);
     await db.set('veteran_roster', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_added', 'veteran_roster', row.id, { examDate: row.examDate, providerUserId });
+    await mirrorExamToGoogle(row);
     res.json({ row: vetRoster.publicRow(row, (users.find(u => u.id === providerUserId) || {}).name) });
   } catch (error) {
     console.error('Veteran add error:', error);
@@ -4221,6 +4263,7 @@ app.put('/api/veterans/roster/:id', authenticateToken, requireVeteranStaff, asyn
     rows[i] = { ...next, updatedAt: new Date().toISOString(), updatedById: req.user.id };
     await db.set('veteran_roster', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_updated', 'veteran_roster', rows[i].id, { providerUserId });
+    await mirrorExamToGoogle(rows[i]);
     res.json({ row: vetRoster.publicRow(rows[i], (users.find(u => u.id === providerUserId) || {}).name) });
   } catch (error) {
     console.error('Veteran update error:', error);
@@ -4238,6 +4281,7 @@ app.delete('/api/veterans/roster/:id', authenticateToken, requireVeteranStaff, a
     rows[i] = { ...rows[i], removedAt: new Date().toISOString(), removedById: req.user.id };
     await db.set('veteran_roster', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_removed', 'veteran_roster', rows[i].id, {});
+    await unmirrorExamFromGoogle(rows[i].id);
     res.json({ ok: true });
   } catch (error) {
     console.error('Veteran remove error:', error);
