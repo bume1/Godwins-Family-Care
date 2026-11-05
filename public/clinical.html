@@ -6176,7 +6176,12 @@
         notes: (isRes && appt.notes) || ''
       });
       const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
-      const canPickProvider = providersData && providersData.isAdmin;
+      // SERVED, not decided here. The server answers this from the same
+      // function the booking route enforces with, so the picker cannot offer
+      // (or withhold) a calendar the route disagrees about. It was
+      // `providersData.isAdmin` and left a care coordinator a disabled
+      // "Provider —" box they could never save.
+      const canPickProvider = !!(providersData && providersData.canPickProvider);
       const submit = () => {
         setErr('');
         if (!isRes && !f.clientId) { setErr('Pick a patient.'); return; }
@@ -6410,7 +6415,7 @@
       const gEvents = (data && data.googleEvents) || [];
       const gCal = (data && data.googleCalendar) || null;
       const changed = () => { setPicked(null); setModal(null); load(); };
-      const isAdmin = providersData && providersData.isAdmin;
+      const allCalendars = !!(providersData && providersData.canPickProvider);
 
       if (err && err.code === 'PROVIDER_NOT_MAPPED') {
         return (
@@ -6440,13 +6445,13 @@
               {mode === 'day' ? fmtDayLabel(anchor) : `${fmtDayLabel(from)} – ${fmtDayLabel(to)}`}
             </div>
             <div className="ml-auto flex items-center gap-2">
-              {isAdmin && (
+              {allCalendars && (
                 <select className="inp !w-auto text-xs" value={providerFilter} onChange={e => setProviderFilter(e.target.value)}>
                   <option value="">All providers</option>
                   {(providersData.providers || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               )}
-              {!isAdmin && providersData && (
+              {!allCalendars && providersData && (
                 <span className="chip bg-primary-50 text-primary">
                   {(providersData.providers || []).filter(p => p.id === providersData.myProviderId).map(p => p.name)[0] || 'My calendar'}
                 </span>
