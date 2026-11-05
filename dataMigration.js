@@ -111,6 +111,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // PHI because it names a client and the room they will be seen in, even
   // though nothing identifying was ever sent to Google.
   { key: 'appointment_video_links', phi: true, owner: 'T1' },
+  { key: 'appointment_attendees', phi: true, owner: 'attendees 11/2026', note: 'eid → the staff user ids on a visit besides its clinician (family meetings)' },
   // One-tap join tokens for the reminder email. Hashed, bound to one eid and
   // one recipient, and dead outside the join window — but a live token is a
   // door onto a patient's video visit, so it moves with the same care.

@@ -137,10 +137,16 @@ function buildEvent({ eid, title, patientName, date, startTime, durationMinutes,
 //
 // Build-enforced in test/google_calendar.test.js: this function may not read
 // patientName or address, and its output may not contain either.
-function buildInvite({ eid, title, date, startTime, durationMinutes, location, providerEmail }) {
+// `providerEmail` is the one-attendee shorthand a plain visit uses;
+// `attendeeEmails` is the list a family meeting needs — a clinician plus a
+// case manager, a social worker, the coordinator (owner, 2026-11-05). They
+// are the same thing, folded into one list here rather than two code paths:
+// ONE event with several guests, not several events.
+function buildInvite({ eid, title, date, startTime, durationMinutes, location, providerEmail, attendeeEmails }) {
   const start = hhmm(startTime);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !start) return null;
-  if (!isEmail(providerEmail)) return null;
+  const emails = inviteEmails({ providerEmail, attendeeEmails });
+  if (!emails.length) return null;
   const end = addMinutes(start, durationMinutes);
   const where = LOCATION_LABEL[location] || 'Visit';
   return {
@@ -155,10 +161,13 @@ function buildInvite({ eid, title, date, startTime, durationMinutes, location, p
     ].join('\n'),
     start: { dateTime: `${date}T${start}:00`, timeZone: TIME_ZONE },
     end: { dateTime: `${date}T${end}:00`, timeZone: TIME_ZONE },
-    attendees: [{ email: String(providerEmail).trim() }],
+    attendees: emails.map(email => ({ email })),
     // The clinician cannot change the visit from their own calendar — it is
     // booked in the app, and a guest edit here would never reach OpenEMR.
-    guestsCanModify: false, guestsCanInviteOthers: false, guestsCanSeeOtherGuests: false,
+    guestsCanModify: false, guestsCanInviteOthers: false,
+    // Guests cannot see each other: who else is in a care meeting is itself
+    // something a recipient has no need to learn from a calendar entry.
+    guestsCanSeeOtherGuests: false,
     extendedProperties: { private: { gfcAppointmentEid: String(eid), gfcInvite: '1' } }
   };
 }
@@ -166,6 +175,18 @@ function buildInvite({ eid, title, date, startTime, durationMinutes, location, p
 // Deliberately strict rather than clever: an address Google refuses fails the
 // whole insert, and a silent non-invite is worse than not offering one.
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v == null ? '' : v).trim());
+
+// The guest list, de-duplicated and lower-cased, with anything unusable
+// DROPPED rather than failing the whole invitation: one bad address on a
+// four-person meeting must not stop the other three being told. An invite
+// with nobody left on it is refused by the caller.
+const inviteEmails = ({ providerEmail, attendeeEmails }) => {
+  const seen = new Set();
+  return [providerEmail, ...(Array.isArray(attendeeEmails) ? attendeeEmails : [])]
+    .filter(isEmail)
+    .map(e => String(e).trim().toLowerCase())
+    .filter(e => (seen.has(e) ? false : seen.add(e)));
+};
 
 // An IME exam on the clinical calendar (owner, 2026-11-05).
 //
@@ -261,7 +282,7 @@ async function upsertInvite(db, invite, { previousEid } = {}) {
   if (!status.invitesConfigured && !_clientOverride) {
     return { invited: false, reason: status.configured ? 'no_invite_calendar' : 'not_configured' };
   }
-  if (!isEmail(invite && invite.providerEmail)) return { invited: false, reason: 'no_provider_email' };
+  if (!inviteEmails(invite || {}).length) return { invited: false, reason: 'no_provider_email' };
   try {
     const body = buildInvite(invite);
     if (!body) return { invited: false, reason: 'bad_visit' };
@@ -279,7 +300,7 @@ async function upsertInvite(db, invite, { previousEid } = {}) {
     }
     if (!eventId) return { invited: false, reason: 'no_event_id' };
     const next = rows.filter(r => r.eid !== String(invite.eid) && r.eid !== String(previousEid || ''));
-    next.push({ eid: String(invite.eid), eventId, providerEmail: String(invite.providerEmail).trim(), at: new Date().toISOString() });
+    next.push({ eid: String(invite.eid), eventId, attendees: inviteEmails(invite), at: new Date().toISOString() });
     await db.set(INVITE_COLLECTION, next);
     return { invited: true, eventId };
   } catch (e) {
@@ -381,7 +402,7 @@ async function removeVisit(db, eid) {
 }
 
 module.exports = {
-  calendarStatus, buildEvent, buildInvite, buildExamEvent, addMinutes, isEmail,
+  calendarStatus, buildEvent, buildInvite, buildExamEvent, addMinutes, isEmail, inviteEmails,
   upsertVisit, removeVisit, upsertInvite, removeInvite, upsertExam, removeExam,
   setClientForTests, COLLECTION, INVITE_COLLECTION, EXAM_COLLECTION, CALENDAR_SCOPE
 };

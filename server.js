@@ -11426,12 +11426,23 @@ const clinicalClientsByPuuid = async () => {
 };
 
 const summarizeCalendarRows = async (rows, emrRowsFilter) => {
-  const [linkRows, clientMap] = await Promise.all([getAppointmentLinkage(), clinicalClientsByPuuid()]);
+  const [linkRows, clientMap, attendeeRows, allUsers] = await Promise.all([
+    getAppointmentLinkage(), clinicalClientsByPuuid(),
+    db.get('appointment_attendees'), getUsers()
+  ]);
   const links = linkageByEid(linkRows);
+  // Who else is on a visit, resolved here so the calendar, the detail panel
+  // and My Day all read one answer. NAME AND ROLE ONLY — a staff email is not
+  // something a screen needs, and the one place it is used is the invite.
+  const byEid = new Map((attendeeRows || []).filter(r => r && r.eid)
+    .map(r => [String(r.eid), (r.userIds || []).map(id => {
+      const u = (allUsers || []).find(x => x && x.id === id);
+      return u ? { id: u.id, name: u.name || u.email, role: clinicalRoles.resolveClinicalRole(u) || u.role || null } : null;
+    }).filter(Boolean)]));
   return rows.filter(emrRowsFilter || (() => true)).map(r => {
     const s = clinicalRepo.summarizeAppointmentRow(r, links.get(String(r.pc_eid)) || null);
     const app = r.puuid ? clientMap.get(String(r.puuid)) : null;
-    return { ...s, clientId: app ? app.clientId : null };
+    return { ...s, clientId: app ? app.clientId : null, attendees: byEid.get(String(r.pc_eid)) || [] };
   }).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
 };
 
@@ -11717,6 +11728,51 @@ const calendarPatientFacts = async (clientId) => {
     : (a ? String(a) : null);
   return { patientName: u.preferredName ? `${u.preferredName} ${String(u.name || '').split(' ').slice(-1)[0]}` : u.name, address };
 };
+// ── Other clinical team members on a visit (owner, 2026-11-05) ────────────
+// "Other team members can be added to appointment as scheduled, for example,
+// family meetings." A family meeting is a clinician plus whoever else belongs
+// in the room — a case manager, a social worker, the coordinator.
+//
+// APP-SIDE, keyed by the OpenEMR appointment eid, the way the Meet room
+// pointer already is: OpenEMR's appointment row has nowhere to put a guest
+// list, and packing one into pc_hometext is the marker trick the location
+// field already shows to be fragile.
+//
+// ⚠️ STAFF ONLY. clinicalRoles.canAttendVisit is the gate and it admits
+// nobody outside the clinical team — a patient's own family is a different
+// privacy decision, and an open one.
+const attendeesForEid = async (eid) => {
+  const row = ((await db.get('appointment_attendees')) || []).find(r => r && String(r.eid) === String(eid));
+  return (row && Array.isArray(row.userIds)) ? row.userIds : [];
+};
+// Returns { userIds, invalid } — an id that is not an attendable staff member
+// is REFUSED BY NAME rather than dropped, or somebody is quietly left off a
+// meeting they were added to.
+const resolveAttendees = async (userIds) => {
+  const users = await getUsers();
+  const out = []; const invalid = [];
+  for (const id of (Array.isArray(userIds) ? userIds : [])) {
+    const u = users.find(x => x && String(x.id) === String(id));
+    if (u && clinicalRoles.canAttendVisit(u)) { if (!out.includes(u.id)) out.push(u.id); }
+    else invalid.push(String(id));
+  }
+  return { userIds: out, invalid, users };
+};
+const setAttendeesForEid = async (eid, userIds) => {
+  const rows = (await db.get('appointment_attendees')) || [];
+  const next = rows.filter(r => r && String(r.eid) !== String(eid));
+  if (userIds.length) next.push({ eid: String(eid), userIds, at: new Date().toISOString() });
+  await db.set('appointment_attendees', next);
+};
+// A reschedule gives the visit a new eid (the tombstone swap), so the guest
+// list follows it or the moved visit silently loses everyone on it.
+const moveAttendees = async (fromEid, toEid) => {
+  if (!fromEid || String(fromEid) === String(toEid)) return;
+  const ids = await attendeesForEid(fromEid);
+  await setAttendeesForEid(fromEid, []);
+  if (ids.length) await setAttendeesForEid(toEid, ids);
+};
+
 // ONE FUNCTION DOES BOTH HALVES, so a route cannot write the full event and
 // forget the provider's invite (or the reverse). Both are best-effort: a
 // Google failure never undoes a visit that is already on OpenEMR's calendar.
@@ -11736,9 +11792,14 @@ const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, st
     }, { previousEid });
     if (!r.synced && r.reason !== 'not_configured') console.warn(`[CALENDAR] visit ${eid} not mirrored: ${r.reason}`);
     // The invite is handed ONLY what it may show — no clientId, no facts.
+    // The clinician plus anyone else put on the visit; one event, several
+    // guests, each at their own address.
+    await moveAttendees(previousEid, eid);
+    const extra = await resolveAttendees(await attendeesForEid(eid));
     const inv = await googleCalendar.upsertInvite(db, {
       eid, title, date, startTime, durationMinutes, location,
-      providerEmail: clinician ? clinician.email : null
+      providerEmail: clinician ? clinician.email : null,
+      attendeeEmails: extra.userIds.map(id => (extra.users.find(u => u.id === id) || {}).email).filter(Boolean)
     }, { previousEid });
     if (!inv.invited && !['not_configured', 'no_invite_calendar', 'no_provider_email'].includes(inv.reason)) {
       console.warn(`[CALENDAR] visit ${eid} invite not sent: ${inv.reason}`);
@@ -11970,6 +12031,78 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
 
 // POST /api/clinical/appointments/:eid/no-show — same swap, status '?'; the
 // chart list shows it as no-show (Scope B).
+// PUT /api/clinical/appointments/:eid/attendees — who else is in the room.
+// Separate from booking on purpose: a family meeting usually gains people
+// after it is on the calendar, and changing the guest list must not need a
+// reschedule (which would move the visit and tell the patient it had).
+//
+// Google's own `sendUpdates: 'all'` on the patch is what tells somebody added
+// that they are expected and somebody removed that they are not; this route
+// changes the list and lets the one invite writer send it.
+app.put('/api/clinical/appointments/:eid/attendees', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const emr = openemr.forActor(req.user);
+    const loaded = await loadAppointmentForMutation(emr, req.params.eid, req.user);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
+    const { row } = loaded;
+    const body = req.body || {};
+    if (!Array.isArray(body.userIds)) {
+      return res.status(400).json({ error: 'Send userIds as a list.', code: 'ATTENDEES_INVALID' });
+    }
+    // Refused by name, never silently dropped: somebody left off a meeting
+    // they were added to is the failure this is guarding.
+    const resolved = await resolveAttendees(body.userIds);
+    if (resolved.invalid.length) {
+      return res.status(400).json({
+        error: 'Only clinical team members can be added to a visit.',
+        code: 'ATTENDEE_NOT_ELIGIBLE', invalid: resolved.invalid
+      });
+    }
+    await setAttendeesForEid(row.pc_eid, resolved.userIds);
+    const dec = clinicalRepo.decodeAppointmentNotes(row.pc_hometext);
+    const appClient = (await clinicalClientsByPuuid()).get(String(row.puuid)) || null;
+    const mirrored = await mirrorVisitToGoogle({
+      clientId: appClient ? appClient.clientId : null, eid: row.pc_eid, title: row.pc_title,
+      date: row.pc_eventDate, startTime: row.pc_startTime,
+      durationMinutes: Math.round(Number(row.pc_duration || 0) / 60) || undefined,
+      location: dec && dec.location, providerId: row.pc_aid
+    });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_attendees_set', 'appointment', String(row.pc_eid), { count: resolved.userIds.length });
+    res.json({
+      eid: String(row.pc_eid),
+      attendees: resolved.userIds.map(id => {
+        const u = resolved.users.find(x => x.id === id) || {};
+        return { id, name: u.name || null, role: clinicalRoles.resolveClinicalRole(u) || u.role || null };
+      }),
+      invited: !!(mirrored && mirrored.invite && mirrored.invite.invited),
+      inviteReason: (mirrored && mirrored.invite && mirrored.invite.reason) || null
+    });
+  } catch (error) {
+    console.error('Attendees error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/attendee-candidates — the staff who may be put on a visit.
+// SERVED, never listed in the page: a screen that keeps its own idea of who is
+// eligible drifts from the gate that refuses them.
+app.get('/api/clinical/attendee-candidates', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const users = await getUsers();
+    res.json({
+      candidates: users.filter(u => clinicalRoles.canAttendVisit(u)).map(u => ({
+        id: u.id, name: u.name || u.email,
+        role: clinicalRoles.resolveClinicalRole(u) || u.role || null,
+        hasEmail: !!u.email
+      })).sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+    });
+  } catch (error) {
+    console.error('Attendee candidates error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
