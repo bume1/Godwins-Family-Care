@@ -383,6 +383,86 @@ async function removeExam(db, examId) {
   }
 }
 
+// ── Reading the clinical calendar back (owner, 2026-11-05) ────────────────
+//
+// "I want that clinical appointments scheduled in Google also show on the app
+// schedule available to [the] clinical team to see." Until now this module
+// only wrote; a visit put straight into Google by hand reached nobody.
+//
+// ⚠️ ONLY THE EVENTS THE APP DID NOT PUT THERE COME BACK. Everything the app
+// writes is stamped `gfcAppointmentEid` (a visit) or `gfcExamId` (an exam),
+// and those are already on the app's schedule from OpenEMR and the roster —
+// returning them too would show every visit twice. The filter is on the
+// STAMP, not on a title or a guess.
+//
+// These rows are READ-ONLY and the caller must treat them so: an event made
+// in Google has no OpenEMR appointment, no patient record and no encounter,
+// so it cannot be documented, rescheduled or cancelled from the app. Saying
+// that plainly beats offering a button that fails.
+//
+// Needs the same `calendar.events` scope the writes use — it covers reading.
+const GFC_STAMPS = ['gfcAppointmentEid', 'gfcExamId'];
+const isAppWritten = (ev) => {
+  const priv = (ev && ev.extendedProperties && ev.extendedProperties.private) || {};
+  return GFC_STAMPS.some(k => priv[k] != null && String(priv[k]) !== '');
+};
+
+// A Google event as the app's schedule reads it. Times come back either as a
+// dateTime or, for an all-day event, a bare date — an all-day block has no
+// start time and is reported as one rather than being given 00:00.
+function externalRow(ev) {
+  const id = ev && ev.id;
+  if (!id || (ev.status && ev.status === 'cancelled')) return null;
+  const sd = (ev.start && (ev.start.dateTime || ev.start.date)) || null;
+  const ed = (ev.end && (ev.end.dateTime || ev.end.date)) || null;
+  if (!sd) return null;
+  const allDay = !(ev.start && ev.start.dateTime);
+  const hhmmOf = (v) => (v && v.length >= 16 ? v.slice(11, 16) : null);
+  return {
+    source: 'google',
+    eventId: String(id),
+    title: ev.summary || 'Untitled event',
+    date: String(sd).slice(0, 10),
+    startTime: allDay ? null : hhmmOf(sd),
+    endTime: allDay || !ed ? null : hhmmOf(ed),
+    allDay,
+    location: ev.location || null,
+    organizer: (ev.organizer && (ev.organizer.displayName || ev.organizer.email)) || null,
+    htmlLink: ev.htmlLink || null,
+    // Said on the row itself, so a screen cannot forget it.
+    readOnly: true,
+    reason: 'created_in_google'
+  };
+}
+
+/**
+ * Events on the clinical calendar between two dates that the app did not put
+ * there. Never throws: returns { ok, rows, reason? } so the caller can SAY the
+ * read failed rather than render an empty day — an unreachable calendar and a
+ * clear one look identical on screen and are opposite facts.
+ */
+async function listExternalEvents({ from, to } = {}) {
+  const status = calendarStatus();
+  if (!status.configured && !_clientOverride) return { ok: false, rows: [], reason: 'not_configured' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(from || '')) || !/^\d{4}-\d{2}-\d{2}$/.test(String(to || ''))) {
+    return { ok: false, rows: [], reason: 'bad_range' };
+  }
+  try {
+    const r = await getClient().events.list({
+      calendarId: status.calendarId,
+      timeMin: `${from}T00:00:00`, timeMax: `${to}T23:59:59`,
+      timeZone: TIME_ZONE, singleEvents: true, orderBy: 'startTime', maxResults: 250
+    });
+    const items = (r && r.data && r.data.items) || [];
+    const rows = items.filter(ev => !isAppWritten(ev)).map(externalRow).filter(Boolean)
+      .sort((a, b) => `${a.date} ${a.startTime || ''}`.localeCompare(`${b.date} ${b.startTime || ''}`));
+    return { ok: true, rows };
+  } catch (e) {
+    console.error('[CALENDAR] read failed (non-fatal):', e.message);
+    return { ok: false, rows: [], reason: e.message };
+  }
+}
+
 // A cancelled visit leaves the clinicians' calendar. (OpenEMR keeps its
 // cancelled tombstone with the reason; that is the record, not this.)
 async function removeVisit(db, eid) {
@@ -404,5 +484,6 @@ async function removeVisit(db, eid) {
 module.exports = {
   calendarStatus, buildEvent, buildInvite, buildExamEvent, addMinutes, isEmail, inviteEmails,
   upsertVisit, removeVisit, upsertInvite, removeInvite, upsertExam, removeExam,
+  listExternalEvents, externalRow, isAppWritten,
   setClientForTests, COLLECTION, INVITE_COLLECTION, EXAM_COLLECTION, CALENDAR_SCOPE
 };
