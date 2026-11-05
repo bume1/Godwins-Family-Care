@@ -11531,7 +11531,24 @@ app.get('/api/clinical/appointments', authenticateToken, requireClinicalRead, as
       (!scope.providerId || String(r.pc_aid) === scope.providerId) &&
       (!from || String(r.pc_eventDate) >= String(from)) &&
       (!to || String(r.pc_eventDate) <= String(to)));
-    res.json({ appointments, providerId: scope.providerId, locked: !!scope.locked });
+    // Owner, 2026-11-05: anything put on the clinical calendar BY HAND shows
+    // here too. Only events the app did not write come back (everything it
+    // writes is stamped), or each visit would appear twice.
+    //
+    // ⚠️ A FAILED READ IS REPORTED, NEVER SWALLOWED. An unreachable calendar
+    // and a clear one look identical on screen and are opposite facts — the
+    // rule the My Day calendar banner already follows.
+    let googleEvents = []; let googleCal = { ok: true, reason: null };
+    if (from && to) {
+      const ext = await googleCalendar.listExternalEvents({ from: String(from), to: String(to) });
+      googleEvents = ext.rows;
+      // "Not configured" is not a failure to shout about: the mirror is simply
+      // off, which the boot log already says.
+      googleCal = { ok: ext.ok || ext.reason === 'not_configured', reason: ext.ok ? null : ext.reason };
+    } else {
+      googleCal = { ok: true, reason: 'no_range' };
+    }
+    res.json({ appointments, googleEvents, googleCalendar: googleCal, providerId: scope.providerId, locked: !!scope.locked });
   } catch (error) {
     console.error('Clinical appointments list error:', error);
     res.status(502).json({ error: `OpenEMR error: ${error.message}` });

@@ -438,3 +438,116 @@ test('page: the picker renders from the SERVED list and warns about a missing em
   assert.match(comp, /carries no patient details/);
   assert.match(src, /<VisitAttendees appt=\{appt\}/, 'and it is actually rendered');
 });
+
+// ── Reading the clinical calendar back (owner, 2026-11-05) ────────────────
+// "Clinical appointments scheduled in Google also show on the app schedule."
+
+test('⚠️ only events the app did NOT write come back, or every visit shows twice', () => {
+  const stamped = [
+    { id: 'a', extendedProperties: { private: { gfcAppointmentEid: '77' } } },
+    { id: 'b', extendedProperties: { private: { gfcExamId: 'r1' } } }
+  ];
+  for (const ev of stamped) assert.strictEqual(G.isAppWritten(ev), true, JSON.stringify(ev));
+  // The filter is on the STAMP, not a title or a guess — a hand-made event
+  // called "Home visit · Someone" is still external.
+  for (const ev of [
+    { id: 'c', summary: 'Home visit · Someone' },
+    { id: 'd', extendedProperties: {} },
+    { id: 'e', extendedProperties: { private: { gfcAppointmentEid: '' } } },
+    {}
+  ]) assert.strictEqual(G.isAppWritten(ev), false, JSON.stringify(ev));
+});
+
+test('an external row is read-only, and an all-day block is not given an hour', () => {
+  const e = G.externalRow({
+    id: 'b', summary: 'Family meeting', location: 'Office',
+    start: { dateTime: '2026-11-10T15:00:00-05:00' }, end: { dateTime: '2026-11-10T16:00:00-05:00' },
+    organizer: { displayName: 'Kate' }, htmlLink: 'https://cal'
+  });
+  assert.strictEqual(e.source, 'google');
+  assert.strictEqual(e.date, '2026-11-10');
+  assert.strictEqual(e.startTime, '15:00');
+  assert.strictEqual(e.endTime, '16:00');
+  assert.strictEqual(e.allDay, false);
+  // It has no OpenEMR row, so nothing can be documented or moved from it.
+  assert.strictEqual(e.readOnly, true);
+  assert.strictEqual(e.reason, 'created_in_google');
+  // An all-day event has a bare date and NO start time. Reporting 00:00 would
+  // put a conference at midnight on the grid.
+  const all = G.externalRow({ id: 'c', summary: 'Conference', start: { date: '2026-11-11' }, end: { date: '2026-11-12' } });
+  assert.strictEqual(all.allDay, true);
+  assert.strictEqual(all.startTime, null);
+  assert.strictEqual(all.date, '2026-11-11');
+  // A deleted event and one with no start are not rows at all.
+  assert.strictEqual(G.externalRow({ id: 'd', status: 'cancelled', start: { dateTime: '2026-11-10T09:00:00Z' } }), null);
+  assert.strictEqual(G.externalRow({ id: 'e' }), null);
+});
+
+test('the read excludes app events, sorts by time, and SAYS when it failed', async () => {
+  const items = [
+    { id: 'mine', summary: 'Home visit', start: { dateTime: '2026-11-10T09:00:00-05:00' }, extendedProperties: { private: { gfcAppointmentEid: '1' } } },
+    { id: 'late', summary: 'Case conference', start: { dateTime: '2026-11-10T16:00:00-05:00' }, end: { dateTime: '2026-11-10T17:00:00-05:00' } },
+    { id: 'early', summary: 'Team huddle', start: { dateTime: '2026-11-10T08:00:00-05:00' }, end: { dateTime: '2026-11-10T08:30:00-05:00' } }
+  ];
+  let asked = null;
+  G.setClientForTests({ events: { list: async (a) => { asked = a; return { data: { items } }; } } });
+  try {
+    const r = await G.listExternalEvents({ from: '2026-11-10', to: '2026-11-10' });
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(r.rows.map(x => x.eventId), ['early', 'late'], 'app-written excluded, time order kept');
+    // Recurring events have to be expanded or a weekly huddle appears once.
+    assert.strictEqual(asked.singleEvents, true);
+    assert.strictEqual(asked.timeZone, 'America/New_York');
+  } finally { G.setClientForTests(null); }
+
+  // ⚠️ A FAILED READ IS REPORTED. An unreachable calendar and a clear one look
+  // identical on screen and are opposite facts.
+  G.setClientForTests({ events: { list: async () => { throw new Error('insufficientPermissions'); } } });
+  try {
+    const bad = await G.listExternalEvents({ from: '2026-11-10', to: '2026-11-10' });
+    assert.strictEqual(bad.ok, false);
+    assert.match(bad.reason, /insufficientPermissions/);
+    assert.deepStrictEqual(bad.rows, []);
+  } finally { G.setClientForTests(null); }
+
+  // A nonsense range is refused rather than asking Google for all of time.
+  G.setClientForTests({ events: { list: async () => { throw new Error('should not be called'); } } });
+  try {
+    assert.strictEqual((await G.listExternalEvents({ from: 'soon', to: '2026-11-10' })).reason, 'bad_range');
+    assert.strictEqual((await G.listExternalEvents({})).reason, 'bad_range');
+  } finally { G.setClientForTests(null); }
+});
+
+test('server: the schedule serves Google events and reports a failed read', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.get('/api/clinical/appointments'");
+  const route = src.slice(i, src.indexOf("app.get('/api/clinical/patients/:clientId/appointments'", i));
+  assert.match(route, /googleCalendar\.listExternalEvents\(/);
+  assert.match(route, /googleEvents, googleCalendar: googleCal/);
+  // Not configured is not a failure to shout about; a real error is.
+  assert.match(route, /ext\.reason === 'not_configured'/);
+  // Asked for only the window on screen, never the whole calendar.
+  assert.match(route, /from: String\(from\), to: String\(to\)/);
+});
+
+test('page: Google events draw as read-only, and the empty state stops lying', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  const i = src.indexOf('const DayColumn =');
+  const col = src.slice(i, src.indexOf('\n    const ', i + 10));
+  assert.match(col, /googleEvents/);
+  assert.match(col, /In Google/, 'the row says where it came from');
+  // It must not be clickable into the appointment panel: there is no
+  // appointment behind it, so every action would fail.
+  const gBlock = col.slice(col.indexOf('gEvents.map'), col.indexOf('dayAppts.map'));
+  assert.ok(!/onPick/.test(gBlock), 'a Google event must not open the appointment panel');
+  // "No appointments this week" is false when Google has entries on it.
+  assert.match(src, /the entries above were added in Google Calendar/);
+  // The replacement sentence existing proves nothing on its own — with the
+  // condition dropped BOTH render. Pin the condition that suppresses the
+  // wrong one, which a mutation slipped past until this line existed.
+  assert.match(src, /\{appts\.length === 0 && gEvents\.length === 0 && \(/,
+    'the "no appointments" empty state must require Google to be empty too');
+  assert.match(src, /\{appts\.length === 0 && gEvents\.length > 0 && \(/,
+    'and the narrowed sentence takes over when it is not');
+  assert.match(src, /could not be read, so anything added there is missing/);
+});

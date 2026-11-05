@@ -6328,15 +6328,35 @@
 
     const GRID_START = 7 * 60, GRID_END = 19 * 60, PX_PER_MIN = 0.8;
 
-    const DayColumn = ({ ymd, appts, onPick }) => {
+    const DayColumn = ({ ymd, appts, onPick, googleEvents }) => {
       const dayAppts = laneify(appts.filter(a => a.date === ymd));
       const hours = []; for (let h = 7; h < 19; h++) hours.push(h);
+      // Owner, 2026-11-05: what somebody put on the clinical calendar by hand
+      // belongs on this screen too. Drawn in a plain grey band, NOT as an
+      // appointment: it has no OpenEMR row, so nothing can be documented,
+      // rescheduled or cancelled from it. An all-day block has no hour and is
+      // pinned to the top rather than given one.
+      const gEvents = (googleEvents || []).filter(e => e.date === ymd);
       return (
         <div className="flex-1 min-w-[130px] border-l border-stone-200 relative" style={{ height: (GRID_END - GRID_START) * PX_PER_MIN }}>
           {hours.map(h => (
             <div key={h} className="absolute w-full border-t border-stone-100 text-[9px] text-stone-300 pl-1"
               style={{ top: (h * 60 - GRID_START) * PX_PER_MIN }}>{((h + 11) % 12) + 1}{h >= 12 ? 'p' : 'a'}</div>
           ))}
+          {gEvents.map(e => {
+            const top = e.allDay ? 0 : Math.max(0, (timeMins(e.startTime) - GRID_START) * PX_PER_MIN);
+            const mins = (e.allDay || !e.endTime) ? 30 : Math.max(15, timeMins(e.endTime) - timeMins(e.startTime));
+            return (
+              <div key={`g:${e.eventId}`} title={`${e.title}${e.organizer ? ` · ${e.organizer}` : ''} — added in Google Calendar, read-only here`}
+                className="absolute left-0.5 right-0.5 rounded-md border border-dashed border-stone-300 bg-stone-50 px-1 py-0.5 overflow-hidden"
+                style={{ top, height: Math.max(18, mins * PX_PER_MIN) }}>
+                <div className="text-[10px] font-semibold text-stone-600 truncate">{e.title}</div>
+                <div className="text-[9px] text-stone-400 truncate">
+                  {e.allDay ? 'All day' : fmt12h(e.startTime)} · In Google
+                </div>
+              </div>
+            );
+          })}
           {dayAppts.map(a => {
             const top = Math.max(0, (timeMins(a.startTime) - GRID_START) * PX_PER_MIN);
             const height = Math.max(18, (Math.max(15, a.durationMinutes || 30)) * PX_PER_MIN);
@@ -6387,6 +6407,8 @@
 
       const days = mode === 'day' ? [anchor] : [0, 1, 2, 3, 4, 5, 6].map(i => addDaysYmd(from, i));
       const appts = (data && data.appointments) || [];
+      const gEvents = (data && data.googleEvents) || [];
+      const gCal = (data && data.googleCalendar) || null;
       const changed = () => { setPicked(null); setModal(null); load(); };
       const isAdmin = providersData && providersData.isAdmin;
 
@@ -6437,6 +6459,14 @@
             <p className="text-[12px] text-amber-700 mb-2"><i className="ti ti-alert-triangle mr-1" />{providersData.notice}</p>
           )}
           {err && <p className="text-red-600 text-sm mb-3">{err.message}</p>}
+          {/* ⚠️ An unreachable Google calendar and a clear one look identical
+              on screen and are opposite facts, so the failure is said. */}
+          {gCal && gCal.ok === false && (
+            <p className="text-[12px] text-amber-700 mb-2">
+              <i className="ti ti-alert-triangle mr-1" />
+              The Google clinical calendar could not be read, so anything added there is missing from this view. ({gCal.reason})
+            </p>
+          )}
           {!err && data === null && <p className="text-sm text-stone-500">Loading calendar from OpenEMR…</p>}
           {data !== null && (
             <div className="card overflow-x-auto">
@@ -6449,14 +6479,20 @@
                 ))}
               </div>
               <div className="flex">
-                {days.map(d => <DayColumn key={d} ymd={d} appts={appts} onPick={setPicked} />)}
+                {days.map(d => <DayColumn key={d} ymd={d} appts={appts} onPick={setPicked} googleEvents={gEvents} />)}
               </div>
-              {appts.length === 0 && (
+              {appts.length === 0 && gEvents.length === 0 && (
                 <div className="text-center py-8 border-t border-stone-100">
                   <i className="ti ti-calendar-smile text-3xl text-accent" />
                   <p className="text-sm text-stone-500 mt-1">No appointments {mode === 'day' ? 'this day' : 'this week'}{providerFilter ? ' for this provider' : ''}.</p>
                   <p className="text-xs text-stone-400">Book one with New Appointment. It goes straight onto the OpenEMR calendar.</p>
                 </div>
+              )}
+              {appts.length === 0 && gEvents.length > 0 && (
+                /* "No appointments" would be false with events on the day. */
+                <p className="text-center text-xs text-stone-400 py-3 border-t border-stone-100">
+                  No OpenEMR appointments {mode === 'day' ? 'this day' : 'this week'} — the entries above were added in Google Calendar.
+                </p>
               )}
             </div>
           )}
