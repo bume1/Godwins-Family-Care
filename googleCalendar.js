@@ -24,11 +24,35 @@
 // GOOGLE_CALENDAR_IMPERSONATE (falls back to GMAIL_SEND_AS), writing to the
 // calendar GOOGLE_CLINICAL_CALENDAR_ID names. That user must be able to edit
 // that calendar.
+//
+// ── THE PROVIDER'S INVITE (owner, 2026-11-05) ───────────────────────────────
+//
+// Clinicians here mostly hold personal Gmail accounts, so a visit booked in
+// the app sends them a calendar invite at whatever address is on their user
+// record. That invite is a SECOND, DELIBERATELY PHI-FREE EVENT, and the
+// separation is the whole point:
+//
+//   ⚠️ THE WORKSPACE BAA COVERS THE GFC DOMAIN. IT DOES NOT COVER A PERSONAL
+//   @gmail.com. The clinical@ event carries the patient's name and, for a
+//   home visit, their home address; putting that in front of an attendee at
+//   an uncovered mailbox is a disclosure, not a formatting choice. So the
+//   invite carries the time, the kind of visit and "open the app" — the same
+//   rule the patient message notice already follows — and the identifying
+//   half never leaves the covered calendar.
+//
+// The two events therefore live on DIFFERENT CALENDARS: the full one on
+// GOOGLE_CLINICAL_CALENDAR_ID, the invites on GOOGLE_PROVIDER_INVITE_CALENDAR_ID.
+// With no invite calendar set, NO INVITES ARE SENT and the boot log says so —
+// defaulting them onto the clinical calendar would put two rows on every
+// visit for everyone reading it, which is a change nobody asked for.
 // ============================================================================
 
 const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const TIME_ZONE = 'America/New_York';
 const COLLECTION = 'google_calendar_events';
+// The invites are their own map: one visit has a full event AND an invite
+// event, on two calendars, and a single map could only remember one of them.
+const INVITE_COLLECTION = 'google_calendar_invites';
 
 function loadServiceAccount() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
@@ -48,11 +72,19 @@ function calendarStatus() {
   const sa = loadServiceAccount();
   const impersonate = String(process.env.GOOGLE_CALENDAR_IMPERSONATE || process.env.GMAIL_SEND_AS || '').trim();
   const calendarId = String(process.env.GOOGLE_CLINICAL_CALENDAR_ID || '').trim();
+  const inviteCalendarId = String(process.env.GOOGLE_PROVIDER_INVITE_CALENDAR_ID || '').trim();
   const blockers = [];
   if (!sa) blockers.push('GOOGLE_SERVICE_ACCOUNT_KEY is not set (or is not valid JSON)');
   if (!impersonate) blockers.push('GOOGLE_CALENDAR_IMPERSONATE is not set (and GMAIL_SEND_AS is not set to fall back on)');
   if (!calendarId) blockers.push('GOOGLE_CLINICAL_CALENDAR_ID is not set');
-  return { configured: !blockers.length, calendarId: calendarId || null, impersonating: impersonate || null, blockers };
+  return {
+    configured: !blockers.length, calendarId: calendarId || null,
+    impersonating: impersonate || null, blockers,
+    // Invites are their own switch. Deliberately NOT defaulted to the clinical
+    // calendar: that would put a second row on every visit for every reader.
+    inviteCalendarId: inviteCalendarId || null,
+    invitesConfigured: !blockers.length && !!inviteCalendarId
+  };
 }
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -87,6 +119,47 @@ function buildEvent({ eid, title, patientName, date, startTime, durationMinutes,
     extendedProperties: { private: { gfcAppointmentEid: String(eid) } }
   };
 }
+
+// ⚠️ THE PROVIDER'S INVITE, AND IT CARRIES NO PATIENT.
+//
+// Built from a DIFFERENT, NARROWER INPUT than buildEvent on purpose: it is
+// handed only the facts it may show, so there is no patient name or address
+// in scope to leak by a later edit. Passing the whole visit and trusting
+// whoever edits it next to leave two fields out is how a disclosure happens
+// quietly — the same reasoning behind the critical-result notice builder,
+// which takes no arguments at all.
+//
+// Build-enforced in test/google_calendar.test.js: this function may not read
+// patientName or address, and its output may not contain either.
+function buildInvite({ eid, title, date, startTime, durationMinutes, location, providerEmail }) {
+  const start = hhmm(startTime);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !start) return null;
+  if (!isEmail(providerEmail)) return null;
+  const end = addMinutes(start, durationMinutes);
+  const where = LOCATION_LABEL[location] || 'Visit';
+  return {
+    // No patient, so the summary says what KIND of visit it is and nothing
+    // about whose. A bare "Visit" on somebody's calendar is useless.
+    summary: `GFC ${title || where}`,
+    description: [
+      where,
+      'Open the Godwins Family Care app for the patient, the address and the chart.',
+      'This invite deliberately carries no patient details.',
+      'Booked in the app. Change it there, not here.'
+    ].join('\n'),
+    start: { dateTime: `${date}T${start}:00`, timeZone: TIME_ZONE },
+    end: { dateTime: `${date}T${end}:00`, timeZone: TIME_ZONE },
+    attendees: [{ email: String(providerEmail).trim() }],
+    // The clinician cannot change the visit from their own calendar — it is
+    // booked in the app, and a guest edit here would never reach OpenEMR.
+    guestsCanModify: false, guestsCanInviteOthers: false, guestsCanSeeOtherGuests: false,
+    extendedProperties: { private: { gfcAppointmentEid: String(eid), gfcInvite: '1' } }
+  };
+}
+
+// Deliberately strict rather than clever: an address Google refuses fails the
+// whole insert, and a silent non-invite is worse than not offering one.
+const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v == null ? '' : v).trim());
 
 // The Google client, built once per call. Injected in tests.
 let _clientOverride = null;
@@ -137,6 +210,63 @@ async function upsertVisit(db, visit, { previousEid } = {}) {
   }
 }
 
+/**
+ * Invite the provider, on their own email, to a PHI-free copy of the visit.
+ * `sendUpdates: 'all'` is what actually puts the invitation in their inbox —
+ * without it Google creates the event and tells nobody.
+ * Never throws: returns { invited, eventId?, reason? }.
+ */
+async function upsertInvite(db, invite, { previousEid } = {}) {
+  const status = calendarStatus();
+  if (!status.invitesConfigured && !_clientOverride) {
+    return { invited: false, reason: status.configured ? 'no_invite_calendar' : 'not_configured' };
+  }
+  if (!isEmail(invite && invite.providerEmail)) return { invited: false, reason: 'no_provider_email' };
+  try {
+    const body = buildInvite(invite);
+    if (!body) return { invited: false, reason: 'bad_visit' };
+    const cal = getClient();
+    const rows = (await db.get(INVITE_COLLECTION)) || [];
+    const prior = rows.find(r => r.eid === String(previousEid || invite.eid));
+    const calendarId = status.inviteCalendarId;
+    let eventId;
+    if (prior) {
+      const r = await cal.events.patch({ calendarId, eventId: prior.eventId, requestBody: body, sendUpdates: 'all' });
+      eventId = (r && r.data && r.data.id) || prior.eventId;
+    } else {
+      const r = await cal.events.insert({ calendarId, requestBody: body, sendUpdates: 'all' });
+      eventId = r && r.data && r.data.id;
+    }
+    if (!eventId) return { invited: false, reason: 'no_event_id' };
+    const next = rows.filter(r => r.eid !== String(invite.eid) && r.eid !== String(previousEid || ''));
+    next.push({ eid: String(invite.eid), eventId, providerEmail: String(invite.providerEmail).trim(), at: new Date().toISOString() });
+    await db.set(INVITE_COLLECTION, next);
+    return { invited: true, eventId };
+  } catch (e) {
+    console.error('[CALENDAR] invite failed (non-fatal):', e.message);
+    return { invited: false, reason: e.message };
+  }
+}
+
+// A cancelled visit takes the invitation back, and `sendUpdates: 'all'` is
+// what tells the provider it is off. Deleting quietly would leave them
+// driving to a visit nobody cancelled as far as their phone is concerned.
+async function removeInvite(db, eid) {
+  const status = calendarStatus();
+  if (!status.invitesConfigured && !_clientOverride) return { invited: false, reason: 'not_configured' };
+  try {
+    const rows = (await db.get(INVITE_COLLECTION)) || [];
+    const prior = rows.find(r => r.eid === String(eid));
+    if (!prior) return { invited: false, reason: 'no_event' };
+    await getClient().events.delete({ calendarId: status.inviteCalendarId, eventId: prior.eventId, sendUpdates: 'all' });
+    await db.set(INVITE_COLLECTION, rows.filter(r => r.eid !== String(eid)));
+    return { invited: true };
+  } catch (e) {
+    console.error('[CALENDAR] invite removal failed (non-fatal):', e.message);
+    return { invited: false, reason: e.message };
+  }
+}
+
 // A cancelled visit leaves the clinicians' calendar. (OpenEMR keeps its
 // cancelled tombstone with the reason; that is the record, not this.)
 async function removeVisit(db, eid) {
@@ -155,4 +285,8 @@ async function removeVisit(db, eid) {
   }
 }
 
-module.exports = { calendarStatus, buildEvent, addMinutes, upsertVisit, removeVisit, setClientForTests, COLLECTION, CALENDAR_SCOPE };
+module.exports = {
+  calendarStatus, buildEvent, buildInvite, addMinutes, isEmail,
+  upsertVisit, removeVisit, upsertInvite, removeInvite,
+  setClientForTests, COLLECTION, INVITE_COLLECTION, CALENDAR_SCOPE
+};
