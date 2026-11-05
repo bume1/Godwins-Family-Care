@@ -3135,41 +3135,51 @@
     );
 
     // One line on the day's schedule. Picking it fills the Visit Details pane.
+    // A slot reads as "9:30 AM" or "9:30 AM – 10:30 AM", and an exam with no
+    // slot reads as "No set time" rather than being shown a made-up one.
+    // ONE formatter for the Veterans board and My Day: two would drift, and a
+    // 24-hour time on one screen and a 12-hour on the other is how somebody
+    // turns up an hour out.
+    const fmtSlot = (examTime, durationMinutes) => {
+      if (!/^\d{2}:\d{2}$/.test(String(examTime || ''))) return null;
+      const h12 = (mins) => {
+        const h = Math.floor((mins % 1440) / 60), m = mins % 60;
+        return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+      };
+      const start = Number(examTime.slice(0, 2)) * 60 + Number(examTime.slice(3));
+      const len = Number(durationMinutes);
+      return Number.isFinite(len) && len > 0 ? `${h12(start)} – ${h12(start + len)}` : h12(start);
+    };
+
     // Track E — the day's IME exams, beside the clinical visits and labelled.
     // READ ONLY, on purpose: a veteran's status is marked on the Veterans board
     // and nowhere else, so this screen cannot become a second writer of it.
     // An exam has a date and a site and no time of day, so these are grouped by
     // site rather than slotted into the timed list, which would invent a time.
-    const ImeExamBlock = ({ ime, onOpen }) => {
-      if (!ime || !ime.exams || !ime.exams.length) return null;
-      const t = ime.totals || {};
+    // Track E — one IME exam on the clinician's day. Rendered IN TIME ORDER
+    // among the clinical visits (the server's `agenda`), because a provider
+    // with a 9am home visit and an 11am exam reads one day, not two lists.
+    // READ ONLY, on purpose: a veteran's status is marked on the Veterans
+    // board and nowhere else, so this screen cannot become a second writer.
+    const ImeExamRow = ({ e }) => {
       const chip = { expected: 'bg-stone-100 text-stone-600', arrived: 'bg-emerald-100 text-emerald-800',
         seen: 'bg-sky-100 text-sky-800', no_show: 'bg-amber-100 text-amber-800' };
+      const slot = fmtSlot(e.examTime, e.durationMinutes);
       return (
-        <div className="border-t border-stone-100">
-          <div className="flex items-center justify-between gap-2 px-4 lg:px-5 pt-3 pb-1">
-            <div className="text-[12px] font-bold uppercase tracking-wide text-stone-500">
-              <i className="ti ti-shield-check mr-1" />
-              IME Exams · {t.exams} {t.exams === 1 ? 'Veteran' : 'Veterans'}
-            </div>
-            <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" onClick={onOpen}>Open Board</button>
+        <div className="flex items-start gap-3 px-4 lg:px-5 py-3 border-b border-stone-100 last:border-0 bg-cream/40">
+          <div className="w-11 shrink-0 text-[12px] text-stone-500 leading-tight pt-0.5">
+            {slot ? slot.split(' – ')[0] : <span className="text-stone-400">—</span>}
           </div>
-          {(ime.sites || []).map(g => (
-            <div key={g.site} className="px-4 lg:px-5 pb-2">
-              <div className="text-[11.5px] text-stone-400 py-1">{g.siteLabel}</div>
-              {g.exams.map(e => (
-                <div key={e.id} className="flex items-center justify-between gap-2 py-1 text-[13px]">
-                  <span className="truncate">
-                    {e.lastName}, {e.firstName}
-                    {e.providerName && <span className="text-stone-400"> · {e.providerName}</span>}
-                  </span>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${chip[e.status] || chip.expected}`}>
-                    {e.statusLabel}
-                  </span>
-                </div>
-              ))}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[13.5px] font-semibold text-primary truncate">{e.lastName}, {e.firstName}</span>
+              <span className="rounded px-1.5 py-0.5 text-[10.5px] font-bold uppercase tracking-wide bg-primary/10 text-primary">IME</span>
+              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${chip[e.status] || chip.expected}`}>{e.statusLabel}</span>
             </div>
-          ))}
+            <div className="text-[12px] text-stone-500">
+              {e.siteLabel}{slot ? ` · ${slot}` : ' · No set time'}{e.providerName ? ` · ${e.providerName}` : ''}
+            </div>
+          </div>
         </div>
       );
     };
@@ -3309,6 +3319,13 @@
         try { wide = window.matchMedia('(min-width: 1280px)').matches; } catch { wide = false; }
         setSelEid(wide ? day.visits[0].eid : null);
       }, [day]);
+
+      // The two lists the agenda points into, by id. The page never sorts or
+      // merges them itself: one ordering, computed on the server.
+      const exams = (day && day.ime && day.ime.exams) || [];
+      const agenda = (day && day.agenda) || [];
+      const examById = useMemo(() => new Map(exams.map(e => [String(e.id), e])), [day]);
+      const visitById = useMemo(() => new Map((day && day.visits ? day.visits : []).map(v => [String(v.eid), v])), [day]);
 
       // ONE Start Visit (owner, 2026-11-04): it records the start time AND
       // opens the note for this appointment — the visit's own note if it has
@@ -3460,22 +3477,33 @@
               {mode === 'list' && (
                 <div>
                   {!day && !err && <p className="text-sm text-stone-500 px-5 py-6">Loading your day…</p>}
-                  {day && visits.length === 0 && (
+                  {day && visits.length === 0 && exams.length === 0 && (
                     <div className="px-5 py-10 text-center">
                       <i className="ti ti-calendar-off text-3xl text-stone-300" />
                       {/* "Nothing today" would be false on a day carrying IME
                           exams, so the sentence narrows to the clinical half. */}
-                      <p className="text-sm text-stone-500 mt-2">
-                        {day.ime && day.ime.totals && day.ime.totals.exams > 0
-                          ? 'No clinical visits scheduled for this day.'
-                          : 'No visits scheduled for this day.'}
-                      </p>
+                      <p className="text-sm text-stone-500 mt-2">No visits scheduled for this day.</p>
                     </div>
                   )}
-                  {visits.map(v => (
-                    <DayScheduleRow key={v.eid} v={v} on={v.eid === selEid} onSelect={(vv) => setSelEid(vv.eid)} />
-                  ))}
-                  {day && <ImeExamBlock ime={day.ime} onOpen={() => onGo && onGo('veterans')} />}
+                  {day && visits.length === 0 && exams.length > 0 && (
+                    /* "Nothing today" would be false on a day carrying exams,
+                       so the sentence narrows to the clinical half. */
+                    <p className="text-[13px] text-stone-500 px-4 lg:px-5 pt-4 pb-1">No clinical visits scheduled for this day.</p>
+                  )}
+                  {/* The SERVER decides the reading order over both lines
+                      (myDay.buildAgenda) and hands back pointers; the rows
+                      themselves still live in `visits` and `ime.exams`, so
+                      there is one copy of each and the page sorts nothing. */}
+                  {agenda.map(a => (a.kind === 'ime'
+                    ? <ImeExamRow key={`ime:${a.id}`} e={examById.get(String(a.id))} />
+                    : <DayScheduleRow key={`v:${a.id}`} v={visitById.get(String(a.id))}
+                        on={a.id === selEid} onSelect={(vv) => setSelEid(vv.eid)} />))}
+                  {exams.length > 0 && (
+                    <div className="px-4 lg:px-5 py-2.5 border-t border-stone-100 flex items-center justify-between gap-2">
+                      <span className="text-[12px] text-stone-500">Mark a veteran seen on the Veterans board.</span>
+                      <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" onClick={() => onGo && onGo('veterans')}>Open Board</button>
+                    </div>
+                  )}
                 </div>
               )}
               {day && (
@@ -3487,7 +3515,7 @@
                       : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
                   </span>
                   <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
-                  {day.ime && day.ime.totals && day.ime.totals.exams > 0 && (
+                  {day.ime && day.ime.totals.exams > 0 && (
                     <span><b>{day.ime.totals.exams}</b> IME {day.ime.totals.exams === 1 ? 'exam' : 'exams'}</span>
                   )}
                 </div>
@@ -7531,7 +7559,7 @@
     };
     const fmtYmd = (ymd) => { const [y, m, d] = String(ymd || '').split('-'); return y ? `${m}/${d}/${y}` : '—'; };
     const VeteranAddForm = ({ date, providers, office, onAdded }) => {
-      const blank = { firstName: '', lastName: '', dob: '', examDate: date, providerUserId: '' };
+      const blank = { firstName: '', lastName: '', dob: '', examDate: date, examTime: '', durationMinutes: '', providerUserId: '' };
       const [f, setF] = useState(blank);
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState('');
@@ -7541,7 +7569,10 @@
       const submit = (e) => {
         e.preventDefault(); setBusy(true); setErr(''); setFe({});
         authedFetch('/api/veterans/roster', { method: 'POST', body: JSON.stringify(f) })
-          .then(() => { setF({ ...blank, examDate: f.examDate, providerUserId: f.providerUserId }); onAdded(); })
+          // The date, the provider and the LENGTH are kept for the next
+          // veteran — an exam day is a run of the same-shaped bookings — but
+          // the start time is cleared, or the next one silently stacks on it.
+          .then(() => { setF({ ...blank, examDate: f.examDate, providerUserId: f.providerUserId, durationMinutes: f.durationMinutes }); onAdded(); })
           .catch(e2 => { setErr(e2.message); setFe((e2.data && e2.data.fieldErrors) || {}); })
           .finally(() => setBusy(false));
       };
@@ -7550,11 +7581,13 @@
         <form onSubmit={submit} className="card p-4 mb-5">
           <h3 className="text-[15px] font-semibold text-primary mb-3">Add Veteran</h3>
           {err && <div className="text-sm text-red-600 mb-2">{err}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <label className="text-[12px] text-stone-600">First name<input className={inp} value={f.firstName} onChange={set('firstName')} />{fe.firstName && <span className="text-red-600">{fe.firstName}</span>}</label>
             <label className="text-[12px] text-stone-600">Last name<input className={inp} value={f.lastName} onChange={set('lastName')} />{fe.lastName && <span className="text-red-600">{fe.lastName}</span>}</label>
             <label className="text-[12px] text-stone-600">Date of birth<input type="date" className={inp} value={f.dob} onChange={set('dob')} />{fe.dob && <span className="text-red-600">{fe.dob}</span>}</label>
             <label className="text-[12px] text-stone-600">Exam date<input type="date" className={inp} value={f.examDate} onChange={set('examDate')} />{fe.examDate && <span className="text-red-600">{fe.examDate}</span>}</label>
+            <label className="text-[12px] text-stone-600">Start time <span className="text-stone-400">(optional)</span><input type="time" className={inp} value={f.examTime} onChange={set('examTime')} />{fe.examTime && <span className="text-red-600">{fe.examTime}</span>}</label>
+            <label className="text-[12px] text-stone-600">Length <span className="text-stone-400">(minutes)</span><input type="number" min="1" step="5" className={inp} value={f.durationMinutes} onChange={set('durationMinutes')} placeholder="60" />{fe.durationMinutes && <span className="text-red-600">{fe.durationMinutes}</span>}</label>
             {office ? (
               <label className="text-[12px] text-stone-600">Provider
                 <select className={inp} value={f.providerUserId} onChange={set('providerUserId')}>
@@ -7681,7 +7714,15 @@
                         <span className="text-[15px] font-semibold text-primary">{r.firstName} {r.lastName}</span>
                         <span className={`pill ${VETERAN_STATUS_PILL[r.status] || ''}`}>{r.statusLabel}</span>
                       </div>
-                      <div className="text-[12.5px] text-stone-600">DOB {fmtYmd(r.dob)}{d.office && r.providerName ? ` · ${r.providerName}` : ''}</div>
+                      <div className="text-[12.5px] text-stone-600">
+                        {/* The slot first: on an exam day it is what a person
+                            reads down the list for. "No set time" rather than
+                            a blank, which reads as a missing value. */}
+                        <span className={fmtSlot(r.examTime, r.durationMinutes) ? 'font-semibold text-primary' : 'text-stone-400'}>
+                          {fmtSlot(r.examTime, r.durationMinutes) || 'No set time'}
+                        </span>
+                        {' · '}DOB {fmtYmd(r.dob)}{d.office && r.providerName ? ` · ${r.providerName}` : ''}
+                      </div>
                       {r.arrivedAt && (
                         <div className="text-[12.5px] text-stone-700 mt-0.5">
                           Signed in {fmtTs(r.arrivedAt)}

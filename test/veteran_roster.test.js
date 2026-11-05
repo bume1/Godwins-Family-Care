@@ -52,7 +52,7 @@ test('input validation: real dates, DOB in the past, required fields', () => {
   assert.ok(v.normalizeRosterInput({ lastName: 'B', dob: '1970-01-01', examDate: TODAY }, { today: TODAY }).fieldErrors.firstName);
   assert.ok(v.normalizeRosterInput({ firstName: 'A', lastName: 'B', dob: '1970-01-01' }, { today: TODAY }).fieldErrors.examDate);
   const ok = v.normalizeRosterInput({ firstName: '  Ann  ', lastName: 'Lee', dob: '1970-01-01', examDate: TODAY }, { today: TODAY });
-  assert.deepStrictEqual(ok.value, { firstName: 'Ann', lastName: 'Lee', dob: '1970-01-01', examDate: TODAY, site: 'savannah' });
+  assert.deepStrictEqual(ok.value, { firstName: 'Ann', lastName: 'Lee', dob: '1970-01-01', examDate: TODAY, site: 'savannah', examTime: null, durationMinutes: null });
 });
 
 test('a provider edits only their own rows; the office edits any', () => {
@@ -243,24 +243,38 @@ test("My Day's exam row carries no DOB and no arrival contact details", () => {
   assert.ok('dob' in v.publicRow(row({}), null), 'the roster board still needs the DOB');
 });
 
-test('exams are grouped by site and counted by status, with no time invented', () => {
+test('exams are counted by status and keep the roster\'s own order', () => {
   const e = (o) => v.examDayRow(row(o), null);
   const d = myDay.imeDay([
-    e({ id: '1', status: 'expected' }), e({ id: '2', status: 'arrived' }),
+    e({ id: '1', status: 'expected', examTime: '09:00' }), e({ id: '2', status: 'arrived' }),
     e({ id: '3', status: 'seen' }), e({ id: '4', status: 'no_show', site: 'atlanta' })
   ]);
   assert.deepStrictEqual(d.totals, { exams: 4, expected: 1, arrived: 1, seen: 1, noShow: 1 });
-  // TWO sites in the fixture on purpose: with every exam at one site, grouping
-  // and one flat list are indistinguishable and the assertion proves nothing.
-  assert.deepStrictEqual(d.sites.map(g => [g.site, g.exams.length]), [['savannah', 3], ['atlanta', 1]]);
-  assert.strictEqual(d.sites[0].siteLabel, 'Savannah clinic');
-  // A site the catalog does not name falls back to its own key rather than
-  // rendering as blank.
-  assert.strictEqual(d.sites[1].siteLabel, 'atlanta');
-  // A roster row has no time of day, so nothing here may claim one.
-  assert.ok(d.exams.every(x => !('time' in x) && !('startTime' in x)));
+  // The roster already sorts by day, then time, then site, then surname. A
+  // second sort here is how the day and the board start disagreeing.
+  assert.deepStrictEqual(d.exams.map(x => x.id), ['1', '2', '3', '4']);
+  assert.strictEqual(d.exams[0].siteLabel, 'Savannah clinic');
+  // A site the catalog does not name falls back to its own key, never blank.
+  assert.strictEqual(d.exams[3].siteLabel, 'atlanta');
   assert.deepStrictEqual(myDay.imeDay([]).totals.exams, 0);
   assert.deepStrictEqual(myDay.imeDay(undefined).exams, []);
+});
+
+test('the day reads in one order over both lines, as POINTERS not copies', () => {
+  const a = myDay.buildAgenda({
+    visits: [{ eid: 'v-am', time: '09:00' }, { eid: 'v-pm', time: '14:00' }, { eid: 'v-none', time: null }],
+    exams: [{ id: 'e-mid', examTime: '11:00' }, { id: 'e-none', examTime: null }, { id: 'e-am', examTime: '09:00' }]
+  });
+  assert.deepStrictEqual(a.map(x => `${x.kind}:${x.id}`),
+    ['visit:v-am', 'ime:e-am', 'ime:e-mid', 'visit:v-pm', 'visit:v-none', 'ime:e-none']);
+  // ⚠️ UNTIMED SORTS LAST. The first draft used a '~' sentinel with
+  // localeCompare and put every untimed row at the HEAD of the day, because
+  // ICU collation sorts punctuation before digits. Caught by running it.
+  assert.deepStrictEqual(a.slice(-2).map(x => x.id), ['v-none', 'e-none']);
+  // Pointers only: the rows live in `visits` and `ime.exams`, so there is one
+  // copy of each and the order cannot drift from what it orders.
+  assert.deepStrictEqual([...new Set(a.flatMap(Object.keys))], ['kind', 'id', 'time']);
+  assert.deepStrictEqual(myDay.buildAgenda({}), []);
 });
 
 test('an exam never reaches a clinical figure: not the totals, the plot or the route', () => {
@@ -299,19 +313,143 @@ test('server: My Day scopes exams by the ROSTER\'s own rule, not a second copy',
   assert.ok(!/db\.set\('veteran_roster'/.test(route), 'My Day is a read of the exam line, never a writer');
 });
 
-test('page: the IME block is read-only and the empty-day sentence narrows', () => {
+test('page: the exam rows are read-only and the empty-day sentence narrows', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
-  const i = src.indexOf('const ImeExamBlock');
-  assert.ok(i > 0, 'ImeExamBlock not found');
-  assert.ok(/^    const ImeExamBlock/m.test(src), 'must sit at module scope (react_input_focus)');
+  const i = src.indexOf('const ImeExamRow');
+  assert.ok(i > 0, 'ImeExamRow not found');
+  assert.ok(/^    const ImeExamRow/m.test(src), 'must sit at module scope (react_input_focus)');
   const comp = src.slice(i, src.indexOf('const DayScheduleRow', i));
   // Status is marked on the Veterans board and nowhere else, or this screen
   // becomes a second writer of it.
-  assert.ok(!/veterans\/roster/.test(comp), 'the block must not call a roster route');
-  assert.ok(!/method: 'POST'/.test(comp), 'the block must not write');
-  assert.ok(/onOpen/.test(comp), 'it links to the board, which is where status is marked');
+  assert.ok(!/veterans\/roster/.test(comp), 'the row must not call a roster route');
+  assert.ok(!/method: 'POST'/.test(comp), 'the row must not write');
+  assert.ok(/Open Board/.test(src), 'it links to the board, which is where status is marked');
   // "No visits scheduled" is false on a day that carries exams.
   assert.ok(/No clinical visits scheduled for this day/.test(src),
     'the empty-day sentence must narrow when exams are on the day');
-  assert.ok(/ImeExamBlock ime=\{day\.ime\}/.test(src), 'the block must be rendered from the served day');
+  // THE PAGE SORTS NOTHING. One ordering, computed on the server, or the day
+  // and the board disagree about what comes first.
+  assert.ok(/agenda\.map\(a =>/.test(src), 'the day must render from the served agenda');
+  const view = src.slice(src.indexOf('const MyDayView'), src.indexOf('const VisitDetails'));
+  assert.ok(!/\.sort\(/.test(view), 'My Day must not re-sort the day it was served');
+  // ONE slot formatter for both screens: a 24-hour time on one and a 12-hour
+  // on the other is how somebody turns up an hour out.
+  assert.strictEqual((src.match(/const fmtSlot = /g) || []).length, 1, 'exactly one slot formatter');
+  assert.ok(/^    const fmtSlot = /m.test(src), 'and it sits at module scope');
+  // AND BOTH SCREENS ACTUALLY CALL IT. Asserting the formatter exists proves
+  // nothing about the rows: a row rendering the stored `examTime` straight
+  // shows a clinician "14:00" on a screen where every other time reads "2:00
+  // PM", which is how somebody turns up an hour out. A mutation that swapped
+  // the call for the raw value survived until this line existed.
+  assert.ok(/fmtSlot\(e\.examTime, e\.durationMinutes\)/.test(comp),
+    'the My Day exam row must render through the shared formatter');
+  const board = src.slice(src.indexOf('const VeteransView'), src.indexOf('const OverdueOrders'));
+  assert.ok(/fmtSlot\(r\.examTime, r\.durationMinutes\)/.test(board),
+    'the Veterans board must render through the same formatter');
+  assert.ok(/No set time/.test(comp) && /No set time/.test(board),
+    'an exam with no slot says so on both screens rather than showing a blank');
+});
+
+// ── A time slot on an exam (owner, 2026-11-04) ─────────────────────────────
+
+test('⚠️ a time NEVER narrows the sign-in match: early, late and wrong-hour all match', () => {
+  // The owner's own concern, 2026-11-04, and the thing most likely to break:
+  // a veteran who turns up at 08:40 for a 09:00 exam is the person we are
+  // expecting. Matching on the slot would read as "we don't have you down", at
+  // an iPad, with nobody standing there to ask.
+  const booked = row({ id: 't1', firstName: 'Ann', lastName: 'Lee', dob: '1970-01-01', examTime: '09:00', durationMinutes: 60 });
+  const checkin = { firstName: 'Ann', lastName: 'Lee', dob: '1970-01-01' };
+  assert.strictEqual(v.matchCheckin([booked], checkin, TODAY).state, 'matched');
+  // The same veteran, same day, whatever the clock says now — there is no
+  // "now" in the call at all, which is what makes this true by construction.
+  assert.strictEqual(v.candidatesFor([booked], TODAY).length, 1);
+  // And an untimed row still matches exactly as it did before slots existed.
+  const untimed = row({ id: 't2', firstName: 'Ann', lastName: 'Lee', dob: '1970-01-01' });
+  assert.strictEqual(v.matchCheckin([untimed], checkin, TODAY).state, 'matched');
+  // Build-enforced: neither function may learn about the time.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'veteranRoster.js'), 'utf8');
+  const slice = src.slice(src.indexOf('function candidatesFor'), src.indexOf('// ── the window a roster read covers'));
+  assert.ok(slice.length > 200, 'match slice looks wrong');
+  assert.ok(!/examTime|durationMinutes|minutesOfDay|occupies/.test(slice),
+    'the sign-in match is keyed on the DAY — a time here turns an early arrival into an unmatched veteran');
+});
+
+test('a slot is optional, validated when typed, and a length needs a start', () => {
+  const base = { firstName: 'A', lastName: 'B', dob: '1970-01-01', examDate: TODAY };
+  const at = (o) => v.normalizeRosterInput({ ...base, ...o }, { today: TODAY });
+  assert.strictEqual(at({}).value.examTime, null, 'an untimed exam is still a real booking');
+  assert.strictEqual(at({ examTime: '09:30', durationMinutes: 60 }).value.examTime, '09:30');
+  assert.strictEqual(at({ examTime: '09:30', durationMinutes: '60' }).value.durationMinutes, 60);
+  assert.strictEqual(at({ examTime: '' }).value.examTime, null, 'a cleared time is not an error');
+  // A time that was TYPED and is not a time is a slip, not a blank.
+  assert.ok(at({ examTime: '9:30' }).fieldErrors.examTime, 'needs two-digit hours');
+  assert.ok(at({ examTime: '24:00' }).fieldErrors.examTime);
+  assert.ok(at({ examTime: '09:60' }).fieldErrors.examTime);
+  assert.ok(at({ examTime: '09:00', durationMinutes: 0 }).fieldErrors.durationMinutes);
+  assert.ok(at({ examTime: '09:00', durationMinutes: 1.5 }).fieldErrors.durationMinutes);
+  assert.ok(at({ examTime: '09:00', durationMinutes: v.MAX_EXAM_MINUTES + 1 }).fieldErrors.durationMinutes);
+  // Refused BY NAME rather than ignored: a length with no start is a half
+  // -filled slot the day cannot place.
+  assert.match(at({ durationMinutes: 60 }).fieldErrors.durationMinutes, /start time/);
+});
+
+test('one provider cannot examine two veterans at once, and a length is never guessed', () => {
+  const booked = [row({ id: 'a', providerUserId: 'p1', examTime: '09:00', durationMinutes: 60 })];
+  const at = (o) => v.slotClash(booked, { examDate: TODAY, providerUserId: 'p1', ...o });
+  assert.ok(at({ examTime: '09:00' }), 'the same minute is a clash even with no length on either side');
+  assert.ok(at({ examTime: '09:30' }), 'inside the hour is a clash');
+  assert.ok(!at({ examTime: '10:00' }), 'the minute it ends is free');
+  assert.ok(!at({ examTime: '08:00' }));
+  assert.ok(!at({ examTime: '09:30', providerUserId: 'p2' }), 'another provider is another room');
+  assert.ok(!at({ examTime: '09:30', examDate: v.isoDate('2026-12-01') }), 'another day is not a clash');
+  assert.ok(!at({}), 'an untimed exam occupies no slot and clashes with nothing');
+  assert.ok(!v.slotClash(booked, { id: 'a', examDate: TODAY, providerUserId: 'p1', examTime: '09:00' }, { exceptId: 'a' }),
+    'editing a row must not clash with itself');
+  assert.ok(!v.slotClash([row({ id: 'r', providerUserId: 'p1', examTime: '09:00', durationMinutes: 60, removedAt: new Date().toISOString() })],
+    { examDate: TODAY, providerUserId: 'p1', examTime: '09:00' }), 'a removed exam frees its slot');
+  // TWO ROWS WITH NO LENGTH 30 MINUTES APART DO NOT CLASH. The app cannot know
+  // whether a 09:00 exam runs past 09:30, and inventing a default length would
+  // refuse a real booking on the strength of a number nobody entered.
+  assert.ok(!v.slotClash([row({ id: 'n', providerUserId: 'p1', examTime: '09:00' })],
+    { examDate: TODAY, providerUserId: 'p1', examTime: '09:30' }));
+});
+
+test('a day reads in time order, and an untimed exam sorts AFTER the timed ones', () => {
+  const rows = [
+    row({ id: 'none', lastName: 'Adams' }),
+    row({ id: 'pm', lastName: 'Baker', examTime: '14:00' }),
+    row({ id: 'am', lastName: 'Zane', examTime: '09:00' })
+  ];
+  // Surnames fight the clock on purpose: Adams sorts first alphabetically and
+  // must still come last, and Zane sorts last and must come first.
+  assert.deepStrictEqual(
+    v.rowsInRange(rows, { from: TODAY, to: TODAY }, {}).map(r => r.id),
+    ['am', 'pm', 'none']);
+});
+
+test('the slot travels to both screens, and My Day still carries no DOB', () => {
+  const r = row({ examTime: '09:30', durationMinutes: 45 });
+  assert.strictEqual(v.publicRow(r, null).examTime, '09:30');
+  assert.strictEqual(v.publicRow(r, null).durationMinutes, 45);
+  const d = v.examDayRow(r, null);
+  assert.strictEqual(d.examTime, '09:30');
+  assert.strictEqual(d.durationMinutes, 45);
+  assert.ok(!('dob' in d), 'the slot must not have smuggled the rest of the row along with it');
+});
+
+test('server: a double-booked slot is refused at BOTH write doors, before the write', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const post = src.slice(src.indexOf("app.post('/api/veterans/roster'"), src.indexOf("app.put('/api/veterans/roster/:id'"));
+  const put = src.slice(src.indexOf("app.put('/api/veterans/roster/:id'"), src.indexOf("app.delete('/api/veterans/roster/:id'"));
+  for (const [name, route] of [['post', post], ['put', put]]) {
+    assert.ok(route.length > 400 && route.length < 4000, `${name} slice looks wrong`);
+    assert.ok(/vetRoster\.slotClash\(/.test(route), `${name} must check the slot`);
+    assert.ok(/VETERAN_SLOT_TAKEN/.test(route), `${name} must name the refusal`);
+    // The refusal names WHO holds the slot: "that time is taken" without
+    // saying by whom is a refusal nobody can act on.
+    assert.ok(/clash\.firstName/.test(route), `${name} must name the veteran already booked`);
+    // Before the write, or a refused booking leaves a row behind.
+    assert.ok(route.indexOf('slotClash') < route.indexOf("db.set('veteran_roster'"), `${name} must refuse before writing`);
+  }
+  assert.ok(/exceptId: rows\[i\]\.id/.test(put), 'editing a row must not clash with itself');
 });

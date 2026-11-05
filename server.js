@@ -4186,6 +4186,11 @@ app.post('/api/veterans/roster', authenticateToken, requireVeteranStaff, async (
     }
     const row = { id: uuidv4(), ...n.value, providerUserId, status: 'expected', createdAt: new Date().toISOString(), createdById: req.user.id, createdByName: req.user.name || req.user.email };
     const rows = (await db.get('veteran_roster')) || [];
+    // One provider cannot examine two veterans at once. Refused BEFORE the
+    // write and NAMING the veteran already in the slot, because "that time is
+    // taken" without saying by whom is a refusal nobody can act on.
+    const clash = vetRoster.slotClash(rows, row);
+    if (clash) return res.status(409).json({ error: `${clash.firstName} ${clash.lastName} is already booked at that time.`, code: 'VETERAN_SLOT_TAKEN', fieldErrors: { examTime: `Taken by ${clash.firstName} ${clash.lastName}.` } });
     rows.push(row);
     await db.set('veteran_roster', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_added', 'veteran_roster', row.id, { examDate: row.examDate, providerUserId });
@@ -4210,7 +4215,10 @@ app.put('/api/veterans/roster/:id', authenticateToken, requireVeteranStaff, asyn
       if (!veteranProviders(users).some(u => u.id === req.body.providerUserId)) return res.status(400).json({ error: 'Please choose a provider.', code: 'VETERAN_INVALID', fieldErrors: { providerUserId: 'Please choose a provider.' } });
       providerUserId = req.body.providerUserId;
     }
-    rows[i] = { ...rows[i], ...n.value, providerUserId, updatedAt: new Date().toISOString(), updatedById: req.user.id };
+    const next = { ...rows[i], ...n.value, providerUserId };
+    const clash = vetRoster.slotClash(rows, next, { exceptId: rows[i].id });
+    if (clash) return res.status(409).json({ error: `${clash.firstName} ${clash.lastName} is already booked at that time.`, code: 'VETERAN_SLOT_TAKEN', fieldErrors: { examTime: `Taken by ${clash.firstName} ${clash.lastName}.` } });
+    rows[i] = { ...next, updatedAt: new Date().toISOString(), updatedById: req.user.id };
     await db.set('veteran_roster', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'veteran_updated', 'veteran_roster', rows[i].id, { providerUserId });
     res.json({ row: vetRoster.publicRow(rows[i], (users.find(u => u.id === providerUserId) || {}).name) });

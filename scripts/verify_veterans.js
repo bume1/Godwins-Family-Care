@@ -202,7 +202,7 @@ const CM = { id: 'cm_v', role: 'caseManager', hasClinicalAccess: true, clinicalR
   // This section seeds its OWN rows for today rather than reading whatever the
   // earlier sections happened to leave behind: a probe that assumes a world it
   // did not create is reporting on a world that is not production.
-  await call('POST', '/api/veterans/roster', at, { firstName: 'Nina', lastName: 'Okafor', dob: '1961-02-02', examDate: today, providerUserId: DOC1.id });
+  await call('POST', '/api/veterans/roster', at, { firstName: 'Nina', lastName: 'Okafor', dob: '1961-02-02', examDate: today, examTime: '11:00', durationMinutes: 60, providerUserId: DOC1.id });
   await call('POST', '/api/veterans/roster', at, { firstName: 'Carl', lastName: 'Reyes', dob: '1958-07-07', examDate: today, providerUserId: DOC2.id });
 
   r = await call('GET', `/api/clinical/my-day?date=${today}`, at);
@@ -237,13 +237,69 @@ const CM = { id: 'cm_v', role: 'caseManager', hasClinicalAccess: true, clinicalR
 
   r = await call('GET', `/api/clinical/my-day?date=${practiceTime.addDays(today, 1)}`, at);
   check('a day with no exams reports zero rather than yesterday\'s list',
-    r.status === 200 && r.body.ime.totals.exams === 0 && r.body.ime.sites.length === 0);
+    r.status === 200 && r.body.ime.totals.exams === 0 && r.body.ime.exams.length === 0 && r.body.agenda.length === 0);
 
   // Status is marked on the Veterans board, and My Day is a read of it.
   const beforeSeen = (STORE.get('veteran_roster') || []).filter(x => x.status === 'seen').length;
   await call('GET', `/api/clinical/my-day?date=${today}`, at);
   check('reading My Day changes no roster row',
     (STORE.get('veteran_roster') || []).filter(x => x.status === 'seen').length === beforeSeen);
+
+  // ── A time slot on an exam (owner, 2026-11-04) ──────────────────────────
+  console.log('\nThe exam time slot');
+
+  r = await call('POST', '/api/veterans/roster', at, { firstName: 'Mara', lastName: 'Quinn', dob: '1965-05-05', examDate: today, examTime: '11:30', providerUserId: DOC1.id });
+  check('a second exam inside an existing slot is refused, naming who holds it',
+    r.status === 409 && r.body.code === 'VETERAN_SLOT_TAKEN' && /Nina Okafor/.test(r.body.error || ''),
+    JSON.stringify(r.body));
+  check('and the refused booking left no row behind',
+    !(STORE.get('veteran_roster') || []).some(x => x.lastName === 'Quinn'));
+
+  r = await call('POST', '/api/veterans/roster', at, { firstName: 'Mara', lastName: 'Quinn', dob: '1965-05-05', examDate: today, examTime: '13:00', durationMinutes: 45, providerUserId: DOC1.id });
+  const quinnId = r.body.row && r.body.row.id;
+  check('a free slot books, and the slot comes back on the row',
+    r.status === 200 && r.body.row.examTime === '13:00' && r.body.row.durationMinutes === 45,
+    JSON.stringify(r.body.row || r.body));
+
+  r = await call('PUT', `/api/veterans/roster/${quinnId}`, at, { examTime: '13:00', durationMinutes: 30 });
+  check('shortening an exam does not clash with itself', r.status === 200 && r.body.row.durationMinutes === 30, JSON.stringify(r.body));
+
+  r = await call('POST', '/api/veterans/roster', at, { firstName: 'Ola', lastName: 'Diaz', dob: '1959-09-09', examDate: today, examTime: '11:30', providerUserId: DOC2.id });
+  check('another provider may use the same minute — it is another room', r.status === 200, JSON.stringify(r.body));
+
+  r = await call('POST', '/api/veterans/roster', at, { firstName: 'Bad', lastName: 'Slot', dob: '1959-09-09', examDate: today, durationMinutes: 60, providerUserId: DOC1.id });
+  check('a length with no start time is refused by name',
+    r.status === 400 && /start time/i.test((r.body.fieldErrors || {}).durationMinutes || ''), JSON.stringify(r.body));
+
+  // ⚠️ THE OWNER'S OWN CONCERN, 2026-11-04: the slot must not narrow the match.
+  r = await call('GET', `/api/veterans/roster?date=${today}`, at);
+  const timed = (r.body.rows || []).filter(x => x.examTime);
+  check('the exam day reads in time order, untimed last',
+    r.status === 200 && timed.length >= 2 &&
+    r.body.rows.findIndex(x => !x.examTime) > r.body.rows.findIndex(x => x.examTime === '11:00'),
+    JSON.stringify(r.body.rows.map(x => `${x.lastName}@${x.examTime || '-'}`)));
+
+  r = await call('POST', '/api/veterans/check-in', null, { firstName: 'Nina', lastName: 'Okafor', dob: '1961-02-02', phone: '(912) 555-0199' });
+  await wait(200);
+  const nina = (STORE.get('veteran_roster') || []).find(x => x.lastName === 'Okafor');
+  check('⚠️ a veteran with an 11:00 slot signing in at any hour still matches',
+    r.status === 200 && nina && nina.status === 'arrived' && !!nina.checkinId,
+    JSON.stringify({ status: nina && nina.status, checkinId: !!(nina && nina.checkinId) }));
+  check('and the slot survived the sign-in untouched',
+    nina && nina.examTime === '11:00' && nina.durationMinutes === 60,
+    JSON.stringify({ examTime: nina && nina.examTime, durationMinutes: nina && nina.durationMinutes }));
+
+  r = await call('GET', `/api/clinical/my-day?date=${today}`, at);
+  const ag = r.body.agenda || [];
+  check('My Day serves one reading order over both lines, as pointers',
+    r.status === 200 && ag.length === r.body.ime.totals.exams + r.body.visits.length &&
+    ag.every(x => Object.keys(x).sort().join(',') === 'id,kind,time'),
+    JSON.stringify(ag.slice(0, 3)));
+  const timedAg = ag.filter(x => x.time);
+  check('the agenda is in time order with the untimed last',
+    timedAg.map(x => x.time).join('|') === timedAg.map(x => x.time).sort().join('|') &&
+    (ag.findIndex(x => !x.time) === -1 || ag.findIndex(x => !x.time) >= timedAg.length),
+    JSON.stringify(ag.map(x => `${x.kind}@${x.time || '-'}`)));
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);
   process.exit(fail ? 1 : 0);
