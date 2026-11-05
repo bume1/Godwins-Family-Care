@@ -11176,10 +11176,13 @@ const formatVisitWhen = (date, startTime) => {
 // shared formatter used by booking, reschedule, cancel AND the reminder, because
 // four copies of "how a clinician is described to a patient" is four copies that
 // drift silently.
-const clinicianNameForProviderId = async (providerId) => {
+const clinicianForProviderId = async (providerId) => {
   if (!providerId) return null;
   const users = await getUsers();
-  const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
+  return users.find(x => x && String(x.openEmrProviderId || '') === String(providerId)) || null;
+};
+const clinicianNameForProviderId = async (providerId) => {
+  const u = await clinicianForProviderId(providerId);
   return u ? visitReminders.visitClinicianLabel(u) : null;
 };
 
@@ -11670,16 +11673,33 @@ const calendarPatientFacts = async (clientId) => {
     : (a ? String(a) : null);
   return { patientName: u.preferredName ? `${u.preferredName} ${String(u.name || '').split(' ').slice(-1)[0]}` : u.name, address };
 };
+// ONE FUNCTION DOES BOTH HALVES, so a route cannot write the full event and
+// forget the provider's invite (or the reverse). Both are best-effort: a
+// Google failure never undoes a visit that is already on OpenEMR's calendar.
+//
+// ⚠️ THE TWO EVENTS ARE NOT THE SAME EVENT. The full one carries the patient
+// and the address and stays on the BAA-covered clinical calendar; the invite
+// goes to the clinician's own address, which is usually a personal Gmail
+// OUTSIDE the BAA, and carries neither. See googleCalendar.js.
 const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, startTime, durationMinutes, location, providerId, status }) => {
   try {
     const facts = await calendarPatientFacts(clientId);
+    const clinician = providerId ? await clinicianForProviderId(providerId) : null;
     const r = await googleCalendar.upsertVisit(db, {
       eid, clientId, title, date, startTime, durationMinutes, location, status,
       patientName: facts.patientName, address: facts.address,
-      clinicianName: providerId ? await clinicianNameForProviderId(providerId) : null
+      clinicianName: clinician ? visitReminders.visitClinicianLabel(clinician) : null
     }, { previousEid });
     if (!r.synced && r.reason !== 'not_configured') console.warn(`[CALENDAR] visit ${eid} not mirrored: ${r.reason}`);
-    return r;
+    // The invite is handed ONLY what it may show — no clientId, no facts.
+    const inv = await googleCalendar.upsertInvite(db, {
+      eid, title, date, startTime, durationMinutes, location,
+      providerEmail: clinician ? clinician.email : null
+    }, { previousEid });
+    if (!inv.invited && !['not_configured', 'no_invite_calendar', 'no_provider_email'].includes(inv.reason)) {
+      console.warn(`[CALENDAR] visit ${eid} invite not sent: ${inv.reason}`);
+    }
+    return { ...r, invite: inv };
   } catch (e) { console.warn('[CALENDAR] mirror error (non-fatal):', e.message); return { synced: false }; }
 };
 
@@ -11885,6 +11905,9 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
     }
     // A cancelled visit leaves the clinicians' Google calendar.
     await googleCalendar.removeVisit(db, String(row.pc_eid));
+    // And take the invitation back, so the clinician's own calendar does not
+    // keep a visit that was called off.
+    await googleCalendar.removeInvite(db, String(row.pc_eid));
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -31460,6 +31483,9 @@ app.listen(PORT, () => {
   console.log(calState.configured
     ? `📅 Clinical calendar: mirroring app-booked visits to ${calState.calendarId} as ${calState.impersonating}`
     : `📅 Clinical calendar: NOT CONFIGURED — visits are not mirrored to Google (${calState.blockers.join('; ')})`);
+  console.log(calState.invitesConfigured
+    ? `📨 Provider invites: PHI-free invitations from ${calState.inviteCalendarId} to each clinician's own email`
+    : `📨 Provider invites: OFF — ${calState.configured ? 'GOOGLE_PROVIDER_INVITE_CALENDAR_ID is not set' : 'the clinical calendar is not configured'}, so clinicians are not invited`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {

@@ -87,6 +87,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'ime_deletion_log', phi: true, owner: 'IME-AI.1 11/2026' },
   // Which Google Calendar event mirrors which OpenEMR appointment eid.
   { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
+  { key: 'google_calendar_invites', phi: true, owner: 'provider invites 11/2026', note: 'eid → the PHI-free invite event sent to a clinician\'s own email' },
   // Patient statements: copays and home care hours. Amounts and dates of
   // service for a named client. Stripe holds only the invoice number.
   { key: 'patient_invoices', phi: true, owner: 'billing 10/2026' },
