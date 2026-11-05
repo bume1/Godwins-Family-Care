@@ -11508,8 +11508,28 @@ app.get('/api/clinical/providers', authenticateToken, requireClinicalRead, async
       providers,
       degraded, notice,
       myProviderId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
-      // unified (all-provider) view: admin, and the case manager's read-only calendar (4.3)
-      isAdmin: req.user.role === config.ROLES.ADMIN || req.user.role === config.ROLES.CASE_MANAGER
+      // May this person work the whole practice's calendar, or only their own?
+      //
+      // ASKED OF THE ENFORCER, never restated. This flag used to be a second
+      // copy of the rule, spelled `isAdmin` and listing admin and the case
+      // manager by name — so when the care coordinator was added to
+      // `resolveProviderScope` on 2026-10-14 nobody thought to touch something
+      // called `isAdmin`, and a coordinator the SERVER would have let book any
+      // provider's calendar got no provider picker and no calendar filter.
+      // They could open the booking form and never save it: a disabled
+      // "Provider —" box and a 400 APPT_NO_PROVIDER.
+      //
+      // `resolveProviderScope(user, null).all` is true exactly when the route
+      // will accept any provider id, so the screen cannot disagree with it
+      // again. A clinician mapped to their own OpenEMR provider gets `locked`,
+      // and one mapped to none gets an error — both read false here, which is
+      // the safe direction.
+      //
+      // `=== true` is defensive, not load-bearing: `all` is only ever true or
+      // absent, JSON drops an absent key, and the page coerces with `!!`.
+      // Mutation-checked as a no-op and recorded as one. The line that bites
+      // is the call itself — replace it with a role list and the tests fail.
+      canPickProvider: resolveProviderScope(req.user, null).all === true
     });
   } catch (error) {
     console.error('Clinical providers error:', error);
