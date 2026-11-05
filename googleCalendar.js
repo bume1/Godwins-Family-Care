@@ -53,6 +53,12 @@ const COLLECTION = 'google_calendar_events';
 // The invites are their own map: one visit has a full event AND an invite
 // event, on two calendars, and a single map could only remember one of them.
 const INVITE_COLLECTION = 'google_calendar_invites';
+// An IME exam is NOT an appointment: it has no OpenEMR eid, no client record
+// and no encounter, because the exam line is billed to the contracting vendor
+// rather than claimed (owner, 2026-11-04). Its events are keyed on the roster
+// row id, so they get their own map rather than a prefixed key pretending to
+// be an eid in a field named `eid`.
+const EXAM_COLLECTION = 'google_calendar_exam_events';
 
 function loadServiceAccount() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
@@ -161,6 +167,40 @@ function buildInvite({ eid, title, date, startTime, durationMinutes, location, p
 // whole insert, and a silent non-invite is worse than not offering one.
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v == null ? '' : v).trim());
 
+// An IME exam on the clinical calendar (owner, 2026-11-05).
+//
+// ⚠️ THE EXAM NEVER REACHES OPENEMR. The owner's rule is that OpenEMR's
+// calendar holds clinical appointments only; an exam belongs on the clinical
+// calendar and on My Day and nowhere else. This function is the calendar half
+// of that and writes to Google alone.
+//
+// The clinical calendar is inside the Workspace BAA, so the event names the
+// veteran, as a clinical visit names its patient. The PHI-free copy that goes
+// to a provider's own mailbox is buildInvite, same as a visit.
+//
+// AN EXAM WITH NO TIME GETS NO EVENT. The roster has always allowed an untimed
+// booking and a clinic that runs first-come has nothing to enter; placing one
+// at a made-up hour would put a clinician somewhere nobody said to be.
+function buildExamEvent({ examId, firstName, lastName, examDate, examTime, durationMinutes, siteLabel, providerName }) {
+  const start = hhmm(examTime);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(examDate || '')) || !start) return null;
+  const end = addMinutes(start, durationMinutes || 60);
+  const who = [lastName, firstName].filter(Boolean).join(', ');
+  return {
+    summary: `IME Exam${who ? ` · ${who}` : ''}`,
+    description: [
+      'Independent medical examination',
+      siteLabel || null,
+      providerName ? `With ${providerName}` : null,
+      'Added on the Veterans board in the Godwins Family Care app. Change it there, not here.'
+    ].filter(Boolean).join('\n'),
+    location: siteLabel || undefined,
+    start: { dateTime: `${examDate}T${start}:00`, timeZone: TIME_ZONE },
+    end: { dateTime: `${examDate}T${end}:00`, timeZone: TIME_ZONE },
+    extendedProperties: { private: { gfcExamId: String(examId), gfcKind: 'ime' } }
+  };
+}
+
 // The Google client, built once per call. Injected in tests.
 let _clientOverride = null;
 function setClientForTests(c) { _clientOverride = c; }
@@ -267,6 +307,61 @@ async function removeInvite(db, eid) {
   }
 }
 
+/**
+ * Put an IME exam on the clinical calendar, or move it, or take it off when
+ * its time is cleared. Keyed on the roster row id.
+ * Never throws: returns { synced, eventId?, reason? }.
+ */
+async function upsertExam(db, exam) {
+  const status = calendarStatus();
+  if (!status.configured && !_clientOverride) return { synced: false, reason: 'not_configured' };
+  try {
+    const rows = (await db.get(EXAM_COLLECTION)) || [];
+    const prior = rows.find(r => r.examId === String(exam && exam.examId));
+    const body = buildExamEvent(exam);
+    // A time REMOVED from an exam that had one takes its event off the
+    // calendar. Leaving it behind would show an hour nobody is holding.
+    if (!body) {
+      if (!prior) return { synced: false, reason: 'no_time' };
+      return removeExam(db, exam.examId);
+    }
+    const cal = getClient();
+    let eventId;
+    if (prior) {
+      const r = await cal.events.patch({ calendarId: status.calendarId, eventId: prior.eventId, requestBody: body });
+      eventId = (r && r.data && r.data.id) || prior.eventId;
+    } else {
+      const r = await cal.events.insert({ calendarId: status.calendarId, requestBody: body });
+      eventId = r && r.data && r.data.id;
+    }
+    if (!eventId) return { synced: false, reason: 'no_event_id' };
+    const next = rows.filter(r => r.examId !== String(exam.examId));
+    next.push({ examId: String(exam.examId), eventId, at: new Date().toISOString() });
+    await db.set(EXAM_COLLECTION, next);
+    return { synced: true, eventId };
+  } catch (e) {
+    console.error('[CALENDAR] exam sync failed (non-fatal):', e.message);
+    return { synced: false, reason: e.message };
+  }
+}
+
+// A veteran taken off the roster leaves the calendar with them.
+async function removeExam(db, examId) {
+  const status = calendarStatus();
+  if (!status.configured && !_clientOverride) return { synced: false, reason: 'not_configured' };
+  try {
+    const rows = (await db.get(EXAM_COLLECTION)) || [];
+    const prior = rows.find(r => r.examId === String(examId));
+    if (!prior) return { synced: false, reason: 'no_event' };
+    await getClient().events.delete({ calendarId: status.calendarId, eventId: prior.eventId });
+    await db.set(EXAM_COLLECTION, rows.filter(r => r.examId !== String(examId)));
+    return { synced: true, removed: true };
+  } catch (e) {
+    console.error('[CALENDAR] exam removal failed (non-fatal):', e.message);
+    return { synced: false, reason: e.message };
+  }
+}
+
 // A cancelled visit leaves the clinicians' calendar. (OpenEMR keeps its
 // cancelled tombstone with the reason; that is the record, not this.)
 async function removeVisit(db, eid) {
@@ -286,7 +381,7 @@ async function removeVisit(db, eid) {
 }
 
 module.exports = {
-  calendarStatus, buildEvent, buildInvite, addMinutes, isEmail,
-  upsertVisit, removeVisit, upsertInvite, removeInvite,
-  setClientForTests, COLLECTION, INVITE_COLLECTION, CALENDAR_SCOPE
+  calendarStatus, buildEvent, buildInvite, buildExamEvent, addMinutes, isEmail,
+  upsertVisit, removeVisit, upsertInvite, removeInvite, upsertExam, removeExam,
+  setClientForTests, COLLECTION, INVITE_COLLECTION, EXAM_COLLECTION, CALENDAR_SCOPE
 };
