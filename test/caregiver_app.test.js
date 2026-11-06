@@ -685,7 +685,20 @@ test('SAFETY: a Drive failure FAILS the caregiver upload — no row pointing at 
   const write = handler.indexOf("db.set('caregiver_documents'");
   assert.ok(fail > 0 && write > 0 && fail < write,
     'the upload must fail BEFORE the row is written, or the caregiver believes they sent something that does not exist');
-  assert.match(handler, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
+  assert.match(handler, /staffDocs\.prepareStaffDocument\(/,
+    'the route must go through the one shared preparer');
+  assert.match(handler, /detectFileType,/,
+    'and hand it the byte sniffer, not a declared type');
+  const shared = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'staffDocuments.js'), 'utf8');
+  assert.match(shared, /const mime = detectFileType \? detectFileType\(buffer\) : null/,
+    'typed by its bytes, not its declared type — now enforced one layer along');
+  const sharedCode = shared
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  assert.ok(!/mimetype/.test(sharedCode),
+    `the claimed mime type must never be READ, only written about: ${
+      (sharedCode.match(/.{0,60}mimetype.{0,40}/) || [''])[0]}`);
 });
 
 // ---- The staff supervision surface -----------------------------------------

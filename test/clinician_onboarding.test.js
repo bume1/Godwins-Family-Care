@@ -795,8 +795,11 @@ test('a proof upload writes the SAME store User Management already reads', () =>
 
   assert.match(block, /db\.set\('caregiver_documents', docRows\)/,
     'one store, two doors: the office should not have to know which door a file came through');
+  // The row's SHAPE is the shared builder's; what is asserted here is the
+  // judgement this door makes, which is its own.
+  assert.match(block, /staffDocs\.buildStaffDocumentRow\(/);
   assert.match(block, /kind: 'clinician_onboarding'/);
-  assert.match(block, /caregiver_id: String\(req\.user\.id\)/,
+  assert.match(block, /ownerId: req\.user\.id/,
     'filed under the person, which is what the documents card lists by');
   assert.match(block, /note: `Onboarding: \$\{item\.title\}`/,
     'or every one of her uploads reads "Clinician onboarding document"');
@@ -932,25 +935,23 @@ test('the comment stripper does not eat code hiding behind a string', () => {
 });
 
 test('a proof upload types the file by its bytes and does not refuse every one', () => {
-  // ⚠️ REGRESSION. `detectFileType` returns a MIME STRING, and this route read
-  // `sniffed.ext` — undefined on a string — so `ext` was always null and every
-  // single upload came back PROOF_TYPE_UNSUPPORTED. The attach-a-file
-  // capability had never worked. Reading the route could not show it; posting
-  // a real PNG through it did.
+  // ⚠️ REGRESSION. `detectFileType` returns a MIME STRING, and this route had
+  // its OWN copy of the typing that read `sniffed.ext` — undefined on a string
+  // — so every single upload came back refused. The attach-a-file capability
+  // had never worked, while the caregiver route next door was fine. That is
+  // what two copies cost, and why the check now lives in one module.
   const src = stripComments(read('routes/clinicianOnboarding.js'));
-  const block = src.slice(src.indexOf('items/:itemId/proof'), src.indexOf('db.set(\'caregiver_documents\''));
-  assert.match(block, /const mime = detectFileType \? detectFileType\(req\.file\.buffer\) : null/);
-  assert.match(block, /EXT_FOR_MIME\[mime\]/,
-    'the sniffer answers a mime type; an extension has to be derived from it');
-  assert.ok(!/sniffed\.ext/.test(block),
-    'reading .ext off a string is how every upload got refused');
+  assert.match(src, /staffDocs\.prepareStaffDocument\(/,
+    'the route must not type the file itself');
+  assert.ok(!/sniffed\.ext|sniffed\.mime/.test(src),
+    'reading .ext off a mime string is how every upload got refused');
 
-  // The server's own sniffer must still answer what this map expects, or the
-  // two drift and uploads start being refused again in silence.
+  // The shared preparer must still be held to what the SERVER's own sniffer
+  // answers, or the two drift and uploads start being refused again in silence.
   const server = read('server.js');
   ['application/pdf', 'image/png', 'image/jpeg'].forEach(m => {
     assert.ok(server.includes(`return '${m}'`), `detectFileType must still answer ${m}`);
-    assert.ok(block.includes(`'${m}'`), `and the route must still map ${m}`);
+    assert.ok(m in SD.EXT_FOR_MIME, `and the shared preparer must still map ${m}`);
   });
 });
 
@@ -1072,7 +1073,9 @@ test('a file that is not a PDF, JPEG or PNG is refused by its bytes', async (t) 
   const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
     { method: 'POST', body: fd });
   assert.strictEqual(res.status, 400);
-  assert.strictEqual((await res.json()).code, 'PROOF_TYPE_UNSUPPORTED');
+  // The SAME code both doors answer. Prefixing it per door would be two
+  // names for one rule — the duplication, moved into the vocabulary.
+  assert.strictEqual((await res.json()).code, 'DOC_TYPE_REJECTED');
   assert.strictEqual((h.store.caregiver_documents || []).length, 0,
     'nothing may be recorded for a file that was refused');
 });
@@ -1110,4 +1113,103 @@ test('a Drive id never leaves the server', () => {
   assert.strictEqual(f.documentId, 'cgdoc_1', 'the office needs our own row id to open it');
   assert.ok(!('driveFileId' in f), 'but never Google\'s');
   assert.ok(!JSON.stringify(rows).includes('SECRET_DRIVE_ID'));
+});
+
+// ===========================================================================
+// ONE COPY OF "WHAT A VALID STAFF DOCUMENT UPLOAD IS"
+//
+// Owner, on watching this get rebuilt: we should not be building this from
+// scratch — there was already a function for it in the launch board. She is
+// right about the shape, and the clinician route is the proof: it had its own
+// copy of the byte-typing and read `.ext` off a mime STRING, so every upload
+// was refused from the day it shipped while the caregiver route next door
+// worked fine. Two copies drift, and the drift is silent both ways.
+// ===========================================================================
+
+const SD = require('../staffDocuments');
+
+test('both staff document doors go through one preparer', () => {
+  ['routes/caregiver.js', 'routes/clinicianOnboarding.js'].forEach(f => {
+    const src = stripComments(read(f));
+    assert.match(src, /require\('\.\.\/staffDocuments'\)/, `${f} must share the preparer`);
+    assert.match(src, /staffDocs\.prepareStaffDocument\(/, `${f} must call it`);
+    // And must not have re-grown its own copy of the two checks that matter.
+    const own = (src.match(/EXT_FOR_MIME\s*=/g) || []).length;
+    assert.strictEqual(own, 0, `${f} declares its own extension map again`);
+    assert.ok(!/\.ext\b/.test(src.split('prepareStaffDocument')[0] || ''),
+      `${f} reads .ext off something before the preparer runs`);
+  });
+});
+
+test('the preparer types by bytes and refuses what the uploader merely claims', () => {
+  const png = Buffer.from([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
+  const sniff = (b) => (b[0] === 0x89 && b[1] === 0x50 ? 'image/png' : null);
+
+  const ok = SD.prepareStaffDocument({
+    buffer: png, fileName: 'my scan.png', detectFileType: sniff, maxBytes: 1024, keyPrefix: 'NP-01'
+  });
+  assert.strictEqual(ok.ok, true);
+  assert.strictEqual(ok.mime, 'image/png');
+  assert.strictEqual(ok.ext, 'png');
+  assert.match(ok.safeName, /^NP-01_\d+_my_scan\.png$/, 'spaces out, prefix and stamp in');
+
+  // An executable that CLAIMS to be a PNG. The claim is never read.
+  const bad = SD.prepareStaffDocument({
+    buffer: Buffer.from('MZ\x90\x00'), fileName: 'x.png', detectFileType: sniff
+  });
+  assert.strictEqual(bad.ok, false);
+  assert.strictEqual(bad.code, 'DOC_TYPE_REJECTED');
+
+  assert.strictEqual(SD.prepareStaffDocument({
+    buffer: Buffer.alloc(0), fileName: 'x', detectFileType: sniff
+  }).code, 'DOC_EMPTY');
+
+  // ⚠️ The ceiling is PASSED IN, never a literal. The clinician route had
+  // multer's 15 MB while the caregiver route had the app's 10 MB, so one door
+  // already accepted what the other refused.
+  assert.strictEqual(SD.prepareStaffDocument({
+    buffer: png, fileName: 'x.png', detectFileType: sniff, maxBytes: 4
+  }).code, 'DOC_TOO_LARGE');
+  const mod = stripComments(read('staffDocuments.js'));
+  assert.ok(!/10 \* 1024 \* 1024|15 \* 1024 \* 1024/.test(mod),
+    'a size ceiling written here is a third copy of the number');
+});
+
+test('the shared row has one shape, and status stays the caller\'s judgement', () => {
+  const row = SD.buildStaffDocumentRow({
+    id: 'd1', ownerId: 7, ownerName: 'Thanmayie Rao', kind: 'clinician_onboarding',
+    fileName: 'licence.png', storedName: 'NP-01_1_licence.png', mime: 'image/png',
+    sizeBytes: 8, driveFileId: 'drv', note: 'Onboarding: Nursing licence',
+    status: 'received', uploadedById: 7, uploadedByName: 'Thanmayie Rao',
+    uploadedByOffice: false, extra: { clinician_item_id: 'NP-01' }
+  });
+  // The fields the documents card, the download route and the review flow read.
+  ['id', 'caregiver_id', 'kind', 'file_name', 'mime_type', 'drive_file_id',
+   'status', 'uploaded_at', 'uploaded_by_office', 'review_note'].forEach(k =>
+    assert.ok(k in row, `the shared row must carry ${k}`));
+  assert.strictEqual(row.caregiver_id, '7', 'always a string, whatever the caller held');
+  assert.strictEqual(row.clinician_item_id, 'NP-01', 'extras ride along');
+
+  // Who may accept a document on sight is a policy question each door answers
+  // for itself. The module must not decide it.
+  const mod = stripComments(read('staffDocuments.js'));
+  assert.ok(!/status:\s*'accepted'|status:\s*'received'/.test(mod),
+    'the shape is shared; the judgement is not');
+});
+
+test('the launch board upload is left alone, and why is written down', () => {
+  // Owner: the launch module is hidden, not dead — she will need it to launch
+  // new clients. So it is NOT folded in here, and that is a decision rather
+  // than an oversight: it validates on the mimetype the UPLOADER CLAIMS and
+  // hands the browser a direct Drive link. Fine for a project plan, not for a
+  // record that decides whether somebody may see patients.
+  const server = read('server.js');
+  assert.match(server, /app\.post\('\/api\/projects\/:projectId\/tasks\/:taskId\/files'/,
+    'the launch board route must still be there — it is hidden, not deleted');
+  assert.match(server, /ALLOWED_FILE_TYPES\.includes\(req\.file\.mimetype\)/,
+    'it still types by the claim, which is exactly why it is not shared');
+
+  const mod = read('staffDocuments.js');
+  assert.match(mod, /LAUNCH-BOARD TASK UPLOAD/,
+    'the reason it is excluded has to be written where the next person looks');
 });

@@ -435,3 +435,88 @@ between the browser and Drive is the shipped path.
 nothing, because PORT is an env var and never appears in argv. Five stale
 servers were running and a probe was reading one started before the fix. Kill
 by PID.
+
+---
+
+## Third addendum — the owner was right: this was being rebuilt
+
+Owner, watching the document and notes work land: *"so we should not be
+building this from scratch tbh"*, then *"in our repo, there was a function for
+this in our launch board"*, then *"I just had it hidden for this moment of
+needing it to launch new clients, the launch module. Why can't we just use
+segments of this for the file upload, front face view vs behind, and so on."*
+
+She is right, and the bug above is the proof. Checked rather than assumed:
+
+### WHAT THE LAUNCH MODULE ALREADY HAD
+
+`POST /api/projects/:projectId/tasks/:taskId/files` — a file attached to a
+checklist item, stored in Drive, a pointer appended to the item, rendered as a
+paperclip with the filename. **Structurally the same thing**, and it has been
+in this repo the whole time. The launch module is **hidden, not dead** — the
+owner kept it for launching new clients — so nothing here removes it.
+
+### WHY IT IS NOT LIFTED AS-IS, WITH THE TWO REASONS WRITTEN DOWN
+
+- It validates on **`req.file.mimetype` — the type the uploader CLAIMS** — not
+  on the bytes. Fine for a project plan; not for a record that decides whether
+  somebody may see patients.
+- It hands the browser a **direct Drive link** (`webViewLink`). GFC-era reads
+  go back through the app so every one is audited.
+
+Folding them together would have to level the launch board UP to those rules,
+which is a decision about the launch module, not a tidy-up. The exclusion and
+both reasons are written at the top of `staffDocuments.js`, where the next
+person looks, and a test fails if that route disappears or that note does.
+
+### ON "FRONT FACE VS BEHIND"
+
+The launch board does it as two pages over one data set — and **has no
+field-level filtering at all**: grep finds no `clientVisible`, no
+`internalOnly`, nothing. The public page renders whatever the route sends. The
+clinician wizard needs the stronger version, because the office's working notes
+must not reach her, which is what `forClinician` does. So the **pattern**
+transfers; the mechanism had to be stronger, not reused.
+
+### WHAT WAS ACTUALLY DUPLICATED, AND IS NOW NOT
+
+Not the launch board — the **caregiver document** path, the GFC-era descendant
+of that same idea, already shared across three doors. The clinician proof route
+had its own copy of the byte-typing, the size ceiling, the Drive upload, the
+failure rule and the row shape. **`staffDocuments.js` is now the one copy**,
+called by both doors:
+
+- `prepareStaffDocument` — empty, size, byte-typing, safe filename.
+- `buildStaffDocumentRow` — one row shape, so the documents card, the download
+  route and the review flow read the same fields whichever door a file came
+  through.
+
+**The size ceiling is passed in, never a literal there.** The clinician route
+had multer's 15 MB while the caregiver route had the app's configured 10 MB —
+one door already accepted what the other refused, which is exactly the drift
+this collapse exists to end. **The refusal CODE is now the same on both doors
+too** (`DOC_TYPE_REJECTED`); prefixing it per door would be two names for one
+rule, the duplication moved into the vocabulary.
+
+**`status` stays the caller's judgement, deliberately.** Who may accept a
+document on sight is a policy question each door answers for itself — the
+office IS the reviewer; a licence is checked against a primary source. The
+shape is shared; the judgement is not, and a test fails if the module starts
+deciding it.
+
+### Verified
+
+Suite **3227, 0 failing**; probes **97/97** and **38/38**. **9 of 9 mutations
+caught**, including either door bypassing the preparer, the preparer trusting
+the claimed type, the ceiling becoming a literal, the module deciding status,
+and the launch-board route or its exclusion note being removed.
+
+**Two existing guards were REPOINTED, not deleted**, because the rule they
+protect moved rather than went away — and the caregiver one got **stricter**:
+it now pins that the route delegates, that it hands over the byte sniffer, and
+that the shared module never reads a claimed mime type.
+
+**A house rule re-bought a third time in one session:** that last guard read
+the word "mimetype" out of the module's own comment explaining why the launch
+board is excluded, and failed on the explanation. Strip comments before any
+source scan.

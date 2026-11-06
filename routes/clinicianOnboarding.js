@@ -25,6 +25,10 @@ const PRV = require('../clinicianPrivileges');
 // The one place a Content-Disposition header is built. A macOS screenshot
 // filename carries a narrow no-break space, which res.setHeader throws on.
 const { contentDisposition } = require('../contentDisposition');
+// ONE declaration of what a valid staff document upload is, shared with the
+// caregiver document route. See staffDocuments.js for why the launch board's
+// own task-file upload is deliberately not folded in.
+const staffDocs = require('../staffDocuments');
 
 const MAX_PROOF_BYTES = 15 * 1024 * 1024;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PROOF_BYTES } });
@@ -340,38 +344,34 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         const item = T.findItem(req.params.itemId);
         if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
         if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
-        // Typed by its BYTES, never by what the upload claims.
-        //
-        // ⚠️ `detectFileType` returns a MIME STRING ('image/png'), not an
-        // object. This read `sniffed.ext`, which is undefined on a string, so
-        // `ext` was always null and EVERY upload was refused
-        // PROOF_TYPE_UNSUPPORTED — the attach-a-file capability had never once
-        // worked. Reading the route could not show it; posting a real PNG did,
-        // on the first run of the probe that does. Verify the behaviour, not
-        // the artifact.
-        const mime = detectFileType ? detectFileType(req.file.buffer) : null;
-        const EXT_FOR_MIME = {
-          'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg'
-        };
-        const ext = mime ? EXT_FOR_MIME[mime] : null;
-        if (!ext) {
-          return res.status(400).json({
-            error: 'Upload a PDF, JPEG or PNG.', code: 'PROOF_TYPE_UNSUPPORTED'
-          });
+        // ONE COPY of "what a valid staff document upload is", shared with
+        // the caregiver document route. This block used to be its own — and
+        // it read `.ext` off a function that returns a mime STRING, so every
+        // upload was refused from the day it shipped. Two copies drift, and
+        // the drift is silent in both directions.
+        const prepared = staffDocs.prepareStaffDocument({
+          buffer: req.file.buffer,
+          fileName: req.file.originalname,
+          detectFileType,
+          maxBytes: (config && config.MAX_FILE_SIZE) || MAX_PROOF_BYTES,
+          keyPrefix: item.id
+        });
+        if (!prepared.ok) {
+          return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
         }
-        const sniffed = { mime, ext };
+        const name = prepared.safeName;
+
         const rows = await allRecords();
         let rec = findRecord(rows, req.user.id);
         if (!rec) { rec = blankRecord(req.user); rows.push(rec); }
 
-        const name = `${item.id}_${Date.now()}.${ext}`;
         // A storage failure REFUSES the upload. A row pointing at a file that
         // does not exist would tick a credentialing item with no proof behind it.
         let stored;
         try {
           stored = await drive.uploadCaregiverDocumentFile(
             `Clinician ${rec.userName || rec.userId}`, name, req.file.buffer,
-            sniffed.mime || 'application/octet-stream');
+            prepared.mime);
         } catch (err) {
           return res.status(502).json({
             error: 'We could not store that file. Please try again.',
@@ -393,30 +393,30 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         // `received` so it still reads as waiting on them.
         const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const docRows = (await db.get('caregiver_documents')) || [];
-        docRows.push({
+        docRows.push(staffDocs.buildStaffDocumentRow({
           id: docId,
-          caregiver_id: String(req.user.id),
-          caregiver_name: req.user.name || req.user.email || null,
+          ownerId: req.user.id,
+          ownerName: req.user.name || req.user.email,
           kind: 'clinician_onboarding',
-          file_name: req.file.originalname ? trim(req.file.originalname, 200) : name,
-          stored_name: name,
-          mime_type: sniffed.mime || null,
-          size_bytes: req.file.buffer.length,
-          drive_file_id: stored.id || stored.fileId || null,
-          drive_url: stored.webViewLink || null,
+          fileName: req.file.originalname || name,
+          storedName: name,
+          mime: prepared.mime,
+          sizeBytes: req.file.buffer.length,
+          driveFileId: stored.id || stored.fileId || null,
+          driveUrl: stored.webViewLink || null,
           // WHICH item it answers. Without this every one of her uploads reads
           // "Clinician onboarding document" and the office has to open each one
           // to find out what it is.
           note: `Onboarding: ${item.title}`,
-          period_start: null, period_end: null, shift_id: null,
+          // The row's status MIRRORS the item's rather than inventing a second
+          // rule: anything verified against a primary source still reads as
+          // waiting on the office.
           status: needsOfficeCheck ? 'received' : 'accepted',
-          uploaded_at: nowIso(),
-          uploaded_by_id: req.user.id,
-          uploaded_by_name: req.user.name || req.user.email || null,
-          uploaded_by_office: isOffice(req.user),
-          reviewed_at: null, reviewed_by_name: null, review_note: null,
-          clinician_item_id: item.id
-        });
+          uploadedById: req.user.id,
+          uploadedByName: req.user.name || req.user.email,
+          uploadedByOffice: isOffice(req.user),
+          extra: { clinician_item_id: item.id }
+        }));
         await db.set('caregiver_documents', docRows);
 
         const prev = rec.items[item.id] || {};
@@ -425,7 +425,7 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
           driveFileId: stored.id || stored.fileId || null,
           // The shared row, so the wizard and User Management open one file.
           documentId: docId,
-          mime: sniffed.mime || null, uploadedAt: nowIso(),
+          mime: prepared.mime, uploadedAt: nowIso(),
           uploadedBy: req.user.id, uploadedByName: req.user.name || req.user.email
         }]);
         rec.items[item.id] = Object.assign({}, prev, {
