@@ -1352,6 +1352,21 @@ const MoreTab = ({ visitLogs, queued, me }) => (
     <h2 className="pg">More</h2>
     <p className="sub">Your logs, documents, messages and help.</p>
 
+    {/* Password, two-step sign-in and the devices this account is signed in
+        on. One page for every role (owner, "Fix all"). */}
+    <div className="card">
+      <h3>Your account</h3>
+      {/* A <button>, not an <a>: this page's `.btn` is width:100% with its own
+          padding and no anchor styling, and nothing else here renders a link
+          as a button. */}
+      <button className="btn ghost" onClick={() => { window.location.href = '/account'; }}>
+        <i className="ti ti-shield-lock"></i> Password &amp; Security
+      </button>
+      <p className="sub" style={{ marginTop: 8 }}>
+        Change your password, set up two-step sign-in, and see every device signed in as you.
+      </p>
+    </div>
+
     <div className="card">
       <h3>Visit logs</h3>
       {queued > 0 && (

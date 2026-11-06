@@ -7541,6 +7541,14 @@
           <p className="sub">What family members can see is set by {me && me.clientName ? me.clientName : 'the patient'} or their Power of Attorney.</p>
         )}
         <div className="sech"><h3>Account</h3></div>
+        {/* Password, and the devices this account is signed in on. One page
+            for every role (owner, "Fix all") rather than a patient-only copy. */}
+        {/* A <button>, not an <a>: `.lrow` carries no anchor styling, so a
+            link would render blue and underlined beside an identical row. */}
+        <button className="lrow" onClick={() => { window.location.href = '/account'; }}>
+          <span className="lic"><i className="ti ti-shield-lock" /></span>
+          <span className="lm"><b>Password &amp; Security</b><span>Change your password, see where you are signed in</span></span>
+        </button>
         <button className="lrow" onClick={gfcLogout}>
           <span className="lic"><i className="ti ti-logout" /></span>
           <span className="lm"><b>Sign Out</b><span>{me && me.name}</span></span>
