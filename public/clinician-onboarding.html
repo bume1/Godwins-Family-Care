@@ -995,6 +995,71 @@ const InputsForm = ({ inputs, meta, candidates, onSave }) => {
   );
 };
 
+// The append-only credentialing record: who signed a gate open, what had
+// cleared at the time, who verified what against which source. The playbook
+// calls the gate-opening record the credentialing committee decision, so it
+// needs somewhere a person can actually read it.
+const EVENT_LABELS = {
+  inputs_changed: 'Track settings changed',
+  item_recorded: 'Item recorded',
+  gate_opened: 'Gate signed open',
+  payer_gate_opened: 'Payer billing opened',
+  privileges_generated: 'Privilege list generated',
+  privilege_decided: 'Privilege decided',
+  privileges_co_signed: 'Privilege list co-signed'
+};
+
+const CredentialingHistory = ({ userId }) => {
+  const [events, setEvents] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api(`/api/clinician-onboarding/admin/${userId}/events`)
+      .then(d => { if (live) setEvents(d.events || []); })
+      .catch(e => { if (live) setErr(e.message); });
+    return () => { live = false; };
+  }, [userId]);
+  if (err) return <div className="card"><div className="banner bad">{err}</div></div>;
+  if (!events) return <div className="card"><div className="empty">Loading…</div></div>;
+  return (
+    <div className="card">
+      <h3>Credentialing history</h3>
+      <div className="sub">
+        Append-only. Every gate signed open carries who signed it and what had
+        cleared at the time, which is the record an auditor asks for.
+      </div>
+      {events.length === 0
+        ? <div className="empty">Nothing recorded yet.</div>
+        : <table style={{ marginTop: 10 }}>
+            <thead><tr><th>When</th><th>What</th><th>Who</th><th>Detail</th></tr></thead>
+            <tbody>
+              {events.map(e => (
+                <tr key={e.id}>
+                  <td>{fmtDate(e.at)}</td>
+                  <td>{EVENT_LABELS[e.type] || e.type}</td>
+                  <td>{e.byName || '—'}</td>
+                  <td>
+                    {e.gateId && <Pill>{e.gateId}</Pill>}
+                    {e.itemId && <Pill>{e.itemId}</Pill>}
+                    {e.privilegeId && <Pill>{e.privilegeId}</Pill>}
+                    {e.payerId && <Pill>{e.payerId}</Pill>}
+                    {e.source && <> checked at {e.source}</>}
+                    {e.verifiedAt && <> on {fmtDate(e.verifiedAt)}</>}
+                    {e.status && <> — {e.status}</>}
+                    {e.agreementVersion && <> from agreement {e.agreementVersion}</>}
+                    {Array.isArray(e.cleared) && e.cleared.length > 0 && (
+                      <div className="sub">{e.cleared.length} items had cleared</div>
+                    )}
+                    {e.scope && <div className="sub">Scope: {e.scope}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>}
+    </div>
+  );
+};
+
 const OfficeDetail = ({ userId, meta, onBack }) => {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -1088,6 +1153,7 @@ const OfficeDetail = ({ userId, meta, onBack }) => {
             <button className={`tab${tab === 'train' ? ' on' : ''}`} onClick={() => setTab('train')}>Training</button>
             <button className={`tab${tab === 'docs' ? ' on' : ''}`} onClick={() => setTab('docs')}>Documents</button>
             <button className={`tab${tab === 'due' ? ' on' : ''}`} onClick={() => setTab('due')}>Keeping Current</button>
+            <button className={`tab${tab === 'history' ? ' on' : ''}`} onClick={() => setTab('history')}>History</button>
           </div>
           {tab === 'list' && <Checklist track={track} mode="office" onRecord={record} />}
           {tab === 'priv' && <PrivilegeList priv={privileges} meta={meta} inputs={track.inputs}
@@ -1141,6 +1207,7 @@ const OfficeDetail = ({ userId, meta, onBack }) => {
               </table>
             </div>
           )}
+          {tab === 'history' && <CredentialingHistory userId={userId} />}
           {tab === 'due' && (
             <div className="card">
               <h3>Keeping current</h3>

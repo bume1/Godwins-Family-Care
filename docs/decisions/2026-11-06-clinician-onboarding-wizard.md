@@ -187,3 +187,21 @@ before it is ten real gaps.
    v1.0, so the app uses Supervising Physician throughout. If Georgia wording matters,
    it is one label change in `clinicianOnboarding.js` and the Manual.
 8. **Nothing is live until the container is rebuilt.** `git pull` alone changes nothing.
+
+## Merging main in (same day)
+
+Main moved eighteen screens' worth between branching and the PR, and this repo
+has **no CI at all** (no `.github/workflows`), so merging it in and running the
+suite locally is the only check there is. It caught one real thing:
+
+**The new orphan-route guard (`test/no_orphan_routes.test.js`, PR #250) failed on
+`GET /api/clinician-onboarding/admin/:userId/events`** — the credentialing
+history route had no screen calling it. That is the exact defect this repo keeps
+paying for (the facility-assignment route, `acknowledgeAbnormalResult`, the MFA
+reset button), and the guard's own words are right: a capability nobody can
+reach is not shipped. **Wired to a History tab on the office detail view rather
+than allowlisted**, because the append-only record of who signed a gate open and
+what had cleared is precisely what an auditor asks for, and it was unreadable.
+
+After the merge: suite **3201 passing, 0 failing** (1 skipped), HTTP probe 64/64,
+render probe 17/17.
