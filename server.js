@@ -121,6 +121,7 @@ const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
+const clinicianOnboardingRoutes = require('./routes/clinicianOnboarding'); // clinician onboarding, credentialing + privileging (2026-11)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
                                                        // timeline asks it rather than restating it.
@@ -3022,6 +3023,19 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
   // The signer's own address, hashed — the chain is not the signer, the same
   // rule the consent signatures follow.
   hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
+
+// Clinician onboarding: the four inputs build the checklist, the checklist
+// decides the gates, and a gate is signed open by a person. Credentialing is
+// office work, so the router gates its own admin half on admin-or-manager
+// rather than on clinical write — a provider must never verify their own
+// licence or sign their own gate open.
+app.use(clinicianOnboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+  drive: googledrive,
+  detectFileType: (buf) => detectFileType(buf),
+  // The signer's own address, hashed — the same rule the consent and packet
+  // signatures follow: the forwarding chain is not the signer.
+  hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET)
+}));
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
@@ -31282,6 +31296,10 @@ app.get('/admin/enrollment', (req, res) => {
 
 // Clinician workspace (Session 4.1). Page shell is public; every
 // /api/clinical/* route it calls enforces requireClinicalRead / requireClinicalWrite.
+app.get('/onboarding', (req, res) => {
+  res.sendFile(__dirname + '/public/clinician-onboarding.html');
+});
+
 app.get('/clinical', (req, res) => {
   res.sendFile(__dirname + '/public/clinical.html');
 });

@@ -123,6 +123,17 @@ const COLLECTION_REGISTRY = Object.freeze([
   // and a signature image, so it moves with the same care and never leaves the
   // boundary.
   { key: 'welcome_packets', phi: false, owner: 'welcome-packet', note: 'caregiver onboarding: profile answers + signature image + office checklist' },
+  // Clinician onboarding, credentialing and privileging. NOT patient PHI — it is
+  // employment and credentialing data about the clinician — but it carries an
+  // NPDB report, immunization and TB results, a DEA registration, a home
+  // address and signatures, so it moves with the same care and never leaves the
+  // boundary. One row per clinician: their four inputs plus the state of each
+  // item. The checklist itself is never stored; it is derived on every read.
+  { key: 'clinician_onboarding', phi: false, owner: 'clinician-onboarding', note: 'four inputs + per-item state + gate events + privilege list' },
+  // Append-only. Every gate opening carries who signed it, what had cleared and
+  // the approved scope: the playbook calls that the credentialing committee
+  // decision, so it is a durable row and never a recomputed view.
+  { key: 'clinician_onboarding_events', phi: false, owner: 'clinician-onboarding', note: 'append-only: gate openings, verifications, privilege decisions' },
   // The four forms a caregiver signs IN THE APP rather than printing: the
   // background check authorization, the registry attestation, the physical
   // ability acknowledgement and the mandatory reporter acknowledgement. Its

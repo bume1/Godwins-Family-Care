@@ -49,6 +49,9 @@ const BLOCKED_WHILE_ACTING_AS = Object.freeze([
   { method: 'POST', pattern: /^\/api\/gfc\/care-plan\/cosign$/, what: 'co-signing the care plan' },
   { method: 'POST', pattern: /^\/api\/gfc\/transfer-roi\/submit$/, what: 'signing a record release' },
   { method: 'PUT', pattern: /^\/api\/client\/service-reports\/[^/]+\/sign$/, what: 'signing a service report' },
+  // Clinician onboarding and credentialing signatures
+  { method: 'POST', pattern: /^\/api\/clinician-onboarding\/me\/resources\/[^/]+\/sign$/, what: 'signing an onboarding document' },
+  { method: 'POST', pattern: /^\/api\/clinician-onboarding\/admin\/[^/]+\/privileges\/co-sign$/, what: 'co-signing a privilege list' },
   // Caregiver signatures
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/submit$/, what: 'signing the welcome packet' },
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/attestations\/[^/]+$/, what: 'signing a caregiver form' },
