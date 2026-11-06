@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Your Account</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* YOUR OWN ACCOUNT (owner, "Fix all", 2026-11-06).
+       Five things a signed-in person could do only by calling an API by hand:
+       see their two-factor state, get fresh recovery codes, see where their
+       account is signed in, disconnect their own OpenEMR sign-in, and change
+       their password voluntarily (the change-password route existed but was
+       only reachable from login.html's FORCED change).
+       One page for every role, because every role has an account. Each card
+       asks the server whether it applies and hides itself when it does not —
+       a control that is going to answer 403 is worse than no control. */
+    :root{--navy:#033D50;--navy-d:#022A38;--gold:#F5CD85;--goldd:#C9A44A;
+          --cream:#FAF7F2;--cream-d:#efe9db;--ink:#2b2b28;--mut:#7a746a;
+          --red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.55}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a{color:var(--gold);text-decoration:none;font-size:14px;font-weight:600}
+    .wrap{max-width:780px;margin:0 auto;padding:20px 18px 70px}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:17px 19px;margin-bottom:14px}
+    .card h2{font-family:'Cormorant Garamond',serif;font-size:20px;font-weight:600;color:var(--navy);margin-bottom:3px}
+    .card .sub{color:var(--mut);font-size:13.5px;margin-bottom:13px}
+    .mu{color:var(--mut);font-size:14px}
+    .err{background:#fdeeee;border:1px solid #f3c9c9;color:var(--red);border-radius:10px;padding:11px 14px;margin:10px 0;font-size:14px}
+    .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:var(--green);border-radius:10px;padding:11px 14px;margin:10px 0;font-size:14px}
+    .note{background:var(--cream);border:1.5px dashed var(--goldd);border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;color:var(--mut)}
+    .note b{color:var(--navy)}
+    label.f{display:block;font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--mut);margin-bottom:4px}
+    input{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit;background:#fff;color:var(--ink)}
+    .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:11px;margin-bottom:11px}
+    .btn{border-radius:8px;padding:10px 15px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn.warn{border-color:var(--red);background:#fff;color:var(--red)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .fact{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px solid #f1ece1;font-size:14px}
+    .fact:last-child{border-bottom:none}
+    .fact span:first-child{color:var(--mut)}
+    .chip{display:inline-block;border-radius:12px;padding:2px 9px;font-size:11.5px;font-weight:700;background:#eef3f0;color:var(--green)}
+    .chip.w{background:#fdf3dd;color:#8a6a1e}
+    .chip.r{background:#fdeeee;color:var(--red)}
+    .codes{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;background:var(--cream);border:1px solid var(--line);border-radius:10px;padding:13px;margin:10px 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px}
+    table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:4px}
+    th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+    td{padding:7px 9px;border-bottom:1px solid #f1ece1;vertical-align:top}
+    tr:last-child td{border-bottom:none}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/session-guard.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const getToken = () =>
+  localStorage.getItem('admin_token') || localStorage.getItem('unified_token')
+  || localStorage.getItem('portal_token');
+
+const call = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.status = res.status; err.code = data && data.code;
+    throw err;
+  }
+  return data;
+};
+
+// The zone comes from gfc-time.js, never a literal. Two guards cover it and
+// mutation testing shows either alone is enough: `installDefaultTimeZone()`
+// in the head fills in a missing `timeZone`, and the explicit one below
+// covers the shim being removed. Only dropping BOTH renders the container's
+// clock (UTC), which the browser probe catches. Keep both.
+const TZ = window.GFC_TIME && window.GFC_TIME.PRACTICE_TIMEZONE;
+const fmtWhen = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString('en-US', { timeZone: TZ || undefined,
+    year: 'numeric', month: 'short', day: '2-digit', hour: 'numeric', minute: '2-digit' });
+};
+
+// A user agent is not a device name, so this is a best-effort READING of one
+// and is labelled as such. Guessing a tidy "iPhone 15" from a string that may
+// say anything is how a person decides a session is theirs when it is not.
+const deviceOf = (ua) => {
+  const s = String(ua || '');
+  if (!s) return 'Unknown device';
+  const os = /iPhone/.test(s) ? 'iPhone' : /iPad/.test(s) ? 'iPad'
+    : /Android/.test(s) ? 'Android' : /Macintosh|Mac OS X/.test(s) ? 'Mac'
+    : /Windows/.test(s) ? 'Windows' : /Linux/.test(s) ? 'Linux' : null;
+  const br = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera'
+    : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox'
+    : /Safari\//.test(s) ? 'Safari' : null;
+  if (!os && !br) return 'Unknown device';
+  return [br, os].filter(Boolean).join(' on ');
+};
+
+const Card = ({ title, sub, children }) => (
+  <div className="card">
+    <h2>{title}</h2>
+    {sub && <p className="sub">{sub}</p>}
+    {children}
+  </div>
+);
+
+// ---- password ---------------------------------------------------------------
+const PasswordCard = ({ account, onChanged }) => {
+  const [cur, setCur] = useState(''); const [next, setNext] = useState(''); const [again, setAgain] = useState('');
+  const [msg, setMsg] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setErr(''); setMsg(null);
+    if (next.length < 8) return setErr('Your new password must be at least 8 characters.');
+    if (next !== again) return setErr('The two new passwords do not match.');
+    setBusy(true);
+    try {
+      await call('/api/auth/change-password', { method: 'POST', body: { currentPassword: cur, newPassword: next } });
+      setCur(''); setNext(''); setAgain('');
+      // Changing the password revokes every OTHER session server-side, so the
+      // device list below is stale the moment this succeeds.
+      setMsg('Your password is changed. Every other device signed in as you has been signed out.');
+      onChanged && onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Card title="Password"
+          sub={account && account.lastPasswordChange
+            ? `Last changed ${fmtWhen(account.lastPasswordChange)}.`
+            : 'We have no record of when this was last changed.'}>
+      {err && <div className="err">{err}</div>}
+      {msg && <div className="ok">{msg}</div>}
+      <div className="row">
+        <div><label className="f">Current password</label>
+          <input type="password" value={cur} autoComplete="current-password" onChange={e => setCur(e.target.value)} /></div>
+        <div><label className="f">New password</label>
+          <input type="password" value={next} autoComplete="new-password" onChange={e => setNext(e.target.value)} /></div>
+        <div><label className="f">New password again</label>
+          <input type="password" value={again} autoComplete="new-password" onChange={e => setAgain(e.target.value)} /></div>
+      </div>
+      <button className="btn" disabled={busy || !next} onClick={submit}>{busy ? 'Saving…' : 'Change Password'}</button>
+      <p className="mu" style={{ marginTop: 9 }}>
+        Changing it signs out every other device. That is how you lock someone else out.
+      </p>
+    </Card>
+  );
+};
+
+// ---- two-factor --------------------------------------------------------------
+const MfaCard = ({ s, reload }) => {
+  const [code, setCode] = useState(''); const [codes, setCodes] = useState(null);
+  const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const regenerate = async () => {
+    setErr(''); setCodes(null); setBusy(true);
+    try {
+      const r = await call('/api/auth/mfa/recovery-codes/regenerate', { method: 'POST', body: { code: code.trim() } });
+      setCodes(r.recoveryCodes); setCode(''); reload();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const low = s.enrolled && s.recoveryRemaining <= 2;
+  return (
+    <Card title="Two-step sign-in"
+          sub="A code from your authenticator app, on top of your password.">
+      <div className="fact"><span>Set up on this account</span>
+        <span>{s.enrolled
+          ? <span className="chip">Yes{s.enrolledAt ? `, since ${fmtWhen(s.enrolledAt)}` : ''}</span>
+          : <span className="chip r">Not set up</span>}</span></div>
+      <div className="fact"><span>Required for your role</span>
+        <span>{s.required ? <span className="chip">Yes</span> : <span className="chip w">No</span>}</span></div>
+      <div className="fact"><span>Backup codes left</span>
+        <span>{s.enrolled
+          ? <span className={`chip ${low ? 'r' : ''}`}>{s.recoveryRemaining}</span>
+          : <span className="mu">—</span>}</span></div>
+
+      {!s.enrolled && (
+        <div className="note">
+          <b>You set this up at sign-in, not here.</b> {s.required
+            ? 'Your role requires it, so the next time you sign in you will be asked to scan a code and will not get past it until you do.'
+            : 'It is not required for your role. If you want it on, ask an admin to turn it on for your account; you will then be asked to set it up the next time you sign in.'}
+        </div>
+      )}
+
+      {s.enrolled && (
+        <>
+          {low && <div className="err">You are nearly out of backup codes. Make a fresh set now, before you are locked out of a lost phone.</div>}
+          {err && <div className="err">{err}</div>}
+          {codes && (
+            <>
+              <div className="ok">Here are your new backup codes. <b>This is the only time they are shown.</b> Save them somewhere you can reach without your phone. Your old codes no longer work.</div>
+              <div className="codes">{codes.map(c => <span key={c}>{c}</span>)}</div>
+              <button className="btn ghost" onClick={() => {
+                const blob = new Blob([`Godwins Family Care backup codes\n\n${codes.join('\n')}\n`], { type: 'text/plain' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob); a.download = 'gfc-backup-codes.txt';
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+              }}>Download Codes</button>
+            </>
+          )}
+          <div className="row" style={{ marginTop: 12, marginBottom: 8 }}>
+            <div><label className="f">Code from your authenticator</label>
+              <input value={code} inputMode="numeric" autoComplete="one-time-code" placeholder="6 digits"
+                     onChange={e => setCode(e.target.value)} /></div>
+          </div>
+          {/* The server asks for a live code before it will issue new ones:
+              somebody holding a stolen session must not be able to mint
+              themselves a set of permanent keys. */}
+          <button className="btn" disabled={busy || code.trim().length < 6} onClick={regenerate}>
+            {busy ? 'Checking…' : 'Make New Backup Codes'}
+          </button>
+          <p className="mu" style={{ marginTop: 9 }}>
+            We ask for a live code first, so a stolen session cannot mint itself a permanent way in.
+            Making a new set cancels the old one.
+          </p>
+        </>
+      )}
+    </Card>
+  );
+};
+
+// ---- where you are signed in --------------------------------------------------
+const SessionsCard = ({ rows, err }) => {
+  const live = (rows || []).filter(r => !r.revokedAt);
+  const others = live.filter(r => !r.current).length;
+  return (
+    <Card title="Where you are signed in"
+          sub="Every device holding a live sign-in for your account.">
+      {err && <div className="err">{err}</div>}
+      {!err && live.length === 0 && <p className="mu">Nothing to show yet.</p>}
+      {live.length > 0 && (
+        <table>
+          <thead><tr><th>Device</th><th>Signed in</th><th>Last used</th><th></th></tr></thead>
+          <tbody>
+            {live.map(r => (
+              <tr key={r.id}>
+                <td>{deviceOf(r.userAgent)}
+                  {r.surface && <div className="mu" style={{ fontSize: 12 }}>{r.surface}</div>}</td>
+                <td>{fmtWhen(r.createdAt)}</td>
+                <td>{fmtWhen(r.lastSeenAt)}</td>
+                <td>{r.current ? <span className="chip">This device</span> : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {/* HONEST ABOUT THE CONTROL THAT EXISTS. There is no self-service route
+          that ends one other session, and inventing a button that does nothing
+          would be worse than saying so. Changing the password DOES revoke every
+          other session server-side, which is the real control, so it is named
+          rather than implied. */}
+      {others > 0 && (
+        <div className="note">
+          <b>{others === 1 ? 'One other device is signed in as you.' : `${others} other devices are signed in as you.`}</b>{' '}
+          If one of them is not yours, change your password above. That signs them all out at once.
+          There is no way to sign out a single device on its own.
+        </div>
+      )}
+      <p className="mu" style={{ marginTop: 9 }}>
+        Any device idle for 15 minutes is signed out on its own. The device name is read from what the
+        browser reported, so treat it as a hint rather than proof.
+      </p>
+    </Card>
+  );
+};
+
+// ---- OpenEMR -------------------------------------------------------------------
+const EmrCard = ({ emr, reload }) => {
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect your OpenEMR sign-in? You will be asked to sign in to OpenEMR again the next time you open a chart.')) return;
+    setErr(''); setMsg(''); setBusy(true);
+    try {
+      const r = await call('/api/emr/disconnect', { method: 'POST' });
+      setMsg(r.disconnected ? 'Disconnected. You will sign in to OpenEMR again the next time you open a chart.'
+                            : 'There was nothing to disconnect.');
+      reload();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Card title="Your OpenEMR sign-in"
+          sub="This app never holds your OpenEMR password. It holds your own sign-in to OpenEMR, and only yours.">
+      {err && <div className="err">{err}</div>}
+      {msg && <div className="ok">{msg}</div>}
+      <div className="fact"><span>Connected</span>
+        <span>{emr.connected ? <span className="chip">Yes</span> : <span className="chip w">No</span>}</span></div>
+      {emr.connected && emr.emrUser && emr.emrUser.username && (
+        <div className="fact"><span>Signed in to OpenEMR as</span><span>{emr.emrUser.username}</span></div>
+      )}
+      {emr.connected && emr.connectedAt && (
+        <div className="fact"><span>Since</span><span>{fmtWhen(emr.connectedAt)}</span></div>
+      )}
+      {emr.connected
+        ? <>
+            <button className="btn warn" style={{ marginTop: 12 }} disabled={busy} onClick={disconnect}>
+              {busy ? 'Disconnecting…' : 'Disconnect OpenEMR'}
+            </button>
+            <p className="mu" style={{ marginTop: 9 }}>
+              Do this if you signed in on a device you no longer have. It clears this app's pointer to your
+              OpenEMR sign-in. It does not change anything in OpenEMR and it does not touch your password.
+            </p>
+          </>
+        : <p className="mu" style={{ marginTop: 10 }}>
+            You are asked to sign in to OpenEMR from the clinical workspace, the first time you open a chart.
+          </p>}
+    </Card>
+  );
+};
+
+// ---- email -----------------------------------------------------------------------
+const EmailCard = ({ account }) => (
+  <Card title="Email from GFC" sub="Whether automated messages reach you at all.">
+    <div className="fact"><span>Automated email</span>
+      <span>{account.emailUnsubscribed ? <span className="chip r">Turned off</span> : <span className="chip">On</span>}</span></div>
+    <div className="fact"><span>Address we use</span><span>{account.email || '—'}</span></div>
+    {account.accountStatus === 'inactive' && (
+      <div className="note"><b>Your account is marked inactive</b>, so no automated email is sent to you whatever this says.</div>
+    )}
+    {/* NO TOGGLE HERE, AND THAT IS DELIBERATE. The only self-service switch is
+        the unsubscribe link at the foot of the email itself, which carries its
+        own signed token; the setting is otherwise an admin's. A switch here
+        would need a route that does not exist, and a switch that silently did
+        nothing is the worse outcome. */}
+    <p className="mu" style={{ marginTop: 10 }}>
+      {account.emailUnsubscribed
+        ? 'Somebody used the unsubscribe link at the foot of a GFC email, or an admin turned this off. Ask an admin to turn it back on.'
+        : 'To stop these, use the unsubscribe link at the foot of any GFC email, or ask an admin. Messages about your care or your shifts are not marketing and are worth keeping on.'}
+    </p>
+  </Card>
+);
+
+// ---- page --------------------------------------------------------------------------
+const App = () => {
+  const [s, setS] = useState(null);
+  const [sessions, setSessions] = useState(null);
+  const [sessionsErr, setSessionsErr] = useState('');
+  const [emr, setEmr] = useState(null);     // null = not a clinical user / unknown
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async () => {
+    setErr('');
+    try { setS(await call('/api/auth/mfa/status')); }
+    catch (e) { setErr(e.message); return; }
+    try { setSessions((await call('/api/auth/sessions')).sessions || []); setSessionsErr(''); }
+    catch (e) { setSessionsErr(e.message); }
+    // The clinical status read IS the test of whether this person has an
+    // OpenEMR sign-in to manage: a 403 means they are not a clinical user, so
+    // the card does not apply and is not drawn. Asking the server beats the
+    // page deciding a credential question for itself.
+    try {
+      const st = await call('/api/clinical/status');
+      setEmr({ connected: !!st.connected, emrUser: st.emrUser || null, connectedAt: st.connectedAt || null });
+    } catch (e) { setEmr(null); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  if (err) return (
+    <div><div className="hdr"><span className="t">Your Account</span></div>
+      <div className="wrap"><div className="err">{err}</div>
+        <p className="mu">If this says your session has ended, sign in again and come back.</p></div></div>
+  );
+  if (!s) return (
+    <div><div className="hdr"><span className="t">Your Account</span></div>
+      <div className="wrap"><p className="mu">Loading…</p></div></div>
+  );
+
+  const a = s.account || {};
+  return (
+    <div>
+      <div className="hdr">
+        <span className="t">Your Account</span>
+        <a href="/login">Sign out</a>
+      </div>
+      <div className="wrap">
+        <div className="card">
+          <div className="fact"><span>Name</span><span>{a.name || '—'}</span></div>
+          <div className="fact"><span>Email</span><span>{a.email || '—'}</span></div>
+          <div className="fact"><span>Account type</span><span>{a.role || '—'}</span></div>
+        </div>
+        <PasswordCard account={a} onChanged={load} />
+        <MfaCard s={s} reload={load} />
+        <SessionsCard rows={sessions} err={sessionsErr} />
+        {emr && <EmrCard emr={emr} reload={load} />}
+        <EmailCard account={a} />
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
