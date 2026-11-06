@@ -92,8 +92,7 @@ const NOT_UI_CALLED = [
   { method: 'POST', path: '/api/auth/service-login', reason: 'Superseded by /api/auth/login; every page uses that one. Delete candidate, owner decision pending.' },
 
   // --- Vestigial --------------------------------------------------------
-  { method: 'GET', path: '/api/config', reason: 'Public non-sensitive config for "frontend portals"; no portal reads it. Vestigial, delete candidate.' },
-  { method: 'GET', path: '/api/clinical/facilities', reason: 'Redundant: the facility picker reads data.facilities embedded in another payload (admin-enrollment.html:1730). Only /facilities/sync is called.' }
+  { method: 'GET', path: '/api/config', reason: 'Public non-sensitive config for "frontend portals"; no portal reads it. Vestigial, delete candidate.' }
 ];
 
 const KEY = (r) => `${r.method} ${routeCallers.normalizeRoutePath(r.path)}`;
@@ -102,28 +101,16 @@ const KEY = (r) => `${r.method} ${routeCallers.normalizeRoutePath(r.path)}`;
 // Routes with no caller and no allow-list entry: capabilities users cannot
 // perform. Each is a screen somebody owes. This list shrinks as they land; it
 // must never grow, which is what the first test enforces.
+// EIGHTEEN ENTRIES LEFT THIS LIST ON 2026-11-06, which is the list working:
+// each was a capability nobody could reach, each now has a screen, and the
+// assertion below is what said so. Three remain, and every one of them is an
+// OWNER DECISION rather than an oversight: the lab-era service-report
+// signature, the financial-change request, and the notification-preferences
+// route whose three keys nothing in this repo reads.
 const KNOWN_MISSING_SCREENS = [
-  'GET /api/admin/audit-log',
-  'GET /api/admin/notifications/preview/:p',
-  'POST /api/admin/reset-user-password/:p',
-  'POST /api/admin/test-email',
-  'POST /api/auth/mfa/recovery-codes/regenerate',
-  'GET /api/auth/mfa/status',
-  'GET /api/auth/sessions',
-  'GET /api/caregiver/admin/welcome-packets',
-  'PUT /api/caregiver/admin/welcome-packets/:p/office-item',
   'PUT /api/client/service-reports/:p/sign',
-  'GET /api/clinical/patients/:p/care-plan/goals/:p/history',
-  'PUT /api/clinical/patients/:p/encounters/:p/billing-facility',
-  'GET /api/clinical/patients/:p/encounters/:p/documents',
-  'GET /api/clinical/standing-orders/:p',
-  'POST /api/clinical/standing-orders/:p/revise',
-  'POST /api/clinical/standing-orders/:p/status',
-  'POST /api/emr/disconnect',
-  'PUT /api/gfc/prior-providers',
   'POST /api/users/:p/financial-change-requests',
-  'PUT /api/users/:p/notification-preferences',
-  'POST /api/users/:p/sessions/revoke'
+  'PUT /api/users/:p/notification-preferences'
 ];
 
 // ---- Method-level gaps the matcher cannot see --------------------------
@@ -133,14 +120,6 @@ const KNOWN_MISSING_SCREENS = [
 // wired. Written down rather than left in a head: a known blind spot with a
 // list is a limitation, the same blind spot without one is a lie.
 const METHOD_LEVEL_GAPS = [
-  {
-    method: 'POST', path: '/api/clinical/standing-orders',
-    note: 'A provider CANNOT AUTHOR A STANDING ORDER AT ALL. The page only calls ' +
-          'GET /api/clinical/standing-orders?executable=true (clinical.html:380) to fill the ' +
-          'order and screening pickers. So the whole Session 4.8 mechanism that lets an RN or ' +
-          'LMSW act under provider authority has never been usable, because nobody can write ' +
-          'the protocol it rests on. Owed a screen, with GET /:id, /revise and /status.'
-  },
   {
     method: 'GET', path: '/api/clinical/visits/:eid/timing',
     note: 'REDUNDANT, not a missing capability: the page POSTs to this path to stamp a visit ' +
