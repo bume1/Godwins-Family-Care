@@ -17398,7 +17398,26 @@ app.get('/api/clinical/standing-orders', authenticateToken, requireClinicalRead,
           };
         });
     }
-    res.json({ standingOrders: list, orderTypes: clinicalRoles.STANDING_ORDER_TYPES, executorRoles: standingOrders.EXECUTOR_ROLES, myClinicalRole: myRole, myCeiling: clinicalRoles.ceilingFor(req.user) });
+    // The authoring form draws every option from here. A screen that restates
+    // the vocabulary drifts from the validator that refuses an answer it never
+    // offered — `buildStandingOrder` silently drops an order type or executor
+    // role outside these lists, so a hardcoded option would read as accepted
+    // and authorise nothing.
+    res.json({
+      standingOrders: list,
+      orderTypes: clinicalRoles.STANDING_ORDER_TYPES,
+      executorRoles: standingOrders.EXECUTOR_ROLES,
+      // Labels so the form never invents a name for a role, and scopes so the
+      // page does not have to know that 'panel' and 'named' are the only two.
+      roleLabels: clinicalRoles.CLINICAL_ROLE_LABELS,
+      patientScopes: standingOrders.PATIENT_SCOPES,
+      // Whether THIS person may author one, from the same matrix the route
+      // enforces, so the page offers no control the server will refuse.
+      canAuthor: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER),
+      authorRefusal: clinicalRoles.CAPABILITY_REASONS.authorStandingOrder,
+      myClinicalRole: myRole,
+      myCeiling: clinicalRoles.ceilingFor(req.user)
+    });
   } catch (error) {
     console.error('Standing order list error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -31338,6 +31357,18 @@ app.get('/billing', (req, res) => {
 // Shell is public; every route it calls is bound to req.user.
 app.get('/account', (req, res) => {
   res.sendFile(__dirname + '/public/account.html');
+});
+
+// The audit log viewer (Super Admin). Session 5.4 built the durable,
+// append-only log and its own route comment said "Session 12 builds the UI".
+// Session 12 never ran, so for fourteen months the only way to read it was an
+// API call by hand — which makes an accounting of disclosures under
+// 45 CFR 164.528 something nobody at GFC could actually produce. Shell is
+// public; GET /api/admin/audit-log is requireAdmin and decides what comes
+// back. Nothing on the page can change or remove an entry, and no route
+// exists that could.
+app.get('/audit', (req, res) => {
+  res.sendFile(__dirname + '/public/audit.html');
 });
 
 // Admin hub login endpoint (same as regular admin login)

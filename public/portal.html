@@ -765,6 +765,16 @@
           body: JSON.stringify(payload)
         }).then(handleResponse).catch(asError),
 
+      // The client's saved provider list, edited on its own rather than only
+      // while signing a release. PUT /api/gfc/prior-providers has existed
+      // since Session 3.4 ("editable independently") and nothing ever called it.
+      saveGfcPriorProviders: (token, priorProviders) =>
+        fetch(`${API_URL}/api/gfc/prior-providers`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ priorProviders })
+        }).then(handleResponse).catch(asError),
+
       uploadGfcTransferRoi: (token, payload) =>
         fetch(`${API_URL}/api/gfc/transfer-roi/upload`, {
           method: 'POST',
@@ -6247,6 +6257,13 @@
       const [providers, setProviders] = useState([]);
       // Providers who already have a release in force: listed, not re-sent by default.
       const [alreadySent, setAlreadySent] = useState([]);
+      // The SAVED list, exactly as the server holds it — roleLabel, addedFrom
+      // and all. The ROI form's `providers` above is a filtered display copy;
+      // editing the list needs the real rows, because `addedFrom` decides
+      // whether an edit survives the next intake save (see saveMyProviders).
+      const [myProviders, setMyProviders] = useState([]);
+      const [myProvidersOriginal, setMyProvidersOriginal] = useState([]);
+      const [myProvidersSaved, setMyProvidersSaved] = useState(false);
       const [maxProviders, setMaxProviders] = useState(10);
       const [result, setResult] = useState(null);
       const [signed, setSigned] = useState([]); // the client's own signed releases
@@ -6280,6 +6297,14 @@
               name: pp.name || '', dept: pp.dept || '', address: pp.address || '', phone: pp.phone || '', fax: pp.fax || '',
               activeAuthorization: pp.activeAuthorization || null
             });
+            const rawPrior = (r.priorProviders || []).map(pp => ({
+              name: pp.name || '', dept: pp.dept || '', address: pp.address || '',
+              phone: pp.phone || '', fax: pp.fax || '',
+              roleLabel: pp.roleLabel || 'other', addedFrom: pp.addedFrom || 'manual',
+              activeAuthorization: pp.activeAuthorization || null
+            }));
+            setMyProviders(rawPrior);
+            setMyProvidersOriginal(rawPrior);
             const all = (r.priorProviders || []).map(toCard);
             // Only providers WITHOUT a release in force are pre-filled. Every
             // provider used to be re-sent on every submission.
@@ -6436,6 +6461,123 @@
         );
       }
 
+      // ---- The client's own provider list -----------------------------
+      // ⚠️ `addedFrom` DECIDES WHETHER AN EDIT SURVIVES, and getting this wrong
+      // loses the client's correction silently. `resolvePriorProviders` on the
+      // server rebuilds every `intake_prefill` entry from the medical team on
+      // each intake save and preserves only `manual` and `roi_form`. So:
+      //   - a row the client CHANGED is sent WITHOUT addedFrom, and the route
+      //     stamps it `manual`, which makes the correction durable;
+      //   - a row they did NOT touch keeps its addedFrom, so an intake-derived
+      //     entry still follows the medical team as it was designed to.
+      // Sending addedFrom for everything would make every edit fragile; sending
+      // it for nothing would freeze entries that should still sync.
+      const myProviderRowChanged = (row, i) => {
+        const was = myProvidersOriginal[i];
+        if (!was) return true;                       // a row they added
+        return ['name', 'dept', 'address', 'phone', 'fax', 'roleLabel']
+          .some(k => String(row[k] || '').trim() !== String(was[k] || '').trim());
+      };
+      const setMyProvider = (i, key, val) =>
+        setMyProviders(rows => rows.map((r, n) => (n === i ? { ...r, [key]: val } : r)));
+      const saveMyProviders = async () => {
+        setErr(''); setMyProvidersSaved(false);
+        // A row with no name is dropped by the server. Drop it here too, so
+        // the list they are looking at is the list that was saved.
+        const named = myProviders.filter(p => String(p.name || '').trim());
+        const bad = named.find(p => roiFaxState(p.fax) === 'bad');
+        if (bad) { setErr(`${bad.name}: a fax number needs 10 digits, e.g. 404-555-1234.`); return; }
+        setBusy(true);
+        const payload = named.map((p, i) => {
+          const idx = myProviders.indexOf(p);
+          const row = {
+            name: p.name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax,
+            roleLabel: p.roleLabel
+          };
+          if (!myProviderRowChanged(p, idx)) row.addedFrom = p.addedFrom;
+          return row;
+        });
+        const r = await api.saveGfcPriorProviders(token, payload);
+        setBusy(false);
+        if (r.error) { setErr(r.error); return; }
+        const saved = (r.priorProviders || []).map(pp => ({
+          name: pp.name || '', dept: pp.dept || '', address: pp.address || '',
+          phone: pp.phone || '', fax: pp.fax || '',
+          roleLabel: pp.roleLabel || 'other', addedFrom: pp.addedFrom || 'manual',
+          // The server does not re-resolve releases on this route, so keep what
+          // we already knew rather than dropping the note on the row.
+          activeAuthorization: (myProvidersOriginal.find(o => o.name === pp.name) || {}).activeAuthorization || null
+        }));
+        // Read back what was STORED, never what was typed: the server trims,
+        // caps lengths and refuses a roleLabel it does not know.
+        setMyProviders(saved);
+        setMyProvidersOriginal(saved);
+        setMyProvidersSaved(true);
+      };
+
+      if (screen === 'providers') {
+        const ROLES = [
+          { v: 'pcp', l: 'Primary care physician' },
+          { v: 'specialist', l: 'Specialist' },
+          { v: 'hospital', l: 'Hospital / facility' },
+          { v: 'other', l: 'Other provider' }
+        ];
+        return (
+          <div className="gfc-body">
+            {backBtn('choice')}
+            <h2 className="disp">Your providers</h2>
+            <p className="sub">These are the doctors, specialists and hospitals we have on file for you. Keeping them right means a records request goes to the correct place.</p>
+            <div className="card" style={{ marginTop: 14, background: 'var(--cream)' }}>
+              <b style={{ color: 'var(--navy)', fontSize: 13.5 }}>Saving this only updates your list</b>
+              <div className="sub" style={{ marginTop: 2 }}>It does not request any records and does not authorize anything. To request records you sign an authorization, which is the previous screen.</div>
+            </div>
+            {myProviders.length === 0 && (
+              <p className="sub" style={{ marginTop: 16 }}>You have no providers saved yet. Add one below.</p>
+            )}
+            {myProviders.map((p, i) => (
+              <div className="card" key={i} style={{ marginTop: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--navy)' }}>Provider {i + 1}</span>
+                  <button onClick={() => setMyProviders(rows => rows.filter((_, n) => n !== i))}
+                    style={{ background: 'none', border: 'none', color: '#B5462E', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Remove</button>
+                </div>
+                {/* Deliberately not SelectField: it stores the LABEL as the
+                    value, and the server coerces a roleLabel it does not know
+                    to 'other' — so the role would be silently lost. The code
+                    is the value here; the label is only what is read. */}
+                <div className="fld">
+                  <label>Type</label>
+                  <select value={p.roleLabel} onChange={e => setMyProvider(i, 'roleLabel', e.target.value)}>
+                    {ROLES.map(r => <option key={r.v} value={r.v}>{r.l}</option>)}
+                  </select>
+                </div>
+                <TextField label="Provider / facility name" value={p.name} onChange={v => setMyProvider(i, 'name', v)} placeholder="e.g. Northside Hospital" maxLength={120} />
+                <TextField label="Department" value={p.dept} onChange={v => setMyProvider(i, 'dept', v)} placeholder="e.g. Medical Records" maxLength={80} />
+                <TextField label="Address" value={p.address} onChange={v => setMyProvider(i, 'address', v)} placeholder="Street, City, State ZIP" maxLength={200} />
+                <TextField label="Phone" type="tel" value={p.phone} onChange={v => setMyProvider(i, 'phone', v)} maxLength={30} />
+                <TextField label="Fax" type="tel" value={p.fax} onChange={v => setMyProvider(i, 'fax', v)} maxLength={30} />
+                {roiFaxState(p.fax) === 'bad' && <div className="err" style={{ marginTop: 4 }}>A fax number needs 10 digits, e.g. 404-555-1234.</div>}
+                {!String(p.name || '').trim() && <div className="hint" style={{ fontSize: 11.5, color: '#8a5a00', marginTop: 4 }}>A provider with no name is not kept. Add a name or remove this one.</div>}
+                {p.activeAuthorization && (
+                  <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginTop: 6 }}>
+                    You have already signed a release for this provider. Correcting their details here does not re-send it — tell us if it needs sending again.
+                  </div>
+                )}
+              </div>
+            ))}
+            <button className="btn ghost" style={{ marginTop: 12 }}
+              onClick={() => setMyProviders(rows => [...rows, { name: '', dept: '', address: '', phone: '', fax: '', roleLabel: 'other', addedFrom: 'manual', activeAuthorization: null }])}>
+              <i className="ti ti-plus" /> Add a Provider
+            </button>
+            {err && <div className="err" style={{ marginTop: 12 }}>{err}</div>}
+            {myProvidersSaved && !err && <div className="card" style={{ marginTop: 12, background: 'var(--cream)' }}><b style={{ color: 'var(--navy)', fontSize: 13.5 }}>Saved</b><div className="sub" style={{ marginTop: 2 }}>Your provider list is up to date.</div></div>}
+            <button className="btn" style={{ marginTop: 12 }} disabled={busy} onClick={saveMyProviders}>
+              {busy ? 'Saving…' : 'Save Providers'}
+            </button>
+          </div>
+        );
+      }
+
       if (screen === 'choice') {
         return (
           <div className="gfc-body">
@@ -6452,6 +6594,12 @@
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <i className="ti ti-edit" style={{ fontSize: 22, color: 'var(--navy)' }} />
                 <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Complete the form online</b><div className="sub" style={{ marginTop: 2 }}>Fill it out now — we'll generate one authorization per provider.</div></div>
+              </div>
+            </div>
+            <div className="card" style={{ cursor: 'pointer' }} onClick={() => { setErr(''); setMyProvidersSaved(false); setScreen('providers'); }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <i className="ti ti-address-book" style={{ fontSize: 22, color: 'var(--navy)' }} />
+                <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Update your providers</b><div className="sub" style={{ marginTop: 2 }}>Changed doctor, or a detail is wrong? Fix your list without signing anything.{myProviders.length ? ` ${myProviders.length} on file.` : ''}</div></div>
               </div>
             </div>
             {signed.length > 0 && (

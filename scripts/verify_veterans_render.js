@@ -95,7 +95,15 @@ const run = async (scenario) => {
     const u = new URL(req.url());
     const p = u.pathname;
     const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
-    if (req.method() !== 'GET') return json({ message: 'Saved' });
+    if (req.method() !== 'GET') {
+      if (req.method() === 'PUT' && /\/api\/veterans\/roster\//.test(p)) {
+        const body = JSON.parse(req.postData() || '{}');
+        const row = ROWS.find(r => p.endsWith(r.id));
+        if (row) Object.assign(row, { examTime: body.examTime || null, durationMinutes: body.durationMinutes ? Number(body.durationMinutes) : null });
+        asked.push({ put: (row && row.id) || p, examTime: body.examTime });
+      }
+      return json({ message: 'Saved' });
+    }
     if (p === '/api/clinical/status') return json({ configured: true, connected: true, emr: { connected: true },
       access: { canWrite: true, clinicalRole: roles.resolveClinicalRole(DOC), capabilities: roles.capabilitiesFor(DOC), credentialCeiling: roles.ceilingFor(DOC) } });
     if (p === '/api/veterans/roster') {
@@ -244,6 +252,45 @@ const run = async (scenario) => {
     if (process.env.GFC_PROBE_SHOT) {
       await page.screenshot({ path: path.join(process.env.GFC_PROBE_SHOT, 'veterans-board.png'), fullPage: true });
     }
+  });
+
+  // ── F. An exam added with no time can be given one afterwards ───────────
+  // The PUT route shipped with the roster and nothing ever called it, so the
+  // only way to fix a booking was to remove the veteran and re-add them.
+  await run(async (page, asked) => {
+    console.log('\nF. A veteran on the board can be edited');
+    await page.waitForSelector('text=Veterans', { timeout: 20000 });
+    ok('an untimed veteran reads "No set time", not a blank',
+      /No set time/.test(await page.locator('body').innerText()));
+    ok('every row offers Edit', (await page.locator('button:has-text("Edit")').count()) > 0);
+
+    // Open the untimed one. Pat Ames has no slot in the fixture.
+    const rows = page.locator('div').filter({ hasText: /Ames, Pat|Pat Ames/ });
+    await page.locator('button:has-text("Edit")').last().click();
+    await page.waitForFunction(() => /Edit /.test(document.body.innerText), null, { timeout: 10000 });
+    const txt = await page.locator('body').innerText();
+    ok('the form opens on that veteran by name', /Edit (Pat|James)/.test(txt), txt.slice(0, 400));
+    const surname = await page.locator('form input').nth(1).inputValue();
+    ok('the form is PREFILLED with the row, not blank', surname.length > 0, `surname field = "${surname}"`);
+    const heading = await page.locator('form h3').first().innerText();
+    ok('it is an edit, not a second Add form',
+      /^Edit /.test(heading) && !/Add Veteran/.test(heading) && /Save Changes/.test(txt), heading);
+    ok('and it can be cancelled', (await page.locator('button:has-text("Cancel")').count()) > 0);
+
+    // The whole point: give it a time and save.
+    await page.locator('input[type="time"]').first().fill('13:30');
+    await page.locator('button:has-text("Save Changes")').click();
+    await page.waitForFunction(() => !/Save Changes/.test(document.body.innerText), null, { timeout: 10000 });
+    const put = asked.filter(a => a.put);
+    ok('saving sends a PUT with the new time', put.length > 0 && put[put.length - 1].examTime === '13:30',
+      JSON.stringify(put.slice(-1)));
+    ok('the form closes on save — there is no next one to add', !/Save Changes/.test(await page.locator('body').innerText()));
+
+    // Opening Add must close the edit, or two headings claim one set of inputs.
+    await page.locator('button:has-text("Edit")').first().click();
+    await page.locator('button:has-text("Add Veteran")').first().click();
+    const after = await page.locator('body').innerText();
+    ok('opening Add closes an edit in progress', !/Save Changes/.test(after));
   });
 
   console.log(`\n${pass}/${pass + fails.length} checks passed.`);
