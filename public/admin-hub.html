@@ -258,6 +258,23 @@
       // password field above.
       // "View as" (impersonation.js). Super Admin only; the server refuses
       // admin targets, nested starts and anyone without an MFA-verified session.
+      // Two more Session 5 routes whose first UI this is. Both are admin-only
+      // and neither is the password field on the form: that one SETS a password
+      // the admin then has to convey; this one emails the person a reset link
+      // and never hands the password back.
+      emailPasswordReset: (token, userId) =>
+        fetch(`${API_URL}/api/admin/reset-user-password/${encodeURIComponent(userId)}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }).then(handleResponse).catch(asError),
+
+      revokeUserSessions: (token, userId) =>
+        fetch(`${API_URL}/api/users/${encodeURIComponent(userId)}/sessions/revoke`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        }).then(handleResponse).catch(asError),
+
       startViewAs: (token, userId) =>
         fetch(`${API_URL}/api/admin/impersonate/${userId}`, {
           method: 'POST',
@@ -2217,7 +2234,7 @@
       );
     };
 
-    const UsersPage = ({ token, isSuperAdmin }) => {
+    const UsersPage = ({ token, isSuperAdmin, user: me }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
       const [clients, setClients] = useState([]);
@@ -2550,6 +2567,43 @@
           ? `${user.name}'s OpenEMR connection was cleared. They'll be asked to sign in again next time.`
           : `${user.name} had no active OpenEMR connection.`);
         refreshEmrStatus(user.id);
+      };
+
+      // Email them a reset link. DELIBERATELY NOT the password field above:
+      // that one sets a password an admin then has to read out over the phone,
+      // which is how a password ends up in a text message. This generates a
+      // temporary one, emails a secure link, and never returns the password —
+      // so the copy must not imply the admin now knows it.
+      const emailResetLink = async (user) => {
+        if (!window.confirm(`Email ${user.name || 'this user'} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${user.email}. You will not be shown the new password — they set their own from the link.`)) return;
+        setAccessActionBusy(true);
+        const result = await api.emailPasswordReset(token, user.id);
+        setAccessActionBusy(false);
+        // A placeholder login is refused with a specific, actionable sentence
+        // (RESET_PLACEHOLDER_LOGIN names the POA to reset instead). Surface the
+        // server's own words — a generic failure sends somebody to the wrong fix.
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        setMessage(`A password reset link has been emailed to ${user.email}. Their old password no longer works.`);
+        loadData();
+      };
+
+      // End every session this person holds. For a lost or stolen device: it
+      // does not change their password, so they sign in again with the one
+      // they have.
+      const revokeUserSessions = async (user) => {
+        const isMe = !!(me && me.id === user.id);
+        const warn = isMe
+          ? `Sign yourself out everywhere?\n\nThis is your own account, so it ends THIS session too and you will have to sign in again. Your password is unchanged.`
+          : `Sign ${user.name || 'this user'} out everywhere?\n\nEvery device they are signed in on is ended immediately. Their password is unchanged — they can sign straight back in with it, so reset the password too if the device is lost.`;
+        if (!window.confirm(warn)) return;
+        setAccessActionBusy(true);
+        const result = await api.revokeUserSessions(token, user.id);
+        setAccessActionBusy(false);
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        // `revoked` is a count, and 0 is a real answer: nobody was signed in.
+        setMessage(result.revoked
+          ? `${user.name || 'They'} ${result.revoked === 1 ? 'was' : 'were'} signed out of ${result.revoked} session${result.revoked === 1 ? '' : 's'}.`
+          : `${user.name || 'They'} had no active sessions, so nothing was signed out.`);
       };
 
       const handleDelete = async (userId) => {
@@ -3273,6 +3327,47 @@
                             onClick={() => resetUserMfa(editingUser)}
                             className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
                             Reset Authenticator
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Email a reset link. Separate from the password field
+                          above on purpose: that one sets a password somebody
+                          then has to read out, this one lets them set their
+                          own. Refused on a placeholder login, with the server's
+                          own sentence naming the POA to reset instead. */}
+                      <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Password reset link</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Emails a secure link to {editingUser.email} and stops their current password working. You are not shown the new password — they choose their own. Use this instead of typing one in when you cannot speak to them.
+                            </p>
+                          </div>
+                          <button type="button" disabled={accessActionBusy}
+                            onClick={() => emailResetLink(editingUser)}
+                            className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                            Email Reset Link
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* End every session. For a lost or stolen device; it
+                          changes no password, which the copy has to say or
+                          somebody will think it locks the account. */}
+                      <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Active sessions</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Signs them out of every device immediately. Their password is unchanged, so they can sign back in with it — reset the password as well if a device is lost.
+                              {me && me.id === editingUser.id && <span className="text-amber-800 font-medium"> This is your own account, so it will sign you out of this session too.</span>}
+                            </p>
+                          </div>
+                          <button type="button" disabled={accessActionBusy}
+                            onClick={() => revokeUserSessions(editingUser)}
+                            className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                            Sign Out Everywhere
                           </button>
                         </div>
                       </div>
@@ -5533,12 +5628,12 @@
       };
 
       const renderPage = () => {
-        if (officeOnly) return <UsersPage token={token} isSuperAdmin={false} />;
+        if (officeOnly) return <UsersPage token={token} isSuperAdmin={false} user={user} />;
 
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
           case 'inbox': return <InboxPage token={token} user={user} />;
-          case 'users': return <UsersPage token={token} isSuperAdmin={isSuperAdmin} />;
+          case 'users': return <UsersPage token={token} isSuperAdmin={isSuperAdmin} user={user} />;
           case 'veterans': return <VeteransPage token={token} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
