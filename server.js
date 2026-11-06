@@ -17381,7 +17381,26 @@ app.get('/api/clinical/standing-orders', authenticateToken, requireClinicalRead,
           };
         });
     }
-    res.json({ standingOrders: list, orderTypes: clinicalRoles.STANDING_ORDER_TYPES, executorRoles: standingOrders.EXECUTOR_ROLES, myClinicalRole: myRole, myCeiling: clinicalRoles.ceilingFor(req.user) });
+    // The authoring form draws every option from here. A screen that restates
+    // the vocabulary drifts from the validator that refuses an answer it never
+    // offered — `buildStandingOrder` silently drops an order type or executor
+    // role outside these lists, so a hardcoded option would read as accepted
+    // and authorise nothing.
+    res.json({
+      standingOrders: list,
+      orderTypes: clinicalRoles.STANDING_ORDER_TYPES,
+      executorRoles: standingOrders.EXECUTOR_ROLES,
+      // Labels so the form never invents a name for a role, and scopes so the
+      // page does not have to know that 'panel' and 'named' are the only two.
+      roleLabels: clinicalRoles.CLINICAL_ROLE_LABELS,
+      patientScopes: standingOrders.PATIENT_SCOPES,
+      // Whether THIS person may author one, from the same matrix the route
+      // enforces, so the page offers no control the server will refuse.
+      canAuthor: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER),
+      authorRefusal: clinicalRoles.CAPABILITY_REASONS.authorStandingOrder,
+      myClinicalRole: myRole,
+      myCeiling: clinicalRoles.ceilingFor(req.user)
+    });
   } catch (error) {
     console.error('Standing order list error:', error);
     res.status(500).json({ error: 'Server error' });
