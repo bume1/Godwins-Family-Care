@@ -126,6 +126,55 @@ const KNOWN_MISSING_SCREENS = [
   'POST /api/users/:p/sessions/revoke'
 ];
 
+// ---- Method-level gaps the matcher cannot see --------------------------
+// `routeCallers` matches on PATH, not method, so a page that GETs `/api/x`
+// satisfies a POST route at `/api/x`. These were found by hand and are listed
+// here because no assertion below can find them — the matcher calls them
+// wired. Written down rather than left in a head: a known blind spot with a
+// list is a limitation, the same blind spot without one is a lie.
+const METHOD_LEVEL_GAPS = [
+  {
+    method: 'POST', path: '/api/clinical/standing-orders',
+    note: 'A provider CANNOT AUTHOR A STANDING ORDER AT ALL. The page only calls ' +
+          'GET /api/clinical/standing-orders?executable=true (clinical.html:380) to fill the ' +
+          'order and screening pickers. So the whole Session 4.8 mechanism that lets an RN or ' +
+          'LMSW act under provider authority has never been usable, because nobody can write ' +
+          'the protocol it rests on. Owed a screen, with GET /:id, /revise and /status.'
+  },
+  {
+    method: 'GET', path: '/api/clinical/visits/:eid/timing',
+    note: 'REDUNDANT, not a missing capability: the page POSTs to this path to stamp a visit ' +
+          '(clinical.html:271) and reads timing back as `v.timing` embedded in the encounter ' +
+          'payload, never from this GET. Nothing is owed a screen.'
+  }
+];
+
+test('the method-level gap list is honest about what it holds', () => {
+  const routes = routeCallers.collectRoutes(ROOT);
+  const defined = new Set(routes.map(KEY));
+  for (const g of METHOD_LEVEL_GAPS) {
+    assert.ok(defined.has(`${g.method} ${routeCallers.normalizeRoutePath(g.path)}`),
+      `${g.method} ${g.path} is not a route any more; drop the entry`);
+    // A length check could not tell a gutted note from a whole one (the note
+    // is concatenated, so losing a line still leaves plenty of characters).
+    // Require it to CITE THE CALL SITE that makes the claim checkable — the
+    // file and line of the call the matcher saw instead. That is the fact a
+    // reader needs to confirm or refute the entry.
+    assert.match(g.note, /\b[a-z-]+\.html:\d+/,
+      `${g.method} ${g.path}: the note must cite the call site (file.html:line) the matcher saw instead`);
+    assert.ok(g.note.length >= 60, `${g.method} ${g.path} needs a real note`);
+  }
+  // These are exactly the routes the matcher CANNOT help with: if one ever
+  // starts reading as an orphan on its path alone, it belongs in the normal
+  // lists instead and this entry should go.
+  const callers = routeCallers.collectCallerPaths(ROOT);
+  const isCalled = routeCallers.buildMatcher(callers);
+  for (const g of METHOD_LEVEL_GAPS) {
+    assert.ok(isCalled(g.path),
+      `${g.path} now reads as an orphan on its path alone — move it to KNOWN_MISSING_SCREENS or NOT_UI_CALLED`);
+  }
+});
+
 test('no API route is unreachable from the front end without a written reason', () => {
   const routes = routeCallers.collectRoutes(ROOT);
   const callers = routeCallers.collectCallerPaths(ROOT);

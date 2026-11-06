@@ -56,6 +56,47 @@ purpose — the question is whether ANYTHING calls the route.
 - **the work list cannot rot either**: a screen that lands must leave
   `KNOWN_MISSING_SCREENS`.
 
+## ⚠️ It matches on PATH, not method — and that hid a real defect
+
+A page that GETs `/api/x` satisfies a POST route at `/api/x`. Not theoretical:
+it hid **`POST /api/clinical/standing-orders`**. The page calls
+`GET /api/clinical/standing-orders?executable=true` to fill the order and
+screening pickers, so the path reads as called — while **nothing has ever
+posted to it.**
+
+So **a provider cannot author a standing order at all**, which means the whole
+Session 4.8 mechanism that lets an RN or LMSW act under provider authority has
+never been usable: nobody can write the protocol it rests on. That is now in
+`METHOD_LEVEL_GAPS` with its call site, because no assertion in the file can
+find it.
+
+The second entry there, `GET /api/clinical/visits/:eid/timing`, is **redundant
+rather than missing**: the page POSTs to that path to stamp a visit and reads
+timing back as `v.timing` embedded in the encounter payload, never from the GET.
+
+**A method-aware matcher was built and REVERTED.** Reading a method means
+reading the call site, and it needs to handle five shapes — `api('POST', path)`,
+`fetch(path, {method})`, `post(path)`, `authedUpload(path)`, and a bare URL
+builder with no call at all. Each of those got handled. What did not survive
+scrutiny is the scan underneath: it treats a **closing** backtick as opening a
+new literal, so it swallowed everything to the next one and produced keys like
+`` GET /api/veterans/roster/:p`, { method: `` — malformed, and wrong in both
+directions. Fixing it properly needs one tokenizer pass that cannot mistake a
+closing quote for an opening one.
+
+Shipping a stricter matcher that emits nonsense would be worse than an honest
+blind spot, because the cure a developer reaches for is a padded allow-list or a
+disabled test. So the limitation is written into the module header and the two
+hand-verified gaps are listed.
+
+**It also corrected a claim in PR #248.** `PUT /api/veterans/roster/:id` was
+described there as called by nothing. It is called — from the admin hub's
+Veterans table, to reassign the examining provider
+(`admin-hub.html:2102`). What was true is narrower: that caller only ever sends
+`providerUserId`, so a veteran's exam TIME could not be edited. The gap was
+real; the sentence about it was not, because the grep behind it was bounded to
+`public/clinical.html`. A grep bounded to one file is not a search.
+
 ## What it does NOT do, stated so nobody trusts it for more
 
 It proves a path **appears** in a page, never that the control is reachable or

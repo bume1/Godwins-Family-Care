@@ -12,11 +12,30 @@
 // So this module answers one question, mechanically, and `test/no_orphan_routes`
 // fails the build on a route nobody calls and nobody has justified.
 //
-// WHAT IT IS NOT. It proves a path APPEARS in a page, never that the button is
-// reachable or that the condition around it is ever true. The care-coordinator
-// bug (2026-11-05) would have PASSED this: the route was called, behind a flag
-// that was false for that role. That class needs a browser probe, and saying so
-// here is cheaper than someone later trusting this for more than it does.
+// WHAT IT IS NOT — two limits, both found the hard way, both worth knowing
+// before anyone trusts an answer from this file.
+//
+// 1. It proves a path APPEARS in a page, never that the control is reachable or
+//    that the condition around it is ever true. The care-coordinator bug
+//    (2026-11-05) would have PASSED: the route was called, behind a flag that
+//    was false for that role. That class needs a browser probe.
+//
+// 2. ⚠️ IT MATCHES ON PATH, NOT METHOD. A page that GETs `/api/x` therefore
+//    satisfies a POST route at `/api/x`. That is not theoretical: it hid
+//    `POST /api/clinical/standing-orders`, so a provider has never been able to
+//    author a standing order, while the GET beside it was called and the route
+//    read as wired. Hand-verified method-level gaps are listed in
+//    METHOD_LEVEL_GAPS in the test, because this file cannot find them.
+//
+//    A method-aware version was built and REVERTED on 2026-11-06. Reading a
+//    method means reading the call site, and the character scan below treats a
+//    CLOSING backtick as opening a new literal, so it swallowed everything to
+//    the next one and produced keys like
+//    `GET /api/veterans/roster/:p`, { method:` — malformed, in both
+//    directions. Doing it properly needs one tokenizer pass that cannot
+//    mistake a closing quote for an opening one; until then a stricter matcher
+//    emitting nonsense is worse than an honest blind spot, because the cure a
+//    developer reaches for is a padded allow-list or a disabled test.
 // ============================================================================
 
 'use strict';
