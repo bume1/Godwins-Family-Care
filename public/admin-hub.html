@@ -1863,6 +1863,9 @@
                         {d.kindLabel}
                         {d.payroll && <span className="ml-2 text-[10px] uppercase tracking-wide text-gray-500">payroll</span>}
                       </div>
+                      {d.note && (
+                        <div className="text-xs text-gray-600 truncate">{d.note}</div>
+                      )}
                       <div className="text-xs text-gray-500 truncate">
                         {d.fileName} · {String(d.uploadedAt).slice(0, 10)}
                         {/* Who filed it. "The caregiver sent this" and "the office
@@ -3579,11 +3582,22 @@
                         )}
                       </div>
 
-                      <CaregiverDocsSection
-                        token={token}
-                        caregiverId={editingUser ? editingUser.id : null}
-                        caregiverName={formData.name} />
                     </div>
+                  )}
+
+                  {/* DOCUMENTS ON FILE — caregivers AND clinicians.
+                      The card used to sit inside the vendor-only block, so a
+                      clinician's onboarding paperwork went into Drive and a
+                      credentialing record and was reachable from nowhere on
+                      this screen. Her proof uploads write the same
+                      `caregiver_documents` row a caregiver's do, so the office
+                      has ONE place to look for one person's documents rather
+                      than having to know which door a file came through. */}
+                  {(formData.role === 'vendor' || formData.hasClinicalAccess) && editingUser && (
+                    <CaregiverDocsSection
+                      token={token}
+                      caregiverId={editingUser.id}
+                      caregiverName={formData.name} />
                   )}
 
                   {/* Client-specific fields */}

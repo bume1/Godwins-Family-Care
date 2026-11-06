@@ -15,9 +15,25 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 // Comments are stripped before any source scan. A guard that reads a comment as
 // code proves nothing, and this repo has paid for that five times — including
 // once where a comment NAMED the function it had replaced.
+// ⚠️ A `/*` INSIDE A STRING IS NOT A COMMENT, and taking it for one is the
+// same mistake as reading a comment as code — the stripper's own failure mode,
+// pointed at itself. `public/admin-hub.html` carries
+// accept="image/*,application/pdf"; the naive version read that `/*` as an
+// opener and silently deleted 1,666 characters of real JSX up to the next
+// `*/`, so an assertion about code inside that window could never pass however
+// correct the code was. Found by a guard that failed against markup plainly
+// present in the file.
+//
+// A real comment opener never follows a letter or a digit, so those are hidden
+// from the comment pass and put back afterwards. Not a tokenizer; enough to
+// tell an attribute value from a comment, and it changes nothing for every
+// other file this helper reads.
+const NOT_A_COMMENT = '\u0000*';
 const stripComments = (src) => src
+  .replace(/([A-Za-z0-9])\/\*/g, '$1' + NOT_A_COMMENT)
   .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1')
+  .split(NOT_A_COMMENT).join('/*');
 
 const NP_HYBRID = {
   roles: ['NP'], relationship: 'HYBRID', lanes: ['CLINICAL', 'EXAMS'],
@@ -767,4 +783,331 @@ test('an item tells her what to do, not why we designed it that way', () => {
     assert.ok(!rationale.test(i.detail),
       `${i.id} explains our design decision where it should say what to do: "${i.detail.slice(0, 90)}"`);
   });
+});
+
+// ===========================================================================
+// HER DOCUMENTS, AND THE NOTES EITHER SIDE CAN SEND
+// ===========================================================================
+
+test('a proof upload writes the SAME store User Management already reads', () => {
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  const block = src.slice(src.indexOf('items/:itemId/proof'), src.indexOf('items/:itemId/proof/:fileId'));
+
+  assert.match(block, /db\.set\('caregiver_documents', docRows\)/,
+    'one store, two doors: the office should not have to know which door a file came through');
+  assert.match(block, /kind: 'clinician_onboarding'/);
+  assert.match(block, /caregiver_id: String\(req\.user\.id\)/,
+    'filed under the person, which is what the documents card lists by');
+  assert.match(block, /note: `Onboarding: \$\{item\.title\}`/,
+    'or every one of her uploads reads "Clinician onboarding document"');
+  assert.match(block, /status: needsOfficeCheck \? 'received' : 'accepted'/,
+    'the row mirrors the item rather than inventing a second rule');
+  assert.match(block, /documentId: docId/,
+    'the two must point at one file, or the wizard and User Management can disagree');
+
+  // The kind has to be in the served catalog, or the document lists as a raw
+  // slug and the office cannot tell what it is.
+  const cg = stripComments(read('routes/caregiver.js'));
+  assert.match(cg, /kind: 'clinician_onboarding', label: 'Clinician onboarding document'/);
+});
+
+test('the documents card renders for a clinician, not only a caregiver', () => {
+  const hub = stripComments(read('public/admin-hub.html'));
+  assert.match(hub, /\{\(formData\.role === 'vendor' \|\| formData\.hasClinicalAccess\) && editingUser && \(/,
+    'it sat inside the vendor-only block, so a clinician\'s paperwork was reachable from nowhere here');
+  assert.strictEqual((hub.match(/<CaregiverDocsSection/g) || []).length, 1,
+    'one card, or the two copies drift');
+  assert.match(hub, /\{d\.note && \(/,
+    'the note is what names which checklist item a clinician\'s file answers');
+});
+
+test('an attached file can actually be opened, by her and by the office', () => {
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  // Her own, by her own session: no userId in the path, so there is nothing
+  // to widen. Build-enforced alongside the other /me routes.
+  assert.match(src, /router\.get\('\/api\/clinician-onboarding\/me\/items\/:itemId\/proof\/:fileId'/);
+  assert.match(src, /logActivity\('clinician_onboarding_proof_read'/,
+    'through the app, never a Drive link, so every read is audited');
+  // A missing row and Google refusing a file are different facts.
+  assert.match(src, /PROOF_FILE_MISSING/);
+  assert.match(src, /PROOF_STORAGE_UNAVAILABLE/);
+  assert.match(src, /contentDisposition\('inline', file\.name/,
+    'the header is built by the one helper, or a filename with a narrow no-break space 500s');
+
+  const page = stripComments(read('public/clinician-onboarding.html'));
+  const itemRow = page.slice(page.indexOf('const ItemRow'), page.indexOf('const Checklist'));
+  assert.ok(!/files? attached\s*$/m.test(itemRow),
+    'a count with nothing to click is a capability nobody can reach');
+  assert.match(itemRow, /onClick=\{\(\) => openProof\(row\.id, f\)\}/);
+  // A plain <a href> is a navigation and carries no Authorization header.
+  assert.ok(!/<a[^>]+href=\{[^}]*proof/.test(itemRow),
+    'a download is a request like any other and needs the token, in the HEADER');
+  assert.match(page, /Authorization: `Bearer \$\{getToken\(\)\}` \}\s*\}\);\s*\n\s*if \(!res\.ok\)/,
+    'fetched with the token, handed over as a blob');
+});
+
+test('notes are append-only and two-sided, so neither side overwrites the other', () => {
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  assert.match(src, /notes: \(prev\.notes \|\| \[\]\)\.concat/,
+    'APPEND. One shared `note` string meant whoever saved last silently won');
+  assert.match(src, /router\.post\('\/api\/clinician-onboarding\/me\/items\/:itemId\/notes'/);
+  assert.match(src, /router\.post\('\/api\/clinician-onboarding\/admin\/:userId\/items\/:itemId\/notes'/);
+  assert.match(src, /const addNote = async \(req, res, \{ userId, fromOffice \}\)/,
+    'one handler, two gates: a note that reads differently by sender is two features');
+  const noteObj = src.slice(src.indexOf('notes: (prev.notes || []).concat'),
+    src.indexOf('notes: (prev.notes || []).concat') + 260);
+  assert.match(noteObj, /fromOffice: !!fromOffice/,
+    `each NOTE says which side wrote it: ${noteObj.slice(0, 180)}`);
+  assert.match(noteObj, /byName: req\.user\.name/, 'and who, by name');
+  assert.match(noteObj, /at: nowIso\(\)/, 'and when');
+
+  // THAT a note was written, never what it said.
+  const ev = src.slice(src.indexOf("type: 'note_added'"), src.indexOf("type: 'note_added'") + 400);
+  assert.ok(!/\btext\b/.test(ev), `an audit row is not a second copy of the conversation: ${ev.slice(0, 120)}`);
+
+  // Both audiences render the thread; `notes` is NOT in the hidden list.
+  assert.ok(!/CLINICIAN_HIDDEN_ITEM_FIELDS = \[[^\]]*'notes'/s.test(src),
+    'she must read what the office wrote to her');
+  const page = stripComments(read('public/clinician-onboarding.html'));
+  assert.match(page, /const NoteThread = /);
+  assert.match(page, /<NoteThread row=\{row\} office=\{office\} onAdd=\{onAddNote\} \/>/);
+});
+
+test('a note reaches the checklist row both sides read', () => {
+  const rows = T.buildTrack({
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] },
+    record: { items: { 'CORE-01': { notes: [{ id: 'n1', text: 'Sent Tuesday', fromOffice: false }] } } }
+  }).rows;
+  const r = rows.find(x => x.id === 'CORE-01');
+  assert.strictEqual(r.notes.length, 1);
+  assert.strictEqual(r.notes[0].text, 'Sent Tuesday');
+  // An item nobody has written on carries an empty list, never undefined, or
+  // the page has to guard every read.
+  assert.deepStrictEqual(rows.find(x => x.id === 'CORE-03').notes, []);
+});
+
+test('a document to complete outside the app says where to send it back', () => {
+  // The resources list had no file input at all, so "complete it outside the
+  // app, then upload it" was a dead end. It points at the checklist item that
+  // owns it rather than growing a second upload path with its own copy of the
+  // byte-typing and the Drive failure rule.
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  assert.match(src, /r\.uploadItem = owner \? \{ id: owner\.id, title: owner\.title \} : null/);
+  const page = stripComments(read('public/clinician-onboarding.html'));
+  assert.match(page, /!signable && res\.uploadItem/);
+
+  // Every resource that needs a file back must have an item that can take one,
+  // or the pointer points nowhere.
+  const needsFile = RES.RESOURCES.filter(r =>
+    ['COMPLETE_EXTERNAL', 'UPLOAD_CERTIFICATE'].includes(r.action));
+  assert.ok(needsFile.length > 0, 'or this guard reads nothing');
+  needsFile.forEach(r => {
+    const owner = T.ITEM_LIBRARY.find(it => (it.resources || []).includes(r.id));
+    assert.ok(owner, `${r.id} asks for a file back and no checklist item owns it`);
+  });
+});
+
+test('the comment stripper does not eat code hiding behind a string', () => {
+  // The guard's own failure mode. `image/*` in an accept attribute opened a
+  // fake block comment and 1,666 characters of real JSX in admin-hub.html went
+  // with it — so a correct assertion failed against markup plainly in the file.
+  // A source scan that silently loses code proves as little as one that reads a
+  // comment as code.
+  const sample = [
+    '<input accept="image/*,application/pdf" />',
+    'const keep = 1;',
+    '/* a real comment */',
+    'const alsoKeep = 2;'
+  ].join('\n');
+  const out = stripComments(sample);
+  assert.ok(out.includes('const keep = 1;'), out);
+  assert.ok(out.includes('const alsoKeep = 2;'), 'the real comment must not swallow what follows');
+  assert.ok(!out.includes('a real comment'), 'a real comment must still go');
+  assert.ok(out.includes('image/*'), 'and the attribute must survive unchanged');
+
+  // Proven against the file that actually broke, not only a fixture.
+  const hub = stripComments(read('public/admin-hub.html'));
+  assert.ok(hub.length > read('public/admin-hub.html').length * 0.9,
+    'losing a tenth of the file is the symptom this exists to catch');
+});
+
+test('a proof upload types the file by its bytes and does not refuse every one', () => {
+  // ⚠️ REGRESSION. `detectFileType` returns a MIME STRING, and this route read
+  // `sniffed.ext` — undefined on a string — so `ext` was always null and every
+  // single upload came back PROOF_TYPE_UNSUPPORTED. The attach-a-file
+  // capability had never worked. Reading the route could not show it; posting
+  // a real PNG through it did.
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  const block = src.slice(src.indexOf('items/:itemId/proof'), src.indexOf('db.set(\'caregiver_documents\''));
+  assert.match(block, /const mime = detectFileType \? detectFileType\(req\.file\.buffer\) : null/);
+  assert.match(block, /EXT_FOR_MIME\[mime\]/,
+    'the sniffer answers a mime type; an extension has to be derived from it');
+  assert.ok(!/sniffed\.ext/.test(block),
+    'reading .ext off a string is how every upload got refused');
+
+  // The server's own sniffer must still answer what this map expects, or the
+  // two drift and uploads start being refused again in silence.
+  const server = read('server.js');
+  ['application/pdf', 'image/png', 'image/jpeg'].forEach(m => {
+    assert.ok(server.includes(`return '${m}'`), `detectFileType must still answer ${m}`);
+    assert.ok(block.includes(`'${m}'`), `and the route must still map ${m}`);
+  });
+});
+
+// ===========================================================================
+// THE DOCUMENT PATH, DRIVEN. Drive is unreachable from a sandbox, so the live
+// probe can only prove the upload is REFUSED when it is unconfigured (which is
+// the designed behaviour). The route is mounted here with a fake Drive and
+// driven over real HTTP, so what is asserted is the row that was stored — the
+// `sniffed.ext` bug was invisible to every source scan and showed itself the
+// first time a real PNG went through.
+// ===========================================================================
+
+const express = require('express');
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64');
+
+const mountOnboarding = async (t, { user, inputs }) => {
+  const store = {};
+  const db = {
+    get: async (k) => (k in store ? JSON.parse(JSON.stringify(store[k])) : null),
+    set: async (k, v) => { store[k] = JSON.parse(JSON.stringify(v)); }
+  };
+  const driveStub = {
+    uploadCaregiverDocumentFile: async (folder, name, buf, mime) => {
+      driveStub.last = { folder, name, bytes: buf.length, mime };
+      return { fileId: 'drv_1', id: 'drv_1' };
+    },
+    downloadFileBuffer: async () => PNG,
+    describeDriveError: (e) => ({ reason: e.message, hint: null })
+  };
+  const router = require('../routes/clinicianOnboarding')({
+    db, config: {}, logActivity: async () => {},
+    getUsers: async () => [user],
+    authenticateToken: (req, _res, next) => { req.user = user; next(); },
+    drive: driveStub,
+    // The SERVER's own sniffer, copied, so the route is held to what production
+    // actually hands it — a mime STRING, not an object.
+    detectFileType: (buf) => {
+      if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
+      if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+      if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return 'application/pdf';
+      return null;
+    },
+    hashIp: () => 'hashed',
+    uuidv4: () => `id_${Math.random().toString(36).slice(2, 10)}`
+  });
+  const app = express();
+  app.use(express.json({ limit: '20mb' }));
+  app.use(router);
+  const server = app.listen(0);
+  t.after(() => server.close());
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  if (inputs) {
+    await fetch(`${base}/api/clinician-onboarding/admin/${user.id}/inputs`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(inputs)
+    });
+  }
+  return { store, drive: driveStub, base };
+};
+
+const OFFICE_NP = {
+  id: 'u1', name: 'Thanmayie Rao', email: 't@gfc.test',
+  role: 'admin', hasClinicalAccess: true, clinicalRole: 'provider'
+};
+
+test('a file she attaches lands in the store User Management reads', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+
+  const fd = new FormData();
+  fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence-scan.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
+    { method: 'POST', body: fd });
+  const body = await res.json();
+  assert.strictEqual(res.status, 200, JSON.stringify(body).slice(0, 200));
+
+  // THE ACTUAL ASK: one person's paperwork in one place.
+  const docs = h.store.caregiver_documents || [];
+  assert.strictEqual(docs.length, 1, 'the upload must write the shared row');
+  const d = docs[0];
+  assert.strictEqual(d.kind, 'clinician_onboarding');
+  assert.strictEqual(String(d.caregiver_id), 'u1', 'filed under the person');
+  assert.strictEqual(d.file_name, 'licence-scan.png', 'her own filename, kept');
+  assert.strictEqual(d.mime_type, 'image/png', 'typed by its bytes');
+  assert.strictEqual(d.size_bytes, PNG.length);
+  assert.strictEqual(d.drive_file_id, 'drv_1');
+  assert.match(d.note, /^Onboarding: /, 'named by the item it answers');
+  assert.strictEqual(d.clinician_item_id, 'NP-01');
+  // A licence is verified against a primary source, so it is still waiting on
+  // the office — the row mirrors the item rather than inventing a second rule.
+  assert.strictEqual(d.status, 'received');
+
+  // And the wizard points at that same row.
+  const row = body.track.rows.find(r => r.id === 'NP-01');
+  assert.strictEqual(row.proofFiles.length, 1);
+  assert.strictEqual(row.proofFiles[0].documentId, d.id,
+    'one file, two screens — never two copies that can disagree');
+
+  // She can open it, and gets back the bytes she sent.
+  const open = await fetch(
+    `${h.base}/api/clinician-onboarding/me/items/NP-01/proof/${row.proofFiles[0].id}`);
+  assert.strictEqual(open.status, 200);
+  assert.ok(Buffer.from(await open.arrayBuffer()).equals(PNG), 'the same bytes come back');
+});
+
+test('a file that is not a PDF, JPEG or PNG is refused by its bytes', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+  const fd = new FormData();
+  // Claims to be a PNG; the bytes say otherwise. Never trust the claim.
+  fd.append('file', new Blob([Buffer.from('MZ\x90\x00 not a png')], { type: 'image/png' }), 'x.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
+    { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual((await res.json()).code, 'PROOF_TYPE_UNSUPPORTED');
+  assert.strictEqual((h.store.caregiver_documents || []).length, 0,
+    'nothing may be recorded for a file that was refused');
+});
+
+test('a Drive failure refuses the upload rather than recording a row with no file', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+  h.drive.uploadCaregiverDocumentFile = async () => { throw new Error('Drive is down'); };
+  const fd = new FormData();
+  fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
+    { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 502);
+  // A row pointing at a file that does not exist would tick a credentialing
+  // item with no proof behind it, and she would believe she had sent it.
+  assert.strictEqual((h.store.caregiver_documents || []).length, 0);
+  const rec = (h.store.clinician_onboarding || [])[0];
+  assert.ok(!rec || !rec.items['NP-01'] || !(rec.items['NP-01'].proofFiles || []).length);
+});
+
+test('a Drive id never leaves the server', () => {
+  // Both readers go through a route that audits. A Drive id in the browser is
+  // a file reachable without one — the rule the caregiver document store and
+  // the client document exchange both already follow.
+  const rows = T.buildTrack({
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] },
+    record: { items: { 'NP-01': { proofFiles: [{
+      id: 'f1', name: 'licence.png', documentId: 'cgdoc_1',
+      driveFileId: 'SECRET_DRIVE_ID', uploadedAt: '2026-11-06T00:00:00Z'
+    }] } } }
+  }).rows;
+  const f = rows.find(r => r.id === 'NP-01').proofFiles[0];
+  assert.strictEqual(f.documentId, 'cgdoc_1', 'the office needs our own row id to open it');
+  assert.ok(!('driveFileId' in f), 'but never Google\'s');
+  assert.ok(!JSON.stringify(rows).includes('SECRET_DRIVE_ID'));
 });

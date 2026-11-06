@@ -287,13 +287,64 @@ const GateCard = ({ gate, onOpen, canOpen, office }) => {
 };
 
 // ---- ONE CHECKLIST ITEM ---------------------------------------------------
+// NOTES ON AN ITEM, BOTH WAYS. Append-only and stamped, so neither side can
+// overwrite the other — which the single shared `note` field silently did. Each
+// line says who wrote it, because "the office asked for a clearer scan" and
+// "she said the board is slow" are different facts and the office works the
+// list off them. Shown on every item, done or not: the reason something took
+// three weeks is worth keeping after it is finished.
+const NoteThread = ({ row, office, onAdd }) => {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [open, setOpen] = useState(false);
+  const notes = row.notes || [];
+  const send = async () => {
+    if (!text.trim()) return;
+    setBusy(true); setErr(null);
+    try { await onAdd(row.id, text.trim()); setText(''); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div style={{ marginTop: 6 }}>
+      {notes.map(n => (
+        <div key={n.id} className="sub" style={{ padding: '3px 0' }}>
+          <strong>{n.fromOffice ? 'The office' : (n.byName || 'They')}</strong>
+          {' '}· {fmtDate(n.at)} — {n.text}
+        </div>
+      ))}
+      {!open && (
+        <button type="button" className="btn ghost sm" style={{ marginTop: 4 }}
+          onClick={() => setOpen(true)}>
+          {notes.length ? 'Add A Note' : (office ? 'Add A Note' : 'Ask A Question')}
+        </button>
+      )}
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          <label>{office ? 'Note for them' : 'Note for the office'}</label>
+          <input type="text" value={text} maxLength={2000}
+            onChange={e => setText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') send(); }} />
+          {err && <div className="sub" style={{ color: 'var(--bad)' }}>{err}</div>}
+          <div style={{ marginTop: 6 }}>
+            <button className="btn sm" disabled={busy || !text.trim()} onClick={send}>Send</button>
+            <button className="btn ghost sm" style={{ marginLeft: 6 }}
+              onClick={() => { setOpen(false); setText(''); setErr(null); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ONE CHECKLIST ITEM. `mode` is the AUDIENCE, not a style: the office reads
 // this as a credentialing file and needs the item's id, the evidence to file
 // and the gates it blocks; the clinician reads it as a thing to do. The fields
 // the office-only rows draw from are not even sent to her (see forClinician in
 // routes/clinicianOnboarding.js) — these guards are the second layer, so that
 // a field restored to her payload still does not render as admin vocabulary.
-const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
+const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload, onAddNote, openProof }) => {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState(row.note || '');
   const [verifiedAt, setVerifiedAt] = useState(row.verifiedAt || '');
@@ -338,11 +389,24 @@ const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
                 : <>Completed {fmtDate(row.completedAt)}{row.completedBy ? ` by ${row.completedBy}` : ''}</>}
             </div>
           )}
-          {row.proofFiles.length > 0 && (
-            <div className="sub" style={{ marginTop: 4 }}>
-              {row.proofFiles.length} file{row.proofFiles.length === 1 ? '' : 's'} attached
+          {/* A COUNT IS NOT A DOCUMENT. This used to read "2 files attached"
+              as plain text with nothing to click, so the office could see that
+              something had been sent and could not read it — a capability
+              nobody can reach is not shipped. Fetched with the token and handed
+              over as a blob: a plain <a href> carries no Authorization header,
+              and a PHI document's URL does not belong in browser history. */}
+          {(row.proofFiles || []).length > 0 && (
+            <div className="sub" style={{ marginTop: 6 }}>
+              {row.proofFiles.map(f => (
+                <button key={f.id} type="button" className="btn ghost sm"
+                  style={{ marginRight: 6, marginTop: 4 }}
+                  onClick={() => openProof(row.id, f)}>
+                  <span role="img" aria-hidden="true">📄</span>&nbsp;{f.name}
+                </button>
+              ))}
             </div>
           )}
+          <NoteThread row={row} office={office} onAdd={onAddNote} />
           {row.blockedByItems.length > 0 && (
             <div className="sub" style={{ marginTop: 4 }}>Starts after {row.blockedByItems.join(', ')}.</div>
           )}
@@ -452,7 +516,7 @@ const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
 };
 
 // ---- CHECKLIST ------------------------------------------------------------
-const Checklist = ({ track, mode, onSubmit, onRecord, onUpload }) => {
+const Checklist = ({ track, mode, onSubmit, onRecord, onUpload, onAddNote, openProof }) => {
   const [filter, setFilter] = useState(mode === 'clinician' ? 'mine' : 'open');
   const rows = track.rows.filter(r => {
     if (filter === 'mine') return r.waitingOn === 'clinician' && r.status !== 'complete' && r.status !== 'not_applicable';
@@ -485,7 +549,8 @@ const Checklist = ({ track, mode, onSubmit, onRecord, onUpload }) => {
           <h3>{b.title}</h3>
           {b.rows.map(r => (
             <ItemRow key={r.id} row={r} mode={mode}
-              onSubmit={onSubmit} onRecord={onRecord} onUpload={onUpload} />
+              onSubmit={onSubmit} onRecord={onRecord} onUpload={onUpload}
+              onAddNote={onAddNote} openProof={openProof} />
           ))}
         </div>
       ))}
@@ -515,6 +580,15 @@ const DocRow = ({ res, onSign, onNoAccess }) => {
             {res.countersign && <Pill>Countersigned by the Clinical Director</Pill>}
           </div>
           {!res.available && <div className="sub" style={{ marginTop: 6 }}>{res.unavailableMessage}</div>}
+          {/* "Complete it outside the app, then upload it" used to offer
+              nothing to upload with. The door is the checklist item that owns
+              this document, so say which one rather than building a second
+              upload path beside it. */}
+          {!signable && res.uploadItem && (
+            <div className="sub" style={{ marginTop: 6 }}>
+              Send it back on your checklist, under <strong>{res.uploadItem.title}</strong>.
+            </div>
+          )}
         </div>
         <div className="meta" style={{ marginTop: 0 }}>
           {res.url && <a className="btn ghost sm" href={res.url} target="_blank" rel="noopener noreferrer">Open</a>}
@@ -825,6 +899,28 @@ const MyWizard = ({ data, meta, reload, firstName }) => {
     const d = await api(`/api/clinician-onboarding/me/resources/${resId}/no-access`, { method: 'POST' });
     reload(d);
   };
+  const addNote = async (id, text) => {
+    const d = await api(`/api/clinician-onboarding/me/items/${id}/notes`,
+      { method: 'POST', body: JSON.stringify({ text }) });
+    reload(d);
+  };
+  // Fetched with the token and handed over as a blob. A plain <a href> is a
+  // navigation and carries no Authorization header, and a PHI-adjacent
+  // document's URL has no business in browser history or a Referer.
+  const openProof = async (itemId, file) => {
+    const res = await fetch(`/api/clinician-onboarding/me/items/${itemId}/proof/${file.id}`,
+      { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || (res.status === 401
+        ? 'Your session has timed out. Sign in again.' : 'That file could not be opened.'));
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name || 'document';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  };
   const completeModule = async (id, answers) => {
     const d = await api(`/api/clinician-onboarding/me/training/${id}`,
       { method: 'PUT', body: JSON.stringify({ answers }) });
@@ -909,6 +1005,7 @@ const MyWizard = ({ data, meta, reload, firstName }) => {
               ? <div className="empty">Nothing right now. </div>
               : track.rows.filter(r => r.waitingOnYou && r.status !== 'complete').slice(0, 6).map(r => (
                 <ItemRow key={r.id} row={r} mode="clinician"
+                onAddNote={addNote} openProof={openProof}
                   onSubmit={submitItem} onUpload={uploadProof} />
               ))}
           </div>
@@ -938,7 +1035,8 @@ const MyWizard = ({ data, meta, reload, firstName }) => {
       )}
 
       {tab === 'list' && <Checklist track={track} mode="clinician"
-        onSubmit={submitItem} onUpload={uploadProof} />}
+        onSubmit={submitItem} onUpload={uploadProof}
+        onAddNote={addNote} openProof={openProof} />}
 
       {tab === 'train' && (
         <div>
@@ -1166,6 +1264,26 @@ const OfficeDetail = ({ userId, meta, onBack }) => {
     `/api/clinician-onboarding/admin/${userId}/inputs`, { method: 'PUT', body: JSON.stringify(body) }));
   const record = async (id, body) => setData(await api(
     `/api/clinician-onboarding/admin/${userId}/items/${id}`, { method: 'PUT', body: JSON.stringify(body) }));
+  const addNote = async (itemId, text) => setData(await api(
+    `/api/clinician-onboarding/admin/${userId}/items/${itemId}/notes`,
+    { method: 'POST', body: JSON.stringify({ text }) }));
+  // The office opens a file she sent in through the SHARED caregiver-document
+  // row the upload wrote, which is the same row User Management's documents
+  // card reads. One file, two screens; never two copies that can disagree.
+  const openProof = async (itemId, file) => {
+    if (!file.documentId) throw new Error('That file predates the shared document store. Open it from the onboarding record.');
+    const res = await fetch(`/api/caregiver/documents/${file.documentId}/file`,
+      { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || 'That file could not be opened.');
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name || 'document';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  };
   const openGate = async (gateId, scope) => setData(await api(
     `/api/clinician-onboarding/admin/${userId}/gates/${gateId}/open`,
     { method: 'POST', body: JSON.stringify({ scope }) }));
@@ -1243,7 +1361,8 @@ const OfficeDetail = ({ userId, meta, onBack }) => {
             <button className={`tab${tab === 'due' ? ' on' : ''}`} onClick={() => setTab('due')}>Keeping Current</button>
             <button className={`tab${tab === 'history' ? ' on' : ''}`} onClick={() => setTab('history')}>History</button>
           </div>
-          {tab === 'list' && <Checklist track={track} mode="office" onRecord={record} />}
+          {tab === 'list' && <Checklist track={track} mode="office" onRecord={record}
+            onAddNote={addNote} openProof={openProof} />}
           {tab === 'priv' && <PrivilegeList priv={privileges} meta={meta} inputs={track.inputs}
             mode="office" onGenerate={generatePriv} onDecide={decide} onCoSign={coSign} />}
           {tab === 'train' && (

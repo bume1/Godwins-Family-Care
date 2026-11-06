@@ -445,8 +445,21 @@ function buildTrack({ inputs, record, supervisor, today, viewer } = {}) {
       verifiedAt: st.record ? (st.record.verifiedAt || null) : null,
       verifiedBy: st.record ? (st.record.verifiedByName || null) : null,
       note: st.record ? (st.record.note || null) : null,
+      // NOTES ARE APPEND-ONLY AND TWO-SIDED. There used to be one `note`
+      // string that both she and the office wrote into, so whoever saved last
+      // silently overwrote the other — and it only showed once the item was
+      // done. A thread is what "can she and the office send notes" actually
+      // means, and the single field could never be one. `note` above is kept
+      // so records written before this still read.
+      notes: st.record && Array.isArray(st.record.notes) ? st.record.notes : [],
+      // AN ALLOW-LIST, so a field added to a stored file does not reach the
+      // browser by default. `driveFileId` is deliberately NOT on it — a Drive
+      // id never leaves the server, and both readers go through a route that
+      // audits. `documentId` is our OWN row id in `caregiver_documents`, and
+      // the office needs it to open the file from User Management.
       proofFiles: st.record ? ((st.record.proofFiles || []).map(f => ({
-        id: f.id, name: f.name, uploadedAt: f.uploadedAt
+        id: f.id, name: f.name, uploadedAt: f.uploadedAt,
+        documentId: f.documentId || null
       }))) : []
     };
   });

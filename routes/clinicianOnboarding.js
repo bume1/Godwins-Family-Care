@@ -22,6 +22,9 @@ const T = require('../clinicianTrack');
 const TR = require('../clinicianTraining');
 const RES = require('../clinicianResources');
 const PRV = require('../clinicianPrivileges');
+// The one place a Content-Disposition header is built. A macOS screenshot
+// filename carries a narrow no-break space, which res.setHeader throws on.
+const { contentDisposition } = require('../contentDisposition');
 
 const MAX_PROOF_BYTES = 15 * 1024 * 1024;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PROOF_BYTES } });
@@ -199,6 +202,21 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
     const resources = RES.buildResources({
       inputs: track.inputs, signatures: rec.signatures, accessFailures: rec.accessFailures
     });
+    // WHERE A DOCUMENT GOES BACK. A few resources are "complete it outside the
+    // app, then upload it" — and the document list had no file input at all,
+    // so that read as a dead end. The upload door already exists on the
+    // checklist item that owns the resource, so each one is pointed at its
+    // item rather than growing a SECOND upload path with its own copy of the
+    // byte-typing, the size ceiling and the Drive failure rule. Two copies of
+    // "what a valid upload is" is how one door starts accepting what the other
+    // refuses — the rule the client document exchange settled.
+    (resources.byStep || []).forEach(step => {
+      (step.resources || []).forEach(r => {
+        const owner = T.ITEM_LIBRARY.find(it => (it.resources || []).includes(r.id));
+        r.uploadItem = owner ? { id: owner.id, title: owner.title } : null;
+      });
+    });
+
     const privileges = PRV.buildPrivileges({
       inputs: track.inputs, list: rec.privileges,
       agreementVersion: rec.privileges && rec.privileges.agreement
@@ -323,14 +341,25 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
         if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
         // Typed by its BYTES, never by what the upload claims.
-        const sniffed = detectFileType ? detectFileType(req.file.buffer) : null;
-        const allowed = ['pdf', 'jpg', 'jpeg', 'png'];
-        const ext = sniffed && sniffed.ext ? String(sniffed.ext).toLowerCase() : null;
-        if (!ext || !allowed.includes(ext)) {
+        //
+        // ⚠️ `detectFileType` returns a MIME STRING ('image/png'), not an
+        // object. This read `sniffed.ext`, which is undefined on a string, so
+        // `ext` was always null and EVERY upload was refused
+        // PROOF_TYPE_UNSUPPORTED — the attach-a-file capability had never once
+        // worked. Reading the route could not show it; posting a real PNG did,
+        // on the first run of the probe that does. Verify the behaviour, not
+        // the artifact.
+        const mime = detectFileType ? detectFileType(req.file.buffer) : null;
+        const EXT_FOR_MIME = {
+          'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg'
+        };
+        const ext = mime ? EXT_FOR_MIME[mime] : null;
+        if (!ext) {
           return res.status(400).json({
             error: 'Upload a PDF, JPEG or PNG.', code: 'PROOF_TYPE_UNSUPPORTED'
           });
         }
+        const sniffed = { mime, ext };
         const rows = await allRecords();
         let rec = findRecord(rows, req.user.id);
         if (!rec) { rec = blankRecord(req.user); rows.push(rec); }
@@ -350,14 +379,55 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
             detail: drive.describeDriveError ? drive.describeDriveError(err).reason : null
           });
         }
+        const needsOfficeCheck = item.action === T.ACTIONS.VERIFY || !!item.verify;
+
+        // ONE STORE, TWO DOORS. The file also becomes a row in
+        // `caregiver_documents`, which is what User Management's documents card
+        // already reads — so a clinician's paperwork sits beside a caregiver's
+        // on the same screen instead of only inside the onboarding wizard. The
+        // office should not have to know which door a document came through to
+        // find it, and a second store is how one of them goes unread.
+        //
+        // The row's status MIRRORS the item's rather than inventing a second
+        // rule: anything the office verifies against a primary source lands
+        // `received` so it still reads as waiting on them.
+        const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const docRows = (await db.get('caregiver_documents')) || [];
+        docRows.push({
+          id: docId,
+          caregiver_id: String(req.user.id),
+          caregiver_name: req.user.name || req.user.email || null,
+          kind: 'clinician_onboarding',
+          file_name: req.file.originalname ? trim(req.file.originalname, 200) : name,
+          stored_name: name,
+          mime_type: sniffed.mime || null,
+          size_bytes: req.file.buffer.length,
+          drive_file_id: stored.id || stored.fileId || null,
+          drive_url: stored.webViewLink || null,
+          // WHICH item it answers. Without this every one of her uploads reads
+          // "Clinician onboarding document" and the office has to open each one
+          // to find out what it is.
+          note: `Onboarding: ${item.title}`,
+          period_start: null, period_end: null, shift_id: null,
+          status: needsOfficeCheck ? 'received' : 'accepted',
+          uploaded_at: nowIso(),
+          uploaded_by_id: req.user.id,
+          uploaded_by_name: req.user.name || req.user.email || null,
+          uploaded_by_office: isOffice(req.user),
+          reviewed_at: null, reviewed_by_name: null, review_note: null,
+          clinician_item_id: item.id
+        });
+        await db.set('caregiver_documents', docRows);
+
         const prev = rec.items[item.id] || {};
         const files = (prev.proofFiles || []).concat([{
           id: uuidv4(), name: req.file.originalname ? trim(req.file.originalname, 200) : name,
           driveFileId: stored.id || stored.fileId || null,
+          // The shared row, so the wizard and User Management open one file.
+          documentId: docId,
           mime: sniffed.mime || null, uploadedAt: nowIso(),
           uploadedBy: req.user.id, uploadedByName: req.user.name || req.user.email
         }]);
-        const needsOfficeCheck = item.action === T.ACTIONS.VERIFY || !!item.verify;
         rec.items[item.id] = Object.assign({}, prev, {
           proofFiles: files,
           status: prev.status === 'complete' ? 'complete' : (needsOfficeCheck ? 'submitted' : 'complete'),
@@ -374,6 +444,119 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         res.status(500).json({ error: 'Could not store that file.', code: 'PROOF_FAILED' });
       }
     });
+
+  /**
+   * SHE OPENS A FILE SHE SENT IN.
+   *
+   * Her own, by her own session — there is no userId to pass, so there is
+   * nothing to widen. The office opens the same file through the caregiver
+   * document route, because the upload writes one shared row: two readers,
+   * one file, never two copies that can disagree about what was sent.
+   *
+   * Through the app, never a Drive link, so every read is audited.
+   */
+  router.get('/api/clinician-onboarding/me/items/:itemId/proof/:fileId',
+    authenticateToken, requireClinician, async (req, res) => {
+      try {
+        const rows = await allRecords();
+        const rec = findRecord(rows, req.user.id);
+        const entry = rec && rec.items ? rec.items[req.params.itemId] : null;
+        const file = entry && Array.isArray(entry.proofFiles)
+          ? entry.proofFiles.find(f => String(f.id) === String(req.params.fileId))
+          : null;
+        if (!file) return res.status(404).json({ error: 'No such file.', code: 'PROOF_NOT_FOUND' });
+        // A row with no stored file is a different fact from Google refusing
+        // one, and asking Google about `undefined` answers "File not found",
+        // which reads as an outage.
+        if (!file.driveFileId) {
+          return res.status(404).json({
+            error: 'No stored file is attached to that record.', code: 'PROOF_FILE_MISSING'
+          });
+        }
+        let buf;
+        try {
+          buf = await drive.downloadFileBuffer(file.driveFileId);
+        } catch (e) {
+          const d = drive.describeDriveError ? drive.describeDriveError(e) : { reason: e.message };
+          console.error('[CLINICIAN ONBOARDING] Drive read failed:', d.reason);
+          return res.status(502).json({
+            error: 'That file could not be retrieved right now. The office has been told.',
+            code: 'PROOF_STORAGE_UNAVAILABLE'
+          });
+        }
+        await logActivity('clinician_onboarding_proof_read', req.user.id, {
+          itemId: req.params.itemId, fileId: req.params.fileId
+        });
+        res.setHeader('Content-Type', file.mime || 'application/octet-stream');
+        res.setHeader('Content-Disposition', contentDisposition('inline', file.name || 'document'));
+        res.send(buf);
+      } catch (e) {
+        console.error('clinician proof read:', e.message);
+        res.status(500).json({ error: 'Could not open that file.', code: 'PROOF_READ_FAILED' });
+      }
+    });
+
+  /**
+   * A NOTE ON AN ITEM, FROM EITHER SIDE.
+   *
+   * Append-only, each one stamped with who wrote it and when. The old single
+   * `note` field was written by her AND by the office, so whoever saved last
+   * silently overwrote the other, and it only rendered once the item was done
+   * — it could never have been the back-and-forth it looked like.
+   *
+   * One handler, two gates: she writes on her own record (no userId to pass),
+   * the office writes on anyone's. The same shape either way, because a note
+   * that reads differently depending on who sent it is two features.
+   */
+  const addNote = async (req, res, { userId, fromOffice }) => {
+    try {
+      const item = T.findItem(req.params.itemId);
+      if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+      const text = trim(req.body && req.body.text, 2000);
+      if (!text) return res.status(400).json({ error: 'Write something first.', code: 'NOTE_EMPTY' });
+
+      const rows = await allRecords();
+      const users = await getUsers();
+      let rec = findRecord(rows, userId);
+      if (!rec) {
+        const user = (users || []).find(u => String(u.id) === String(userId));
+        if (!user) return res.status(404).json({ error: 'No such person.', code: 'USER_UNKNOWN' });
+        rec = blankRecord(user);
+        rows.push(rec);
+      }
+      const prev = rec.items[item.id] || {};
+      rec.items[item.id] = Object.assign({}, prev, {
+        notes: (prev.notes || []).concat([{
+          id: uuidv4(), text, at: nowIso(),
+          by: req.user.id, byName: req.user.name || req.user.email,
+          fromOffice: !!fromOffice
+        }])
+      });
+      rec.updatedAt = nowIso();
+      await saveRecords(rows);
+      // THAT a note was written, never what it said. An audit trail is not a
+      // second copy of the conversation.
+      await appendEvent({
+        type: 'note_added', userId: String(userId), itemId: item.id,
+        byId: req.user.id, byName: req.user.name || req.user.email, fromOffice: !!fromOffice
+      });
+      await logActivity('clinician_onboarding_note_added', req.user.id, {
+        itemId: item.id, onUserId: String(userId), fromOffice: !!fromOffice
+      });
+      res.json(await assemble(rec, {
+        viewer: req.user, users, rows, audience: fromOffice ? 'office' : 'clinician'
+      }));
+    } catch (e) {
+      console.error('clinician onboarding note:', e.message);
+      res.status(500).json({ error: 'Could not save that note.', code: 'NOTE_FAILED' });
+    }
+  };
+
+  router.post('/api/clinician-onboarding/me/items/:itemId/notes', authenticateToken,
+    requireClinician, (req, res) => addNote(req, res, { userId: req.user.id, fromOffice: false }));
+
+  router.post('/api/clinician-onboarding/admin/:userId/items/:itemId/notes', authenticateToken,
+    requireOffice, (req, res) => addNote(req, res, { userId: req.params.userId, fromOffice: true }));
 
   /**
    * She signs a document.

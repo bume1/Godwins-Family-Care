@@ -331,3 +331,107 @@ HTTP on both views of one record (85 modules and 179 rows on every path she
 reads) — because a scan of the page cannot prove what the route withheld. Render
 probe **38/38** at 1440 and 390, measuring the hero's own bounding rect rather
 than reading its CSS.
+
+---
+
+## Second addendum — her documents, and notes either side can send
+
+Owner: *"I want files she uploads to this area as an employee to show up in the
+user management client record like how it is for other caregiver records. Can
+she attach files or upload files to checklist items? What about update notes,
+can she or admin see and send these? For the google drive ones requiring
+signature she can download and sign digitally then reupload."*
+
+Four questions. The honest answers before this change were: yes but it never
+worked, no, sort of and badly, and no.
+
+### ⚠️ EVERY FILE UPLOAD WAS REFUSED, AND HAD BEEN SINCE THE ROUTE SHIPPED
+
+`detectFileType` returns a **MIME STRING** (`'image/png'`). The proof route read
+`sniffed.ext` — `undefined` on a string — so `ext` was always null and every
+single upload came back `PROOF_TYPE_UNSUPPORTED`. **The attach-a-file
+capability had never once worked.** No source scan could show it; it showed
+itself the first time a real PNG went through the real route. *Verify the
+behaviour, not the artifact*, again.
+
+### ONE STORE, TWO DOORS
+
+Her proof upload now writes the same `caregiver_documents` row a caregiver's
+upload writes, so **the office has one place to look for one person's
+paperwork** instead of having to know which door a file came through. The row
+carries `clinician_item_id` and a note naming the item (`Onboarding: Nursing
+licence — Georgia`), or all thirty of her uploads read "Clinician onboarding
+document" and each has to be opened to find out what it is. Its status
+**mirrors the item's** rather than inventing a second rule: anything verified
+against a primary source lands `received`, so it still reads as waiting on the
+office.
+
+**The documents card in User Management sat inside the vendor-only block**, so
+a clinician's paperwork was reachable from nowhere on that screen. It now
+renders for a caregiver **or** anyone with clinical access, and shows the note.
+
+### A COUNT IS NOT A DOCUMENT
+
+The checklist showed "2 files attached" as plain text with nothing to click —
+the office could see that something had been sent and could not read it. **A
+capability nobody can reach is not shipped.** Both sides open the file now, and
+both go through a route that audits: hers by her own session (no userId in the
+path, so there is nothing to widen), the office's through the shared row. A
+**plain `<a href>` carries no Authorization header**, so it is fetched with the
+token and handed over as a blob — and a PHI-adjacent document's URL has no
+business in browser history.
+
+`proofFiles` is an allow-list projection and **`driveFileId` is deliberately
+not on it**; `documentId` is, because it is our own row id and the office needs
+it to open the file.
+
+### NOTES WERE ONE FIELD THAT SILENTLY CLOBBERED
+
+There was a single `note` string per item. She wrote into it; the office wrote
+into it; **whoever saved last overwrote the other with no sign**, and it only
+rendered once the item was done. It could never have been the back-and-forth it
+looked like. Notes are **append-only** now, each stamped with who wrote it,
+when, and which side they are — one handler behind two gates, because a note
+that reads differently depending on who sent it is two features. The audit row
+records **that** a note was written, never what it said.
+
+### A DOCUMENT TO COMPLETE OUTSIDE THE APP NOW SAYS WHERE IT GOES BACK
+
+The 15 signature documents are **typed-name attestations in the app**, which is
+the stronger record: version-stamped from the server's own copy, timestamped,
+and impossible to backdate. Download-sign-reupload is deliberately not built
+for those. But `COMPLETE_EXTERNAL` resources genuinely do need a file back, and
+the list offered no input at all — a dead end. Each now points at the checklist
+item that owns it, rather than growing a **second upload path with its own copy
+of the byte-typing, the size ceiling and the Drive failure rule**. Two copies of
+"what a valid upload is" is how one door starts accepting what the other
+refuses. A test fails if a resource needs a file back and no item can take one.
+
+### ⚠️ THE COMMENT STRIPPER WAS EATING CODE
+
+`test`'s own `stripComments` read the `/*` in
+`accept="image/*,application/pdf"` as a comment opener and **silently deleted
+1,666 characters of real JSX** from `admin-hub.html`, so an assertion about
+code inside that window could never pass however correct the code was. A
+scanner that loses code proves as little as one that reads a comment as code.
+A real opener never follows a letter or digit, so those are hidden from the
+comment pass and put back after — and that is now its own test.
+
+### Verified
+
+73 tests in the file; suite **3223, 0 failing**. **23 of 23 mutations caught**
+(one survived first — `fromOffice` matched elsewhere in the file, so the
+assertion could not distinguish the two states; the test was anchored on the
+note object rather than the catch being claimed). Probe **97/97**, render
+**38/38**. The document path is **driven with a fake Drive** in the test file —
+mounted router, real HTTP, the stored row read back — because Drive is
+unreachable from a sandbox; the live probe now reports that half as not
+runnable rather than reporting a correct refusal as a failure.
+
+**Not proven here:** a real Google Drive accepting the bytes. Everything
+between the browser and Drive is the shipped path.
+
+**A house rule re-bought, twice in one session:** `pkill -f "PORT=3277"` matches
+nothing, because PORT is an env var and never appears in argv. Five stale
+servers were running and a probe was reading one started before the fix. Kill
+by PID.

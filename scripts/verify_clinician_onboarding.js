@@ -338,6 +338,131 @@ async function call(method, path, { token, body, raw } = {}) {
       !Object.values(hers.track.gates).some(g => /\b(their|her|his|she|he)\b/i.test(g.opens || '')));
   }
 
+  // ==========================================================================
+  // Q · HER DOCUMENTS AND NOTES, END TO END
+  //
+  // The point of the shared row is that the office finds one person's
+  // paperwork in ONE place. Only a real upload through the real route, read
+  // back through the caregiver document list the User Management card calls,
+  // can show that — a source scan cannot.
+  // ==========================================================================
+  console.log('\nQ · her documents and notes');
+  if (npToken) {
+    // A 1x1 PNG, so the byte-typing has something real to type.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64');
+    const fd = new FormData();
+    fd.append('file', new Blob([png], { type: 'image/png' }), 'licence-scan.png');
+    const up = await fetch(`${BASE}/api/clinician-onboarding/me/items/NP-01/proof`, {
+      method: 'POST', headers: { Authorization: `Bearer ${npToken}` }, body: fd
+    });
+    const upBody = await up.json().catch(() => ({}));
+
+    // DRIVE IS NOT REACHABLE FROM A SANDBOX, and a Drive failure REFUSING the
+    // upload is the designed behaviour — a row pointing at a file that does
+    // not exist would tick a credentialing item with no proof behind it. So a
+    // 502 here is the control working, not a defect, and calling it a failure
+    // would be a false alarm every time this runs without Google. The stored
+    // row is proven instead by `test/clinician_onboarding.test.js`, which
+    // mounts this same router with a fake Drive and reads the row back.
+    const driveOff = up.status === 502 && upBody.code === 'PROOF_STORAGE_UNAVAILABLE';
+    if (driveOff) {
+      console.log('  --   Drive is not configured here, so the document half cannot run.');
+      console.log('       A refused upload IS the rule: nothing is recorded without the file.');
+      ok('and nothing was recorded for the refused upload',
+        !((await call('GET', '/api/clinician-onboarding/me', { token: npToken }))
+          .track.rows.find(r => r.id === 'NP-01').proofFiles || []).length);
+    } else {
+      ok('she can attach a file to a checklist item', up.status === 200,
+        `${up.status} ${JSON.stringify(upBody).slice(0, 160)}`);
+    }
+
+    const row = up.status === 200
+      ? (upBody.track.rows || []).find(r => r.id === 'NP-01') : null;
+    if (!driveOff) {
+    const file = row && (row.proofFiles || [])[0];
+    ok('the item carries the file', !!file, JSON.stringify(row && row.proofFiles));
+    ok('and points at the shared document row', !!(file && file.documentId),
+      'without this the wizard and User Management open different things');
+
+    // THE ACTUAL ASK: does it show up where the office manages the person?
+    const docs = await call('GET', `/api/caregiver/documents?caregiverId=${np.id}`, { token });
+    const list = docs.documents || docs.docs || [];
+    const mine = list.filter(d => d.kind === 'clinician_onboarding');
+    ok('it is in the documents list User Management reads', mine.length === 1,
+      `${list.length} rows, ${mine.length} clinician`);
+    ok('named by the checklist item it answers',
+      !!(mine[0] && /^Onboarding: /.test(mine[0].note || '')), mine[0] && mine[0].note);
+    ok('with her own filename kept', !!(mine[0] && mine[0].fileName === 'licence-scan.png'),
+      mine[0] && mine[0].fileName);
+    ok('and a readable label rather than a raw slug',
+      !!(mine[0] && mine[0].kindLabel && mine[0].kindLabel !== 'clinician_onboarding'),
+      mine[0] && mine[0].kindLabel);
+    ok('it reads as waiting on the office, since a licence is verified',
+      !!(mine[0] && mine[0].status === 'received'), mine[0] && mine[0].status);
+
+    // Both readers open the SAME bytes.
+    if (file) {
+      const hers = await fetch(`${BASE}/api/clinician-onboarding/me/items/NP-01/proof/${file.id}`,
+        { headers: { Authorization: `Bearer ${npToken}` } });
+      const herBytes = Buffer.from(await hers.arrayBuffer());
+      ok('she can open what she sent', hers.status === 200 && herBytes.length === png.length,
+        `${hers.status}, ${herBytes.length} bytes`);
+      ok('and the bytes are the ones she uploaded', herBytes.equals(png));
+
+      const theirs = await fetch(`${BASE}/api/caregiver/documents/${file.documentId}/file`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const theirBytes = Buffer.from(await theirs.arrayBuffer());
+      ok('the office opens the same file from User Management',
+        theirs.status === 200 && theirBytes.equals(png), `${theirs.status}`);
+
+      // Hers is her own, with no id to widen; another clinician's is refused
+      // by the route reading from the session rather than the URL.
+      const stranger = await fetch(
+        `${BASE}/api/clinician-onboarding/me/items/NP-01/proof/not-a-real-file`,
+        { headers: { Authorization: `Bearer ${npToken}` } });
+      ok('a file id that is not hers is 404, not somebody else\'s document',
+        stranger.status === 404, String(stranger.status));
+    }
+
+    }
+
+    // NOTES, both ways, on one item. These need no storage, so they run
+    // whatever Drive is doing.
+    const n1 = await call('POST', '/api/clinician-onboarding/me/items/NP-01/notes',
+      { token: npToken, body: { text: 'Board says four to six weeks.' } });
+    const n2 = await call('POST', `/api/clinician-onboarding/admin/${np.id}/items/NP-01/notes`,
+      { token, body: { text: 'Noted, we will not chase you on it.' } });
+
+    const afterOffice = (n2.track.rows || []).find(r => r.id === 'NP-01');
+    ok('her note survives the office writing one', (afterOffice.notes || []).length === 2,
+      JSON.stringify((afterOffice.notes || []).map(x => x.text)));
+    ok('the office note did not overwrite hers',
+      (afterOffice.notes || [])[0].text === 'Board says four to six weeks.');
+    ok('each note says which side wrote it',
+      afterOffice.notes[0].fromOffice === false && afterOffice.notes[1].fromOffice === true);
+    ok('and who, by name', !!afterOffice.notes[0].byName && !!afterOffice.notes[1].byName);
+
+    const herView = await call('GET', '/api/clinician-onboarding/me', { token: npToken });
+    const herRow = (herView.track.rows || []).find(r => r.id === 'NP-01');
+    ok('she reads what the office wrote to her', (herRow.notes || []).length === 2,
+      JSON.stringify((herRow.notes || []).map(x => x.text)));
+
+    const empty = await call('POST', '/api/clinician-onboarding/me/items/NP-01/notes',
+      { token: npToken, body: { text: '   ' } });
+    ok('an empty note is refused rather than stored', empty.status === 400 || empty.code === 'NOTE_EMPTY',
+      JSON.stringify(empty).slice(0, 120));
+
+    // A document to complete outside the app must say where it goes back.
+    const external = (herView.resources.byStep || [])
+      .flatMap(s => s.resources || [])
+      .filter(r => r.action === 'COMPLETE_EXTERNAL' || r.action === 'UPLOAD_CERTIFICATE');
+    ok(`a document to send back names its checklist item (${external.length} checked)`,
+      external.length > 0 && external.every(r => r.uploadItem && r.uploadItem.title),
+      JSON.stringify(external.map(r => [r.id, r.uploadItem && r.uploadItem.id])));
+  }
+
   console.log(`\n${pass}/${pass + fail} checks passed${fail ? ` — ${fail} FAILED` : ''}\n`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('\nprobe crashed:', e.message, '\n'); process.exit(1); });

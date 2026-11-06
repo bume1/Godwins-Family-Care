@@ -1093,7 +1093,15 @@ module.exports = function createCaregiverRoutes(deps) {
     { kind: 'id_document',   label: 'Photo ID',                  needsPeriod: false, payroll: true },
     { kind: 'paystub',       label: 'Paystub',                   needsPeriod: true,  payroll: true },
     { kind: 'w9',            label: 'W-9',                       needsPeriod: false, payroll: true },
-    { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false }
+    { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false },
+    // A clinician's onboarding proof, filed from the credentialing wizard
+    // (/onboarding) rather than from this form. It joins THIS store on purpose:
+    // the office should not have to look in two places for one person's
+    // paperwork, and the row carries the checklist item it answers in its note.
+    // Office-only on the upload form — she files hers against the item, which
+    // is what records WHICH item it answers.
+    { kind: 'clinician_onboarding', label: 'Clinician onboarding document',
+      needsPeriod: false, payroll: false, clinician: true }
   ];
 
   // The welcome packet's own document items join this list rather than living
