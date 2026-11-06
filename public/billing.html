@@ -110,6 +110,13 @@ const api = {
   encounterDetail: (id, euuid) => call(visit(id, euuid)),
   saveCoding: (id, euuid, body) => call(`${visit(id, euuid)}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
   refreshPos: (id, euuid) => post(`${visit(id, euuid)}/pos/refresh`),
+  // Both have existed with nothing calling them. `billing_facility` is WHO
+  // bills a visit, which since the 2026-09-09 split is a different question
+  // from where care happened — and nothing showed the current value, let
+  // alone let billing change it for one visit.
+  facilities: () => call('/api/clinical/facilities'),
+  setBillingFacility: (id, euuid, facilityId) =>
+    call(`${visit(id, euuid)}/billing-facility`, { method: 'PUT', body: JSON.stringify({ facilityId }) }),
   billingSubmit: (id, euuid, body) => post(`${visit(id, euuid)}/billing-submit`, body),
   claimScrub: (id, euuid) => call(`${visit(id, euuid)}/claim-scrub`),
   claimRelease: (id, euuid, body) => post(`${visit(id, euuid)}/claim-release`, body),
@@ -571,6 +578,81 @@ const Section = ({ id, title, right, children }) => (
     <div className="p-4">{children}</div>
   </div>
 );
+// WHO BILLS THIS VISIT, and the one place it can be changed per visit.
+//
+// `form_encounter.billing_facility` is the business entity on the claim. The
+// 2026-09-09 split separated it from `facility_id` (where care happened),
+// which for a home-visit practice are almost never the same record.
+// `PUT .../billing-facility` has been able to override it for a single visit
+// since Session 4.5 and nothing ever called it, so the only way to correct a
+// visit billed to the wrong entity was in OpenEMR by hand.
+//
+// The facility list is READ FROM OPENEMR, never named here. A list that
+// cannot be read is said to be unreadable rather than shown empty: an empty
+// picker and "OpenEMR has no facilities" are different facts, and only one
+// of them is this page's to claim.
+const BillingFacilityRow = ({ clientId, euuid, encounter, canEdit, onChanged }) => {
+  const [rows, setRows] = React.useState(null);   // null = loading, false = unreadable
+  const [open, setOpen] = React.useState(false);
+  const [pick, setPick] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const [msg, setMsg] = React.useState('');
+  React.useEffect(() => {
+    let dead = false;
+    api.facilities()
+      .then(r => { if (!dead) setRows((r && r.facilities) || []); })
+      .catch(() => { if (!dead) setRows(false); });
+    return () => { dead = true; };
+  }, []);
+  const current = encounter.billingFacilityId || null;
+  const named = Array.isArray(rows) ? rows.find(f => String(f.id) === String(current)) : null;
+  const save = async () => {
+    setBusy(true); setErr(''); setMsg('');
+    try {
+      const r = await api.setBillingFacility(clientId, euuid, pick);
+      setMsg(r.message || 'Saved.'); setOpen(false); onChanged && onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="mt-2 pt-2 border-t border-stone-100 text-[13px]">
+      <div className="flex flex-wrap items-center gap-3">
+        <span>
+          Billing facility{' '}
+          <b>{current
+            ? (named ? `${named.name} (${current})` : current)
+            : <span className="text-amber-700">not set on this visit</span>}</b>
+        </span>
+        {canEdit && !open && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => { setPick(current || ''); setOpen(true); }}>Change</button>}
+      </div>
+      {err && <p className="text-[11.5px] text-red-700 mt-1">{err}</p>}
+      {msg && <p className="text-[11.5px] text-[#0f6e56] mt-1">{msg}</p>}
+      {rows === false && <p className="text-[11.5px] text-amber-700 mt-1">OpenEMR's facility list could not be read, so this cannot be changed here. That is not the same as there being no facilities.</p>}
+      {open && Array.isArray(rows) && (
+        <div className="flex flex-wrap items-center gap-2 mt-2">
+          <select className="inp !py-1 text-xs w-auto" value={pick} onChange={e => setPick(e.target.value)}>
+            <option value="">Choose a facility…</option>
+            {/* Only a facility OpenEMR marks as a billing location can be the
+                business entity on a claim; the rest are shown as not billing
+                rather than hidden, so a wrong flag in OpenEMR is visible here
+                instead of looking like a missing record. */}
+            {rows.map(f => (
+              <option key={f.id} value={f.id}>
+                {f.name} ({f.id}){f.billingLocation ? '' : ' — not a billing location in OpenEMR'}
+              </option>
+            ))}
+          </select>
+          <button className="btn !py-1 !px-2.5 text-xs" disabled={busy || !pick} onClick={save}>{busy ? 'Saving…' : 'Set Billing Facility'}</button>
+          <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setOpen(false)}>Cancel</button>
+        </div>
+      )}
+      <p className="text-[11.5px] text-stone-500 mt-1">
+        Who bills this visit, which is not where care happened. It is written to the encounter, never to a charge.
+      </p>
+    </div>
+  );
+};
+
 const ClaimDetail = ({ claim, names, isAdmin, onBack, onChanged }) => {
   const { clientId, encounterUuid: euuid } = claim;
   const [d, setD] = useState(null);
@@ -695,6 +777,7 @@ const ClaimDetail = ({ claim, names, isAdmin, onBack, onChanged }) => {
         </div>
         {d.posMissingReason && !d.encounter.posCode && <p className="text-[11.5px] text-amber-700 mt-1">{d.posMissingReason}</p>}
         <p className="text-[11.5px] text-stone-500 mt-1">A missing place of service is set from the patient's facility when you submit.</p>
+        <BillingFacilityRow clientId={clientId} euuid={euuid} encounter={d.encounter} canEdit={ba.canSubmit} onChanged={load} />
       </Section>
 
       {ba.canSubmit && (

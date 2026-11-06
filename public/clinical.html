@@ -348,6 +348,12 @@
       saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
       // Two co-sign routes that had no button anywhere in the app.
       goalStatus: (id, goalId, body) => authedFetch(`/api/clinical/patients/${id}/care-plan/goals/${encodeURIComponent(goalId)}/status`, { method: 'POST', body: JSON.stringify(body) }),
+      // Both of these routes have existed with nothing calling them. A goal
+      // showed only its LATEST status, so "was this ever met and then lost?"
+      // could not be answered from the chart; and a visit's document
+      // requirements were recorded and invisible.
+      goalHistory: (id, goalId) => authedFetch(`/api/clinical/patients/${id}/care-plan/goals/${encodeURIComponent(goalId)}/history`),
+      visitDocuments: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${encodeURIComponent(euuid)}/documents`),
       providerCoSignCarePlan: (id, signatureImageB64) => authedFetch(`/api/clinical/patients/${id}/care-plan/provider-cosign`, { method: 'POST', body: JSON.stringify({ signatureImageB64 }) }),
       coSignOrder: (orderId) => authedFetch(`/api/clinical/orders/${encodeURIComponent(orderId)}/co-sign`, { method: 'POST', body: JSON.stringify({}) }),
       // The clinical enrollment sequence (checklist/mark/activate) moved to
@@ -5971,6 +5977,57 @@
       </div>
     );
 
+    // EVERY status this goal has ever carried, not just the current one.
+    // The goal row shows `statusAt`/`statusBy`/`statusNote` — the last change
+    // and nothing before it — so a goal that was met in September and slipped
+    // back in October reads as though it had only ever been one thing. The
+    // route has returned the whole trail since the status feature shipped and
+    // nothing asked for it.
+    //
+    // It is a READ (requireClinicalRead), so a case manager sees it too; the
+    // Update Status control beside it stays a writer's.
+    const GoalHistory = ({ clientId, goal, vocab }) => {
+      const [open, setOpen] = useState(false);
+      const [rows, setRows] = useState(null);   // null = loading, [] = none, false = failed
+      useEffect(() => {
+        if (!open) return;
+        let dead = false;
+        setRows(null);
+        api.goalHistory(clientId, goal.id)
+          .then(r => { if (!dead) setRows((r && r.history) || []); })
+          .catch(() => { if (!dead) setRows(false); });
+        return () => { dead = true; };
+      }, [open, clientId, goal.id]);
+      if (!open) return <button className="text-[12px] text-primary underline" onClick={() => setOpen(true)}>History</button>;
+      return (
+        <div className="mt-2 rounded-xl border border-stone-200 bg-stone-50 p-3">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[12px] font-semibold text-primary">Status history</span>
+            <button className="text-[12px] text-primary underline" onClick={() => setOpen(false)}>Hide</button>
+          </div>
+          {rows === null && <p className="text-[12px] text-stone-500">Reading…</p>}
+          {/* A failed read and an empty trail are different facts. */}
+          {rows === false && <p className="text-[12px] text-red-600">The history could not be read. That is not the same as this goal never having changed.</p>}
+          {Array.isArray(rows) && rows.length === 0 && (
+            <p className="text-[12px] text-stone-500">No status change has been recorded on this goal yet.</p>
+          )}
+          {Array.isArray(rows) && rows.length > 0 && (
+            <ul className="space-y-1.5">
+              {rows.map((h, i) => (
+                <li key={i} className="text-[12.5px]">
+                  <span className={`chip ${CP_STATUS_TONE[h.status] || ''}`}>{cpLabel(vocab.goalStatuses, h.status)}</span>
+                  {h.previous && <span className="text-stone-500"> from {cpLabel(vocab.goalStatuses, h.previous)}</span>}
+                  <span className="text-stone-500"> · {fmtDate(h.at)}{h.byName ? ` · ${h.byName}` : ''}</span>
+                  {h.planVersion ? <span className="text-stone-400"> · plan v{h.planVersion}</span> : null}
+                  {h.note && <div className="text-stone-600">“{h.note}”</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    };
+
     // One goal's status, changed without writing a new version.
     const GoalStatusControl = ({ clientId, goal, vocab, onDone }) => {
       const [open, setOpen] = useState(false);
@@ -6040,7 +6097,13 @@
                     {[g.measure && `Measure: ${g.measure}`, g.baseline && `Baseline ${g.baseline}`, g.target && `Target ${g.target}`, g.targetDate && `by ${fmtDate(g.targetDate)}`].filter(Boolean).join(' · ')}
                   </div>)}
                 {g.statusAt && <div className="text-[12px] text-stone-500 mt-1">Status set {fmtDate(g.statusAt)}{g.statusBy ? ` by ${g.statusBy}` : ''}{g.statusNote ? ` — "${g.statusNote}"` : ''}</div>}
-                {canWrite && g.id && !cp.legacyFormat && <GoalStatusControl clientId={clientId} goal={g} vocab={vocab} onDone={onChanged} />}
+                {g.id && !cp.legacyFormat && (
+                  <div className="flex items-center gap-3 mt-1">
+                    {canWrite && <GoalStatusControl clientId={clientId} goal={g} vocab={vocab} onDone={onChanged} />}
+                    {/* A read, so a case manager gets it too. */}
+                    <GoalHistory clientId={clientId} goal={g} vocab={vocab} />
+                  </div>
+                )}
               </li>))}</ul> : <p className="text-stone-400">No goals written.</p>}
           </CpSection>
           {!cp.legacyFormat && on('interventions', (cp.interventions || []).length) && <CpSection title="Interventions">
@@ -8936,6 +8999,91 @@
 
     // A signed (or discarded) note, formatted, with its signature bold at the
     // bottom. Read-only: after signing, changes are addenda.
+    // WHAT THIS VISIT STILL NEEDS ON FILE.
+    //
+    // An appointment type can declare the documents a visit of that kind
+    // requires — a face sheet, a discharge summary, a referral letter — and
+    // `GET .../encounters/:euuid/documents` has answered with the full list,
+    // what is filed and what is outstanding since the per-visit document work
+    // shipped. Nothing on any screen called it, so the requirement was
+    // recorded and invisible: a clinician finished a visit with no way to see
+    // that a document was still owed, and the office found out later or not
+    // at all.
+    //
+    // Read-only here on purpose. Filing a document is its own route with its
+    // own gate; this card says what is missing and where it stands. Every
+    // label, hint and kind comes from the SERVER — the page names no document
+    // kind of its own, so it cannot drift from the catalog that decides them.
+    const VisitDocumentsCard = ({ clientId, euuid }) => {
+      const [d, setD] = useState(null);     // null = loading, false = failed
+      useEffect(() => {
+        let dead = false;
+        setD(null);
+        api.visitDocuments(clientId, euuid)
+          .then(r => { if (!dead) setD(r); })
+          .catch(() => { if (!dead) setD(false); });
+        return () => { dead = true; };
+      }, [clientId, euuid]);
+      return (
+        <div className="card">
+          <div className="card-h"><h2>Visit Documents</h2></div>
+          <div className="p-4 text-sm">
+            {d === null && <p className="text-xs text-stone-400">Reading…</p>}
+            {/* A failed read must not read as "nothing is owed". */}
+            {d === false && <p className="text-xs text-red-600">The document list could not be read. That is not the same as this visit needing nothing.</p>}
+            {d && (
+              <>
+                {(d.required || []).length === 0 && (d.filed || []).length === 0 && (
+                  <p className="text-xs text-stone-400">
+                    {d.appointmentType
+                      ? 'This visit type asks for no documents, and none has been filed against it.'
+                      : 'No visit type is set on this encounter, so nothing is being asked for.'}
+                  </p>
+                )}
+                {(d.required || []).length > 0 && (
+                  <ul className="space-y-1.5 mb-3">
+                    {d.required.map(r => (
+                      <li key={r.kind} className="flex items-start gap-2">
+                        <span className={`chip ${r.filed ? 'bg-[#E8F3EE] text-[#0f6e56]' : 'bg-[#FDEEEE] text-[#A32D2D]'}`}>
+                          {r.filed ? 'On file' : 'Still needed'}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="font-medium">{r.label}</span>
+                          {r.hint && <span className="block text-[12px] text-stone-500">{r.hint}</span>}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {(d.filed || []).length > 0 && (
+                  <div className="border-t border-stone-100 pt-3">
+                    <div className="text-[12px] font-semibold text-primary mb-1.5">Filed against this visit</div>
+                    <ul className="space-y-1.5">
+                      {d.filed.map(f => (
+                        <li key={f.id} className="flex flex-wrap items-center gap-2">
+                          {/* The file opens THROUGH the app, so the read is
+                              audited and the Drive id never reaches the
+                              browser — the server already returns that url. */}
+                          <a className="text-primary underline" href={f.url} target="_blank" rel="noreferrer">{f.fileName || f.label}</a>
+                          <span className="text-[12px] text-stone-500">
+                            {f.label}{f.uploadedByName ? ` · ${f.uploadedByName}` : ''}{f.uploadedAt ? ` · ${fmtDate(f.uploadedAt)}` : ''}
+                          </span>
+                          {f.status && f.status !== 'accepted' && <span className="chip bg-[#FDF3DD] text-[#8a6a1e]">{f.status}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <p className="text-[10.5px] text-stone-400 mt-2">
+                  Documents are filed from the chart's Documents area or by the office. This card says what this visit asks for.
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    };
+
     const EncounterLookups = ({ patient, chart, onChartChanged }) => {
       const [open, setOpen] = useState(null);
       return (
@@ -9421,6 +9569,7 @@
                 <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
               </div>
             </div>
+            <VisitDocumentsCard clientId={patient.id} euuid={euuid} />
             <div className="card">
               <div className="card-h"><h2>Orders</h2>{!locked && (canOrderDirect || canOrderStanding || canRefer) && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record Order'}</button>}</div>
               <div className="p-4 text-sm">

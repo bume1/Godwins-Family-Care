@@ -14103,7 +14103,15 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         ...(canBill ? {
           facility: emrRow.facility_name || null,
           facilityId: emrRow.facility_id != null ? String(emrRow.facility_id) : null,
-          posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null
+          posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null,
+          // WHO BILLS this visit, which is a different question from where
+          // care happened (2026-09-09: the two were derived from one setting
+          // and so always matched, exactly backwards for a home-visit
+          // practice). PUT .../billing-facility has been able to override it
+          // per visit since 4.5 and no screen ever showed the current value,
+          // so billing could not see what it was about to change.
+          billingFacilityId: emrRow.billing_facility != null && emrRow.billing_facility !== ''
+            ? String(emrRow.billing_facility) : null
         } : {})
       } : { uuid: encounterUuid, eid: record.encounterEid, date: record.date, reason: record.reason, emrError: emrRowR.e && emrRowR.e.message },
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
