@@ -780,8 +780,15 @@
               </>)}
             </nav>
 
-            {/* Portal Hub & Sign Out */}
+            {/* Portal Hub, Your account & Sign Out */}
             <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-100 bg-gray-50/50 space-y-2">
+              {/* Every role has an account, so /account is linked from every
+                  signed-in surface rather than being an admin-only page. */}
+              <a href="/account"
+                className="w-full text-left px-4 py-2.5 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-xl flex items-center gap-3 transition group">
+                <span className="text-primary-500 group-hover:text-primary-600">{Icons.users}</span>
+                <span className="text-sm font-medium">Your account</span>
+              </a>
               <button onClick={() => { window.location.href = '/'; }}
                 className="w-full text-left px-4 py-2.5 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-xl flex items-center gap-3 transition group">
                 <span className="text-primary-500 group-hover:text-primary-600">{Icons.home}</span>

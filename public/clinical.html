@@ -9919,6 +9919,10 @@
               <div className="font-semibold text-primary text-[15px]">{user.name}</div>
               <div className="text-[13px] text-stone-500">{access.clinicalRoleLabel || user.role}{!canWrite && !access.canDocument ? ' · Read-only' : ''}</div>
             </div>
+            {/* Password, two-step sign-in, the devices this account is signed
+                in on, and this clinician's own OpenEMR sign-in all live on
+                /account — one page for every role (owner, "Fix all"). */}
+            <a className="btn ghost" href="/account"><i className="ti ti-shield-lock" />Account &amp; Security</a>
             <button className="btn ghost" onClick={signOut}><i className="ti ti-logout" />Sign Out</button>
           </div>
         </div>

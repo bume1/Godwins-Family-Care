@@ -3715,10 +3715,27 @@ app.post('/api/auth/mfa/verify', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// This is the one route every signed-in person can call to learn about their
+// own account, whatever their role, so the /account page reads its identity
+// here rather than out of `localStorage`. A stored value that has gone stale
+// is indistinguishable from a good one until somebody is thrown back to the
+// login screen (PR #113), and an account page is the worst place to be wrong
+// about whose account it is. `account` is the viewer's own record and nobody
+// else's — the route is bound to `req.user.id` and takes no parameter.
 app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
   const users = await getUsers(); const u = users.find(x => x.id === req.user.id) || {};
   const remaining = u.mfa && u.mfa.recovery ? u.mfa.recovery.hashes.filter(h => !h.usedAt).length : 0;
-  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified) });
+  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified),
+    account: {
+      id: u.id || req.user.id, name: u.name || null, email: u.email || null, role: u.role || null,
+      // Whether automated email reaches this person at all. `queueNotification`
+      // checks exactly these two at the choke point, so they are the only
+      // email settings this app actually honours — see the page's own note.
+      emailUnsubscribed: !!u.emailUnsubscribed,
+      accountStatus: u.accountStatus || 'active',
+      lastPasswordChange: u.lastPasswordChange || null,
+      requirePasswordChange: !!u.requirePasswordChange
+    } });
 });
 // Regenerate recovery codes — needs a fresh TOTP code, returns the new set ONCE.
 app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (req, res) => {
@@ -31328,6 +31345,18 @@ app.get('/messages', (req, res) => {
 // coordinators. Shell is public; every route it calls is requireBilling.
 app.get('/billing', (req, res) => {
   res.sendFile(__dirname + '/public/billing.html');
+});
+
+// Your own account (owner, "Fix all", 2026-11-06). Five routes a signed-in
+// person could only ever reach by hand lived here: their MFA status, their
+// recovery codes, the list of devices their account is signed in on, their
+// own OpenEMR sign-in, and a voluntary password change (POST
+// /api/auth/change-password was only reachable through login.html's FORCED
+// change, so somebody who simply wanted to change their password could not).
+// Every role gets this page; each card decides for itself whether it applies.
+// Shell is public; every route it calls is bound to req.user.
+app.get('/account', (req, res) => {
+  res.sendFile(__dirname + '/public/account.html');
 });
 
 // The audit log viewer (Super Admin). Session 5.4 built the durable,
