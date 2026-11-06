@@ -24,6 +24,7 @@ const { PDFDocument } = require('pdf-lib');
 
 const config = require('../config');
 const wp = require('../welcomePacketRepository');
+const attest = require('../caregiverAttestations');
 const packetPdf = require('../welcomePacketPdf');
 
 let passed = 0, failed = 0;
@@ -255,6 +256,38 @@ const detectFileType = (buf) => {
     }
     for (const kind of wp.OFFICE_ITEM_KINDS) {
       await send(`/api/caregiver/admin/welcome-packets/cg1/office-item`, { kind, status: 'done' }, 'PUT');
+    }
+
+    // ⚠️ AND THE FOUR FORMS THE CAREGIVER SIGNS IN THE APP. This section had
+    // been FAILING SINCE PR #99 (2026-09-16) added them, because a required
+    // item added after a probe is written is invisible to it: clearance could
+    // never be reached, so the last four checks reported red and taught anyone
+    // running this to ignore the output. THIRD time this probe has been gutted
+    // by a gate added later — the enrollment gate did it at section B, the
+    // clearance gate at section F.
+    //
+    // The elections are read from the real `choicesFor`, so an added question
+    // or a renamed option is satisfied automatically rather than quietly
+    // stopping the run again.
+    actor = CAREGIVER;
+    for (const kind of attest.KINDS) {
+      const elections = {};
+      for (const c of attest.choicesFor(kind)) {
+        if (c.required && Array.isArray(c.options) && c.options.length) elections[c.key] = c.options[0].value;
+      }
+      await send(`/api/caregiver/welcome-packet/attestations/${kind}`, {
+        elections, printedName: 'Alma Byron',
+        signaturePng: 'data:image/png;base64,iVBORw0KGgo='
+      });
+    }
+    // Assert the seeding WORKED rather than assuming it: a fixture that does
+    // not clear the gate reports on a world that is not production.
+    actor = ADMIN;
+    {
+      const seeded = await (await call('/api/caregiver/admin/welcome-packets')).json();
+      const r = (seeded.caregivers || []).find(c => c.caregiverId === 'cg1') || {};
+      check('every required item is now satisfied, so the fixture really does clear the gate', () =>
+        assert.strictEqual(r.outstandingCount, 0, `still outstanding: ${JSON.stringify((r.outstanding || []).map(o => o.title))}`));
     }
 
     const queue = await (await call('/api/caregiver/admin/welcome-packets')).json();

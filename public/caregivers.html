@@ -538,6 +538,137 @@ const Broadcast = ({ setErr, setOk }) => {
 // ============================================================================
 // App
 // ============================================================================
+// ── Onboarding: the office's own four checks (2026-11-06) ────────────────
+// `PUT /api/caregiver/admin/welcome-packets/:caregiverId/office-item` and the
+// queue beside it have shipped since the welcome packet did, with NO SCREEN.
+// All four items are REQUIRED for shift clearance, so until now no caregiver
+// could be cleared except through the admin override — every assignment had to
+// be forced, with a reason, or not made at all. This is the screen that opens
+// the gate the normal way.
+//
+// Statuses and item titles are SERVED, never named here: the route refuses a
+// status outside its own list (OFFICE_STATUS_UNKNOWN), so an option invented
+// in this page would be refused rather than saved.
+const OFFICE_STATUS_LABEL = { not_started: 'Not started', scheduled: 'Scheduled', done: 'Done' };
+
+const Onboarding = ({ setErr, setOk }) => {
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [open, setOpen] = useState(null);
+  const [onlyWaiting, setOnlyWaiting] = useState(true);
+
+  const load = useCallback(() => {
+    api('/api/caregiver/admin/welcome-packets')
+      .then(r => setRows(r))
+      .catch(e => { setErr(e.message); setRows({ caregivers: [], officeItems: [] }); });
+  }, [setErr]);
+  useEffect(() => { load(); }, [load]);
+
+  if (!rows) return <p className="mu">Loading…</p>;
+  const all = rows.caregivers || [];
+  // Default to the half that is OURS to act on. A queue that mixes "we have
+  // not run their orientation" with "they have not photographed their TB
+  // result" cannot be worked, and only the first half is on this screen.
+  const list = onlyWaiting ? all.filter(c => c.waitingOnUs > 0) : all;
+
+  const setItem = async (caregiverId, kind, status) => {
+    setErr(''); setOk('');
+    setBusy(`${caregiverId}:${kind}`);
+    try {
+      const r = await api(`/api/caregiver/admin/welcome-packets/${encodeURIComponent(caregiverId)}/office-item`, {
+        method: 'PUT', body: JSON.stringify({ kind, status })
+      });
+      // Read the clearance back from the RESPONSE, which recomputes it: marking
+      // the last item is the moment a caregiver becomes schedulable, and that
+      // is the thing the office is waiting to hear.
+      const cleared = r && r.onboarding && r.onboarding.cleared;
+      setOk(cleared
+        ? 'Saved. This caregiver is now cleared for shifts.'
+        : `Saved. ${(r && r.onboarding && r.onboarding.clearanceMessage) || 'Still waiting on other items.'}`);
+      load();
+    } catch (e) {
+      // The route's own refusal names the item or the status; a generic
+      // failure would send somebody looking in the wrong place.
+      setErr(e.message);
+    } finally { setBusy(''); }
+  };
+
+  return (
+    <div>
+      <p className="mu" style={{ marginTop: 0 }}>
+        Fingerprinting, orientation, app training and the skills check are ours, not the caregiver's.
+        All four are required before a caregiver can be given a shift.
+      </p>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 10 }}>
+        <input type="checkbox" checked={onlyWaiting} onChange={e => setOnlyWaiting(e.target.checked)} />
+        Only those waiting on us ({all.filter(c => c.waitingOnUs > 0).length} of {all.length})
+      </label>
+      {list.length === 0 && (
+        <p className="mu">
+          {onlyWaiting
+            ? 'Nothing is waiting on the office. Untick the box above to see every caregiver.'
+            : 'No caregivers on file yet.'}
+        </p>
+      )}
+      {list.map(c => {
+        const office = c.office || [];
+        const doneCount = office.filter(o => o.officeStatus === 'done').length;
+        return (
+          <div className="card" key={c.caregiverId}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+              <div>
+                <b>{c.name || c.email}</b>
+                {c.licenseLevel && <span className="mu"> · {c.licenseLevel}</span>}
+                <div className="mu" style={{ fontSize: 12.5 }}>
+                  {/* The clearance sentence the gate itself produces, not one
+                      written here: the gate decides, the screen reports. */}
+                  {c.cleared ? 'Cleared for shifts.' : (c.clearanceMessage || 'Not cleared.')}
+                </div>
+              </div>
+              <span className={`chip ${c.cleared ? 'resolved' : 'received'}`}>
+                {c.cleared ? 'Cleared' : `${doneCount} of ${office.length} office items`}
+              </span>
+            </div>
+            <button className="btn ghost sm" onClick={() => setOpen(open === c.caregiverId ? null : c.caregiverId)}>
+              {open === c.caregiverId ? 'Hide' : 'Set office items'}
+            </button>
+            {open === c.caregiverId && (
+              <div style={{ marginTop: 8 }}>
+                {office.length === 0 && <p className="mu">No office items are configured.</p>}
+                {office.map(o => (
+                  <div className="row" key={o.kind} style={{ justifyContent: 'space-between', gap: 10, padding: '6px 0', borderTop: '1px solid #eee' }}>
+                    <div>
+                      <div style={{ fontSize: 13.5 }}>{o.title}{o.required ? '' : ' (optional)'}</div>
+                      <div className="mu" style={{ fontSize: 12 }}>
+                        {OFFICE_STATUS_LABEL[o.officeStatus] || o.officeStatus}
+                        {o.officeAt ? ` · ${new Date(o.officeAt).toLocaleDateString()}` : ''}
+                        {o.officeByName ? ` · ${o.officeByName}` : ''}
+                      </div>
+                    </div>
+                    <select value={o.officeStatus} disabled={busy === `${c.caregiverId}:${o.kind}`}
+                      onChange={e => setItem(c.caregiverId, o.kind, e.target.value)}>
+                      {/* Served, so the page cannot offer a status the route
+                          refuses. Labels are local; the VALUES are the API's. */}
+                      {(rows.officeStatuses || []).map(st => (
+                        <option key={st} value={st}>{OFFICE_STATUS_LABEL[st] || st}</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+                {(c.outstanding || []).filter(o => o.waitingOn === 'you').length > 0 && (
+                  <p className="mu" style={{ fontSize: 12, marginTop: 8 }}>
+                    Also waiting on the caregiver: {(c.outstanding || []).filter(o => o.waitingOn === 'you').map(o => o.title).join(', ')}.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const App = () => {
   const [tab, setTab] = useState('escalations');
   const [escalations, setEscalations] = useState([]);
@@ -591,6 +722,7 @@ const App = () => {
     { id: 'logs', label: 'Visit logs', n: logStatus === 'pending_review' ? pendingLogs : 0 },
     { id: 'incidents', label: 'Incidents', n: 0 },
     { id: 'documents', label: 'Documents', n: 0 },
+    { id: 'onboarding', label: 'Onboarding', n: 0 },
     { id: 'broadcast', label: 'Feed post', n: 0 }
   ];
 
@@ -620,6 +752,7 @@ const App = () => {
           status={logStatus} setStatus={setLogStatus} />}
         {tab === 'incidents' && <Incidents rows={incidents} />}
         {tab === 'documents' && <Documents rows={documents} reload={reload} setErr={setErr} setOk={setOk} />}
+        {tab === 'onboarding' && <Onboarding setErr={setErr} setOk={setOk} />}
         {tab === 'broadcast' && <Broadcast setErr={setErr} setOk={setOk} />}
 
         <div className="note">
