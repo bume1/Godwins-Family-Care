@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Audit Log</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <!-- Every time this app shows is Eastern (owner rule, 2026-09-16), and an
+       audit log is the one place where a timestamp an hour out is a wrong
+       answer to a compliance question. Loaded before the page's own scripts. -->
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* Session 5.4 wrote a durable, append-only audit_log on every PHI route
+       and left its own comment saying "Session 12 builds the UI; this is the
+       verification surface for go-live acceptance". Session 12 never ran, so
+       the only way to read it was an API call — which makes an accounting of
+       disclosures something nobody could produce from a screen. This is that
+       screen. A separate page rather than an edit to the 220KB hub, the same
+       call /scheduling and /caregivers made; the hub links to it. */
+    :root{--navy:#033D50;--navy-d:#022A38;--gold:#F5CD85;--goldd:#C9A44A;
+          --cream:#FAF7F2;--cream-d:#efe9db;--ink:#2b2b28;--mut:#7a746a;
+          --red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a{color:var(--gold);text-decoration:none;font-size:14px;font-weight:600}
+    .wrap{max-width:1320px;margin:0 auto;padding:20px 18px 60px}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+    .mu{color:var(--mut);font-size:14px}
+    .err{background:#fdeeee;border:1px solid #f3c9c9;color:var(--red);border-radius:10px;padding:11px 14px;margin-bottom:14px;font-size:14px}
+    .warn{background:#fdf6e3;border:1px solid #e8d9a8;color:#7a5c12;border-radius:10px;padding:11px 14px;margin-bottom:14px;font-size:14px}
+    .filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:11px;align-items:end}
+    label.f{display:block;font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--mut);margin-bottom:4px}
+    input,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit;background:#fff;color:var(--ink)}
+    .btn{border-radius:8px;padding:10px 15px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    table{width:100%;border-collapse:collapse;font-size:13.5px}
+    th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+    td{padding:8px 10px;border-bottom:1px solid #f1ece1;vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+    .chip{display:inline-block;border-radius:12px;padding:2px 9px;font-size:11.5px;font-weight:700;background:#eef3f0;color:var(--green)}
+    .chip.w{background:#fdf3dd;color:#8a6a1e}
+    .chip.r{background:#fdeeee;color:var(--red)}
+    .det{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;word-break:break-word;background:var(--cream);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px}
+    .lnk{background:none;border:none;color:var(--navy);font-weight:600;font-size:12.5px;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline}
+    .empty{text-align:center;color:var(--mut);padding:30px 10px;font-size:14px}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/session-guard.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const API = '';
+
+const getToken = () =>
+  localStorage.getItem('admin_token') || localStorage.getItem('unified_token');
+
+const api = async (path) => {
+  const res = await fetch(API + path, {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` }
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.status = res.status; err.code = data && data.code;
+    throw err;
+  }
+  return data;
+};
+
+// THE ZONE COMES FROM gfc-time.js, never from a literal here. It is the one
+// source of this app's clock (owner rule, 2026-09-16), and an audit timestamp
+// an hour out is a wrong answer to a compliance question. Seconds are the one
+// thing this page adds: `fmtDateTime` stops at the minute, and a burst of
+// requests inside one minute is exactly what an auditor is reading here, so
+// the format is local to this page while the zone is not.
+// TWO GUARDS, AND MUTATION TESTING SHOWS EITHER ALONE IS ENOUGH — recorded
+// here rather than claimed as one catch. `installDefaultTimeZone()` in the
+// head fills in `timeZone` wherever a caller passed none, so dropping the
+// explicit zone below changes nothing while the shim is loaded; dropping the
+// shim changes nothing while the zone below is explicit. Only removing BOTH
+// renders the container's own clock (UTC) under the word Eastern, which the
+// browser probe catches. Keep both: the shim is display-only by design and a
+// later session may drop it, and this is the one page where an hour is a
+// wrong answer to a compliance question.
+const TZ = window.GFC_TIME && window.GFC_TIME.PRACTICE_TIMEZONE;
+// If gfc-time.js did not load, the page has no zone to claim. It says so in
+// the column header rather than printing the viewer's own clock under the word
+// Eastern: the app must not claim a state it cannot observe.
+const TZ_LABEL = TZ ? 'Eastern' : 'your device’s clock, NOT Eastern';
+const fmtTs = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString('en-US', {
+    timeZone: TZ || undefined,
+    year: 'numeric', month: 'short', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+};
+// A local datetime box gives `YYYY-MM-DDTHH:mm` with NO zone, which the server
+// would read as UTC — five hours adrift in Georgia. Resolve it against Eastern
+// before sending, the same thing GFC_TIME does for the scheduling board.
+const easternToIso = (local) => {
+  if (!local) return '';
+  if (window.GFC_TIME && window.GFC_TIME.instantFromZoned) {
+    const [date, time] = String(local).split('T');
+    // instantFromZoned returns an ISO STRING, not a number of milliseconds.
+    // Measuring it with Number.isFinite made every filter fall through to the
+    // raw, zoneless value below — the test is what caught that.
+    const iso = window.GFC_TIME.instantFromZoned(date, (time || '00:00').slice(0, 5));
+    if (iso) return iso;
+  }
+  // Without the helper, send the local string through unchanged rather than
+  // guess a zone: a wrong window is worse than a wide one, and the server
+  // treats a bare value consistently.
+  return local;
+};
+
+const METHOD_CLASS = { GET: '', POST: 'w', PUT: 'w', PATCH: 'w', DELETE: 'r' };
+
+const Row = ({ r }) => {
+  const [open, setOpen] = useState(false);
+  const details = r.details && Object.keys(r.details).length ? r.details : null;
+  return (
+    <>
+      <tr>
+        <td className="mono">{fmtTs(r.timestamp)}</td>
+        <td>
+          {r.userName || r.userId || <span className="mu">unauthenticated</span>}
+          {r.role && <div className="mu" style={{ fontSize: 12 }}>{r.role}</div>}
+          {/* An impersonated action is the one an auditor most needs to see as
+              such: it reads as the viewed person unless the row says otherwise. */}
+          {r.impersonatorName && (
+            <div className="chip r" style={{ marginTop: 3 }}>via {r.impersonatorName}</div>
+          )}
+          {r.actingFor && <div className="mu" style={{ fontSize: 12 }}>acting for {r.actingFor}</div>}
+        </td>
+        <td>{r.action}</td>
+        <td>
+          {r.method && <span className={`chip ${METHOD_CLASS[r.method] || ''}`}>{r.method}</span>}
+          {r.resource && <div className="mono" style={{ marginTop: 3 }}>{r.resource}</div>}
+        </td>
+        <td className="mono">{r.patientId || <span className="mu">—</span>}</td>
+        <td>
+          {r.entityType ? `${r.entityType}${r.entityId ? ` ${r.entityId}` : ''}` : <span className="mu">—</span>}
+          {details && (
+            <div><button className="lnk" onClick={() => setOpen(!open)}>{open ? 'Hide detail' : 'Detail'}</button></div>
+          )}
+        </td>
+      </tr>
+      {open && details && (
+        <tr><td colSpan={6}><div className="det">{JSON.stringify(details, null, 2)}</div></td></tr>
+      )}
+    </>
+  );
+};
+
+const App = () => {
+  const [f, setF] = useState({ since: '', until: '', userId: '', patientId: '', limit: '200' });
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async (filters) => {
+    setErr(''); setBusy(true);
+    const q = new URLSearchParams();
+    if (filters.since) q.set('since', easternToIso(filters.since));
+    if (filters.until) q.set('until', easternToIso(filters.until));
+    if (filters.userId) q.set('userId', filters.userId.trim());
+    if (filters.patientId) q.set('patientId', filters.patientId.trim());
+    if (filters.limit) q.set('limit', filters.limit);
+    try {
+      setData(await api(`/api/admin/audit-log?${q.toString()}`));
+    } catch (e) {
+      // The server's own sentence. A 403 here means the viewer is not a Super
+      // Admin, which is a different problem from an empty log.
+      setErr(e.status === 403
+        ? 'The audit log is the Super Admin\'s. Your account cannot read it.'
+        : e.message);
+      setData(null);
+    } finally { setBusy(false); }
+  }, []);
+
+  useEffect(() => { load(f); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const rows = (data && data.rows) || [];
+  const limit = parseInt(f.limit, 10) || 200;
+  // ⚠️ THE ROUTE HAS NO OFFSET. It is `ORDER BY id DESC LIMIT n`, so a full
+  // page is the NEWEST n in the window and the older rows are simply not
+  // returned. A "load more" button would re-fetch the same rows and quietly
+  // imply there is nothing older, so there is none: narrowing the window is
+  // the only way to reach older entries, and the page says so.
+  const atCap = data && data.count >= limit;
+
+  return (
+    <div>
+      <div className="hdr">
+        <span className="t">Audit Log</span>
+        <span style={{ display: 'flex', gap: 14 }}>
+          <a href="/admin">Admin hub</a>
+          <a href="/caregivers">Caregivers</a>
+        </span>
+      </div>
+      <div className="wrap">
+        <div className="card">
+          <p className="mu" style={{ marginBottom: 12 }}>
+            Every request to a route that can reach patient information, and every recorded action, append-only.
+            This is the record an accounting of disclosures is produced from.
+          </p>
+          <div className="filters">
+            <div>
+              <label className="f">From</label>
+              <input type="datetime-local" value={f.since} onChange={e => setF({ ...f, since: e.target.value })} />
+            </div>
+            <div>
+              <label className="f">To</label>
+              <input type="datetime-local" value={f.until} onChange={e => setF({ ...f, until: e.target.value })} />
+            </div>
+            <div>
+              <label className="f">Staff user id</label>
+              <input value={f.userId} onChange={e => setF({ ...f, userId: e.target.value })} placeholder="exact id" />
+            </div>
+            <div>
+              <label className="f">Patient</label>
+              {/* The stored value is the OpenEMR patient uuid, not a name.
+                  Saying so stops somebody typing "Juanita" and reading the
+                  empty result as "nobody opened her record". */}
+              <input value={f.patientId} onChange={e => setF({ ...f, patientId: e.target.value })} placeholder="OpenEMR patient uuid" />
+            </div>
+            <div>
+              <label className="f">Rows</label>
+              <select value={f.limit} onChange={e => setF({ ...f, limit: e.target.value })}>
+                {['50', '200', '500', '1000'].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn" disabled={busy} onClick={() => load(f)}>{busy ? 'Reading…' : 'Search'}</button>
+              <button className="btn ghost" disabled={busy}
+                onClick={() => { const blank = { since: '', until: '', userId: '', patientId: '', limit: '200' }; setF(blank); load(blank); }}>
+                Clear
+              </button>
+            </div>
+          </div>
+          <p className="mu" style={{ fontSize: 12.5, marginTop: 10 }}>
+            Times are {TZ_LABEL}. The staff id and patient uuid must match exactly — neither is a name search.
+          </p>
+        </div>
+
+        {err && <div className="err">{err}</div>}
+
+        {data && (
+          <p className="mu" style={{ marginBottom: 10 }}>
+            Showing {data.count} {data.count === 1 ? 'entry' : 'entries'}
+            {typeof data.total === 'number' ? ` of ${data.total.toLocaleString()} recorded in total` : ''}.
+          </p>
+        )}
+
+        {atCap && (
+          <div className="warn">
+            <b>This is the newest {limit} in the window, not all of them.</b> The log is read newest first and
+            cannot be paged, so older entries are reached by narrowing the From and To dates — raising the row
+            count only moves the cap.
+          </div>
+        )}
+
+        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+          {!data && !err && <div className="empty">Reading the log…</div>}
+          {data && rows.length === 0 && (
+            <div className="empty">
+              No entries match these filters. That is not the same as nothing having happened — widen the dates,
+              or check the staff id and patient uuid are exact.
+            </div>
+          )}
+          {rows.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>When ({TZ_LABEL})</th><th>Who</th><th>Action</th><th>Request</th><th>Patient</th><th>Entity</th>
+                </tr>
+              </thead>
+              <tbody>{rows.map(r => <Row key={r.auditId || r.id} r={r} />)}</tbody>
+            </table>
+          )}
+        </div>
+
+        <p className="mu" style={{ fontSize: 12.5 }}>
+          Append-only: nothing on this page can change or remove an entry, and there is no route that could.
+        </p>
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

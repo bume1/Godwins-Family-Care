@@ -31330,6 +31330,18 @@ app.get('/billing', (req, res) => {
   res.sendFile(__dirname + '/public/billing.html');
 });
 
+// The audit log viewer (Super Admin). Session 5.4 built the durable,
+// append-only log and its own route comment said "Session 12 builds the UI".
+// Session 12 never ran, so for fourteen months the only way to read it was an
+// API call by hand — which makes an accounting of disclosures under
+// 45 CFR 164.528 something nobody at GFC could actually produce. Shell is
+// public; GET /api/admin/audit-log is requireAdmin and decides what comes
+// back. Nothing on the page can change or remove an entry, and no route
+// exists that could.
+app.get('/audit', (req, res) => {
+  res.sendFile(__dirname + '/public/audit.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {

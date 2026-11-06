@@ -1288,6 +1288,19 @@
                     <p className="text-xs text-gray-500">Post shifts, approve claims, correct time logs, run payroll, and set client locations</p>
                   </div>
                 </a>
+                {/* Super Admin only, because GET /api/admin/audit-log is
+                    requireAdmin: a tile that answers 403 is worse than no
+                    tile. The gate is computed from the same `user` the server
+                    sent, not from a stored flag. */}
+                {user?.role === 'admin' && (
+                  <a href="/audit" className="w-full text-left p-4 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center gap-4 transition group">
+                    <span className="w-10 h-10 rounded-lg bg-gray-200 text-gray-700 flex items-center justify-center group-hover:bg-gray-700 group-hover:text-white transition">{Icons.clipboard}</span>
+                    <div>
+                      <p className="font-medium text-gray-900">Audit Log</p>
+                      <p className="text-xs text-gray-500">Who opened which record, and when — the record an accounting of disclosures is produced from</p>
+                    </div>
+                  </a>
+                )}
                 <a href="/ime" className="w-full text-left p-4 bg-gray-50 hover:bg-primary-50 rounded-xl flex items-center gap-4 transition group">
                   <span className="w-10 h-10 rounded-lg bg-primary-50 text-primary-600 flex items-center justify-center group-hover:bg-primary-500 group-hover:text-white transition">{Icons.clipboard}</span>
                   <div>
