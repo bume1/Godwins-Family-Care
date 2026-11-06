@@ -643,10 +643,33 @@ module.exports = function createWelcomePacketRoutes(deps) {
           // Counts, not the answers. A queue is a glance, and a caregiver's
           // date of birth has no business on one.
           outstandingCount: state.summary.outstanding.length,
-          waitingOnUs: state.summary.outstanding.filter(o => o.waitingOn === 'us').length
+          waitingOnUs: state.summary.outstanding.filter(o => o.waitingOn === 'us').length,
+          // The office's four items with their CURRENT status, because the
+          // screen that sets them has to show where each one stands. Counts
+          // alone cannot do that: `outstanding` drops an item once it is done,
+          // so a queue built from it could not tell "done" from "not a
+          // required item". Onboarding state, not PHI — no date of birth, no
+          // address, nothing from the packet's answers.
+          office: state.checklist
+            .filter(r => r.source === 'office')
+            .map(r => ({
+              // `kind` (fingerprinting, orientation, …) NOT `item`, which is the
+              // printed packet's item NUMBER. The PUT validates against
+              // OFFICE_ITEM_KINDS, so sending the number would be refused.
+              kind: r.kind, title: r.title, required: !!r.required,
+              officeStatus: r.officeStatus, officeAt: r.officeAt, officeByName: r.officeByName
+            }))
         });
       }
-      res.json({ caregivers: out, officeItems: wp.DOCUMENT_ITEMS.filter(d => d.source === 'office') });
+      // officeStatuses too: the screen's dropdown is built from it, and the
+      // route refuses a status outside this list (OFFICE_STATUS_UNKNOWN). A
+      // page that named its own would offer an option the save rejects — or,
+      // worse, render an empty dropdown and look broken.
+      res.json({
+        caregivers: out,
+        officeItems: wp.DOCUMENT_ITEMS.filter(d => d.source === 'office'),
+        officeStatuses: wp.OFFICE_STATUSES
+      });
     } catch (error) {
       console.error('Welcome packet queue error:', error);
       res.status(500).json({ error: 'Server error' });
