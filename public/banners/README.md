@@ -10,11 +10,16 @@ README: photography full-bleed sparingly, navy gradient overlay for legibility.
 | `banner-client.jpg` | `photo-couple-walking.jpg` | Client Portal admin dashboard |
 | `banner-service.jpg` | `photo-couple-walking.jpg` | Service Portal Dashboard |
 | `banner-caregiver.jpg` | `photo-couple-walking.jpg` **(placeholder)** | Caregiver welcome packet hero |
+| `banner-clinician.jpg` | `photo-couple-walking.jpg` **(placeholder)** | Clinician onboarding hero |
 
 **`banner-caregiver.jpg` is a placeholder.** It is a copy of the client
 banner so the packet is never a broken image; the intended photo is a
 caregiver with a client. Drop the real one in at that exact filename —
 nothing in the code changes.
+
+**`banner-clinician.jpg` is a placeholder too**, the same copy, for the same
+reason. The intended photo is a nurse practitioner on a home visit. Same
+filename, no code change.
 
 ## Recommended Specifications
 

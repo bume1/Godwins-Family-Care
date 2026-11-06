@@ -36,6 +36,9 @@ const onboardingGate = require('../caregiverOnboardingGate');
 // second copy that can drift from the one a client has in writing.
 const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
+// ONE declaration of what a valid staff document upload is, shared with the
+// clinician onboarding proof route.
+const staffDocs = require('../staffDocuments');
 
 const accountTypes = require('../accountTypes');
 
@@ -1093,7 +1096,15 @@ module.exports = function createCaregiverRoutes(deps) {
     { kind: 'id_document',   label: 'Photo ID',                  needsPeriod: false, payroll: true },
     { kind: 'paystub',       label: 'Paystub',                   needsPeriod: true,  payroll: true },
     { kind: 'w9',            label: 'W-9',                       needsPeriod: false, payroll: true },
-    { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false }
+    { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false },
+    // A clinician's onboarding proof, filed from the credentialing wizard
+    // (/onboarding) rather than from this form. It joins THIS store on purpose:
+    // the office should not have to look in two places for one person's
+    // paperwork, and the row carries the checklist item it answers in its note.
+    // Office-only on the upload form — she files hers against the item, which
+    // is what records WHICH item it answers.
+    { kind: 'clinician_onboarding', label: 'Clinician onboarding document',
+      needsPeriod: false, payroll: false, clinician: true }
   ];
 
   // The welcome packet's own document items join this list rather than living
@@ -1144,17 +1155,18 @@ module.exports = function createCaregiverRoutes(deps) {
       } catch (e) {
         return res.status(400).json({ error: 'File data is not valid base64.', code: 'DOC_NOT_BASE64' });
       }
-      if (!buffer.length) return res.status(400).json({ error: 'File is empty.', code: 'DOC_EMPTY' });
-      if (buffer.length > config.MAX_FILE_SIZE) {
-        return res.status(400).json({ error: 'File exceeds 10 MB limit.', code: 'DOC_TOO_LARGE' });
+      // ONE COPY of "what a valid staff document upload is", shared with the
+      // clinician onboarding proof route. The size ceiling, the byte-typing
+      // and the safe filename live in staffDocuments.js; this route keeps the
+      // judgements that are its own (which kinds it accepts, whose document
+      // it is, and whether the office filing it means accepted on sight).
+      const prepared = staffDocs.prepareStaffDocument({
+        buffer, fileName, detectFileType, maxBytes: config.MAX_FILE_SIZE, keyPrefix: kind
+      });
+      if (!prepared.ok) {
+        return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
       }
-      // Typed by its BYTES, never by what the caller claimed — a declared mime
-      // is caller-controlled and this is the only thing standing between the
-      // Drive folder and an arbitrary file.
-      const sniffedType = detectFileType(buffer);
-      if (!sniffedType) {
-        return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.', code: 'DOC_TYPE_REJECTED' });
-      }
+      const sniffedType = prepared.mime;
 
       // WHOSE document this is. An admin files onboarding paperwork on a
       // caregiver's behalf and must NAME them — inferring it would file a W9
@@ -1177,7 +1189,7 @@ module.exports = function createCaregiverRoutes(deps) {
       }
       if (!me) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
 
-      const safeName = `${kind}_${me.id}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const safeName = prepared.safeName;
       let stored;
       try {
         stored = await drive.uploadCaregiverDocumentFile(me.name || 'Caregiver', safeName, buffer, sniffedType);
