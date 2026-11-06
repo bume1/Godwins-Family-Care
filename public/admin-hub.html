@@ -4802,6 +4802,9 @@
       const [loading, setLoading] = useState(true);
       const [selectedIds, setSelectedIds] = useState(new Set());
       const [previewNotification, setPreviewNotification] = useState(null);
+      // null = loading, a string = the email, false = the read failed.
+      const [previewHtml, setPreviewHtml] = useState(null);
+      const [testEmail, setTestEmail] = useState({ to: '', sending: false, result: null });
       const [historyPage, setHistoryPage] = useState(1);
       const [historyTypeFilter, setHistoryTypeFilter] = useState('');
 
@@ -4891,6 +4894,40 @@
         await apiFetch('/api/admin/notifications/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [...selectedIds] }) });
         setSelectedIds(new Set());
         loadData();
+      };
+
+      // THE PREVIEW IS FETCHED FROM THE SERVER, NOT GUESSED HERE.
+      // GET /api/admin/notifications/preview/:id runs the drain's own
+      // `buildQueuedEmail`, so what shows is byte-for-byte what the recipient
+      // gets. Building it in the page from `templateData.htmlBody` was wrong
+      // for every notice queued with only a body — since PR #90 the drain
+      // brands those, so the modal showed unbranded plain text while the real
+      // email went out branded. That route had no caller until now.
+      React.useEffect(() => {
+        if (!previewNotification) { setPreviewHtml(null); return; }
+        let cancelled = false;
+        setPreviewHtml(null);
+        fetch(`${API_URL}/api/admin/notifications/preview/${encodeURIComponent(previewNotification.id)}`,
+          { headers: { 'Authorization': `Bearer ${token}` } })
+          .then(r => r.ok ? r.text() : Promise.reject(new Error(String(r.status))))
+          .then(html => { if (!cancelled) setPreviewHtml(html); })
+          .catch(() => { if (!cancelled) setPreviewHtml(false); });
+        return () => { cancelled = true; };
+      }, [previewNotification && previewNotification.id]);
+
+      // The one way to prove this deployment can actually deliver mail. The
+      // boot log says which transport is configured; only a delivered message
+      // says Google accepted it.
+      const handleSendTestEmail = async () => {
+        setTestEmail(t => ({ ...t, sending: true, result: null }));
+        try {
+          const r = await apiFetch('/api/admin/test-email', {
+            method: 'POST', body: JSON.stringify(testEmail.to ? { to: testEmail.to } : {})
+          });
+          setTestEmail(t => ({ ...t, sending: false, result: r }));
+        } catch (e) {
+          setTestEmail(t => ({ ...t, sending: false, result: { success: false, error: 'The request failed.' } }));
+        }
       };
 
       // Email template handlers
@@ -5046,6 +5083,35 @@
           </div>
 
           {/* Overview Tab */}
+          {activeTab === 'overview' && stats && isSuperAdmin && (
+            <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+              <h3 className="font-semibold mb-1">Send a test email</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Proves this deployment can actually deliver. The boot log says which transport is
+                configured; only a delivered message says Google accepted it. Nothing about a client
+                or a patient is in it.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input value={testEmail.to} onChange={e => setTestEmail(t => ({ ...t, to: e.target.value }))}
+                  placeholder="Leave blank to send to yourself"
+                  className="flex-1 min-w-[240px] border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                <button onClick={handleSendTestEmail} disabled={testEmail.sending}
+                  className="px-4 py-2 bg-[#033D50] text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                  {testEmail.sending ? 'Sending\u2026' : 'Send Test Email'}
+                </button>
+              </div>
+              {/* The transport's own answer, success or failure. An invented
+                  "sent!" would be the one thing this control must not say. */}
+              {testEmail.result && (
+                <p className={`text-sm mt-3 ${testEmail.result.success ? 'text-green-700' : 'text-red-700'}`}>
+                  {testEmail.result.success
+                    ? 'Accepted for delivery. If it does not arrive, the address or the mailbox is the next thing to check, not the app.'
+                    : `Not sent: ${testEmail.result.error || 'the transport gave no reason.'}`}
+                </p>
+              )}
+            </div>
+          )}
+
           {activeTab === 'overview' && stats && (
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h3 className="font-semibold mb-4">Pending by Type</h3>
@@ -5452,8 +5518,14 @@
                   </button>
                 </div>
                 <div className="flex-1 overflow-auto" style={{minHeight: '480px'}}>
+                  {/* `sandbox` without allow-scripts: a stored notification
+                      body is content, and nothing in it runs here. */}
                   <iframe
-                    srcDoc={previewNotification.templateData?.htmlBody || `<html><body style="font-family:sans-serif;padding:24px"><pre style="white-space:pre-wrap;font-family:sans-serif">${(previewNotification.templateData?.body || '(no content)').replace(/</g,'&lt;')}</pre></body></html>`}
+                    srcDoc={previewHtml === null
+                      ? '<html><body style="font-family:sans-serif;padding:24px;color:#777">Loading the email\u2026</body></html>'
+                      : previewHtml === false
+                        ? '<html><body style="font-family:sans-serif;padding:24px;color:#A32D2D">This email could not be read back. It is not that the message is empty \u2014 the preview itself failed.</body></html>'
+                        : previewHtml}
                     className="w-full border-0"
                     style={{height: '480px'}}
                     sandbox="allow-same-origin"
