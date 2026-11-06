@@ -256,7 +256,7 @@ const MODULE_LIBRARY = Object.freeze([
   M({ id: 'TRN-219', phase: PHASES.CLINICAL_PREP, when: { lanes: ['CLINICAL'] }, format: FORMATS.SHADOW,
     title: 'Shadow home visits, observing only', minutes: null, host: 'CLINICAL_DIRECTOR',
     signoff: SIGNOFF.OBSERVED, feedsGate: ['G2'],
-    detail: 'Two or three visits. Allowed in this phase because she only observes.' }),
+    detail: 'Two or three visits. Allowed in this phase because they only observe.' }),
   M({ id: 'TRN-220', phase: PHASES.CLINICAL_PREP, when: { lanes: ['CLINICAL'] }, format: FORMATS.OBSERVED,
     title: 'Point-of-care testing and home equipment competency', minutes: 30,
     host: 'CLINICAL_DIRECTOR', signoff: SIGNOFF.OBSERVED, feedsGate: ['G2'] }),

@@ -284,6 +284,31 @@ test('no contractor is named in the item library — the contractor is a field',
   assert.ok(T.normalizeInputs({ contractors: ['VES'] }).contractors.includes('VES'));
 });
 
+test('no item a person reads assumes their gender', () => {
+  // These items are generic: the same row is read by the clinician it is about
+  // and by the office, and the physician's track uses the same library. The
+  // playbook is written about one named clinician, so the wording arrived
+  // gendered and "Malpractice cover confirmed for HER actual scope" was shown
+  // to that clinician on her own screen, about herself.
+  const fields = ['title', 'detail', 'proof', 'requiresWhen'];
+  const gendered = /\b(her|hers|she|his|him|he)\b/i;
+  T.ITEM_LIBRARY.forEach(i => fields.forEach(f => {
+    const v = i[f];
+    if (typeof v !== 'string') return;
+    assert.ok(!gendered.test(v),
+      `${i.id}.${f} assumes a gender: "${v.slice(0, 80)}"`);
+  }));
+  // The same for anything the training library and the privilege list show.
+  TR.MODULE_LIBRARY.forEach(m => ['title', 'detail'].forEach(f => {
+    if (typeof m[f] === 'string') {
+      assert.ok(!gendered.test(m[f]), `${m.id}.${f} assumes a gender: "${m[f]}"`);
+    }
+  }));
+  PRV.ALL_PRIVILEGES.forEach(p => {
+    assert.ok(!gendered.test(p.title), `privilege ${p.id} assumes a gender`);
+  });
+});
+
 test('nothing transmits to Gusto, and no screen may imply it does', () => {
   for (const f of ['clinicianItems.js', 'routes/clinicianOnboarding.js',
     'public/clinician-onboarding.html']) {

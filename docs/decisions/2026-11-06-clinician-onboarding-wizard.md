@@ -205,3 +205,22 @@ what had cleared is precisely what an auditor asks for, and it was unreadable.
 
 After the merge: suite **3201 passing, 0 failing** (1 skipped), HTTP probe 64/64,
 render probe 17/17.
+
+## No item assumes the reader's gender (same day)
+
+Screenshotting the clinician's own view found wording nothing else would have:
+**"Malpractice cover confirmed for HER actual scope", shown to that clinician on
+her own screen, about herself.** 26 strings in all. The playbook is written about
+one named clinician, so the wording arrived gendered — but these items are
+generic: the same row is read by the clinician it is about, by the office, and
+by the physician, whose own track uses the same library.
+
+All rewritten to they/them, and **build-enforced**: no `title`, `detail`, `proof`
+or `requiresWhen` in the item library, the training library or the privilege list
+may carry a gendered pronoun.
+
+The guard immediately earned itself. My own first sweep was a case-SENSITIVE
+grep, so it fixed 18 strings and silently missed 8 that began with a capital
+"She", "Her" or "He". The guard named the first one, and a case-insensitive
+sweep found the rest. *A search that cannot see half the matches is not evidence
+that the rest are clean.*
