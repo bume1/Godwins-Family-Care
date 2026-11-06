@@ -922,10 +922,40 @@ test('SAFETY: billing lists only COMPLETED visits, and says what verification co
   // on-screen view, so the rule is asserted on the builder.
   const b = routeSrc.indexOf('const buildBillingRows');
   assert.ok(b > 0, 'the billing builder exists');
-  const builder = routeSrc.slice(b, b + 2600);
-  assert.match(builder, /!l\.clock_out_at.*return false/s,
-    'a shift still in progress has no final hours and must not reach an invoice');
-  assert.match(builder, /verification/, 'each line states what the geofence could establish');
+  const builder = routeSrc.slice(b, b + 3600);
+  // REPOINTED 2026-11-06, and STRICTER than the line it replaces. The builder
+  // used to drop any row with no clock-out, which silently dropped a visit the
+  // board calls COMPLETED whose hours are missing — so a caregiver who forgot
+  // to clock out left the client unbilled with nothing on the sheet to say so.
+  // Such a visit is listed now, and the protection was never the missing row:
+  // it is that no number reaches the Billable Hours cell. Both halves are
+  // pinned here, and `test/export_shift_edits.test.js` proves the behaviour by
+  // driving the route — a source scan cannot tell a listed gap from an invoice.
+  assert.match(builder, /l\.clock_out_at \|\| concluded\(l\)/,
+    'a row needs a clock-out, or a shift the board already calls completed');
+  // ⚠️ ANCHORED ON THE WHOLE RETURN, not on the substring. A mutation widening
+  // it to `=== 'completed' || === 'in_progress'` still contains the substring,
+  // so the looser assertion could not tell a half-open visit being kept off an
+  // invoice from one being put on it.
+  assert.match(builder, /return !!\(s && s\.status === 'completed'\);/,
+    "'concluded' means exactly completed — never in progress");
+  assert.ok(!/SHIFTS_OWED_HOURS/.test(builder),
+    'a visit still in progress is not an unbilled gap and must not be listed as one');
+  // Reads the stored verdict and NEVER states one it did not observe. The
+  // former assertion was a bare /verification/, which a hardcoded
+  // `verification: 'inside'` satisfied just as well.
+  assert.match(builder, /verification: \(l\.clock_in_geofence && l\.clock_in_geofence\.verdict\) \|\| 'unverifiable'/,
+    'each line states what the geofence could establish, and nothing more');
+  assert.ok(!/verification: '(?:inside|outside_geofence)'/.test(builder),
+    'an invoice must never assert a location check that never happened');
+  // A gap row is built in ONE place, shared by both sheets, so the rule that it
+  // invents no hours is asserted there rather than on each builder.
+  const g = routeSrc.indexOf('const pseudoLog =');
+  assert.ok(g > 0, 'the gap row builder exists');
+  const gap = routeSrc.slice(g, g + 1400);
+  assert.match(gap, /clock_in_at: null, clock_out_at: null, total_minutes: null/,
+    'a visit nobody clocked into carries NO hours — a number here would be invented');
+  assert.match(gap, /flags: \['no_time_log'\]/, 'and says on the row why it is blank');
   const i = routeSrc.indexOf("'/api/scheduling/billing.csv'");
   assert.ok(i > 0, 'the billing route exists');
   const handler = routeSrc.slice(i, i + 900);

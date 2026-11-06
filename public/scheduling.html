@@ -1056,7 +1056,7 @@ const PayView = ({ title, data }) => {
               <thead><tr>{cols.map(c => <th key={c.key} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>{c.header}</th>)}</tr></thead>
               <tbody>
                 {data.rows.map(r => (
-                  <tr key={r.timeLogId} style={r.adjusted === 'yes' ? { background: '#fff8e6' } : null}>
+                  <tr key={r.rowKey || r.timeLogId} style={r.adjusted === 'yes' ? { background: '#fff8e6' } : null}>
                     {cols.map(c => <td key={c.key} style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', whiteSpace: 'nowrap' }}>{r[c.key] === null || r[c.key] === undefined ? '' : String(r[c.key])}</td>)}
                   </tr>
                 ))}
