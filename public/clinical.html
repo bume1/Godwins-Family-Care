@@ -378,6 +378,14 @@
       // protocol's permitted tests and the intersection with my credential
       // ceiling, so the form never computes either.
       myStandingOrders: () => authedFetch('/api/clinical/standing-orders?executable=true'),
+      // The AUTHORING half. Four routes that have shipped since Session 4.8
+      // with nothing calling them, so a provider could never write the
+      // protocol that the whole RN/LMSW standing-order mechanism rests on.
+      allStandingOrders: () => authedFetch('/api/clinical/standing-orders'),
+      standingOrder: (id) => authedFetch(`/api/clinical/standing-orders/${id}`),
+      createStandingOrder: (body) => authedFetch('/api/clinical/standing-orders', { method: 'POST', body: JSON.stringify(body) }),
+      reviseStandingOrder: (id, body) => authedFetch(`/api/clinical/standing-orders/${id}/revise`, { method: 'POST', body: JSON.stringify(body) }),
+      standingOrderStatus: (id, status) => authedFetch(`/api/clinical/standing-orders/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
       orderStatus: (orderId, status, note) => authedFetch(`/api/clinical/orders/${orderId}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
       // ── Session 4.10 — orders that leave the building ────────────────────
       // 'sent' and 'resulted' are deliberately absent from orderStatus above:
@@ -487,6 +495,10 @@
       // signed in on the clinic iPad. Arrival emails link here (#veterans).
       { key: 'veterans', tab: 'Veterans', icon: 'ti-medal', group: 'work' },
       { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox', group: 'work' },
+      // Session 4.8's standing orders. Visible to anyone with clinical read —
+      // an RN wants to know which protocols exist and what they permit — while
+      // every WRITE control is drawn from the served capability.
+      { key: 'protocols', tab: 'Protocols', icon: 'ti-file-certificate', group: 'work' },
       { key: 'settings', tab: 'Settings', icon: 'ti-settings', group: 'foot' }
     ]);
 
@@ -583,6 +595,341 @@
         <div>
           <canvas ref={canvasRef} style={{ width: '100%', height: 130, background: '#FAF7F2', border: '1px solid #e5ddcb', borderRadius: 8, touchAction: 'none' }} />
           <button type="button" className="text-xs text-primary underline mt-1" onClick={() => padRef.current && padRef.current.clear()}>Clear Signature</button>
+        </div>
+      );
+    };
+
+    // ── Standing orders: the authoring surface (2026-11-06) ──────────────
+    // Session 4.8 built the mechanism that lets an RN or LMSW act under a
+    // provider's standing authority. Four of its five routes had no caller, so
+    // NOBODY COULD WRITE A PROTOCOL — the feature has never been usable. This
+    // is the create, the detail, the revision and the activate/retire.
+    //
+    // Every option is SERVED. `buildStandingOrder` silently drops an order
+    // type or executor role outside its own lists, so an option invented here
+    // would read as accepted and authorise nothing.
+    const PROTO_PILL = {
+      active: 'bg-emerald-50 text-emerald-800',
+      draft: 'bg-stone-100 text-stone-700',
+      expired: 'bg-amber-50 text-amber-800',
+      retired: 'bg-stone-100 text-stone-500'
+    };
+    // Comma or newline separated, trimmed, blanks dropped. The server caps the
+    // count and the length of each; this only has to not send empties.
+    const protoList = (text) => String(text || '').split(/[\n,]/).map(t => t.trim()).filter(Boolean);
+
+    const ProtocolForm = ({ meta, existing, onCancel, onSaved }) => {
+      const padRef = useRef(null);
+      const blank = {
+        title: '', permittedOrderTypes: [], permittedTests: '', permittedExecutorRoles: [],
+        indications: '', patientScope: 'panel', effectiveAt: '', expiresAt: '',
+        requiresCoSign: false, coSignWithinDays: '', notes: ''
+      };
+      // A revision starts from the version it supersedes — retyping a protocol
+      // to change its expiry is how a test quietly goes missing from the list.
+      const fromExisting = (o) => ({
+        title: o.title || '',
+        permittedOrderTypes: [...(o.permittedOrderTypes || [])],
+        permittedTests: (o.permittedTests || []).join('\n'),
+        permittedExecutorRoles: [...(o.permittedExecutorRoles || [])],
+        indications: (o.indications || []).join(', '),
+        patientScope: o.patientScope || 'panel',
+        effectiveAt: '', expiresAt: '',
+        requiresCoSign: !!o.requiresCoSign,
+        coSignWithinDays: o.coSignWithinDays == null ? '' : String(o.coSignWithinDays),
+        notes: o.notes || ''
+      });
+      const [f, setF] = useState(() => (existing ? fromExisting(existing) : blank));
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const toggle = (key, val) => setF(x => ({
+        ...x, [key]: x[key].includes(val) ? x[key].filter(v => v !== val) : [...x[key], val]
+      }));
+
+      const submit = async (activate) => {
+        setErr('');
+        // Activating needs the signature, and the server refuses without it
+        // (STANDING_ORDER_UNSIGNED). Say so here rather than let the save fail.
+        const sig = padRef.current && !padRef.current.isEmpty() ? padRef.current.toDataURL() : null;
+        if (activate && !sig) { setErr('Sign the protocol to activate it. Save it as a draft if you are not ready to sign.'); return; }
+        const body = {
+          title: f.title,
+          permittedOrderTypes: f.permittedOrderTypes,
+          permittedTests: protoList(f.permittedTests),
+          permittedExecutorRoles: f.permittedExecutorRoles,
+          indications: protoList(f.indications),
+          patientScope: f.patientScope,
+          ...(f.effectiveAt ? { effectiveAt: f.effectiveAt } : {}),
+          expiresAt: f.expiresAt,
+          requiresCoSign: f.requiresCoSign,
+          ...(f.coSignWithinDays ? { coSignWithinDays: f.coSignWithinDays } : {}),
+          notes: f.notes,
+          // A signature is kept on a draft too: it is the document's signature,
+          // and withholding it would mean re-signing to activate later.
+          ...(sig ? { signatureImage: sig } : {}),
+          status: activate ? 'active' : 'draft'
+        };
+        setBusy(true);
+        const r = existing ? await api.reviseStandingOrder(existing.id, body) : await api.createStandingOrder(body);
+        setBusy(false);
+        // The server's own sentence names the field and why: "permittedTests
+        // must list the tests this protocol authorises" is actionable where
+        // "could not save" is not.
+        if (!r || r.error) { setErr((r && r.error) || 'Could not save the protocol.'); return; }
+        onSaved(r.standingOrder, existing ? `Revised to v${r.standingOrder.version}.` : 'Protocol created.');
+      };
+
+      return (
+        <div className="grid gap-3">
+          <div className="flex items-center justify-between">
+            <h2 className="cw-title">{existing ? `Revise "${existing.title}"` : 'New standing order'}</h2>
+            <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
+          </div>
+          {existing && (
+            <div className="card !bg-amber-50 border-amber-200 px-4 py-3 text-[13px] text-amber-900">
+              <b>This creates version {(existing.version || 1) + 1} and retires v{existing.version}.</b> The version you are
+              replacing is kept exactly as it is, because orders already executed under it reference it.
+            </div>
+          )}
+          <Field label="Title"><input className="inp" value={f.title} maxLength={160}
+            onChange={e => setF({ ...f, title: e.target.value })} placeholder="e.g. Annual diabetic monitoring panel" /></Field>
+
+          <Field label="Order types this protocol authorises">
+            <div className="flex flex-wrap gap-2">
+              {(meta.orderTypes || []).map(t => (
+                <button key={t} type="button" onClick={() => toggle('permittedOrderTypes', t)}
+                  className={`chip ${f.permittedOrderTypes.includes(t) ? 'bg-primary text-white' : 'bg-stone-100 text-stone-700'}`}>{t}</button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Who may act on it">
+            <div className="flex flex-wrap gap-2">
+              {(meta.executorRoles || []).map(r => (
+                <button key={r} type="button" onClick={() => toggle('permittedExecutorRoles', r)}
+                  className={`chip ${f.permittedExecutorRoles.includes(r) ? 'bg-primary text-white' : 'bg-stone-100 text-stone-700'}`}>
+                  {(meta.roleLabels || {})[r] || r}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11.5px] text-stone-500 mt-1">
+              A provider needs no protocol, so a provider is not an option. Each role is additionally held to its own
+              licence ceiling at execution, so naming a role here cannot widen what their licence allows.
+            </p>
+          </Field>
+
+          <Field label="Tests this protocol permits">
+            <textarea className="inp" rows={4} value={f.permittedTests}
+              onChange={e => setF({ ...f, permittedTests: e.target.value })}
+              placeholder={'One per line, e.g.\nHbA1c\nLipid panel\nUrine microalbumin'} />
+            <p className="text-[11.5px] text-stone-500 mt-1">
+              Nothing outside this list can be ordered under the protocol — a test typed in at execution is refused.
+              A protocol with no list authorises nothing.
+            </p>
+          </Field>
+
+          <Field label="ICD-10 indications">
+            <input className="inp" value={f.indications} onChange={e => setF({ ...f, indications: e.target.value })}
+              placeholder="e.g. E11.9, I10" />
+            <p className="text-[11.5px] text-stone-500 mt-1">An order executed under this protocol must link to one of these.</p>
+          </Field>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <Field label="Patients">
+              <select className="inp" value={f.patientScope} onChange={e => setF({ ...f, patientScope: e.target.value })}>
+                {(meta.patientScopes || []).map(sc => (
+                  <option key={sc} value={sc}>{sc === 'panel' ? 'The whole panel' : 'Named patients only'}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Effective from"><input className="inp" type="date" value={f.effectiveAt}
+              onChange={e => setF({ ...f, effectiveAt: e.target.value })} /></Field>
+            <Field label="Expires"><input className="inp" type="date" value={f.expiresAt}
+              onChange={e => setF({ ...f, expiresAt: e.target.value })} /></Field>
+          </div>
+          <p className="text-[11.5px] text-stone-500 -mt-1">
+            An expiry is required. A protocol with no end date is a permission flag wearing a document's clothes;
+            annual review is the norm. Leave "effective from" blank to start today.
+          </p>
+
+          <Field label="Co-signature">
+            <label className="flex items-center gap-2 text-[13px]">
+              <input type="checkbox" checked={f.requiresCoSign} onChange={e => setF({ ...f, requiresCoSign: e.target.checked })} />
+              An order executed under this protocol needs a provider co-signature
+            </label>
+            {f.requiresCoSign && (
+              <input className="inp mt-2" type="number" min="1" max="90" value={f.coSignWithinDays}
+                onChange={e => setF({ ...f, coSignWithinDays: e.target.value })} placeholder="Within how many days" />
+            )}
+          </Field>
+
+          <Field label="Notes"><textarea className="inp" rows={2} value={f.notes}
+            onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
+
+          <Field label="Your signature">
+            <SignaturePad padRef={padRef} />
+            <p className="text-[11.5px] text-stone-500 mt-1">
+              Signing is what makes this a signed clinical document. Unsigned it stays a draft and nobody can act on it.
+            </p>
+          </Field>
+
+          {err && <div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3">{err}</div>}
+          <div className="flex flex-wrap gap-2">
+            <button className="btn ghost" disabled={busy} onClick={() => submit(false)}>{busy ? 'Saving…' : 'Save as Draft'}</button>
+            <button className="btn gold" disabled={busy} onClick={() => submit(true)}>{busy ? 'Saving…' : 'Sign and Activate'}</button>
+          </div>
+        </div>
+      );
+    };
+
+    const ProtocolDetail = ({ id, meta, canAuthor, onBack, onChanged, onRevise }) => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState('');
+      const load = useCallback(() => {
+        api.standingOrder(id).then(r => { if (r && r.error) setErr(r.error); else { setD(r); setErr(''); } })
+          .catch(e => setErr(e.message));
+      }, [id]);
+      useEffect(() => { load(); }, [load]);
+      if (err) return (<div className="grid gap-3"><button className="btn ghost w-fit" onClick={onBack}>Back</button>
+        <div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3">{err}</div></div>);
+      if (!d) return <p className="text-sm text-stone-500 px-1">Loading…</p>;
+      const o = d.standingOrder || {};
+      const setStatus = async (status) => {
+        setMsg(''); setBusy(true);
+        const r = await api.standingOrderStatus(o.id, status);
+        setBusy(false);
+        if (!r || r.error) { setMsg((r && r.error) || 'Could not change the status.'); return; }
+        load(); onChanged();
+      };
+      return (
+        <div className="grid gap-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <button className="btn ghost" onClick={onBack}><i className="ti ti-chevron-left" />Protocols</button>
+            {canAuthor && (
+              <div className="flex gap-2">
+                {/* Retire, never delete: orders executed under it reference it. */}
+                {o.effectiveStatus === 'active' && <button className="btn ghost" disabled={busy} onClick={() => setStatus('retired')}>Retire</button>}
+                {o.effectiveStatus === 'draft' && <button className="btn gold" disabled={busy} onClick={() => setStatus('active')}>Activate</button>}
+                <button className="btn" disabled={busy} onClick={() => onRevise(o)}>Revise</button>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="cw-title">{o.title}</h2>
+            <span className={`chip ${PROTO_PILL[o.effectiveStatus] || ''}`}>{o.effectiveStatus}</span>
+            <span className="chip bg-stone-100 text-stone-600">v{o.version}</span>
+          </div>
+          {o.effectiveStatus === 'expired' && (
+            <div className="card !bg-amber-50 border-amber-200 px-4 py-3 text-[13px] text-amber-900">
+              <b>This protocol has expired.</b> Nobody can act on it. Revise it to issue a new version with a new expiry —
+              activating this one is refused.
+            </div>
+          )}
+          <div className="card px-4 py-3 grid gap-1.5 text-[13px]">
+            <div><b>Authorised by</b> {(o.authorizingProvider || {}).name || '—'}{(o.authorizingProvider || {}).npi ? ` (NPI ${o.authorizingProvider.npi})` : ''}</div>
+            <div><b>Order types</b> {(o.permittedOrderTypes || []).join(', ') || '—'}</div>
+            <div><b>Who may act</b> {(o.permittedExecutorRoles || []).map(r => (meta.roleLabels || {})[r] || r).join(', ') || 'nobody'}</div>
+            <div><b>Tests</b> {(o.permittedTests || []).join(', ') || '—'}</div>
+            <div><b>Indications</b> {(o.indications || []).join(', ') || '—'}</div>
+            <div><b>Patients</b> {o.patientScope === 'named' ? `${(o.namedClientIds || []).length} named` : 'the whole panel'}</div>
+            <div><b>Effective</b> {fmtDate(o.effectiveAt)} <b className="ml-2">Expires</b> {fmtDate(o.expiresAt)}</div>
+            <div><b>Co-signature</b> {o.requiresCoSign ? `required${o.coSignWithinDays ? ` within ${o.coSignWithinDays} days` : ''}` : 'not required'}</div>
+            <div><b>Signed</b> {o.signedAt ? fmtTs(o.signedAt) : 'not signed — this is a draft and nobody can act on it'}</div>
+            {o.notes && <div><b>Notes</b> {o.notes}</div>}
+            <div><b>Executed</b> {d.executionCount} time{d.executionCount === 1 ? '' : 's'}</div>
+          </div>
+          {(d.versions || []).length > 1 && (
+            <div className="card px-4 py-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-stone-500 mb-1">Version history</p>
+              {/* Every version is kept: an order executed under v2 references v2
+                  forever, even after v3 drops a test from the list. */}
+              {d.versions.map(v => (
+                <div key={v.id} className="text-[12.5px] text-stone-600">
+                  v{v.version} · {v.status}{v.signedAt ? ` · signed ${fmtDate(v.signedAt)}` : ''}{v.id === o.id ? ' · you are reading this one' : ''}
+                </div>
+              ))}
+            </div>
+          )}
+          {msg && <div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3">{msg}</div>}
+        </div>
+      );
+    };
+
+    const ProtocolsView = () => {
+      const access = useContext(AccessContext);
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [mode, setMode] = useState({ kind: 'list' });
+      const [flash, setFlash] = useState('');
+      const load = useCallback(() => {
+        api.allStandingOrders().then(r => { if (r && r.error) setErr(r.error); else { setData(r); setErr(''); } })
+          .catch(e => setErr(e.message));
+      }, []);
+      useEffect(() => { load(); }, [load]);
+
+      if (err) return <div className="px-4 py-5"><div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3">{err}</div></div>;
+      if (!data) return <div className="px-4 py-5"><p className="text-sm text-stone-500">Loading…</p></div>;
+      // Served, never derived from the role here: the page must not decide a
+      // credential question the route re-checks.
+      const canAuthor = !!data.canAuthor;
+      const meta = data;
+      const rows = data.standingOrders || [];
+
+      if (mode.kind === 'new' || mode.kind === 'revise') {
+        return (
+          <div className="px-4 py-5 max-w-3xl">
+            <ProtocolForm meta={meta} existing={mode.kind === 'revise' ? mode.order : null}
+              onCancel={() => setMode({ kind: 'list' })}
+              onSaved={(o, note) => { setFlash(note); load(); setMode({ kind: 'detail', id: o.id }); }} />
+          </div>
+        );
+      }
+      if (mode.kind === 'detail') {
+        return (
+          <div className="px-4 py-5 max-w-3xl">
+            {flash && <div className="card !bg-emerald-50 border-emerald-200 px-4 py-2.5 text-[13px] text-emerald-900 mb-3">{flash}</div>}
+            <ProtocolDetail id={mode.id} meta={meta} canAuthor={canAuthor}
+              onBack={() => { setFlash(''); setMode({ kind: 'list' }); }}
+              onChanged={load}
+              onRevise={(o) => { setFlash(''); setMode({ kind: 'revise', order: o }); }} />
+          </div>
+        );
+      }
+      return (
+        <div className="px-4 py-5 max-w-3xl">
+          <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+            <h1 className="cw-title">Standing orders</h1>
+            {canAuthor && <button className="btn gold" onClick={() => { setFlash(''); setMode({ kind: 'new' }); }}><i className="ti ti-plus" />New Protocol</button>}
+          </div>
+          <p className="text-[13px] text-stone-600 mb-3">
+            A signed protocol lets an RN, LCSW or LMSW place an order under a provider's authority, within the tests and
+            diagnoses it names.
+          </p>
+          {/* Not a hidden button: a reader is told who may write one, in the
+              server's own words, rather than wondering where the control is. */}
+          {!canAuthor && <div className="card px-4 py-3 text-[13px] text-stone-600 mb-3">{data.authorRefusal}</div>}
+          {flash && <div className="card !bg-emerald-50 border-emerald-200 px-4 py-2.5 text-[13px] text-emerald-900 mb-3">{flash}</div>}
+          {rows.length === 0 && (
+            <div className="card px-4 py-4 text-[13px] text-stone-600">
+              No standing orders have been written yet.{canAuthor ? ' Write one and an RN or LMSW can act under it.' : ''}
+            </div>
+          )}
+          {rows.map(o => (
+            <button key={o.id} type="button" className="card w-full text-left px-4 py-3 mb-2 cw-row"
+              onClick={() => { setFlash(''); setMode({ kind: 'detail', id: o.id }); }}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <b className="text-[14px] text-primary">{o.title}</b>
+                <span className={`chip ${PROTO_PILL[o.effectiveStatus] || ''}`}>{o.effectiveStatus}</span>
+                <span className="chip bg-stone-100 text-stone-600">v{o.version}</span>
+              </div>
+              <div className="text-[12.5px] text-stone-600 mt-0.5">
+                {(o.permittedOrderTypes || []).join(', ') || 'no order types'} · {(o.permittedExecutorRoles || []).join(', ') || 'nobody'} ·
+                expires {fmtDate(o.expiresAt)}
+              </div>
+            </button>
+          ))}
         </div>
       );
     };
@@ -9959,6 +10306,7 @@
                   onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
               </TasksShell>
             )}
+            {view === 'protocols' && <ProtocolsView />}
             {view === 'analytics' && <AnalyticsView />}
             {view === 'inbox' && (
               <>
