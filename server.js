@@ -3715,10 +3715,27 @@ app.post('/api/auth/mfa/verify', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// This is the one route every signed-in person can call to learn about their
+// own account, whatever their role, so the /account page reads its identity
+// here rather than out of `localStorage`. A stored value that has gone stale
+// is indistinguishable from a good one until somebody is thrown back to the
+// login screen (PR #113), and an account page is the worst place to be wrong
+// about whose account it is. `account` is the viewer's own record and nobody
+// else's — the route is bound to `req.user.id` and takes no parameter.
 app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
   const users = await getUsers(); const u = users.find(x => x.id === req.user.id) || {};
   const remaining = u.mfa && u.mfa.recovery ? u.mfa.recovery.hashes.filter(h => !h.usedAt).length : 0;
-  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified) });
+  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified),
+    account: {
+      id: u.id || req.user.id, name: u.name || null, email: u.email || null, role: u.role || null,
+      // Whether automated email reaches this person at all. `queueNotification`
+      // checks exactly these two at the choke point, so they are the only
+      // email settings this app actually honours — see the page's own note.
+      emailUnsubscribed: !!u.emailUnsubscribed,
+      accountStatus: u.accountStatus || 'active',
+      lastPasswordChange: u.lastPasswordChange || null,
+      requirePasswordChange: !!u.requirePasswordChange
+    } });
 });
 // Regenerate recovery codes — needs a fresh TOTP code, returns the new set ONCE.
 app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (req, res) => {
@@ -14086,7 +14103,15 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         ...(canBill ? {
           facility: emrRow.facility_name || null,
           facilityId: emrRow.facility_id != null ? String(emrRow.facility_id) : null,
-          posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null
+          posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null,
+          // WHO BILLS this visit, which is a different question from where
+          // care happened (2026-09-09: the two were derived from one setting
+          // and so always matched, exactly backwards for a home-visit
+          // practice). PUT .../billing-facility has been able to override it
+          // per visit since 4.5 and no screen ever showed the current value,
+          // so billing could not see what it was about to change.
+          billingFacilityId: emrRow.billing_facility != null && emrRow.billing_facility !== ''
+            ? String(emrRow.billing_facility) : null
         } : {})
       } : { uuid: encounterUuid, eid: record.encounterEid, date: record.date, reason: record.reason, emrError: emrRowR.e && emrRowR.e.message },
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
@@ -17381,7 +17406,26 @@ app.get('/api/clinical/standing-orders', authenticateToken, requireClinicalRead,
           };
         });
     }
-    res.json({ standingOrders: list, orderTypes: clinicalRoles.STANDING_ORDER_TYPES, executorRoles: standingOrders.EXECUTOR_ROLES, myClinicalRole: myRole, myCeiling: clinicalRoles.ceilingFor(req.user) });
+    // The authoring form draws every option from here. A screen that restates
+    // the vocabulary drifts from the validator that refuses an answer it never
+    // offered — `buildStandingOrder` silently drops an order type or executor
+    // role outside these lists, so a hardcoded option would read as accepted
+    // and authorise nothing.
+    res.json({
+      standingOrders: list,
+      orderTypes: clinicalRoles.STANDING_ORDER_TYPES,
+      executorRoles: standingOrders.EXECUTOR_ROLES,
+      // Labels so the form never invents a name for a role, and scopes so the
+      // page does not have to know that 'panel' and 'named' are the only two.
+      roleLabels: clinicalRoles.CLINICAL_ROLE_LABELS,
+      patientScopes: standingOrders.PATIENT_SCOPES,
+      // Whether THIS person may author one, from the same matrix the route
+      // enforces, so the page offers no control the server will refuse.
+      canAuthor: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER),
+      authorRefusal: clinicalRoles.CAPABILITY_REASONS.authorStandingOrder,
+      myClinicalRole: myRole,
+      myCeiling: clinicalRoles.ceilingFor(req.user)
+    });
   } catch (error) {
     console.error('Standing order list error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -30797,10 +30841,25 @@ app.get('/api/admin/notifications/preview/:id', authenticateToken, requireAdminH
       notification = log.find(n => n.id === req.params.id);
     }
     if (!notification) return res.status(404).json({ error: 'Notification not found' });
-    const html = notification.templateData?.htmlBody
-      || `<html><body style="font-family:sans-serif;padding:20px"><pre style="white-space:pre-wrap">${notification.templateData?.body || '(no content)'}</pre></body></html>`;
+    // THE PREVIEW MUST BE THE EMAIL, NOT A GUESS AT IT. Since PR #90 branding
+    // belongs to the DRAIN: a notice queued with only a `body` is wrapped in
+    // the house template by `buildQueuedEmail` on its way out. This route used
+    // to read `templateData.htmlBody` and fall back to a bare <pre>, so for
+    // every one of those notices — the shift notices, both caregiver
+    // escalations, message-received, the admin custom send — the preview
+    // showed unbranded plain text while the recipient got the branded email.
+    // Calling the drain's own builder means the two cannot disagree.
+    //
+    // It also closes an injection hole the old fallback carried: the body was
+    // interpolated into HTML unescaped and served same-origin. `emailTemplates`
+    // escapes everything it renders, so a notification body containing markup
+    // now reaches the admin as text. The page additionally shows this in a
+    // sandboxed iframe, which is belt and braces rather than the guard.
+    const appBaseUrl = await getAppBaseUrl();
+    const built = buildQueuedEmail(notification.templateData, appBaseUrl);
     res.setHeader('Content-Type', 'text/html');
-    res.send(html);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(built.html);
   } catch (error) {
     console.error('Preview notification error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -31095,9 +31154,23 @@ app.post('/api/admin/email-templates/:id/preview', authenticateToken, requireAdm
 
     const renderedSubject = renderTemplate(template.subject, vars);
     const renderedBody = renderTemplate(template.body, vars);
-    const renderedHtml = template.htmlBody
-      ? renderTemplate(template.htmlBody, vars)
-      : buildHtmlEmail(renderedBody, null, appBaseUrl, 'View in App', null, appBaseUrl);
+    // The welcome email is the one template whose HTML is NOT the house
+    // wrapper: it carries a credentials table, which is why PR #81 gave it
+    // its own builder. The test-send route beside this one already uses it
+    // and the real send at `sendWelcomeEmail` does too, so without this the
+    // PREVIEW was the only place that disagreed with what the person
+    // receives — on the one email that carries their sign-in details.
+    //
+    // This fix was written once already, in a SECOND copy of this route
+    // registered 480 lines further down. Express matches the first
+    // registration, so that copy never ran and the fix never landed. The
+    // dead copy is deleted in the same change; `test/no_duplicate_routes.js`
+    // fails the build if a path is ever registered twice again.
+    const renderedHtml = template.id === 'welcome_email'
+      ? WELCOME_HTML_BODY(vars)
+      : (template.htmlBody
+        ? renderTemplate(template.htmlBody, vars)
+        : buildHtmlEmail(renderedBody, null, appBaseUrl, 'View in App', null, appBaseUrl));
 
     res.json({ subject: renderedSubject, body: renderedBody, html: renderedHtml });
   } catch (error) {
@@ -31311,6 +31384,30 @@ app.get('/billing', (req, res) => {
   res.sendFile(__dirname + '/public/billing.html');
 });
 
+// Your own account (owner, "Fix all", 2026-11-06). Five routes a signed-in
+// person could only ever reach by hand lived here: their MFA status, their
+// recovery codes, the list of devices their account is signed in on, their
+// own OpenEMR sign-in, and a voluntary password change (POST
+// /api/auth/change-password was only reachable through login.html's FORCED
+// change, so somebody who simply wanted to change their password could not).
+// Every role gets this page; each card decides for itself whether it applies.
+// Shell is public; every route it calls is bound to req.user.
+app.get('/account', (req, res) => {
+  res.sendFile(__dirname + '/public/account.html');
+});
+
+// The audit log viewer (Super Admin). Session 5.4 built the durable,
+// append-only log and its own route comment said "Session 12 builds the UI".
+// Session 12 never ran, so for fourteen months the only way to read it was an
+// API call by hand — which makes an accounting of disclosures under
+// 45 CFR 164.528 something nobody at GFC could actually produce. Shell is
+// public; GET /api/admin/audit-log is requireAdmin and decides what comes
+// back. Nothing on the page can change or remove an entry, and no route
+// exists that could.
+app.get('/audit', (req, res) => {
+  res.sendFile(__dirname + '/public/audit.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {
@@ -31489,106 +31586,26 @@ const refreshProjectSlugCache = async () => {
 };
 
 // ============================================================
-// EMAIL TEMPLATE MANAGEMENT ENDPOINTS
+// EMAIL TEMPLATE MANAGEMENT — THE SECOND COPY WAS DEAD AND IS GONE.
+//
+// Five routes used to be re-registered here: GET /api/admin/email-templates,
+// GET and PUT of :id, :id/reset and :id/preview. Express matches the FIRST
+// registration, so every one of them was shadowed by the block ~480 lines
+// above and none had ever run. They were not harmless: they read as live
+// code, so the welcome-email preview fix was written HERE and never landed,
+// and the tighter `requireAdmin` gate they carried never applied either.
+//
+// Deleting them changes no behaviour. What the live block was genuinely
+// missing — the welcome email's own HTML builder in the preview — is ported
+// into it, and `test/no_duplicate_routes.test.js` now fails the build if any
+// path is registered twice again.
+//
+// The live block keeps what this one lacked: the /pools route, stripping
+// computed pool fields before persisting, and the activity-log entry on an
+// update. Its gate stays `requireAdminHubAccess` rather than quietly
+// narrowing to Super Admin, which is the owner's call and not a side effect
+// of removing dead code.
 // ============================================================
-
-// List all templates (enriched with pool groups and variables)
-app.get('/api/admin/email-templates', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const templates = await getEmailTemplates();
-    const enriched = templates.map(t => ({
-      ...t,
-      poolGroups: getPoolGroupsForTemplate(t.id),
-      variables: getPoolVariablesForTemplate(t.id)
-    }));
-    res.json(enriched);
-  } catch (error) {
-    console.error('Get email templates error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get a single template by ID
-app.get('/api/admin/email-templates/:id', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const templates = await getEmailTemplates();
-    const tpl = getTemplateById(templates, req.params.id);
-    if (!tpl) return res.status(404).json({ error: 'Template not found' });
-    res.json({ ...tpl, poolGroups: getPoolGroupsForTemplate(tpl.id), variables: getPoolVariablesForTemplate(tpl.id) });
-  } catch (error) {
-    console.error('Get email template error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Update a template's subject/body/htmlBody
-app.put('/api/admin/email-templates/:id', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const templates = await getEmailTemplates();
-    const idx = templates.findIndex(t => t.id === req.params.id);
-    if (idx === -1) return res.status(404).json({ error: 'Template not found' });
-    const { subject, body, htmlBody } = req.body;
-    if (!subject || !body) return res.status(400).json({ error: 'subject and body are required' });
-    templates[idx] = {
-      ...templates[idx],
-      subject,
-      body,
-      htmlBody: htmlBody || null,
-      isDefault: false,
-      updatedAt: new Date().toISOString(),
-      updatedBy: req.user.name
-    };
-    await db.set('email_templates', templates);
-    res.json(templates[idx]);
-  } catch (error) {
-    console.error('Update email template error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Reset a template to its default
-app.post('/api/admin/email-templates/:id/reset', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const def = DEFAULT_EMAIL_TEMPLATES.find(t => t.id === req.params.id);
-    if (!def) return res.status(404).json({ error: 'Template not found' });
-    const templates = await getEmailTemplates();
-    const idx = templates.findIndex(t => t.id === req.params.id);
-    const reset = { ...def, updatedAt: null, updatedBy: null, isDefault: true };
-    if (idx !== -1) templates[idx] = reset; else templates.push(reset);
-    await db.set('email_templates', templates);
-    res.json({ ...reset, poolGroups: getPoolGroupsForTemplate(reset.id), variables: getPoolVariablesForTemplate(reset.id) });
-  } catch (error) {
-    console.error('Reset email template error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Preview a template with example variable values
-app.post('/api/admin/email-templates/:id/preview', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const templates = await getEmailTemplates();
-    const tpl = getTemplateById(templates, req.params.id);
-    if (!tpl) return res.status(404).json({ error: 'Template not found' });
-    // Build example vars from pool definitions
-    const vars = {};
-    getPoolVariablesForTemplate(tpl.id).forEach(v => { vars[v.key] = v.example || `[${v.label}]`; });
-
-    // Override URL vars with dynamic values so preview reflects the configured domain
-    const appBaseUrl = await getAppBaseUrl();
-    vars.appUrl   = appBaseUrl;
-    vars.loginUrl = `${appBaseUrl}/login`;
-
-    const subject = renderTemplate(tpl.subject, vars);
-    const body = renderTemplate(tpl.body, vars);
-    const htmlSrc = tpl.id === 'welcome_email'
-      ? WELCOME_HTML_BODY(vars)
-      : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, appBaseUrl, 'View in App', null, appBaseUrl);
-    res.json({ subject, body, html: htmlSrc });
-  } catch (error) {
-    console.error('Preview email template error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
 
 // Legacy root-level route - redirect old project slugs to /launch
 app.get('/:slug', async (req, res, next) => {

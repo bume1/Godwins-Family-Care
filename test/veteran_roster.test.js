@@ -453,3 +453,52 @@ test('server: a double-booked slot is refused at BOTH write doors, before the wr
   }
   assert.ok(/exceptId: rows\[i\]\.id/.test(put), 'editing a row must not clash with itself');
 });
+
+// ── An exam on the board can be edited (owner report, 2026-11-05) ─────────
+// The PUT route has shipped since the roster did and NOTHING ever called it,
+// so a veteran added without a time could never be given one: remove and
+// re-add was the only way, and that loses the row's history. The same class
+// of gap as the facility-assignment route and acknowledgeAbnormalResult.
+
+test('page: the roster row can be edited, through the same form that adds', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  // The route is reached at all — this is the assertion that was false.
+  assert.match(src, /authedFetch\(`\/api\/veterans\/roster\/\$\{editing\.id\}`, \{ method: 'PUT'/,
+    'nothing called the edit route, so a booking could never be corrected');
+  const i = src.indexOf('const VeteranAddForm =');
+  const form = src.slice(i, src.indexOf('\n    const ', i + 10));
+  // ONE form for both. A second would be a second idea of what a booking is,
+  // and the server validates them through one normalizeRosterInput.
+  assert.strictEqual((src.match(/const VeteranAddForm = /g) || []).length, 1);
+  assert.match(form, /useEffect\(\(\) => \{ setF\(editing \? fromRow\(editing\) : blank\)/,
+    'the effect that actually fills the form from the row');
+  assert.match(form, /Save Changes/);
+  // Moving the board's day must not silently rewrite the date of the row
+  // being edited.
+  assert.match(form, /if \(!editing\) setF\(x => \(\{ \.\.\.x, examDate: date \}\)\)/,
+    'the day picker must not overwrite the edited row');
+  // Clearing a time has consequences the form cannot show on its own.
+  assert.match(form, /Clearing the time removes this exam from the clinical calendar/);
+  // One form on screen at a time.
+  assert.match(src, /setEditing\(null\); setShowAdd\(s => !s\)/, 'opening Add closes an edit');
+  assert.match(src, /setShowAdd\(false\); setEditing\(/, 'and opening an edit closes Add');
+  assert.match(src, /\{editing && editing\.id === r\.id \? 'Close' : 'Edit'\}/,
+    'the Edit button must be labelled — an onClick with no label is an invisible control');
+});
+
+test('server: the edit route re-validates and re-mirrors, it does not just store', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.put('/api/veterans/roster/:id'");
+  const route = src.slice(i, src.indexOf("app.delete('/api/veterans/roster/:id'", i));
+  assert.ok(route.length > 400, 'route slice looks wrong');
+  // An edit goes through the same validation as an add, or the two doors
+  // start accepting different things.
+  assert.match(route, /vetRoster\.normalizeRosterInput\(/);
+  // And through the same slot-clash check, excluding itself.
+  assert.match(route, /vetRoster\.slotClash\(rows, next, \{ exceptId: rows\[i\]\.id \}\)/);
+  // The calendar follows the edit — a moved exam that stays put on Google is
+  // worse than one that was never there.
+  assert.match(route, /mirrorExamToGoogle\(rows\[i\]\)/);
+  // A provider still cannot edit somebody else's veteran.
+  assert.match(route, /vetRoster\.canEditRow\(/);
+});

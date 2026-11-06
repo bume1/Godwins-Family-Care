@@ -545,7 +545,9 @@ test('hub: managers and coordinators sign in to User Management and nothing else
   assert.match(hub, /const HUB_OFFICE_TYPES = \['manager', 'coordinator'\];/);
   assert.match(hub, /result\.user\.role !== 'admin' && !isHubOffice\(result\.user\)/, 'the sign-in lets them in');
   assert.match(hub, /user\.role !== 'admin' && !isHubOffice\(user\)\) window\.location\.replace/, 'and the page does not bounce them');
-  assert.match(hub, /if \(officeOnly\) return <UsersPage token=\{token\} isSuperAdmin=\{false\} \/>;/, 'they get the user page whatever was asked');
+  // isSuperAdmin={false} is the rule; the prop list grows, so do not pin the
+  // whole tag.
+  assert.match(hub, /if \(officeOnly\) return <UsersPage token=\{token\}[^>]*isSuperAdmin=\{false\}[^>]*\/>;/, 'they get the user page whatever was asked');
   assert.match(hub, /: allMenuItems\.filter\(item => item\.id === 'users'\);/, 'the menu shows User Management only');
   // The list shows only the accounts they manage, and the staff-only parts stay hidden.
   assert.match(hub, /isSuperAdmin \|\| OFFICE_MANAGED_TYPES\.includes\(user\.accountType\)\)\.filter\(user =>/);
@@ -581,9 +583,16 @@ test('hub: the user page declares the pay-change state it reads (it crashed User
   // threw "financialPending is not defined" for the Super Admin too. Found by
   // rendering the page, not by reading it.
   const hub = read('public/admin-hub.html');
-  const start = hub.indexOf('const UsersPage = ({ token, isSuperAdmin }) => {');
+  // Anchored on the DECLARATION, not its full parameter list, and checked:
+  // when the signature gained a prop this indexOf returned -1 and the slice
+  // below was garbage. A guard that silently grabs the wrong slice proves
+  // nothing — it only failed loudly here by luck.
+  const start = hub.indexOf('const UsersPage = ({ token, isSuperAdmin');
+  assert.ok(start > 0, 'the UsersPage declaration moved; re-anchor this guard');
   const end = hub.indexOf('\n    const ', start + 10);
+  assert.ok(end > start, 'the end anchor moved');
   const page = hub.slice(start, end);
+  assert.ok(page.length > 1000, `the UsersPage slice looks wrong (${page.length} chars)`);
   assert.match(page, /const \[financialPending, setFinancialPending\] = useState\(\[\]\);/);
   assert.match(page, /loadFinancial\(\);/);
   assert.strictEqual((hub.match(/const \[financialPending, setFinancialPending\]/g) || []).length, 1, 'declared once');

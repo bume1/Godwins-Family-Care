@@ -215,6 +215,14 @@ test('the banner reads the server and Exit restores the admin', () => {
 test('the hub offers View as only to a Super Admin, never on an admin row', () => {
   const hub = read('public/admin-hub.html');
   assert.match(hub, /isSuperAdmin && user\.role !== 'admin' && user\.accountStatus !== 'inactive' && \(/);
-  assert.match(hub, /<UsersPage token=\{token\} isSuperAdmin=\{isSuperAdmin\} \/>/);
+  // The props it passes grow (the signed-in user was threaded in for the
+  // self-signout warning), so pin that isSuperAdmin is still handed down
+  // rather than the exact tag.
+  assert.match(hub, /<UsersPage token=\{token\}[^>]*isSuperAdmin=\{isSuperAdmin\}[^>]*\/>/);
+  // There are TWO View as controls and this guard only ever covered the user
+  // ROW. The Edit-form card carries the same rule on `editingUser`, and
+  // dropping its gate failed nothing — found by mutating it on 2026-11-06.
+  assert.match(hub, /isSuperAdmin && editingUser\.role !== 'admin' && editingUser\.accountStatus !== 'inactive' && \(/,
+    'the Edit-form View as must be Super-Admin-only and never on an admin row');
   assert.match(hub, /localStorage\.setItem\('gfc_view_as_return'/);
 });

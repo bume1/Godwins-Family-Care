@@ -1710,7 +1710,17 @@ test('F3: a blocker the page does not recognise lands on a step, never disappear
 });
 
 test('F5: the rest of the chart opens inside the encounter, and it is the SAME components', () => {
-  const drawer = chartPage.slice(chartPage.indexOf('const EncounterLookups = ('), chartPage.indexOf('const EncounterPanel = ('));
+  // Bounded to EncounterLookups ITSELF, not to everything before the next
+  // named component: a card added between the two used to land inside this
+  // slice and read as a drawer defect. A bounded scan is a guard that works
+  // on the code it was written against, so it is anchored at both ends and
+  // loud if either moves.
+  const dStart = chartPage.indexOf('const EncounterLookups = (');
+  assert.ok(dStart > 0, 'EncounterLookups is gone');
+  const dEnd = chartPage.indexOf('\n    };', dStart);
+  assert.ok(dEnd > dStart, 'the EncounterLookups slice has no end');
+  const drawer = chartPage.slice(dStart, dEnd);
+  assert.ok(drawer.includes('<DocumentsTab'), 'the EncounterLookups slice is too short to contain the drawer');
   // Mounted, not re-rendered. A second view of "what is this patient allergic
   // to" is how the two start disagreeing — the rule the allergy strip already
   // follows one layer down.

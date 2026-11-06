@@ -258,6 +258,23 @@
       // password field above.
       // "View as" (impersonation.js). Super Admin only; the server refuses
       // admin targets, nested starts and anyone without an MFA-verified session.
+      // Two more Session 5 routes whose first UI this is. Both are admin-only
+      // and neither is the password field on the form: that one SETS a password
+      // the admin then has to convey; this one emails the person a reset link
+      // and never hands the password back.
+      emailPasswordReset: (token, userId) =>
+        fetch(`${API_URL}/api/admin/reset-user-password/${encodeURIComponent(userId)}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }).then(handleResponse).catch(asError),
+
+      revokeUserSessions: (token, userId) =>
+        fetch(`${API_URL}/api/users/${encodeURIComponent(userId)}/sessions/revoke`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        }).then(handleResponse).catch(asError),
+
       startViewAs: (token, userId) =>
         fetch(`${API_URL}/api/admin/impersonate/${userId}`, {
           method: 'POST',
@@ -763,8 +780,15 @@
               </>)}
             </nav>
 
-            {/* Portal Hub & Sign Out */}
+            {/* Portal Hub, Your account & Sign Out */}
             <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-100 bg-gray-50/50 space-y-2">
+              {/* Every role has an account, so /account is linked from every
+                  signed-in surface rather than being an admin-only page. */}
+              <a href="/account"
+                className="w-full text-left px-4 py-2.5 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-xl flex items-center gap-3 transition group">
+                <span className="text-primary-500 group-hover:text-primary-600">{Icons.users}</span>
+                <span className="text-sm font-medium">Your account</span>
+              </a>
               <button onClick={() => { window.location.href = '/'; }}
                 className="w-full text-left px-4 py-2.5 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-xl flex items-center gap-3 transition group">
                 <span className="text-primary-500 group-hover:text-primary-600">{Icons.home}</span>
@@ -1271,6 +1295,19 @@
                     <p className="text-xs text-gray-500">Post shifts, approve claims, correct time logs, run payroll, and set client locations</p>
                   </div>
                 </a>
+                {/* Super Admin only, because GET /api/admin/audit-log is
+                    requireAdmin: a tile that answers 403 is worse than no
+                    tile. The gate is computed from the same `user` the server
+                    sent, not from a stored flag. */}
+                {user?.role === 'admin' && (
+                  <a href="/audit" className="w-full text-left p-4 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center gap-4 transition group">
+                    <span className="w-10 h-10 rounded-lg bg-gray-200 text-gray-700 flex items-center justify-center group-hover:bg-gray-700 group-hover:text-white transition">{Icons.clipboard}</span>
+                    <div>
+                      <p className="font-medium text-gray-900">Audit Log</p>
+                      <p className="text-xs text-gray-500">Who opened which record, and when — the record an accounting of disclosures is produced from</p>
+                    </div>
+                  </a>
+                )}
                 <a href="/ime" className="w-full text-left p-4 bg-gray-50 hover:bg-primary-50 rounded-xl flex items-center gap-4 transition group">
                   <span className="w-10 h-10 rounded-lg bg-primary-50 text-primary-600 flex items-center justify-center group-hover:bg-primary-500 group-hover:text-white transition">{Icons.clipboard}</span>
                   <div>
@@ -2217,7 +2254,7 @@
       );
     };
 
-    const UsersPage = ({ token, isSuperAdmin }) => {
+    const UsersPage = ({ token, isSuperAdmin, user: me }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
       const [clients, setClients] = useState([]);
@@ -2550,6 +2587,43 @@
           ? `${user.name}'s OpenEMR connection was cleared. They'll be asked to sign in again next time.`
           : `${user.name} had no active OpenEMR connection.`);
         refreshEmrStatus(user.id);
+      };
+
+      // Email them a reset link. DELIBERATELY NOT the password field above:
+      // that one sets a password an admin then has to read out over the phone,
+      // which is how a password ends up in a text message. This generates a
+      // temporary one, emails a secure link, and never returns the password —
+      // so the copy must not imply the admin now knows it.
+      const emailResetLink = async (user) => {
+        if (!window.confirm(`Email ${user.name || 'this user'} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${user.email}. You will not be shown the new password — they set their own from the link.`)) return;
+        setAccessActionBusy(true);
+        const result = await api.emailPasswordReset(token, user.id);
+        setAccessActionBusy(false);
+        // A placeholder login is refused with a specific, actionable sentence
+        // (RESET_PLACEHOLDER_LOGIN names the POA to reset instead). Surface the
+        // server's own words — a generic failure sends somebody to the wrong fix.
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        setMessage(`A password reset link has been emailed to ${user.email}. Their old password no longer works.`);
+        loadData();
+      };
+
+      // End every session this person holds. For a lost or stolen device: it
+      // does not change their password, so they sign in again with the one
+      // they have.
+      const revokeUserSessions = async (user) => {
+        const isMe = !!(me && me.id === user.id);
+        const warn = isMe
+          ? `Sign yourself out everywhere?\n\nThis is your own account, so it ends THIS session too and you will have to sign in again. Your password is unchanged.`
+          : `Sign ${user.name || 'this user'} out everywhere?\n\nEvery device they are signed in on is ended immediately. Their password is unchanged — they can sign straight back in with it, so reset the password too if the device is lost.`;
+        if (!window.confirm(warn)) return;
+        setAccessActionBusy(true);
+        const result = await api.revokeUserSessions(token, user.id);
+        setAccessActionBusy(false);
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        // `revoked` is a count, and 0 is a real answer: nobody was signed in.
+        setMessage(result.revoked
+          ? `${user.name || 'They'} ${result.revoked === 1 ? 'was' : 'were'} signed out of ${result.revoked} session${result.revoked === 1 ? '' : 's'}.`
+          : `${user.name || 'They'} had no active sessions, so nothing was signed out.`);
       };
 
       const handleDelete = async (userId) => {
@@ -3273,6 +3347,47 @@
                             onClick={() => resetUserMfa(editingUser)}
                             className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
                             Reset Authenticator
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Email a reset link. Separate from the password field
+                          above on purpose: that one sets a password somebody
+                          then has to read out, this one lets them set their
+                          own. Refused on a placeholder login, with the server's
+                          own sentence naming the POA to reset instead. */}
+                      <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Password reset link</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Emails a secure link to {editingUser.email} and stops their current password working. You are not shown the new password — they choose their own. Use this instead of typing one in when you cannot speak to them.
+                            </p>
+                          </div>
+                          <button type="button" disabled={accessActionBusy}
+                            onClick={() => emailResetLink(editingUser)}
+                            className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                            Email Reset Link
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* End every session. For a lost or stolen device; it
+                          changes no password, which the copy has to say or
+                          somebody will think it locks the account. */}
+                      <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Active sessions</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Signs them out of every device immediately. Their password is unchanged, so they can sign back in with it — reset the password as well if a device is lost.
+                              {me && me.id === editingUser.id && <span className="text-amber-800 font-medium"> This is your own account, so it will sign you out of this session too.</span>}
+                            </p>
+                          </div>
+                          <button type="button" disabled={accessActionBusy}
+                            onClick={() => revokeUserSessions(editingUser)}
+                            className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                            Sign Out Everywhere
                           </button>
                         </div>
                       </div>
@@ -4802,6 +4917,9 @@
       const [loading, setLoading] = useState(true);
       const [selectedIds, setSelectedIds] = useState(new Set());
       const [previewNotification, setPreviewNotification] = useState(null);
+      // null = loading, a string = the email, false = the read failed.
+      const [previewHtml, setPreviewHtml] = useState(null);
+      const [testEmail, setTestEmail] = useState({ to: '', sending: false, result: null });
       const [historyPage, setHistoryPage] = useState(1);
       const [historyTypeFilter, setHistoryTypeFilter] = useState('');
 
@@ -4891,6 +5009,40 @@
         await apiFetch('/api/admin/notifications/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [...selectedIds] }) });
         setSelectedIds(new Set());
         loadData();
+      };
+
+      // THE PREVIEW IS FETCHED FROM THE SERVER, NOT GUESSED HERE.
+      // GET /api/admin/notifications/preview/:id runs the drain's own
+      // `buildQueuedEmail`, so what shows is byte-for-byte what the recipient
+      // gets. Building it in the page from `templateData.htmlBody` was wrong
+      // for every notice queued with only a body — since PR #90 the drain
+      // brands those, so the modal showed unbranded plain text while the real
+      // email went out branded. That route had no caller until now.
+      React.useEffect(() => {
+        if (!previewNotification) { setPreviewHtml(null); return; }
+        let cancelled = false;
+        setPreviewHtml(null);
+        fetch(`${API_URL}/api/admin/notifications/preview/${encodeURIComponent(previewNotification.id)}`,
+          { headers: { 'Authorization': `Bearer ${token}` } })
+          .then(r => r.ok ? r.text() : Promise.reject(new Error(String(r.status))))
+          .then(html => { if (!cancelled) setPreviewHtml(html); })
+          .catch(() => { if (!cancelled) setPreviewHtml(false); });
+        return () => { cancelled = true; };
+      }, [previewNotification && previewNotification.id]);
+
+      // The one way to prove this deployment can actually deliver mail. The
+      // boot log says which transport is configured; only a delivered message
+      // says Google accepted it.
+      const handleSendTestEmail = async () => {
+        setTestEmail(t => ({ ...t, sending: true, result: null }));
+        try {
+          const r = await apiFetch('/api/admin/test-email', {
+            method: 'POST', body: JSON.stringify(testEmail.to ? { to: testEmail.to } : {})
+          });
+          setTestEmail(t => ({ ...t, sending: false, result: r }));
+        } catch (e) {
+          setTestEmail(t => ({ ...t, sending: false, result: { success: false, error: 'The request failed.' } }));
+        }
       };
 
       // Email template handlers
@@ -5046,6 +5198,35 @@
           </div>
 
           {/* Overview Tab */}
+          {activeTab === 'overview' && stats && isSuperAdmin && (
+            <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+              <h3 className="font-semibold mb-1">Send a test email</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Proves this deployment can actually deliver. The boot log says which transport is
+                configured; only a delivered message says Google accepted it. Nothing about a client
+                or a patient is in it.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input value={testEmail.to} onChange={e => setTestEmail(t => ({ ...t, to: e.target.value }))}
+                  placeholder="Leave blank to send to yourself"
+                  className="flex-1 min-w-[240px] border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                <button onClick={handleSendTestEmail} disabled={testEmail.sending}
+                  className="px-4 py-2 bg-[#033D50] text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                  {testEmail.sending ? 'Sending\u2026' : 'Send Test Email'}
+                </button>
+              </div>
+              {/* The transport's own answer, success or failure. An invented
+                  "sent!" would be the one thing this control must not say. */}
+              {testEmail.result && (
+                <p className={`text-sm mt-3 ${testEmail.result.success ? 'text-green-700' : 'text-red-700'}`}>
+                  {testEmail.result.success
+                    ? 'Accepted for delivery. If it does not arrive, the address or the mailbox is the next thing to check, not the app.'
+                    : `Not sent: ${testEmail.result.error || 'the transport gave no reason.'}`}
+                </p>
+              )}
+            </div>
+          )}
+
           {activeTab === 'overview' && stats && (
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h3 className="font-semibold mb-4">Pending by Type</h3>
@@ -5452,8 +5633,14 @@
                   </button>
                 </div>
                 <div className="flex-1 overflow-auto" style={{minHeight: '480px'}}>
+                  {/* `sandbox` without allow-scripts: a stored notification
+                      body is content, and nothing in it runs here. */}
                   <iframe
-                    srcDoc={previewNotification.templateData?.htmlBody || `<html><body style="font-family:sans-serif;padding:24px"><pre style="white-space:pre-wrap;font-family:sans-serif">${(previewNotification.templateData?.body || '(no content)').replace(/</g,'&lt;')}</pre></body></html>`}
+                    srcDoc={previewHtml === null
+                      ? '<html><body style="font-family:sans-serif;padding:24px;color:#777">Loading the email\u2026</body></html>'
+                      : previewHtml === false
+                        ? '<html><body style="font-family:sans-serif;padding:24px;color:#A32D2D">This email could not be read back. It is not that the message is empty \u2014 the preview itself failed.</body></html>'
+                        : previewHtml}
                     className="w-full border-0"
                     style={{height: '480px'}}
                     sandbox="allow-same-origin"
@@ -5533,12 +5720,12 @@
       };
 
       const renderPage = () => {
-        if (officeOnly) return <UsersPage token={token} isSuperAdmin={false} />;
+        if (officeOnly) return <UsersPage token={token} isSuperAdmin={false} user={user} />;
 
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
           case 'inbox': return <InboxPage token={token} user={user} />;
-          case 'users': return <UsersPage token={token} isSuperAdmin={isSuperAdmin} />;
+          case 'users': return <UsersPage token={token} isSuperAdmin={isSuperAdmin} user={user} />;
           case 'veterans': return <VeteransPage token={token} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
