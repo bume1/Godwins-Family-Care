@@ -79,7 +79,9 @@ const LIVE_SHIFTS = [{
   requiredLicenseLevel: 'cna', levelRequirementLabel: 'CNA and above',
   poolVisibility: 'all_eligible', caregiverName: 'Danielle Carter'
 }];
+const sched = require('../schedulingRepository');
 let activeShifts = SHIFTS;   // swapped for section H
+let payViewMode = false;     // section J: the manager who reads the sheets
 let coordinatorMode = false; // flipped for section I
 const AVAIL = [{
   id: 'av1', caregiverId: 'cg1', caregiverName: 'Danielle Carter', effectiveFrom: '2026-11-10',
@@ -139,6 +141,35 @@ const posted = [];   // every POST body the page sends
           { id: 'cg2', name: 'Tasha Green', licenseLabel: 'LPN' }
         ] }) });
     }
+    // Payroll and billing as the SERVER sends them, columns and all. The page
+    // renders whatever columns it is given, so this is what proves a corrected
+    // shift reaches the screen and not only the CSV.
+    if (url.pathname === '/api/scheduling/payroll' || url.pathname === '/api/scheduling/billing') {
+      const billing = url.pathname.endsWith('billing');
+      return route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          from: '2026-10-01', to: '2026-10-31',
+          columns: billing ? sched.BILLING_CSV_COLUMNS : sched.PAYROLL_CSV_COLUMNS,
+          canExport: true,
+          rows: [
+            // A corrected visit: the schedule moved, the clock did not.
+            { rowKey: 'tl1', timeLogId: 'tl1', caregiverName: 'Danielle Carter', clientName: 'Margaret Whitfield',
+              shiftDate: '10/12/2026', serviceDate: '10/12/2026', hours: 4.88, scheduledHours: 2,
+              hoursMatch: 'over by 2.88 h', scheduleCorrected: '11/6/2026 4:12 PM',
+              scheduleCorrectedBy: 'GFC Admin', adjusted: 'no', source: 'Clocked' },
+            // Two GAP rows: no time log, so no timeLogId. These are what would
+            // collide on a null React key.
+            { rowKey: 'shift:g1', timeLogId: null, caregiverName: 'Danielle Carter', clientName: 'Margaret Whitfield',
+              shiftDate: '10/14/2026', serviceDate: '10/14/2026', hours: null, scheduledHours: 4,
+              hoursMatch: 'no hours recorded', scheduleCorrected: '', scheduleCorrectedBy: '',
+              adjusted: 'no', source: 'No time recorded' },
+            { rowKey: 'shift:g2', timeLogId: null, caregiverName: 'Danielle Carter', clientName: 'Margaret Whitfield',
+              shiftDate: '10/15/2026', serviceDate: '10/15/2026', hours: null, scheduledHours: 4,
+              hoursMatch: 'no hours recorded', scheduleCorrected: '', scheduleCorrectedBy: '',
+              adjusted: 'no', source: 'No time recorded' }
+          ]
+        }) });
+    }
     if (url.pathname === '/api/scheduling/availability') {
       return route.fulfill({ status: 200, contentType: 'application/json',
         body: JSON.stringify({
@@ -150,7 +181,11 @@ const posted = [];   // every POST body the page sends
     if (url.pathname.endsWith('/caregivers')) // `clients` is NOT optional: the tab strip counts the ones with no
       // coordinates. A fake missing what production supplies exercises a
       // different function — the probe's first run proved it by crashing here.
-      body.json = { caregivers: [], clients: [], access: { manageSchedule: true, managePay: true, manageLocations: true } };
+      body.json = { caregivers: [], clients: [], access: payViewMode
+        // A manager READS the sheets on screen; the Super Admin downloads
+        // them instead, so an admin never renders the tables at all.
+        ? { manageSchedule: true, managePay: false, manageLocations: false, viewPay: true, exportPay: false }
+        : { manageSchedule: true, managePay: true, manageLocations: true } };
     else if (url.pathname.endsWith('/shifts')) body.json = { shifts: activeShifts };
     else if (url.pathname.endsWith('/shift-requests')) body.json = { shiftRequests: [] };
     else if (url.pathname.endsWith('/availability')) body.json = { availability: [] };
@@ -314,6 +349,73 @@ const posted = [];   // every POST body the page sends
     await page.screenshot({ path: process.env.GFC_COORD_SHOT, fullPage: true });
     console.log(`  shot  ${process.env.GFC_COORD_SHOT}`);
   }
+
+  // --- J. A corrected shift, and a visit nobody clocked, ON THE SCREEN ------
+  // Owner report, 2026-11-06: changes to a shift worked after it started or
+  // concluded were not reaching the payroll and billing sheets. They do now,
+  // and the screen reads the same rows the CSV does — so this section renders
+  // them rather than trusting that it would.
+  coordinatorMode = false;
+  payViewMode = true;    // viewPay without exportPay: a manager, not the admin
+  activeShifts = SHIFTS;
+  await page.goto(`${base}/scheduling`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.calhdr', { timeout: 15000 });
+  await page.click('button:has-text("Time & payroll")');
+  await page.waitForTimeout(400);
+
+  const payTable = await page.locator('.card:has-text("Payroll (view only)") table').first();
+  const payHeaders = (await payTable.locator('thead th').allTextContents()).map(t => t.trim());
+  ok('J1 the screen shows the scheduled length beside the paid length',
+    payHeaders.includes('Hours') && payHeaders.includes('Scheduled Hours'), payHeaders.join(' | '));
+  ok('J2 and whether the two agree', payHeaders.includes('Hours vs Schedule'));
+  ok('J3 and who corrected the schedule, and when',
+    payHeaders.includes('Schedule Corrected') && payHeaders.includes('Corrected By'));
+
+  const payRows = await payTable.locator('tbody tr').count();
+  ok('J4 three rows render, gap rows included', payRows === 3, `got ${payRows}`);
+  const matchCol = payHeaders.indexOf('Hours vs Schedule');
+  const cellAt = async (row, col) => (await payTable.locator('tbody tr').nth(row).locator('td').nth(col).textContent()).trim();
+  ok('J5 the overpayment is legible on the row', (await cellAt(0, matchCol)) === 'over by 2.88 h',
+    await cellAt(0, matchCol));
+  ok('J6 a visit nobody clocked says so rather than reading as zero',
+    (await cellAt(1, matchCol)) === 'no hours recorded', await cellAt(1, matchCol));
+  const hoursCol = payHeaders.indexOf('Hours');
+  ok('J7 and carries NO hours at all', (await cellAt(1, hoursCol)) === '', `"${await cellAt(1, hoursCol)}"`);
+  ok('J8 while still showing the size of the gap',
+    (await cellAt(1, payHeaders.indexOf('Scheduled Hours'))) === '4');
+
+  // A picture of the corrected sheet, for whoever reported it. Off unless asked.
+  if (process.env.GFC_PAY_SHOT) {
+    await page.screenshot({ path: process.env.GFC_PAY_SHOT, fullPage: true });
+    console.log(`  shot  ${process.env.GFC_PAY_SHOT}`);
+  }
+
+  const billHeaders = (await page.locator('.card:has-text("Billing (view only)") table thead th').allTextContents())
+    .map(t => t.trim());
+  ok('J9 the billing sheet carries the same two figures',
+    billHeaders.includes('Scheduled Hours') && billHeaders.includes('Hours vs Schedule'), billHeaders.join(' | '));
+  ok('J10 and the correction stamp', billHeaders.includes('Schedule Corrected'));
+
+  // ⚠️ THIS WAS A DUPLICATE-KEY WARNING CHECK AND IT PROVED NOTHING. Reverting
+  // the page to `key={r.timeLogId}` — so both gap rows key on null — raised no
+  // React warning at all, because React treats a null key as absent and falls
+  // back to the index. So the assertion could not distinguish the two states.
+  // It asserts the RENDERED ROWS instead, which can: a mis-keyed table that
+  // reused a row would show the wrong date against the wrong row.
+  //
+  // Recorded rather than dressed up: keying on a stable id is correct practice
+  // (React's index fallback reuses DOM and state across reorders) but no
+  // visible defect was reproduced in this static table. The fix stands; the
+  // claim does not go further than the evidence.
+  const dateCol = payHeaders.indexOf('Shift Date');
+  ok('J11 each row keeps its own date — no row is reused for another',
+    (await cellAt(0, dateCol)) === '10/12/2026'
+    && (await cellAt(1, dateCol)) === '10/14/2026'
+    && (await cellAt(2, dateCol)) === '10/15/2026',
+    `${await cellAt(0, dateCol)} / ${await cellAt(1, dateCol)} / ${await cellAt(2, dateCol)}`);
+  ok('J12 and the corrected row is the only one carrying a correction stamp',
+    (await cellAt(0, payHeaders.indexOf('Corrected By'))) === 'GFC Admin'
+    && (await cellAt(1, payHeaders.indexOf('Corrected By'))) === '');
 
   ok('G1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
 

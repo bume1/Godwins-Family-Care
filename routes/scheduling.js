@@ -3019,15 +3019,79 @@ module.exports = function createSchedulingRoutes(deps) {
     };
   };
 
+  // ---- WHAT A CORRECTION LOOKS LIKE ON THE SHEET ---------------------------
+  // `applyShiftEdit` already moves the time log's copy of the schedule and
+  // stamps WHO corrected it and WHEN. Until now nothing read those stamps, so
+  // a shift corrected after it started or concluded produced two sheets that
+  // quietly disagreed with the board and with each other. These cells are that
+  // stamp, on every row of both exports.
+  const scheduleCells = (l) => ({
+    scheduledHours: sched.minutesToHours(sched.scheduledMinutes(l)),
+    hoursMatch: sched.hoursVsSchedule(l),
+    // Stamped with its OWN date as the reference, so `csvTime` does not
+    // month/day-prefix a time that already sits beside its date — a
+    // correction is almost always on a different day than the visit, which
+    // would have made every one of these cells read "11/6/2026 11/6 4:12 PM".
+    scheduleCorrected: l.schedule_corrected_at
+      ? `${sched.csvDate(l.schedule_corrected_at)} ${sched.csvTime(l.schedule_corrected_at, sched.csvLocalDate(l.schedule_corrected_at))}`
+      : '',
+    scheduleCorrectedBy: l.schedule_corrected_by_name || ''
+  });
+
+  // The stored flags, plus the one condition no flag records: a schedule
+  // corrected onto a DIFFERENT Georgia day than the clock. Derived for the
+  // sheet rather than written onto the row, because it is not an observation
+  // of the visit — it is a statement about two records of it disagreeing.
+  const flagsCell = (l) => {
+    const flags = (l.flags || []).slice();
+    if (sched.scheduleDateMoved(l) && !flags.includes('schedule_date_moved')) flags.push('schedule_date_moved');
+    return flags.join(' ');
+  };
+
+  // ---- A VISIT THAT HAPPENED AND WAS NEVER CLOCKED INTO -------------------
+  // Both exports are built from time logs, so a shift the board calls
+  // completed with no log at all appeared in NEITHER sheet: the caregiver
+  // unpaid, the client unbilled, and nothing anywhere saying a visit was
+  // missing. Silence is the worst of the available answers — a blank cell is a
+  // question somebody answers, a missing row is one nobody asks.
+  //
+  // It is a row now, dated by the shift's own Georgia date, carrying the
+  // SCHEDULED hours so the size of the gap is visible and NO actual hours at
+  // all, because nothing was recorded and a number here would be an invention.
+  const SHIFTS_OWED_HOURS = Object.freeze(['in_progress', 'completed']);
+  const shiftsWithNoTimeLog = (shiftRows, logs, statuses) => {
+    const logged = new Set((logs || []).filter(l => l && l.shift_id).map(l => String(l.shift_id)));
+    return (shiftRows || []).filter(s => s && s.id && statuses.includes(s.status) && !logged.has(String(s.id)));
+  };
+  // Shaped exactly like a time log so every shared cell builder above reads it
+  // without a second code path. A second shape here is how one export starts
+  // reporting what the other does not.
+  const pseudoLog = (s, usersById) => {
+    const holder = s.caregiver_id ? usersById.get(s.caregiver_id) : null;
+    return {
+      id: null, shift_id: s.id, no_time_log: true,
+      caregiver_id: s.caregiver_id || null,
+      caregiver_name: s.caregiver_name || (holder && holder.name) || '',
+      client_id: s.client_id, client_name: s.client_name || '',
+      // The HOLDER's licence, never the shift's requirement: those are
+      // different facts and the sheets report the person.
+      license_level: (holder && holder.licenseLevel) || null,
+      clock_in_at: null, clock_out_at: null, total_minutes: null,
+      scheduled_start: s.start, scheduled_end: s.end,
+      flags: ['no_time_log'],
+      schedule_corrected_at: s.edited_at || null,
+      schedule_corrected_by_name: s.edited_by_name || null
+    };
+  };
+
+  // Oldest first, by the date the row belongs on. A row with no clock falls
+  // back to its schedule, so `clock_in_at` alone cannot order the list.
+  const byRowDate = (a, b) =>
+    String(sched.exportRowDate(a)).localeCompare(String(sched.exportRowDate(b))) ||
+    String(a.clock_in_at || a.scheduled_start || '').localeCompare(String(b.clock_in_at || b.scheduled_start || ''));
+
   const buildPayrollRows = async (from, to) => {
-    // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
-    // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
-    // dropped the last evening of the range and pulled in the evening before
-    // it — and then handed the wrong date to the pay period.
-    const logs = (await readRows('time_logs')).filter(l => {
-      const d = sched.csvLocalDate(l.clock_in_at);
-      return d >= from && d <= to;
-    }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+    const allLogs = await readRows('time_logs');
 
     // Resolve each row's pay rate (owner request, 2026-09-13). A pay rate
     // that payroll never reads is a number stored and left inert — the exact
@@ -3037,8 +3101,19 @@ module.exports = function createSchedulingRoutes(deps) {
     const shiftRows = await readRows('shifts');
     const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
 
+    // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
+    // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
+    // dropped the last evening of the range and pulled in the evening before
+    // it — and then handed the wrong date to the pay period.
+    const logs = allLogs
+      .concat(shiftsWithNoTimeLog(shiftRows, allLogs, SHIFTS_OWED_HOURS).map(s => pseudoLog(s, usersById)))
+      .filter(l => {
+        const d = sched.exportRowDate(l);
+        return !!d && d >= from && d <= to;
+      }).sort(byRowDate);
+
     return logs.map(l => {
-      const shiftDate = sched.csvLocalDate(l.clock_in_at);
+      const shiftDate = sched.exportRowDate(l);
       const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
       // Shift rate → this caregiver's rate for this client → their base rate.
       const resolved = cg.resolvePayRate(
@@ -3055,6 +3130,10 @@ module.exports = function createSchedulingRoutes(deps) {
         : '';
       return {
         timeLogId: l.id,
+        // A gap row has no time log, so `timeLogId` is null on it. The screen
+        // keys its table rows on this, and two gap rows sharing a null key is
+        // a React key collision — so every row carries its own stable key.
+        rowKey: l.id || `shift:${l.shift_id}`,
         caregiverId: l.caregiver_id,
         payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
         payRateSource: resolved.rate === null ? 'not set' : resolved.source,
@@ -3062,17 +3141,18 @@ module.exports = function createSchedulingRoutes(deps) {
         caregiverName: l.caregiver_name,
         licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
         clientName: l.client_name,
-        shiftDate: sched.csvDate(l.clock_in_at),
+        shiftDate: sched.csvDate(l.clock_in_at || l.scheduled_start),
         scheduledStart: sched.csvTime(l.scheduled_start, shiftDate),
         scheduledEnd: sched.csvTime(l.scheduled_end, shiftDate),
         clockInAt: sched.csvTime(l.clock_in_at, shiftDate),
         clockOutAt: sched.csvTime(l.clock_out_at, shiftDate),
-        hours: sched.minutesToHours(l.total_minutes),
+        hours: hoursNum,
+        ...scheduleCells(l),
         ...adjustmentCells(l),
-        flags: (l.flags || []).join(' '),
+        flags: flagsCell(l),
         edited: l.edited ? 'yes' : '',
         editReason: l.edit_reason || '',
-        source: l.entered_manually ? 'Manual entry' : 'Clocked',
+        source: l.no_time_log ? 'No time recorded' : (l.entered_manually ? 'Manual entry' : 'Clocked'),
         enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
         payPeriodStart: period.start,
         payPeriodEnd: period.end
@@ -3081,41 +3161,62 @@ module.exports = function createSchedulingRoutes(deps) {
   };
 
   // What gets INVOICED, which is a different question from payroll: one line
-  // per COMPLETED visit, grouped by client. A shift still in progress has no
-  // final hours, so it is not billable and is not listed — a half-open visit
-  // on an invoice is a credit note waiting to happen.
+  // per visit, grouped by client.
+  //
+  // A visit still in progress has no final hours and is NOT listed — a
+  // half-open visit on an invoice is a credit note waiting to happen, and that
+  // rule stands. What changed is what happens to a visit the board calls
+  // COMPLETED whose hours are missing: it used to be dropped silently, so a
+  // caregiver who forgot to clock out, or never clocked in, left the client
+  // unbilled with nothing on the sheet to say so. Such a visit is listed now
+  // with its Billable Hours cell EMPTY — the protection was never the missing
+  // row, it was the absence of a number — and 'Hours vs Schedule' says why.
   const buildBillingRows = async (from, to, onlyClient) => {
     const visitLogs = await readRows('caregiver_visit_logs');
     const documentedShiftIds = new Set(visitLogs.filter(v => v && v.shift_id).map(v => String(v.shift_id)));
+    const allLogs = await readRows('time_logs');
+    const shiftRows = await readRows('shifts');
+    const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
+    const usersById = new Map((await getUsers()).map(u => [u.id, u]));
+    const concluded = (l) => {
+      const s = shiftsById.get(l.shift_id);
+      return !!(s && s.status === 'completed');
+    };
 
-    const logs = (await readRows('time_logs')).filter(l => {
-      if (!l || !l.clock_out_at) return false;          // not finished, not billable
-      if (onlyClient && String(l.client_id) !== onlyClient) return false;
-      const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
-      return d >= from && d <= to;
-    }).sort((a, b) =>
-      String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
-      String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+    const logs = allLogs
+      .filter(l => l && (l.clock_out_at || concluded(l)))
+      .concat(shiftsWithNoTimeLog(shiftRows, allLogs, ['completed']).map(s => pseudoLog(s, usersById)))
+      .filter(l => {
+        if (onlyClient && String(l.client_id) !== onlyClient) return false;
+        const d = sched.exportRowDate(l);   // Georgia's date, not UTC's
+        return !!d && d >= from && d <= to;
+      }).sort((a, b) =>
+        String(a.client_name || '').localeCompare(String(b.client_name || '')) || byRowDate(a, b));
 
-    return logs.map(l => ({
-      timeLogId: l.id,
-      caregiverId: l.caregiver_id,
-      clientName: l.client_name,
-      serviceDate: sched.csvDate(l.clock_in_at),
-      caregiverName: l.caregiver_name,
-      licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
-      scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
-      scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
-      clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
-      clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
-      hours: sched.minutesToHours(l.total_minutes),
-      ...adjustmentCells(l),
-      // Says what the GPS check could actually establish, never more: an
-      // unverifiable clock-in is not the same claim as a verified one, and
-      // an invoice should not blur them.
-      verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
-      documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
-    }));
+    return logs.map(l => {
+      const rowDate = sched.exportRowDate(l);
+      return {
+        timeLogId: l.id,
+        rowKey: l.id || `shift:${l.shift_id}`,
+        caregiverId: l.caregiver_id,
+        clientName: l.client_name,
+        serviceDate: sched.csvDate(l.clock_in_at || l.scheduled_start),
+        caregiverName: l.caregiver_name,
+        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+        scheduledStart: sched.csvTime(l.scheduled_start, rowDate),
+        scheduledEnd: sched.csvTime(l.scheduled_end, rowDate),
+        clockInAt: sched.csvTime(l.clock_in_at, rowDate),
+        clockOutAt: sched.csvTime(l.clock_out_at, rowDate),
+        hours: sched.minutesToHours(l.total_minutes),
+        ...scheduleCells(l),
+        ...adjustmentCells(l),
+        // Says what the GPS check could actually establish, never more: an
+        // unverifiable clock-in is not the same claim as a verified one, and
+        // an invoice should not blur them.
+        verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
+        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
+      };
+    });
   };
 
   // GET /api/scheduling/payroll.csv — the FILE, Super Admin only.
@@ -3212,25 +3313,39 @@ module.exports = function createSchedulingRoutes(deps) {
       if (to && !sched.isIsoDate(to)) return res.status(400).json({ error: 'That end date is not YYYY-MM-DD.', code: 'DATE_INVALID' });
       if (from && to && to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
 
-      const logs = (await readRows('time_logs')).filter(l => {
-        if (!l || l.caregiver_id !== req.user.id) return false;
-        const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
-        if (from && d < from) return false;
-        if (to && d > to) return false;
-        return true;
-      }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+      const allLogs = await readRows('time_logs');
+      // Their own visits the office has NO hours for are included on purpose.
+      // A caregiver finding their own unrecorded visit is the cheapest control
+      // there is on unpaid work, and it was invisible to every sheet including
+      // this one.
+      const shiftRows = await readRows('shifts');
+      const usersById = new Map((await getUsers()).map(u => [u.id, u]));
+      const logs = allLogs
+        .concat(shiftsWithNoTimeLog(shiftRows, allLogs, SHIFTS_OWED_HOURS).map(s => pseudoLog(s, usersById)))
+        .filter(l => {
+          if (!l || l.caregiver_id !== req.user.id) return false;
+          const d = sched.exportRowDate(l);   // Georgia's date, not UTC's
+          if (!d) return false;
+          if (from && d < from) return false;
+          if (to && d > to) return false;
+          return true;
+        }).sort(byRowDate);
 
-      const rows = logs.map(l => ({
-        shiftDate: sched.csvDate(l.clock_in_at),
-        clientName: l.client_name,
-        scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
-        scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
-        clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
-        clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
-        hours: sched.minutesToHours(l.total_minutes),
-        flags: (l.flags || []).join(' '),
-        edited: l.edited ? 'yes' : ''
-      }));
+      const rows = logs.map(l => {
+        const rowDate = sched.exportRowDate(l);
+        return {
+          shiftDate: sched.csvDate(l.clock_in_at || l.scheduled_start),
+          clientName: l.client_name,
+          scheduledStart: sched.csvTime(l.scheduled_start, rowDate),
+          scheduledEnd: sched.csvTime(l.scheduled_end, rowDate),
+          clockInAt: sched.csvTime(l.clock_in_at, rowDate),
+          clockOutAt: sched.csvTime(l.clock_out_at, rowDate),
+          hours: sched.minutesToHours(l.total_minutes),
+          scheduledHours: sched.minutesToHours(sched.scheduledMinutes(l)),
+          flags: flagsCell(l),
+          edited: l.edited ? 'yes' : ''
+        };
+      });
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_hours_exported', 'time_log', null,
         { from: from || null, to: to || null, rows: rows.length });
