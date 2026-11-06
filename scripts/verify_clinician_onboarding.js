@@ -274,6 +274,70 @@ async function call(method, path, { token, body, raw } = {}) {
   ok('no event carries a signature image or a password',
     !/signaturePng|password/i.test(JSON.stringify(ev.events)));
 
+  // ==========================================================================
+  // P · WHAT HER OWN SCREEN IS SENT
+  //
+  // The page guards on the audience, but a guard in a page is one rule and the
+  // server is another; the day they disagree an internal flag renders. So this
+  // asserts the FIELDS, over real HTTP, on both views of the same record —
+  // because a scan of the page cannot prove what the route withheld.
+  // ==========================================================================
+  console.log('\nP · what her own screen is sent');
+  if (npToken) {
+    const hers = await call('GET', '/api/clinician-onboarding/me', { token: npToken });
+    const ours = await call('GET', `/api/clinician-onboarding/admin/${np.id}`, { token });
+
+    const HIDDEN = ['proof', 'verify', 'alsoVerify', 'ownerRole', 'ownerRoleLabel', 'gates'];
+    const herRow = (hers.track.rows || []).find(r => r.id === 'CLIN-10') || {};
+    const ourRow = (ours.track.rows || []).find(r => r.id === 'CLIN-10') || {};
+    ok('the same item is on both views', !!herRow.title && herRow.title === ourRow.title,
+      `${herRow.title || '(missing)'}`);
+    HIDDEN.forEach(f => {
+      ok(`she is not sent "${f}"`, !(f in herRow), `got ${JSON.stringify(herRow[f])}`);
+      ok(`the office still is sent "${f}"`, f in ourRow,
+        'stripping her view must not narrow credentialing');
+    });
+
+    // The item's TITLE and what to do about it are hers. Only the office's own
+    // working notes go; the work itself must still read.
+    ok('her row still carries what the item is', !!herRow.title && 'status' in herRow);
+    ok('and who it is waiting on', 'waitingOn' in herRow && 'waitingOnYou' in herRow);
+
+    const herMod = (hers.training.rows || [])[0] || {};
+    const ourMod = (ours.training.rows || [])[0] || {};
+    ['checksMissing', 'feedsGate'].forEach(f => {
+      ok(`she is not sent module "${f}"`, !(f in herMod));
+      ok(`the office still is sent module "${f}"`, f in ourMod);
+    });
+    ok('nor the count of modules whose questions we have not written',
+      !('checksMissing' in (hers.training.counts || {})));
+    ok('while the office keeps that backlog figure',
+      'checksMissing' in (ours.training.counts || {}),
+      JSON.stringify(ours.training.counts));
+
+    // byPhase and upNext are the same objects as rows in the builder's own
+    // output. Asserting only `rows` would pass while two other paths leaked.
+    const everyHerMod = []
+      .concat(hers.training.rows || [], hers.training.upNext || [])
+      .concat(...(hers.training.byPhase || []).map(ph => ph.modules || []));
+    ok(`every module on every path she reads is clean (${everyHerMod.length} checked)`,
+      everyHerMod.length > 40 && everyHerMod.every(m => !('checksMissing' in m) && !('feedsGate' in m)));
+
+    const everyHerRow = (hers.track.rows || [])
+      .concat(...Object.values(hers.track.gates || {}).map(g => g.blockedBy || []));
+    ok(`and every row on every path she reads (${everyHerRow.length} checked)`,
+      everyHerRow.length > 80 && everyHerRow.every(r => !HIDDEN.some(f => f in r)));
+
+    // Gate prerequisites in words, not codes.
+    const g2 = hers.track.gates.G2 || {};
+    ok('a gate she cannot open yet names its prerequisites in words',
+      (g2.blockedByGateTitles || []).length > 0 &&
+      !(g2.blockedByGateTitles || []).some(t => /^G[\dM_]/.test(t)),
+      JSON.stringify(g2.blockedByGateTitles));
+    ok('no gate tells her what it opens in the third person',
+      !Object.values(hers.track.gates).some(g => /\b(their|her|his|she|he)\b/i.test(g.opens || '')));
+  }
+
   console.log(`\n${pass}/${pass + fail} checks passed${fail ? ` — ${fail} FAILED` : ''}\n`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('\nprobe crashed:', e.message, '\n'); process.exit(1); });

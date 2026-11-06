@@ -29,10 +29,37 @@
     h1,h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600;line-height:1.2}
     .wrap{max-width:1180px;margin:0 auto;padding:0 16px 72px}
     header.top{background:var(--navy);color:#fff;padding:18px 0 16px}
-    header.top .wrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+    header.top .wrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding-bottom:0}
     .brand{font-family:'Cormorant Garamond',Georgia,serif;font-size:22px}
     .brand b{color:var(--gold);font-weight:600}
     .spacer{flex:1}
+
+    /* THE ONBOARDING HERO. Deliberately the same mechanism as the caregiver
+       welcome packet's (`.whero` in caregiver.html): a photo on navy under a
+       navy gradient, gold rule, Cormorant headline. The two front doors into
+       this company should not look like two different companies.
+
+       THE PHOTO IS ONE FILE, /banners/banner-clinician.jpg. Replacing that file
+       changes the hero; no code moves. If it is ever missing the navy ground
+       and the gradient still carry the headline, so a broken image is a plain
+       banner rather than a broken page.
+
+       Full bleed, with the TEXT held to the page's own column, or on a wide
+       screen the headline floats away from the cards it introduces. */
+    .whero{position:relative;background:var(--navy);overflow:hidden}
+    .whero .img{position:absolute;inset:0;background-size:cover;background-position:center 30%}
+    .whero .scrim{position:absolute;inset:0;background:linear-gradient(180deg,rgba(3,61,80,.44) 0%,rgba(3,61,80,.70) 55%,rgba(2,42,56,.93) 100%)}
+    .whero .inner{position:relative;max-width:1180px;margin:0 auto;padding:34px 16px 22px;
+      min-height:180px;display:flex;flex-direction:column;justify-content:flex-end}
+    .whero .rule{width:56px;height:3px;background:var(--gold);border-radius:2px;margin-bottom:12px}
+    .whero h1{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600;color:var(--cream);
+      font-size:30px;line-height:1.12;letter-spacing:.2px}
+    .whero p{color:rgba(250,247,242,.86);font-size:15px;margin-top:8px;max-width:52ch}
+    @media(min-width:700px){
+      .whero .inner{padding:52px 16px 30px;min-height:248px}
+      .whero h1{font-size:42px}
+      .whero p{font-size:16px}
+    }
     .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0 20px}
     .tab{background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 16px;
       font-size:14px;font-weight:600;color:var(--mut);cursor:pointer}
@@ -129,13 +156,40 @@ const fmtDate = (v) => {
 // remounts on every keystroke and the caret dies — test/react_input_focus) ----
 const Pill = ({ kind, children }) => <span className={`pill ${kind || ''}`}>{children}</span>;
 
+// The banner over a clinician's own onboarding. It greets by first name where
+// we have one, which is all this screen ever needs: everything else about them
+// is what the checklist below is for.
+//
+// It renders on HER OWN view only. The office looking at somebody else's track
+// is doing credentialing work, not being welcomed to the company.
+const OnboardingHero = ({ firstName }) => (
+  <div className="whero">
+    <div className="img" style={{ backgroundImage: 'url(/banners/banner-clinician.jpg)' }}></div>
+    <div className="scrim"></div>
+    <div className="inner">
+      <div className="rule"></div>
+      <h1>Welcome to Godwins Family Care</h1>
+      <p>
+        {firstName ? `We are glad you are here, ${firstName}. ` : 'We are glad you are here. '}
+        This is everything it takes to get you seeing patients, in the order it happens.
+        We will tell you what is waiting on you and what is waiting on us.
+      </p>
+    </div>
+  </div>
+);
+
+// WHO IS WAITING. The office needs the named internal owner, because that is
+// how work gets chased; a clinician needs to know whether it is hers or ours,
+// and "Credentialing Owner" tells her nothing she can act on. The server does
+// not send her `ownerRoleLabel` at all, so the fallback IS her wording rather
+// than a second rule that could drift from the first.
 const OwnerPill = ({ waitingOn, waitingOnYou, ownerRoleLabel }) => {
   if (waitingOnYou) return <Pill kind="you">You</Pill>;
   if (waitingOn === 'clinician') return <Pill kind="you">Clinician</Pill>;
   if (waitingOn === 'gfc' || waitingOn === 'selfPaced') {
-    return <Pill kind="us">{ownerRoleLabel || 'GFC'}</Pill>;
+    return <Pill kind="us">{ownerRoleLabel || 'The office'}</Pill>;
   }
-  if (waitingOn === 'outside') return <Pill kind="out">Outside</Pill>;
+  if (waitingOn === 'outside') return <Pill kind="out">A board or contractor</Pill>;
   return null;
 };
 
@@ -158,10 +212,21 @@ const Progress = ({ done, total }) => (
 );
 
 // ---- GATES ----------------------------------------------------------------
-const GateCard = ({ gate, onOpen, canOpen }) => {
+// A GATE. `office` is the audience; `canOpen` is a capability. They are not the
+// same question and are deliberately separate props: the office reads a gate it
+// is not yet allowed to sign open, and conflating the two would hand the
+// clinician's wording to a credentialing screen the first time a permission
+// narrowed.
+const GateCard = ({ gate, onOpen, canOpen, office }) => {
   const [scope, setScope] = useState('');
   const [busy, setBusy] = useState(false);
   const cls = gate.opened ? 'gate open' : (gate.eligible ? 'gate eligible' : 'gate');
+  // Gate CODES are the playbook's vocabulary and the office works in them.
+  // A clinician gets the gate's own title, because "Waiting on G0 and G_MD
+  // first" is a sentence about our data model, not about her week.
+  const waitingOnGates = office
+    ? (gate.blockedByGates || [])
+    : (gate.blockedByGateTitles || gate.blockedByGates || []);
   return (
     <div className={cls}>
       <h4>{gate.title}</h4>
@@ -169,7 +234,9 @@ const GateCard = ({ gate, onOpen, canOpen }) => {
       <div className="meta">
         {gate.opened
           ? <Pill kind="ok">Open since {fmtDate(gate.openedAt)}</Pill>
-          : gate.eligible ? <Pill kind="warn">Ready to sign open</Pill> : <Pill>Not yet</Pill>}
+          : gate.eligible
+            ? <Pill kind="warn">{office ? 'Ready to sign open' : 'Everything is in'}</Pill>
+            : <Pill>Not yet</Pill>}
       </div>
       {gate.opened && gate.openedBy && (
         <div className="sub" style={{ marginTop: 6 }}>Signed open by {gate.openedBy}</div>
@@ -179,9 +246,14 @@ const GateCard = ({ gate, onOpen, canOpen }) => {
           {gate.waitingOnSupervisor.reason}
         </div>
       )}
-      {!gate.opened && gate.blockedByGates.length > 0 && (
+      {!gate.opened && gate.eligible && !office && (
         <div className="sub" style={{ marginTop: 6 }}>
-          Waiting on {gate.blockedByGates.join(' and ')} first.
+          Nothing is waiting on you here. The office signs this one open.
+        </div>
+      )}
+      {!gate.opened && waitingOnGates.length > 0 && (
+        <div className="sub" style={{ marginTop: 6 }}>
+          Waiting on {waitingOnGates.join(' and ')} first.
         </div>
       )}
       {!gate.opened && gate.blockedBy.length > 0 && (
@@ -192,7 +264,8 @@ const GateCard = ({ gate, onOpen, canOpen }) => {
           <div style={{ marginTop: 8 }}>
             {gate.blockedBy.map(b => (
               <div key={b.id} className="sub" style={{ padding: '3px 0' }}>
-                <strong>{b.id}</strong> {b.title} <OwnerPill waitingOn={b.waitingOn} ownerRoleLabel={b.ownerRole} />
+                {office && <strong>{b.id} </strong>}{b.title}{' '}
+                <OwnerPill waitingOn={b.waitingOn} ownerRoleLabel={b.ownerRole} />
               </div>
             ))}
           </div>
@@ -214,6 +287,12 @@ const GateCard = ({ gate, onOpen, canOpen }) => {
 };
 
 // ---- ONE CHECKLIST ITEM ---------------------------------------------------
+// ONE CHECKLIST ITEM. `mode` is the AUDIENCE, not a style: the office reads
+// this as a credentialing file and needs the item's id, the evidence to file
+// and the gates it blocks; the clinician reads it as a thing to do. The fields
+// the office-only rows draw from are not even sent to her (see forClinician in
+// routes/clinicianOnboarding.js) — these guards are the second layer, so that
+// a field restored to her payload still does not render as admin vocabulary.
 const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState(row.note || '');
@@ -224,6 +303,7 @@ const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
   const done = row.status === 'complete' || row.status === 'not_applicable';
+  const office = mode === 'office';
   const hers = row.waitingOn === 'clinician' || row.owner === 'clinician' || row.owner === 'selfPaced';
 
   const run = async (fn) => {
@@ -237,14 +317,17 @@ const ItemRow = ({ row, mode, onSubmit, onRecord, onUpload }) => {
     <div className={`item${done ? ' done' : ''}`}>
       <div className="row">
         <div style={{ flex: 1 }}>
-          <div className="t"><span className="sub" style={{ fontWeight: 700 }}>{row.id}</span> &nbsp;{row.title}</div>
+          <div className="t">
+            {office && <span className="sub" style={{ fontWeight: 700 }}>{row.id}&nbsp;&nbsp;</span>}
+            {row.title}
+          </div>
           {row.detail && <div className="d">{row.detail}</div>}
-          {row.proof && !done && <div className="d"><strong>Proof:</strong> {row.proof}</div>}
+          {office && row.proof && !done && <div className="d"><strong>Proof:</strong> {row.proof}</div>}
           <div className="meta">
             <StatusPill status={row.status} />
             {!done && <OwnerPill waitingOn={row.waitingOn} waitingOnYou={row.waitingOnYou} ownerRoleLabel={row.ownerRoleLabel} />}
-            {row.gates.length > 0 && <Pill>Blocks {row.gates.join(', ')}</Pill>}
-            {row.verify && <Pill>Checked at {row.verify.label}</Pill>}
+            {office && (row.gates || []).length > 0 && <Pill>Blocks {row.gates.join(', ')}</Pill>}
+            {office && row.verify && <Pill>Checked at {row.verify.label}</Pill>}
             {row.repeats !== 'once' && <Pill>{row.repeatsLabel}</Pill>}
             {row.dueAt && <Pill kind={row.overdue ? 'bad' : ''}>Due {fmtDate(row.dueAt)}</Pill>}
           </div>
@@ -464,6 +547,10 @@ const DocRow = ({ res, onSign, onNoAccess }) => {
 };
 
 // ---- TRAINING -------------------------------------------------------------
+// A TRAINING MODULE, AS THE CLINICIAN SEES IT. This card renders on her own
+// screen only — the office reads training as a table in OfficeDetail, which is
+// where the "check questions not written" backlog belongs. So nothing here
+// needs a mode: anything the office alone cares about simply is not drawn.
 const ModuleCard = ({ mod, onComplete }) => {
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState({});
@@ -475,17 +562,15 @@ const ModuleCard = ({ mod, onComplete }) => {
     <div className={`item${mod.status === 'complete' ? ' done' : ''}`}>
       <div className="row">
         <div style={{ flex: 1 }}>
-          <div className="t"><span className="sub" style={{ fontWeight: 700 }}>{mod.id}</span> &nbsp;{mod.title}</div>
+          <div className="t">{mod.title}</div>
           {mod.detail && <div className="d">{mod.detail}</div>}
           <div className="meta">
             <Pill>{mod.formatLabel}</Pill>
             {mod.minutes && <Pill>{mod.minutes >= 120 ? `${Math.round(mod.minutes / 60)} hours` : `${mod.minutes} min`}</Pill>}
             <Pill>{mod.signoffLabel}</Pill>
-            {mod.feedsGate.length > 0 && <Pill>Counts toward {mod.feedsGate.join(', ')}</Pill>}
             {mod.status === 'complete' && <Pill kind="ok">Done {fmtDate(mod.completedAt)}</Pill>}
             {mod.status === 'redo' && <Pill kind="warn">Review this again</Pill>}
             {mod.locked && <Pill>Locked</Pill>}
-            {mod.checksMissing && <Pill kind="warn">Questions not written yet</Pill>}
           </div>
         </div>
         <div>
@@ -498,7 +583,7 @@ const ModuleCard = ({ mod, onComplete }) => {
         <div style={{ marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
           {mod.checkCount === 0 && (
             <div className="sub">
-              This module has no questions yet. Work through it, then mark it done.
+              Nothing to answer on this one. Work through it, then mark it done.
             </div>
           )}
           {(mod.checks || []).map((c, i) => (
@@ -714,7 +799,7 @@ const PrivilegeList = ({ priv, meta, inputs, mode, onGenerate, onDecide, onCoSig
 };
 
 // ---- THE CLINICIAN'S OWN WIZARD -------------------------------------------
-const MyWizard = ({ data, meta, reload }) => {
+const MyWizard = ({ data, meta, reload, firstName }) => {
   const [tab, setTab] = useState('now');
   const { track, training, resources, privileges } = data;
 
@@ -753,11 +838,13 @@ const MyWizard = ({ data, meta, reload }) => {
 
   if (!track.defined.defined) {
     return (
-      <div className="card">
-        <h2>Welcome to Godwins Family Care</h2>
-        <div className="banner info" style={{ marginTop: 12 }}>
+      <div>
+        <OnboardingHero firstName={firstName} />
+        <div className="card" style={{ marginTop: 20 }}>
+        <div className="banner info">
           {track.defined.message} The office sets this up, and your checklist appears
           here as soon as they have. Nothing is waiting on you yet.
+        </div>
         </div>
       </div>
     );
@@ -766,7 +853,8 @@ const MyWizard = ({ data, meta, reload }) => {
   const openGate = Object.values(track.gates).find(g => g.opened);
   return (
     <div>
-      <div className="card">
+      <OnboardingHero firstName={firstName} />
+      <div className="card" style={{ marginTop: 20 }}>
         <h2>Your onboarding</h2>
         <div className="sub">
           {track.counts.waitingOnClinician} waiting on you · {track.counts.waitingOnGfc} with the
@@ -784,7 +872,7 @@ const MyWizard = ({ data, meta, reload }) => {
       <div className="card">
         <h3>What unlocks when</h3>
         <div className="grid two" style={{ marginTop: 10 }}>
-          {Object.values(track.gates).map(g => <GateCard key={g.id} gate={g} canOpen={false} />)}
+          {Object.values(track.gates).map(g => <GateCard key={g.id} gate={g} canOpen={false} office={false} />)}
         </div>
         {data.supervisor && (
           <div className="sub" style={{ marginTop: 12 }}>
@@ -1115,7 +1203,7 @@ const OfficeDetail = ({ userId, meta, onBack }) => {
           </div>
           <div className="grid two" style={{ marginTop: 12 }}>
             {Object.values(track.gates).map(g => (
-              <GateCard key={g.id} gate={g} canOpen onOpen={openGate} />
+              <GateCard key={g.id} gate={g} canOpen office onOpen={openGate} />
             ))}
           </div>
           {(data.payerGates || []).length > 0 && (
@@ -1351,7 +1439,8 @@ const App = () => {
           </div>
         )}
         {view === 'mine' && hasMine && (
-          <MyWizard data={mine} meta={meta} reload={setMine} />
+          <MyWizard data={mine} meta={meta} reload={setMine}
+            firstName={String((me && me.name) || '').trim().split(/\s+/)[0] || ''} />
         )}
         {view === 'mine' && !hasMine && (
           <div className="card" style={{ marginTop: 20 }}>

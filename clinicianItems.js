@@ -40,7 +40,11 @@ const CORE = [
   { id: 'CORE-03', block: 'CORE', title: 'Employment agreement',
     when: { relationship: ['W2', 'HYBRID'] }, owner: OW.CLINICIAN, action: A.SIGN,
     proof: 'Signed agreement', gates: ['G0'], repeats: 'once',
-    detail: 'A standalone signature. It is deliberately not combined with the contractor agreement: one combined document makes the contractor lane read as a condition of employment, which is the exact thing the hybrid structure has to avoid.' },
+    // Deliberately NOT combined with the contractor agreement (CORE-04): one
+    // combined document makes the contractor lane read as a condition of
+    // employment, which is the exact thing the hybrid structure has to avoid.
+    // That is our reasoning, not her instruction, so it stays out of `detail`.
+    detail: 'This is its own signature, separate from the contractor agreement.' },
   { id: 'CORE-04', block: 'CORE', title: 'Independent contractor agreement',
     when: { relationship: ['1099', 'HYBRID'] }, owner: OW.CLINICIAN, action: A.SIGN,
     proof: 'Signed ICA with the insurance clause and quality standards as deliverables',

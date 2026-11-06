@@ -200,7 +200,7 @@ const CADENCES = Object.freeze({
 const GATES = Object.freeze({
   G0: {
     id: 'G0', label: 'ACCESS', title: 'App and EHR access',
-    opens: 'Their app and EHR accounts', requiresGates: [], parentGate: false,
+    opens: 'App and EHR accounts', requiresGates: [], parentGate: false,
     appliesWhen: {}
   },
   G_MD: {

@@ -65,13 +65,58 @@ const BASE = process.env.PROBE_BASE || 'http://127.0.0.1:3601';
       ok(`${who} sees a real checklist item`, /Upload licence|Accepted offer|Non-Disclosure/i.test(text));
       ok(`${who} is told the physician is not signed off`,
         /not signed off|No supervising physician/i.test(text), text.slice(0, 200));
-      ok(`${who} is NOT shown a place of service or patient data`,
-        !/place of service|patient/i.test(text.replace(/patient visits/gi, '')));
+      // NO CHART DATA ON AN ONBOARDING SCREEN. This deliberately does NOT
+      // match the word "patient": the page says "Patient visits" (a gate's own
+      // title) and "seeing patients" (the welcome), both legitimate English,
+      // and an earlier version of this guard had already carved out the first
+      // and was about to carve out the second. A guard that needs a growing
+      // exception list is testing the wrong thing. The real risk is a patient
+      // RECORD reaching this surface, so the vocabulary of one is the assertion.
+      const chartWords = text.match(
+        /place of service|\bPOS\b|\bMRN\b|date of birth|\bDOB\b|diagnos\w*|\bICD\b|\bCPT\b|chief complaint/gi
+      ) || [];
+      ok(`${who} is NOT shown anything out of a patient's chart`,
+        chartWords.length === 0, chartWords.slice(0, 5).join(' | '));
+
+      // THE WELCOME, same front door as the caregiver packet.
+      ok(`${who} is welcomed by name`, /Welcome to Godwins Family Care/i.test(text)
+        && /glad you are here, Render/i.test(text), text.slice(0, 160));
+      const heroShown = await page.evaluate(() => {
+        const el = document.querySelector('.whero .img');
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { h: Math.round(r.height), bg: getComputedStyle(el).backgroundImage };
+      });
+      // Measured, not read off the CSS: `display:none` on a grid child and a
+      // zero-height hero both read fine in a stylesheet.
+      ok(`${who} hero actually occupies the page`, heroShown && heroShown.h >= 170,
+        JSON.stringify(heroShown));
+      ok(`${who} hero points at the clinician banner`,
+        heroShown && /banner-clinician\.jpg/.test(heroShown.bg), String(heroShown && heroShown.bg));
+
+      // AND NOT THE OFFICE'S OWN WORKING NOTES. Read off the rendered text,
+      // because the whole class of bug here is a label that only appears once
+      // a real payload meets a real component.
+      ok(`${who} is never told our check questions are unwritten`,
+        !/not written|no questions yet/i.test(text));
+      ok(`${who} sees no playbook item codes`, !/\b(CORE|CLIN|NP|MD|W2|HYB|LCL|EXM|PRV|RX|CS|TH|INS|NC|AL|FNP|PMH|DIR|C99)-\d\d\b/.test(text),
+        (text.match(/\b[A-Z0-9]{2,4}-\d\d\b/g) || []).slice(0, 6).join(' '));
+      ok(`${who} sees no training module codes`, !/\bTRN-\d{3}\b/.test(text),
+        (text.match(/\bTRN-\d{3}\b/g) || []).slice(0, 4).join(' '));
+      ok(`${who} sees no raw gate codes`, !/\bG[0-9]\b|\bG_MD\b|Blocks G|Counts toward G/.test(text),
+        (text.match(/\bG[0-9]\b|\bG_MD\b/g) || []).slice(0, 6).join(' '));
+      ok(`${who} sees no "Proof:" filing line`, !/Proof:/i.test(text));
+      ok(`${who} sees no internal owner role`,
+        !/Credentialing Owner|Executive Director|Clinical Director/i.test(text),
+        (text.match(/Credentialing Owner|Executive Director/g) || []).join(' '));
+      ok(`${who} is told plainly when something is ours`, /The office/i.test(text));
     } else {
       await page.waitForTimeout(500);
       ok('office sees the roster', /Clinicians/i.test(text));
       ok('office sees the no-track banner', /no onboarding track set up/i.test(text), text.slice(0, 300));
       ok('office sees Render NP on the roster', /Render NP/.test(text));
+      // The office is NOT welcomed to the company on a credentialing screen.
+      ok('office gets no welcome hero', !/glad you are here/i.test(text));
     }
     await page.screenshot({ path: `${process.env.TMPDIR || '/tmp'}/clinician-onboarding-${who}.png`, fullPage: false });
     await ctx.close();

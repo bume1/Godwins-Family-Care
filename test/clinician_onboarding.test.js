@@ -589,3 +589,182 @@ test('the audit trail never carries a reason text or a signature image', () => {
       `an activity row must not carry free text or a signature: ${l.slice(0, 110)}`);
   });
 });
+
+// ===========================================================================
+// WHAT A CLINICIAN READING HER OWN SCREEN IS NEVER SHOWN
+//
+// Every field below is the office's own working vocabulary — the item's
+// playbook id, the evidence to file, the primary source it is checked
+// against, the internal role that owns it, the gate codes, and the modules
+// whose check questions WE have not written yet. None of it is a secret; all
+// of it reads as somebody else's admin tool in the middle of her onboarding.
+//
+// The server strips them (forClinician) AND the page guards on the audience.
+// Two layers on purpose: a field restored to her payload still must not
+// render, and a pill added by a later session still has no field to read.
+// ===========================================================================
+
+test('the hidden-field list is applied to her payload and not to the office view', () => {
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+
+  // The strip runs inside assemble, so it cannot be forgotten at a call site.
+  assert.match(src, /return audience === 'office' \? payload : forClinician\(payload\)/,
+    'assemble itself decides, or the sixteenth call site leaks');
+
+  // Narrower by default: a route added later that forgets to say its audience
+  // shows the office too little, which somebody notices, rather than showing a
+  // clinician the credentialing file, which nobody notices.
+  assert.match(src, /audience = 'clinician'/,
+    'the default audience must be the narrow one');
+
+  ['proof', 'verify', 'alsoVerify', 'ownerRole', 'ownerRoleLabel', 'gates']
+    .forEach(f => assert.ok(
+      new RegExp(`CLINICIAN_HIDDEN_ITEM_FIELDS = \\[[^\\]]*'${f}'`, 's').test(src),
+      `${f} is office vocabulary and must be stripped from her payload`));
+
+  ['checksMissing', 'feedsGate'].forEach(f => assert.ok(
+    new RegExp(`CLINICIAN_HIDDEN_MODULE_FIELDS = \\[[^\\]]*'${f}'`, 's').test(src),
+    `${f} is our own backlog and must be stripped from her payload`));
+
+  // Each of the three places a row reaches her must be stripped. byPhase,
+  // upNext and rows are the SAME objects in the builders' output, so the deep
+  // copy is what makes stripping one not strip the others by luck.
+  assert.match(src, /JSON\.parse\(JSON\.stringify\(payload\)\)/);
+  ['p.track.rows', 'p.training.rows', 'p.training.upNext']
+    .forEach(k => assert.ok(src.includes(k), `${k} must be stripped`));
+  assert.match(src, /ph\.modules = stripEach\(ph\.modules, CLINICIAN_HIDDEN_MODULE_FIELDS\)/);
+  assert.match(src, /delete p\.training\.counts\.checksMissing/,
+    'the count of modules missing questions is our backlog figure, not her progress');
+});
+
+test('"Questions not written yet" is the office\'s own gap and never reaches her screen', () => {
+  const page = stripComments(read('public/clinician-onboarding.html'));
+
+  // ModuleCard is her card. The office reads training as a table in
+  // OfficeDetail, which is where the backlog belongs — and still has it.
+  const card = page.slice(page.indexOf('const ModuleCard'), page.indexOf('const RecheckCard'));
+  assert.ok(card.length > 400, 'ModuleCard must be found, or this guard reads nothing');
+  assert.ok(!/checksMissing/.test(card),
+    'ModuleCard renders on her own screen: our unwritten questions have no place on it');
+  assert.ok(!/feedsGate/.test(card), 'raw gate codes are not her vocabulary');
+  assert.ok(!/not written yet|no questions yet/i.test(card),
+    'a module with nothing to answer is not a module we have failed to finish');
+
+  // Not deleted from the product — moved to the audience it belongs to.
+  const office = page.slice(page.indexOf('const OfficeDetail'));
+  assert.ok(/checksMissing/.test(office),
+    'the office must still see which modules need their questions written');
+});
+
+test('the page draws office vocabulary only for the office', () => {
+  const page = stripComments(read('public/clinician-onboarding.html'));
+  const itemRow = page.slice(page.indexOf('const ItemRow'), page.indexOf('const Checklist'));
+  assert.ok(itemRow.length > 400, 'ItemRow must be found');
+
+  assert.match(itemRow, /\{office && <span className="sub"[^>]*>\{row\.id\}/,
+    'the playbook id is a credentialing reference, not a thing she reads');
+  assert.match(itemRow, /\{office && row\.proof && !done/,
+    '"Proof: dated screenshot" is what the office files');
+  assert.match(itemRow, /\{office && \(row\.gates \|\| \[\]\)\.length > 0/,
+    '"Blocks G0" is a sentence about our data model');
+  assert.match(itemRow, /\{office && row\.verify &&/,
+    'the primary source an item is verified against is the office\'s own step');
+  assert.match(itemRow, /const office = mode === 'office'/,
+    'the audience comes from mode, which the call sites already pass');
+
+  // A gate card shows her the gate's TITLE for what it waits on; the office
+  // works in codes. `office` and `canOpen` stay separate props: one is the
+  // audience, the other a capability.
+  const gate = page.slice(page.indexOf('const GateCard'), page.indexOf('const PayerGateCard') + 1
+    || page.indexOf('const MyWizard'));
+  assert.match(gate, /office\s*\n?\s*\?\s*\(gate\.blockedByGates \|\| \[\]\)/,
+    'the office reads gate codes');
+  assert.match(gate, /gate\.blockedByGateTitles/, 'she reads gate titles');
+  assert.match(gate, /\{office && <strong>\{b\.id\} <\/strong>\}/,
+    'the ids of the things a gate waits on are the office\'s reference');
+});
+
+test('every gate says what it opens without talking about the reader in the third person', () => {
+  // Same class as the gendered-pronoun sweep: "Their app and EHR accounts" is
+  // a sentence written about her, shown to her. The strings are shared by both
+  // audiences, so they are written to work in either.
+  Object.values(T.GATES).forEach(g => {
+    assert.ok(!/\b(their|theirs|her|hers|his|she|he)\b/i.test(g.opens),
+      `gate ${g.id} describes the reader in the third person: "${g.opens}"`);
+  });
+});
+
+test('a gate names its unmet prerequisites in words as well as codes', () => {
+  const gates = T.gateStatus({
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] },
+    record: {}
+  });
+  assert.deepStrictEqual(gates.G2.blockedByGates, ['G0']);
+  assert.deepStrictEqual(gates.G2.blockedByGateTitles, [T.GATES.G0.title]);
+  assert.ok(!/^G\d/.test(gates.G2.blockedByGateTitles[0]),
+    'a title is what a person reads, never the code');
+});
+
+test('her own onboarding opens with the same welcome the caregiver packet gives', () => {
+  const page = stripComments(read('public/clinician-onboarding.html'));
+  assert.match(page, /const OnboardingHero/);
+  assert.match(page, /url\(\/banners\/banner-clinician\.jpg\)/,
+    'one file is the photo; replacing it changes the hero with no code moving');
+  assert.ok(fs.existsSync(path.join(root, 'public/banners/banner-clinician.jpg')),
+    'the banner file must exist, or the front door is a broken image');
+
+  // The hero renders on HER view, both when her track is set up and when it is
+  // not — day one, before the office has built it, is exactly when somebody
+  // needs welcoming — and never over the office looking at someone else.
+  const wiz = page.slice(page.indexOf('const MyWizard'), page.indexOf('const InputsForm'));
+  assert.strictEqual((wiz.match(/<OnboardingHero/g) || []).length, 2,
+    'the hero belongs on both of her states');
+  const officeDetail = page.slice(page.indexOf('const OfficeDetail'));
+  assert.ok(!/<OnboardingHero/.test(officeDetail),
+    'credentialing somebody else is not being welcomed to the company');
+
+  // The same mechanism as caregiver.html's packet hero, so the two front doors
+  // into this company do not look like two different companies.
+  ['.whero{', '.whero .img{', '.whero .scrim{', '.whero .rule{'].forEach(sel => {
+    assert.ok(page.includes(sel), `${sel} must carry the shared hero styling`);
+    assert.ok(read('public/caregiver.html').includes(sel),
+      `${sel} must still match the caregiver packet it was taken from`);
+  });
+});
+
+test('the supervisor block does not describe the reader to herself', () => {
+  // She reads this on her own gate card. Same class as the gate `opens` text
+  // and the gendered pronouns: one string, both audiences, so it is written
+  // to work in either rather than branched — a branch is two strings that
+  // drift, and only one of them gets re-read.
+  const gates = T.gateStatus({
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] },
+    record: {}, supervisor: null
+  });
+  const reason = gates.G2.waitingOnSupervisor.reason;
+  assert.ok(!/this clinician|their|her|his|she|he\b/i.test(reason), reason);
+  assert.match(reason, /supervising physician/i, 'it must still say what is missing');
+});
+
+test('the header bar is not padded for the page body', () => {
+  // `.wrap` carries 72px of bottom padding so the last card clears the fold.
+  // The header reuses it, so without the override the navy bar renders 72px
+  // taller than its own content — a band of dead colour under the brand that
+  // reads fine in CSS and wrong on screen.
+  const page = read('public/clinician-onboarding.html');
+  assert.match(page, /header\.top \.wrap\{[^}]*padding-bottom:0/);
+});
+
+test('an item tells her what to do, not why we designed it that way', () => {
+  // `detail` is read on her own checklist. Our reasoning about why two
+  // agreements are kept apart, or why a field is shaped as it is, belongs in a
+  // code comment: it is true, it is not secret, and it is not an instruction.
+  // Caught by READING the rendered checklist, which is the only way this class
+  // of thing ever shows up.
+  const rationale = /\bdeliberately\b|\bis the exact thing\b|\bwhich is why\b|\bthe whole point\b|\bwe do not\b|\bthis app\b|\bis what makes\b/i;
+  T.ITEM_LIBRARY.forEach(i => {
+    if (!i.detail) return;
+    assert.ok(!rationale.test(i.detail),
+      `${i.id} explains our design decision where it should say what to do: "${i.detail.slice(0, 90)}"`);
+  });
+});

@@ -224,3 +224,110 @@ grep, so it fixed 18 strings and silently missed 8 that began with a capital
 "She", "Her" or "He". The guard named the first one, and a case-insensitive
 sweep found the rest. *A search that cannot see half the matches is not evidence
 that the rest are clean.*
+
+---
+
+## Addendum, same day — the front door, and what she is never shown
+
+Owner, after reading her own screens: *"I do want to make sure the wizard is as
+clean as the home care version i.e. the welcome banner and branding etc. and
+make sure they don't see tags or labeling they shouldn't like 'questions not
+written yet'"* — then, on a screenshot: *"it should only include Thanmayie
+contact information and title/role. Not this POS, diagnosis code etc."*
+
+### A welcome, not a form
+
+`OnboardingHero` is the caregiver welcome packet's `PacketHero`, same mechanism
+and the same CSS block: photo on navy under a navy gradient, gold rule,
+Cormorant headline, greeted by first name. **The two front doors into this
+company should not look like two different companies**, and a test asserts the
+selectors still match the ones in `caregiver.html` rather than having drifted.
+
+**THE PHOTO IS ONE FILE**, `/banners/banner-clinician.jpg`. Replacing it
+changes the hero and no code moves; a missing file leaves navy and a readable
+headline rather than a broken page. It ships as a **placeholder** copy of the
+caregiver banner, recorded as such in `public/banners/README.md` — the intended
+photo is a nurse practitioner on a home visit.
+
+It renders on **her own view only**, in both of its states — including day one,
+before the office has built her track, which is exactly when somebody needs
+welcoming. The office looking at somebody else's record is doing credentialing
+work, not being welcomed, and a test asserts `OfficeDetail` never draws it.
+
+A real cosmetic bug went with it: `header.top` reuses the shared `.wrap`, which
+carries 72px of bottom padding for the page body, so the navy bar rendered 72px
+taller than its own content. **The CSS reads perfectly well; only looking at it
+shows the band of dead colour.**
+
+### ⚠️ WHAT A CLINICIAN READING HER OWN SCREEN IS NEVER SENT
+
+Not secrets — the office's own working notes, which on her screen read as
+somebody else's admin tool in the middle of her onboarding:
+
+| field | what it is |
+|---|---|
+| `proof`, `verify`, `alsoVerify` | what evidence the office files, and the primary source it is checked against |
+| `ownerRole`, `ownerRoleLabel` | the internal role that owns it — "Credentialing Owner" tells her nothing she can act on |
+| `gates` | raw gate codes. `Blocks G0` is a sentence about our data model |
+| `checksMissing`, `feedsGate` | **OUR** content gap: a module whose check questions are not written yet, plus the backlog count |
+
+**FILTERED ON THE SERVER, NOT HIDDEN IN THE PAGE** (`forClinician`), the same
+read-time rule `patientPublish.js` follows. A field she is never sent cannot be
+rendered by a pill a later session adds. The page guards on the audience too —
+two layers, so a field restored to her payload still does not render.
+
+**It is a DENY list on purpose.** A field added to an item next session reaches
+her by default and is dropped only deliberately. An allow list would silently
+hide new work from the person doing it, and that failure is invisible: she
+simply never sees the item's instructions.
+
+**`assemble` decides, so a call site cannot forget**, and `audience` defaults to
+`'clinician'` — the narrower one. A route added later that forgets to say shows
+the office slightly too little, which somebody notices and fixes, rather than
+showing a clinician the credentialing file, which nobody notices at all.
+
+The deep copy is load-bearing: `rows`, `byPhase[].modules` and `upNext` are the
+**same objects** in the builders' output, so stripping one in place would strip
+the others by accident — and a guard resting on that aliasing is a guard a
+refactor is free to break.
+
+### THREE MORE SENTENCES WRITTEN ABOUT HER, SHOWN TO HER
+
+Same class as the gendered-pronoun sweep earlier the same day, and all three
+found by **reading the rendered screen**, never by reading source:
+
+- `opens: 'Their app and EHR accounts'` → `'App and EHR accounts'`
+- `'No supervising physician is linked to this clinician yet.'` → `'...linked yet.'`
+- CORE-03's `detail` was our reasoning about why the employment and contractor
+  agreements are kept apart. True, not secret, **not an instruction**. It moved
+  into a code comment; the detail now says it is its own signature.
+
+Each string is written to work in **either** audience rather than branched: a
+branch is two strings that drift, and only one of them gets re-read. Gate
+prerequisites are the exception and are sent both ways — `blockedByGates` for
+the office, `blockedByGateTitles` for her, so she reads "Waiting on App and EHR
+access first" where the office reads `G0`.
+
+### ⚠️ NO CHART DATA ON THIS SCREEN, AND THE OLD GUARD WAS WRONG IN KIND
+
+The render probe asserted `!/place of service|patient/i` **after carving out
+"Patient visits"** — the G2 gate's own title. The welcome copy ("get you seeing
+patients") was about to need a second carve-out. **A guard that needs a growing
+exception list is testing the wrong thing.** It now matches the vocabulary of a
+patient RECORD — place of service, POS, MRN, DOB, date of birth, diagnosis,
+ICD, CPT, chief complaint — which is the actual risk, names which words it
+found, and was mutation-checked by injecting a chart line into the page.
+
+### Verified
+
+61 tests in the file (3212 in the suite, 0 failing); **17 of 17 mutations each
+confirmed to fail a test**, 0 harness errors — the strip disabled, the default
+audience widened, each hidden field restored, the deep copy removed, the gap
+pill put back on her card, every office-only row unguarded, gate codes shown to
+her, the third-person wording restored, the gate titles dropped, the hero
+removed from her day-one state and added over somebody else's credentialing.
+The HTTP probe gained section P, **89/89**, which asserts the fields over real
+HTTP on both views of one record (85 modules and 179 rows on every path she
+reads) — because a scan of the page cannot prove what the route withheld. Render
+probe **38/38** at 1440 and 390, measuring the hero's own bounding rect rather
+than reading its CSS.

@@ -322,7 +322,7 @@ function gateStatus({ inputs, record, supervisor, today } = {}) {
           name: (supervisor && supervisor.name) || null,
           reason: supervisor
             ? `${(supervisor.name || 'The supervising physician')} is not signed off yet.`
-            : 'No supervising physician is linked to this clinician yet.'
+            : 'No supervising physician is linked yet.'
         };
       }
     }
@@ -340,6 +340,9 @@ function gateStatus({ inputs, record, supervisor, today } = {}) {
       scope: ev ? (ev.scope || null) : null,
       blockedBy: blockers[gid] || [],
       blockedByGates: prereqUnmet,
+      // The same prerequisites in words. "Waiting on G0 and G_MD first" is a
+      // sentence about our data model; a person reads the gate's own title.
+      blockedByGateTitles: prereqUnmet.map(p => (O.GATES[p] || {}).title || p),
       waitingOnSupervisor: supervisorBlock
     };
   }
@@ -393,6 +396,7 @@ function payerGates({ inputs, record, supervisor, today } = {}) {
       openedAt: ev ? ev.openedAt : null,
       openedBy: ev ? (ev.openedByName || null) : null,
       blockedByGates: g2Open ? [] : ['G2'],
+      blockedByGateTitles: g2Open ? [] : [(O.GATES.G2 || {}).title || 'G2'],
       blockedBy: open.map(it => ({ id: it.id, title: it.title, status: 'not_started' }))
     };
   });
