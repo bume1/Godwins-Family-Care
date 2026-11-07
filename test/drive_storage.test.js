@@ -267,7 +267,7 @@ const mountCaregiver = async (t, { as = CAREGIVER, users = [CAREGIVER, OTHER_CG,
     }
   });
   const app = express();
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: config.BODY_PARSER_LIMIT }));
   app.use(router);
   const server = app.listen(0);
   t.after(() => server.close());

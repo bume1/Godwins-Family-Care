@@ -30,8 +30,12 @@ const { contentDisposition } = require('../contentDisposition');
 // own task-file upload is deliberately not folded in.
 const staffDocs = require('../staffDocuments');
 
-const MAX_PROOF_BYTES = 15 * 1024 * 1024;
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PROOF_BYTES } });
+// A FALLBACK, not the rule. The ceiling is config.MAX_FILE_SIZE and multer is
+// built from it inside the factory below — this is only what multer gets if a
+// caller wires the routes with no config at all. It had its own 15 MB literal,
+// which meant multer refused a file the shared preparer would have accepted,
+// with a different error, from a limit nobody had set deliberately.
+const FALLBACK_MAX_PROOF_BYTES = 25 * 1024 * 1024;
 
 const COLLECTION = 'clinician_onboarding';
 const EVENTS = 'clinician_onboarding_events';
@@ -49,6 +53,13 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
   // write gate: credentialing is office work, and a provider must not be able to
   // verify their own licence or sign their own gate open.
   const isOffice = (u) => !!u && (u.role === 'admin' || u.isManager === true);
+  // ONE ceiling. multer's own limit and the shared preparer's must be the same
+  // number or the stricter one wins silently and reports the wrong reason.
+  const maxUploadBytes = (config && config.MAX_FILE_SIZE) || FALLBACK_MAX_PROOF_BYTES;
+  const upload = multer({
+    storage: multer.memoryStorage(), limits: { fileSize: maxUploadBytes }
+  });
+
   const requireOffice = (req, res, next) => {
     if (isOffice(req.user)) return next();
     return res.status(403).json({
@@ -353,7 +364,7 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
           buffer: req.file.buffer,
           fileName: req.file.originalname,
           detectFileType,
-          maxBytes: (config && config.MAX_FILE_SIZE) || MAX_PROOF_BYTES,
+          maxBytes: maxUploadBytes,
           keyPrefix: item.id
         });
         if (!prepared.ok) {

@@ -8482,7 +8482,7 @@ const prepareClientDocument = ({ kind, fileName, fileDataB64 }) => {
     buffer = Buffer.from(b64, 'base64');
   } catch (e) { return { error: 'File data is not valid base64.', status: 400 }; }
   if (!buffer.length) return { error: 'File is empty.', status: 400 };
-  if (buffer.length > config.MAX_FILE_SIZE) return { error: 'File exceeds 10 MB limit.', status: 400 };
+  if (buffer.length > config.MAX_FILE_SIZE) return { error: `File exceeds the ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB limit.`, status: 400 };
   // Typed by its BYTES, never by what the caller claimed it is.
   const sniffedType = detectFileType(buffer);
   if (!sniffedType) return { error: 'Only PDF, JPG, and PNG files are accepted.', status: 400 };
@@ -8772,7 +8772,7 @@ app.post('/api/gfc/intake/upload', authenticateToken, requireClientForIntake, as
       const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
       buffer = Buffer.from(b64, 'base64');
     } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
-    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: `File exceeds the ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB limit.` });
     // Authoritative type check by content, not the client-declared mimeType.
     const sniffedType = detectFileType(buffer);
     if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
@@ -25377,7 +25377,7 @@ const handleRoiUpload = async (req, res, ctx) => {
       const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
       buffer = Buffer.from(b64, 'base64');
     } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
-    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: `File exceeds the ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB limit.` });
     // Authoritative type check by content, not the client-declared mimeType.
     const sniffedType = detectFileType(buffer);
     if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });

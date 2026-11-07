@@ -56,7 +56,7 @@ if (process.env.NODE_ENV === 'production') {
 // ---- Server ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_PARSER_LIMIT = process.env.BODY_PARSER_LIMIT || '50mb';
-const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || String(10 * 1024 * 1024), 10); // 10MB
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || String(25 * 1024 * 1024), 10); // 25MB
 const MAX_CONCURRENT_UPLOADS = parseInt(process.env.MAX_CONCURRENT_UPLOADS || '5', 10);
 
 // ---- Cache & Performance ----

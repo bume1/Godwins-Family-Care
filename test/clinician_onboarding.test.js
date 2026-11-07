@@ -1213,3 +1213,43 @@ test('the launch board upload is left alone, and why is written down', () => {
   assert.match(mod, /LAUNCH-BOARD TASK UPLOAD/,
     'the reason it is excluded has to be written where the next person looks');
 });
+
+test('there is ONE file size ceiling, and multer is built from it', () => {
+  // multer had its own 15 MB literal while the shared preparer read the app's
+  // configured 10 MB, so multer refused a file the preparer would have taken,
+  // with a different error, from a limit nobody set deliberately. The stricter
+  // of two ceilings always wins silently and always reports the wrong reason.
+  const cfg = require('../config');
+  assert.strictEqual(cfg.MAX_FILE_SIZE, 25 * 1024 * 1024, 'owner asked for 25 MB');
+
+  const src = stripComments(read('routes/clinicianOnboarding.js'));
+  assert.match(src, /const maxUploadBytes = \(config && config\.MAX_FILE_SIZE\)/,
+    'the ceiling comes from config');
+  assert.match(src, /limits: \{ fileSize: maxUploadBytes \}/,
+    'and multer is built from that same number');
+  assert.match(src, /maxBytes: maxUploadBytes,/,
+    'as is the shared preparer');
+  // The only literal left is a fallback for a caller that wires no config.
+  assert.strictEqual((src.match(/\d+ \* 1024 \* 1024/g) || []).length, 1,
+    'one literal, and it is the fallback');
+
+  // A 25 MB file arrives at the caregiver door as ~33.4 MB of base64 in a JSON
+  // body. If the body parser were under that, the request would be rejected
+  // before any of this ran, and the message would be about JSON, not size.
+  const b64 = Math.ceil(cfg.MAX_FILE_SIZE * 4 / 3);
+  const bodyLimitMb = parseInt(String(cfg.BODY_PARSER_LIMIT), 10);
+  assert.ok(bodyLimitMb * 1024 * 1024 > b64,
+    `the body parser (${cfg.BODY_PARSER_LIMIT}) must clear base64 of the ceiling (${Math.round(b64 / 1048576)} MB)`);
+});
+
+test('no size message hardcodes a number the config can change', () => {
+  // Three said "File exceeds 10 MB limit." They would now be lying to somebody
+  // holding a 20 MB file that the app accepts.
+  ['server.js', 'routes/caregiver.js', 'routes/clinicianOnboarding.js', 'staffDocuments.js']
+    .forEach(f => {
+      const src = stripComments(read(f));
+      const lies = src.match(/exceeds (the )?\d+ ?MB|up to \d+ ?MB|\d+ ?MB limit/gi) || [];
+      assert.deepStrictEqual(lies, [],
+        `${f} states a size in words: ${lies.join(', ')}`);
+    });
+});
