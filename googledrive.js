@@ -598,6 +598,54 @@ async function uploadMessageAttachmentFile(clientName, fileName, fileBuffer, mim
   return { fileId: response.data.id, fileName: response.data.name };
 }
 
+/**
+ * A STAFF DOCUMENT INTO THE OFFICE'S OWN DRIVE STRUCTURE.
+ *
+ * `sectionFolderId` is an ID, never a name, and this function will NOT create
+ * it. `06 People / Credentialing & Licensure` already exists, nested, shared
+ * a particular way; finding it by name and creating it when missing — which is
+ * what every other upload here does — would build a second one at the root of
+ * whatever account the service identity impersonates, and nobody would look in
+ * it. A wrong or unreachable id throws, and the caller refuses the upload,
+ * which is the same rule as a Drive outage: better no row than a row pointing
+ * somewhere nobody reads.
+ *
+ * The person's own subfolder IS created, because that is per-person and new
+ * every time somebody joins. It matches what the office already does by hand.
+ */
+async function uploadStaffDocumentFile({ sectionFolderId, personFolderName, fileName, fileBuffer, mimeType }) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+
+  if (!sectionFolderId) {
+    throw new Error('No Drive folder is configured for that kind of document.');
+  }
+  // Prove the section folder is really there before anything is written. A
+  // files.create against a missing parent answers a confusing permission
+  // error, which reads as a credential problem rather than a wrong id.
+  try {
+    await drive.files.get({ fileId: sectionFolderId, fields: 'id, name', ...ALL_DRIVES });
+  } catch (err) {
+    const e = new Error(`The configured Drive folder ${sectionFolderId} could not be opened: ${err.message}`);
+    e.code = 'DRIVE_SECTION_FOLDER_UNREACHABLE';
+    throw e;
+  }
+
+  const personId = await findOrCreateFolder(personFolderName, sectionFolderId);
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [personId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name, webViewLink, webContentLink',
+    ...ALL_DRIVES
+  });
+  // DELIBERATELY no anyone-link. These are a person's own licence, ID and tax
+  // forms; they are read back through the app, where the read is audited.
+  return {
+    fileId: response.data.id, id: response.data.id,
+    fileName: response.data.name, webViewLink: response.data.webViewLink || null
+  };
+}
+
 async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
   const drive = await getDriveClient();
   const { Readable } = require('stream');
@@ -700,6 +748,7 @@ module.exports = {
   uploadClientDocumentFile,
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
+  uploadStaffDocumentFile,
   uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,

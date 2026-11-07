@@ -113,7 +113,100 @@ function buildStaffDocumentRow({
   }, extra || {});
 }
 
+/**
+ * WHERE A CLINICIAN'S DOCUMENT GOES IN DRIVE.
+ *
+ * `06 People` is not one folder. It is sorted by what a document IS, and the
+ * office's own folder names say how:
+ *
+ *   Contracts & Offer Letters   the offer, the agreements, the scope letter
+ *   Personnel Files             I-9, W-4, direct deposit, handbook, HIPAA
+ *   Credentialing & Licensure   licence, DEA, board certification, NPI,
+ *                               malpractice, background check — anything that
+ *                               decides whether this person may see patients
+ *
+ * Both of the first two already carry per-person subfolders somebody made by
+ * hand ("Kathryn Strickland", "Bethel Godwins, FNP"), so the app files the
+ * same way rather than inventing a shape beside it.
+ *
+ * ⚠️ `Onboarding Library / Clinician (W2) | (1099) | (Hybrid)` is deliberately
+ * NOT a destination. That is the READING library — the pack a new clinician
+ * opens — and dropping her licence scan into it would put a personal document
+ * in the folder the whole team reads from.
+ *
+ * ROUTED BY BLOCK, with named exceptions, because `CORE` mixes the two: the
+ * offer and the agreements are contracts, the I-9 and the W-4 are personnel.
+ * Anything not named here goes to Credentialing & Licensure, which is the safe
+ * default: it is the most restricted of the three, so a document whose home we
+ * have not decided lands somewhere narrower than it needs rather than wider.
+ */
+const SECTIONS = Object.freeze({
+  CONTRACTS: 'contracts',
+  PERSONNEL: 'personnel',
+  CREDENTIALING: 'credentialing'
+});
+
+const SECTION_LABELS = Object.freeze({
+  [SECTIONS.CONTRACTS]: 'Contracts & Offer Letters',
+  [SECTIONS.PERSONNEL]: 'Personnel Files',
+  [SECTIONS.CREDENTIALING]: 'Credentialing & Licensure'
+});
+
+// The employment arrangement is personnel, not a credential.
+const PERSONNEL_BLOCKS = Object.freeze(['W2', 'C99', 'HYB']);
+
+// `CORE` is the only block that splits, so it is the only one listed item by
+// item. Everything else follows its block.
+const CONTRACT_ITEMS = Object.freeze([
+  'CORE-01', // accepted offer
+  'CORE-02', // engagement letter
+  'CORE-03', // employment agreement
+  'CORE-04', // independent contractor agreement
+  'CORE-05', // scope letter
+  'CORE-10'  // NDA and non-solicitation
+]);
+
+const PERSONNEL_ITEMS = Object.freeze([
+  'CORE-06', // Form I-9
+  'CORE-07', // Form W-4
+  'CORE-08', // direct deposit
+  'CORE-09', // Form W-9 and vendor payment setup
+  'CORE-11', // code of conduct and field addendum
+  'CORE-12', // handbook acknowledgment
+  'CORE-13', // team roles and responsibilities
+  'CORE-14', // HIPAA privacy and security training
+  'CORE-15'  // emergency contact and personal details
+]);
+// CORE-16, the FCRA background check authorization, is deliberately NOT here:
+// the office already files its FCRA forms under Credentialing & Licensure, so
+// the default sends it where they are.
+
+function sectionForItem(item) {
+  if (!item || !item.id) return SECTIONS.CREDENTIALING;
+  if (CONTRACT_ITEMS.includes(item.id)) return SECTIONS.CONTRACTS;
+  if (PERSONNEL_ITEMS.includes(item.id)) return SECTIONS.PERSONNEL;
+  if (PERSONNEL_BLOCKS.includes(item.block)) return SECTIONS.PERSONNEL;
+  return SECTIONS.CREDENTIALING;
+}
+
+/**
+ * The person's own folder, named as the office already names them.
+ *
+ * The credential is appended where we hold one ("Bethel Godwins, FNP"), which
+ * is the convention the Credentialing folder already uses. A name with nothing
+ * in it would make one folder every unnamed person shares, so that is refused
+ * rather than guessed at.
+ */
+function personFolderName({ name, credential }) {
+  const clean = String(name || '').replace(/[\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  const cred = String(credential || '').trim();
+  return cred ? `${clean}, ${cred}`.slice(0, 120) : clean.slice(0, 120);
+}
+
 module.exports = {
   EXT_FOR_MIME, ACCEPTED_LABEL,
-  prepareStaffDocument, buildStaffDocumentRow
+  prepareStaffDocument, buildStaffDocumentRow,
+  SECTIONS, SECTION_LABELS, PERSONNEL_BLOCKS, CONTRACT_ITEMS, PERSONNEL_ITEMS,
+  sectionForItem, personFolderName
 };

@@ -56,6 +56,29 @@ if (process.env.NODE_ENV === 'production') {
 // ---- Server ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_PARSER_LIMIT = process.env.BODY_PARSER_LIMIT || '50mb';
+
+/**
+ * WHERE STAFF DOCUMENTS LAND IN THE OFFICE'S DRIVE.
+ *
+ * BY FOLDER ID, NEVER BY NAME. `06 People` already exists, nested, with
+ * per-person subfolders somebody made by hand. Finding a folder by name and
+ * creating it when it is missing — which is how every other upload in this app
+ * works — would quietly build a SECOND "06 People" at the root of whatever
+ * account the service identity impersonates, and nobody would look in it. An
+ * id either resolves to the real folder or fails loudly.
+ *
+ * These defaults are the live folder ids, read out of the office's Drive on
+ * 2026-11-07. They move only if somebody deletes and recreates a folder, which
+ * is why each is overridable without a deploy.
+ */
+const DRIVE_FOLDERS = Object.freeze({
+  // 06 People / Contracts & Offer Letters
+  contracts: process.env.GFC_DRIVE_CONTRACTS_FOLDER_ID || '1-CFhIOPVZQPMg9tBkMPwmmS5cwl0yUCz',
+  // 06 People / Personnel Files
+  personnel: process.env.GFC_DRIVE_PERSONNEL_FOLDER_ID || '1BU0HEt_AbA1xfxowWeypIuFYlHbjby4u',
+  // 06 People / Credentialing & Licensure
+  credentialing: process.env.GFC_DRIVE_CREDENTIALING_FOLDER_ID || '132ymHofaSYx_PycDTK6dpLKEXWFn3sx9'
+});
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || String(25 * 1024 * 1024), 10); // 25MB
 const MAX_CONCURRENT_UPLOADS = parseInt(process.env.MAX_CONCURRENT_UPLOADS || '5', 10);
 
@@ -431,6 +454,7 @@ module.exports = {
   // Server
   PORT,
   BODY_PARSER_LIMIT,
+  DRIVE_FOLDERS,
   MAX_FILE_SIZE,
   MAX_CONCURRENT_UPLOADS,
   // Cache

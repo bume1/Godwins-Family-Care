@@ -376,13 +376,38 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         let rec = findRecord(rows, req.user.id);
         if (!rec) { rec = blankRecord(req.user); rows.push(rec); }
 
+        // SORTED BY WHAT THE DOCUMENT IS, into the office's own Drive
+        // structure. `06 People` is not one folder: the offer goes to
+        // Contracts & Offer Letters, the I-9 to Personnel Files, the licence
+        // to Credentialing & Licensure. staffDocuments.js holds that mapping
+        // and config.DRIVE_FOLDERS holds the ids.
+        const section = staffDocs.sectionForItem(item);
+        const sectionFolderId = ((config && config.DRIVE_FOLDERS) || {})[section] || null;
+        const personFolder = staffDocs.personFolderName({
+          name: rec.userName || req.user.name || req.user.email,
+          credential: req.user.prescriberCredential || req.user.licenseLevel || null
+        });
+
         // A storage failure REFUSES the upload. A row pointing at a file that
         // does not exist would tick a credentialing item with no proof behind it.
         let stored;
         try {
-          stored = await drive.uploadCaregiverDocumentFile(
-            `Clinician ${rec.userName || rec.userId}`, name, req.file.buffer,
-            prepared.mime);
+          if (sectionFolderId && personFolder) {
+            stored = await drive.uploadStaffDocumentFile({
+              sectionFolderId, personFolderName: personFolder,
+              fileName: name, fileBuffer: req.file.buffer, mimeType: prepared.mime
+            });
+          } else {
+            // NOT a silent fallback: the old folder, and the reason is logged.
+            // Creating `06 People` by name would build a second one at the root
+            // of whatever account the service identity impersonates, and nobody
+            // would look in it.
+            console.warn('[CLINICIAN ONBOARDING] No Drive folder id for section',
+              section, '— filing under the caregiver documents folder instead.');
+            stored = await drive.uploadCaregiverDocumentFile(
+              `Clinician ${rec.userName || rec.userId}`, name, req.file.buffer,
+              prepared.mime);
+          }
         } catch (err) {
           return res.status(502).json({
             error: 'We could not store that file. Please try again.',
@@ -426,7 +451,16 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
           uploadedById: req.user.id,
           uploadedByName: req.user.name || req.user.email,
           uploadedByOffice: isOffice(req.user),
-          extra: { clinician_item_id: item.id }
+          extra: {
+            clinician_item_id: item.id,
+            // Where it went, so the office can see the folder without opening
+            // Drive — and so a later session can tell a file filed under the
+            // new structure from one filed before it existed.
+            drive_section: sectionFolderId ? section : null,
+            drive_folder: sectionFolderId
+              ? `06 People / ${staffDocs.SECTION_LABELS[section]} / ${personFolder}`
+              : null
+          }
         }));
         await db.set('caregiver_documents', docRows);
 

@@ -980,11 +980,15 @@ const mountOnboarding = async (t, { user, inputs }) => {
       driveStub.last = { folder, name, bytes: buf.length, mime };
       return { fileId: 'drv_1', id: 'drv_1' };
     },
+    uploadStaffDocumentFile: async (args) => {
+      driveStub.lastStaff = args;
+      return { fileId: 'drv_1', id: 'drv_1' };
+    },
     downloadFileBuffer: async () => PNG,
     describeDriveError: (e) => ({ reason: e.message, hint: null })
   };
   const router = require('../routes/clinicianOnboarding')({
-    db, config: {}, logActivity: async () => {},
+    db, config: require('../config'), logActivity: async () => {},
     getUsers: async () => [user],
     authenticateToken: (req, _res, next) => { req.user = user; next(); },
     drive: driveStub,
@@ -1085,7 +1089,9 @@ test('a Drive failure refuses the upload rather than recording a row with no fil
     user: OFFICE_NP,
     inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
   });
-  h.drive.uploadCaregiverDocumentFile = async () => { throw new Error('Drive is down'); };
+  const down = async () => { throw new Error('Drive is down'); };
+  h.drive.uploadCaregiverDocumentFile = down;
+  h.drive.uploadStaffDocumentFile = down;
   const fd = new FormData();
   fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence.png');
   const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
@@ -1252,4 +1258,143 @@ test('no size message hardcodes a number the config can change', () => {
       assert.deepStrictEqual(lies, [],
         `${f} states a size in words: ${lies.join(', ')}`);
     });
+});
+
+// ===========================================================================
+// WHERE A DOCUMENT LANDS IN THE OFFICE'S DRIVE
+//
+// `06 People` is not one folder. It is sorted by what a document IS, and the
+// office's own folder names say how. Getting this wrong is not a cosmetic
+// filing error: `Onboarding Library` is the pack the whole team reads, so a
+// licence scan dropped there is a personal document made readable by everyone.
+// ===========================================================================
+
+test('a document is sorted by what it is, not dumped in one folder', () => {
+  const item = (id) => T.ITEM_LIBRARY.find(i => i.id === id);
+
+  assert.strictEqual(SD.sectionForItem(item('CORE-01')), SD.SECTIONS.CONTRACTS, 'accepted offer');
+  assert.strictEqual(SD.sectionForItem(item('CORE-03')), SD.SECTIONS.CONTRACTS, 'employment agreement');
+  assert.strictEqual(SD.sectionForItem(item('CORE-05')), SD.SECTIONS.CONTRACTS, 'scope letter');
+
+  assert.strictEqual(SD.sectionForItem(item('CORE-06')), SD.SECTIONS.PERSONNEL, 'Form I-9');
+  assert.strictEqual(SD.sectionForItem(item('CORE-07')), SD.SECTIONS.PERSONNEL, 'Form W-4');
+  assert.strictEqual(SD.sectionForItem(item('W2-01')), SD.SECTIONS.PERSONNEL,
+    'the employment arrangement is personnel, not a credential');
+
+  assert.strictEqual(SD.sectionForItem(item('CLIN-10')), SD.SECTIONS.CREDENTIALING, 'malpractice');
+  assert.strictEqual(SD.sectionForItem(item('NP-01')), SD.SECTIONS.CREDENTIALING, 'licence');
+  // The office already files its FCRA forms under Credentialing & Licensure.
+  assert.strictEqual(SD.sectionForItem(item('CORE-16')), SD.SECTIONS.CREDENTIALING,
+    'background check authorization goes where the office already puts them');
+
+  // THE DEFAULT IS THE NARROWEST of the three, so a document whose home nobody
+  // has decided lands somewhere more restricted than it needs, never wider.
+  assert.strictEqual(SD.sectionForItem({ id: 'NEW-99', block: 'NEW' }), SD.SECTIONS.CREDENTIALING);
+  assert.strictEqual(SD.sectionForItem(null), SD.SECTIONS.CREDENTIALING);
+
+  // Every one of the 118 items must resolve to a real section.
+  const real = Object.values(SD.SECTIONS);
+  T.ITEM_LIBRARY.forEach(i => assert.ok(real.includes(SD.sectionForItem(i)), i.id));
+});
+
+test('the reading library is never a destination', () => {
+  // `06 People / Onboarding Library / Clinician (W2) | (1099) | (Hybrid)` is
+  // the pack a new clinician OPENS. Her licence scan must never go in it.
+  const labels = Object.values(SD.SECTION_LABELS).join(' | ');
+  assert.ok(!/Onboarding Library|Clinician \(/.test(labels), labels);
+  const cfg = require('../config');
+  assert.deepStrictEqual(Object.keys(cfg.DRIVE_FOLDERS).sort(),
+    Object.values(SD.SECTIONS).sort(),
+    'exactly one configured folder per section, and no others');
+});
+
+test('a Drive folder is addressed by id and never created by name', () => {
+  // Finding `06 People` by name and creating it when missing — which is what
+  // every other upload in this app does — would build a SECOND one at the root
+  // of whatever account the service identity impersonates, and nobody would
+  // look in it. The section folder is proven to exist before anything writes.
+  const g = stripComments(read('googledrive.js'));
+  const fn = g.slice(g.indexOf('async function uploadStaffDocumentFile'),
+    g.indexOf('async function uploadCaregiverDocumentFile'));
+  assert.ok(fn.length > 400, 'the function must be found');
+  assert.ok(!/findOrCreateFolder\((['"`])/.test(fn),
+    'no folder in the office structure may be created from a name literal');
+  assert.match(fn, /findOrCreateFolder\(personFolderName, sectionFolderId\)/,
+    'only the PERSON\'s own subfolder is created, under the configured id');
+  assert.match(fn, /DRIVE_SECTION_FOLDER_UNREACHABLE/,
+    'a wrong id must fail by name, not as a confusing permission error');
+  assert.ok(!/maybeGrantAnyoneLink/.test(fn),
+    'a licence and a W-4 never get an anyone-link');
+
+  // The ids live in config, overridable without a deploy, and nowhere else.
+  const stray = ['routes/clinicianOnboarding.js', 'staffDocuments.js', 'googledrive.js']
+    .filter(f => /1-CFhIOPVZQPMg9tBkMPwmmS5cwl0yUCz|1BU0HEt_|132ymHof/.test(read(f)));
+  assert.deepStrictEqual(stray, [], 'a folder id outside config is a second copy');
+});
+
+test('a person folder is named as the office already names them', () => {
+  assert.strictEqual(SD.personFolderName({ name: 'Thanmayie Rao', credential: 'FNP-BC' }),
+    'Thanmayie Rao, FNP-BC', 'the convention the Credentialing folder already uses');
+  assert.strictEqual(SD.personFolderName({ name: 'Kathryn Strickland' }), 'Kathryn Strickland');
+  // A blank name would make one folder every unnamed person shares.
+  assert.strictEqual(SD.personFolderName({ name: '   ' }), null);
+  // A name cannot climb out of its folder.
+  assert.strictEqual(SD.personFolderName({ name: 'A/B: "C"' }), 'A B C');
+});
+
+test('a clinician\'s licence is filed under Credentialing, and the row says where', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+  const fd = new FormData();
+  fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
+    { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 200, JSON.stringify(await res.json().catch(() => ({}))));
+
+  const cfg = require('../config');
+  assert.strictEqual(h.drive.lastStaff.sectionFolderId, cfg.DRIVE_FOLDERS.credentialing,
+    'a licence goes to Credentialing & Licensure');
+  assert.strictEqual(h.drive.lastStaff.personFolderName, 'Thanmayie Rao',
+    'into her own subfolder');
+
+  // Recorded on the row, so the office can see the folder without opening Drive.
+  const d = (h.store.caregiver_documents || [])[0];
+  assert.strictEqual(d.drive_section, 'credentialing');
+  assert.strictEqual(d.drive_folder, '06 People / Credentialing & Licensure / Thanmayie Rao');
+});
+
+test('an I-9 goes somewhere different from a licence, through the same route', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+  const fd = new FormData();
+  fd.append('file', new Blob([PNG], { type: 'image/png' }), 'i9.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/CORE-06/proof`,
+    { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 200);
+  const cfg = require('../config');
+  assert.strictEqual(h.drive.lastStaff.sectionFolderId, cfg.DRIVE_FOLDERS.personnel);
+  assert.strictEqual((h.store.caregiver_documents || [])[0].drive_folder,
+    '06 People / Personnel Files / Thanmayie Rao');
+});
+
+test('an unreachable folder refuses the upload rather than filing it elsewhere', async (t) => {
+  const h = await mountOnboarding(t, {
+    user: OFFICE_NP,
+    inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
+  });
+  h.drive.uploadStaffDocumentFile = async () => {
+    const e = new Error('not found'); e.code = 'DRIVE_SECTION_FOLDER_UNREACHABLE'; throw e;
+  };
+  const fd = new FormData();
+  fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence.png');
+  const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,
+    { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 502);
+  // Nothing recorded, and nothing quietly dropped into the old folder: a
+  // credentialing item must not tick against a file nobody can find.
+  assert.strictEqual((h.store.caregiver_documents || []).length, 0);
 });
