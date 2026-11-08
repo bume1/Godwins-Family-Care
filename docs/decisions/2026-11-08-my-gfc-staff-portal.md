@@ -75,3 +75,17 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 1. **Set `PAYROLL_INGEST_KEY`** on the deployment, and the same value in the Apps Script's properties.
 2. **Moving the caregiver app into My GFC.** For now it links across.
 3. **Which folders each role gets.** That is an admin setup task in the portal.
+
+## The caregiver app became the caregiver's My GFC (owner, 2026-11-08)
+
+- **`/caregiver` is a caregiver's My GFC.** It uses the same frame as everyone's: the patient-portal look, a white sidebar on a computer and a white bottom menu on a phone. The sections are:
+  - Home, Schedule, Clients, Feed and Logs & Messages
+  - Onboarding (the welcome packet checklist)
+  - My Documents (what they signed, plus the office upload they always had)
+  - Policies, Shared Folders, Hours & Pay, and Account
+- **The phone menu fits five buttons:** Home, Schedule, Clients and Feed, which are used every shift, plus More. More leads to everything else.
+- **Moved, not rewritten.** Clock-in and clock-out, the visit-log-before-clock-out rule, the offline queue, the welcome packet gate, the schedule component and messaging are the same code.
+- A caregiver who opens `/my` is sent to `/caregiver` with the same `#section`.
+- Shift emails (`/caregiver#schedule`) and message emails (`/caregiver#more`) still land where they did.
+- **One shared file, `public/my-gfc.js`,** holds the frame and the staff sections for both pages. It runs in its own scope as `window.MyGFC`, and every class it styles starts with `mg-`, so neither page's styles can restyle the other's.
+- Rendered in Chromium at 1280px and 390px as a caregiver: Home, My Documents, Hours & Pay, More and Schedule. No page errors.

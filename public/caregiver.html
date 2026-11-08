@@ -41,7 +41,7 @@
     html,body{height:100%}
     body{
       font-family:'DM Sans',system-ui,sans-serif; font-size:16px; line-height:1.5;
-      background:var(--cream-d); color:var(--ink);
+      background:var(--cream); color:var(--ink);
       -webkit-font-smoothing:antialiased;
     }
     .serif{font-family:'Cormorant Garamond',Georgia,serif}
@@ -89,7 +89,8 @@
       .nav button{font-size:13px}
       h2.pg{font-size:30px}
     }
-    h2.pg{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--navy);font-weight:600;margin-bottom:2px}
+    h2.pg{font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--navy);font-weight:600;margin-bottom:2px;line-height:1.15}
+    @media(min-width:1024px){ h2.pg{font-size:40px} }
     .sub{font-size:14px;color:var(--mut);margin-bottom:16px}
 
     .shiftlink{display:flex;align-items:center;gap:7px;background:rgba(250,247,242,.14);border:1px solid rgba(250,247,242,.3);color:var(--cream);border-radius:9px;padding:10px 13px;font-size:15px;font-weight:600;font-family:inherit;cursor:pointer;width:100%;justify-content:center;margin-top:4px}
@@ -98,7 +99,7 @@
     .nav button i{display:block;font-size:21px;margin-bottom:3px}
     .nav button.on{color:var(--navy)} .nav button.on i{color:var(--gold-d)}
 
-    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:15px 16px;margin-bottom:14px}
+    .card{background:#fff;border:1px solid #ECE4D6;border-radius:16px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}
     .card h3{font-family:'Cormorant Garamond',serif;font-size:19px;color:var(--navy);font-weight:600;margin-bottom:6px}
     .shift{background:var(--navy);border-radius:14px;padding:16px;margin-bottom:14px;color:var(--cream)}
     .shift .e{font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gold);margin-bottom:7px}
@@ -192,6 +193,10 @@
 <body>
   <div id="root"></div>
 
+<!-- My GFC: the shared staff portal frame and sections. A caregiver's My GFC
+     is this page (owner, 2026-11-08): the same frame as everyone's, plus the
+     shift tools below. Loaded first so window.MyGFC exists before the app. -->
+<script type="text/babel" src="/my-gfc.js"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
 const API = window.location.origin;
@@ -535,8 +540,7 @@ const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalati
   const open = escalations.filter(e => e.status !== 'resolved');
   return (
     <div>
-      <h2 className="pg">Hi, {String(me.name || '').split(' ')[0]}</h2>
-      <p className="sub">{me.licenseLabel} · {clients.length} {clients.length === 1 ? 'client' : 'clients'}</p>
+      {/* The My GFC frame says hello above this, over the banner. */}
 
       <ShiftCard clients={clients} shifts={shifts} onSchedule={onSchedule} />
 
@@ -1349,28 +1353,8 @@ const OnboardingCard = ({ me, onChanged }) => {
 
 const MoreTab = ({ visitLogs, queued, me }) => (
   <div>
-    <h2 className="pg">More</h2>
-    <p className="sub">Your logs, documents, messages and help.</p>
-
-    {/* Password, two-step sign-in and the devices this account is signed in
-        on. One page for every role (owner, "Fix all"). */}
-    <div className="card">
-      <h3>Your account</h3>
-      {/* A <button>, not an <a>: this page's `.btn` is width:100% with its own
-          padding and no anchor styling, and nothing else here renders a link
-          as a button. */}
-      <button className="btn ghost" onClick={() => { window.location.href = '/account'; }}>
-        <i className="ti ti-shield-lock"></i> Password &amp; Security
-      </button>
-      {/* My GFC, the staff portal: documents, policies and the Drive folders
-          shared with caregivers (owner, 2026-11-08). */}
-      <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => { window.location.href = '/my'; }}>
-        <i className="ti ti-id-badge-2"></i> My GFC
-      </button>
-      <p className="sub" style={{ marginTop: 8 }}>
-        Change your password, set up two-step sign-in, and see every device signed in as you.
-      </p>
-    </div>
+    <h2 className="pg">Logs & Messages</h2>
+    <p className="sub">Your visit logs, messages and help.</p>
 
     <div className="card">
       <h3>Visit logs</h3>
@@ -1402,10 +1386,6 @@ const MoreTab = ({ visitLogs, queued, me }) => (
         Schedule tab now that Session 7's component is wired in. Duplicating
         the mount here would put the same id in the DOM twice. */}
     <MessagingMount me={me} label="Messages" />
-
-    <OnboardingCard me={me} />
-
-    <DocumentsCard />
 
     <div className="card">
       <h3>Help</h3>
@@ -2202,7 +2182,8 @@ const App = () => {
   // the app, and yanking the tab out from under them would be worse than
   // ignoring it. An unknown fragment falls back to Home rather than rendering
   // a tab that does not exist.
-  const TAB_IDS = ['home', 'schedule', 'feed', 'clients', 'more'];
+  // The shift tabs, then the My GFC sections every staff member has.
+  const TAB_IDS = ['home', 'schedule', 'feed', 'clients', 'more', 'onboarding', 'documents', 'policies', 'folders', 'hours', 'account'];
   const tabFromHash = () => {
     try {
       const want = String(window.location.hash || '').replace(/^#/, '').toLowerCase();
@@ -2221,6 +2202,8 @@ const App = () => {
   const [fatal, setFatal] = useState('');
   const [loading, setLoading] = useState(true);
   const draining = useRef(false);
+  // My GFC's own data: signed documents, policies, folders, pay, bio.
+  const staff = window.MyGFC.useStaffData();
 
   const refresh = useCallback(async () => {
     const [c, v, e, f, s] = await Promise.all([
@@ -2318,6 +2301,11 @@ const App = () => {
   }
 
   const back = () => { setScreen(null); setPendingShift(null); };
+  const go = (id) => {
+    setTab(id); setScreen(null); setClientDetail(null);
+    try { window.history.replaceState(null, '', `#${id}`); } catch (e) { /* private mode */ }
+    window.scrollTo(0, 0);
+  };
   const doneAndRefresh = async () => {
     // A log filed to satisfy a clock-out returns to Schedule, where the button
     // that sent them here is — not to Home, which would be a dead end.
@@ -2348,41 +2336,80 @@ const App = () => {
     content = <ClientsTab clients={clients} detail={clientDetail}
       onOpen={openClient} onClose={() => setClientDetail(null)}
       onMessages={() => { setClientDetail(null); setTab('more'); }} />;
+  } else if (tab === 'onboarding') {
+    // A caregiver's onboarding is the welcome packet and its checklist.
+    content = <OnboardingCard me={me} />;
+  } else if (tab === 'documents') {
+    // What they signed, then the documents they send the office (timesheets,
+    // certifications...) with the upload, as it always worked.
+    content = (
+      <div>
+        <h2 className="pg">My Documents</h2>
+        <p className="sub">What you signed, and the documents you send the office.</p>
+        <window.MyGFC.Section title="What You Signed" sub="Your welcome packet and forms, with the date you signed.">
+          <window.MyGFC.Signed signed={staff.signed} onError={staff.setErr} />
+        </window.MyGFC.Section>
+        <DocumentsCard />
+      </div>
+    );
+  } else if (['policies', 'folders', 'hours', 'account'].includes(tab)) {
+    const sec = window.MyGFC.STAFF_SECTIONS.find(x => x.id === tab);
+    content = (
+      <div>
+        <h2 className="pg">{sec.label}</h2>
+        <p className="sub">{sec.subtitle}</p>
+        {staff.profile ? <window.MyGFC.StaffView view={tab} data={staff} /> : <Loading />}
+      </div>
+    );
   } else {
-    content = <MoreTab visitLogs={visitLogs} queued={queued} me={me} />;
+    content = (
+      <div>
+        {/* On a phone, More is the way into everything the menu cannot fit. */}
+        <div className="mg-phone-only">
+          <h2 className="pg">More</h2>
+          <p className="sub">Your documents, policies, pay and account.</p>
+          <window.MyGFC.StaffTiles data={staff} go={go} only={['onboarding', 'documents', 'policies', 'folders', 'hours', 'account']} />
+        </div>
+        <MoreTab visitLogs={visitLogs} queued={queued} me={me} />
+        <button className="btn ghost mg-phone-only" onClick={logout}><i className="ti ti-logout"></i> Sign Out</button>
+      </div>
+    );
   }
 
   // Schedule earns a tab rather than living under More: clocking in is the
   // most frequent thing a caregiver does, and it should be one tap away.
-  const TABS = [
-    { id: 'home', icon: 'home', label: 'Home' },
-    { id: 'schedule', icon: 'calendar-event', label: 'Schedule' },
-    { id: 'feed', icon: 'news', label: 'Feed' },
-    { id: 'clients', icon: 'users', label: 'Clients' },
-    { id: 'more', icon: 'dots', label: 'More' }
+  // The sidebar (a computer) lists everything; the phone menu fits five, so
+  // it carries the shift tabs and More, which leads to the rest.
+  const SECTIONS = [
+    { id: 'home', icon: 'ti-home', label: 'Home' },
+    { id: 'schedule', icon: 'ti-calendar-event', label: 'Schedule' },
+    { id: 'clients', icon: 'ti-users', label: 'Clients' },
+    { id: 'feed', icon: 'ti-news', label: 'Feed' },
+    { id: 'more', icon: 'ti-messages', label: 'Logs & Messages' },
+    { id: 'onboarding', icon: 'ti-route', label: 'Onboarding' },
+    { id: 'documents', icon: 'ti-file-text', label: 'My Documents' },
+    { id: 'policies', icon: 'ti-book', label: 'Policies' },
+    { id: 'folders', icon: 'ti-folders', label: 'Shared Folders' },
+    { id: 'hours', icon: 'ti-clock', label: 'Hours & Pay' },
+    { id: 'account', icon: 'ti-user-circle', label: 'Account' }
+  ];
+  const PHONE_TABS = [
+    { id: 'home', icon: 'ti-home', label: 'Home' },
+    { id: 'schedule', icon: 'ti-calendar-event', label: 'Schedule' },
+    { id: 'clients', icon: 'ti-users', label: 'Clients' },
+    { id: 'feed', icon: 'ti-news', label: 'Feed' },
+    { id: 'more', icon: 'ti-dots', label: 'More', match: ['more', 'onboarding', 'documents', 'policies', 'folders', 'hours', 'account'] }
   ];
 
   return (
-    <div className="shell">
-      <div className="hdr">
-        <span className="ttl">Godwins Family Care</span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span className="lvl">{me.licenseLabel}</span>
-          <button onClick={logout} title="Sign out"><i className="ti ti-logout"></i></button>
-        </span>
-      </div>
-      {!online && <div className="offline">Offline — your work is saved on this phone.</div>}
-      {online && queued > 0 && <div className="queued">Sending {queued} saved {queued === 1 ? 'item' : 'items'}…</div>}
-      <div className="main">{content}</div>
-      <div className="nav">
-        {TABS.map(t => (
-          <button key={t.id} className={tab === t.id && !screen ? 'on' : ''}
-            onClick={() => { setTab(t.id); setScreen(null); setClientDetail(null); }}>
-            <i className={`ti ti-${t.icon}`}></i>{t.label}
-          </button>
-        ))}
-      </div>
-    </div>
+    <window.MyGFC.Shell sections={SECTIONS} phoneTabs={PHONE_TABS} view={screen ? '' : tab} go={go}
+      name={me.name} typeLabel={me.licenseLabel || 'Caregiver'} firstName={String(me.name || '').split(' ')[0]}
+      footExtra={<div><button onClick={logout} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>Sign Out</button></div>}>
+      {!online && <div className="offline" style={{ borderRadius: 12, marginBottom: 12 }}>Offline — your work is saved on this phone.</div>}
+      {online && queued > 0 && <div className="queued" style={{ borderRadius: 12, marginBottom: 12 }}>Sending {queued} saved {queued === 1 ? 'item' : 'items'}…</div>}
+      {staff.err && ['documents', 'policies', 'folders', 'hours', 'account'].includes(tab) && <div className="err">{staff.err}</div>}
+      {content}
+    </window.MyGFC.Shell>
   );
 };
 

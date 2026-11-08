@@ -286,10 +286,15 @@ test('the portal page and the ways into it', () => {
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
   assert.match(read('clinical.html'), /href="\/my"[^>]*>.*My Portal/);
   assert.ok(!/href="\/onboarding"/.test(read('clinical.html')), 'clinicians reach onboarding through My GFC now');
-  assert.match(read('caregiver.html'), /window\.location\.href = '\/my'/);
+  // The caregiver app IS a caregiver's My GFC: the shared frame and sections.
+  const cg = read('caregiver.html');
+  assert.match(cg, /<script type="text\/babel" src="\/my-gfc\.js"><\/script>/);
+  assert.match(cg, /<window\.MyGFC\.Shell /);
+  for (const id of ['documents', 'policies', 'folders', 'hours', 'account']) assert.ok(cg.includes(`'${id}'`), id);
+  assert.match(read('my.html'), /profile\.isCaregiver\) \{ window\.location\.replace\(`\/caregiver/, 'a caregiver opening /my lands in their own My GFC');
   const at = require('../accountTypes');
   for (const t of ['admin', 'manager', 'coordinator']) assert.strictEqual(at.hubTilesFor(at.fieldsFor(t))[0].id, 'myGfc', t);
   const page = read('my.html');
   assert.match(page, /<script src="\/session-guard\.js"><\/script>/);
-  assert.ok(!/drive_file_id|driveFileId/.test(page), 'the page never handles a Drive id');
+  for (const f of ['my.html', 'my-gfc.js']) assert.ok(!/drive_file_id|driveFileId/.test(read(f)), `${f} never handles a Drive id`);
 });

@@ -66,7 +66,10 @@ test('every signed-in surface links to it, because every role has an account', (
     'public/admin-hub.html': /<a href="\/account"/,
     'public/clinical.html': /<a className="btn ghost" href="\/account">/,
     'public/portal.html': /window\.location\.href = '\/account'/,
-    'public/caregiver.html': /window\.location\.href = '\/account'/
+    // The caregiver app is a caregiver's My GFC (owner, 2026-11-08): it loads
+    // the shared My GFC sections, whose Account section links the page.
+    'public/caregiver.html': /<script type="text\/babel" src="\/my-gfc\.js"><\/script>/,
+    'public/my-gfc.js': /<a className="mg-btn" href="\/account">/
   };
   for (const [f, re] of Object.entries(links)) {
     assert.match(read(f), re, `${f} has no way to reach the account page`);
