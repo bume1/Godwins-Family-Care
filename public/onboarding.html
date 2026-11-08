@@ -654,6 +654,12 @@ const Library = () => {
     <div className="card">
       <div className="card-h"><h2>Training Library</h2><span>Clinical manual {d.manual.version ? `v${d.manual.version}` : '(could not be read)'}</span></div>
       {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
+      {/* Off until the SOPs behind the questions are written (owner, 2026-11-08). */}
+      <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '4px 0 12px', fontSize: 14 }}>
+        <input type="checkbox" checked={!!(d.settings && d.settings.checkQuestionsForStaff)}
+          onChange={async (e) => { try { await call('/api/onboarding/admin/settings', { method: 'PUT', body: { checkQuestionsForStaff: e.target.checked } }); await load(); } catch (x) { setErr(x.message); } }} />
+        Show training check questions to staff {d.settings && d.settings.checkQuestionsForStaff ? '(on)' : '(off until the SOPs are written)'}
+      </label>
       <table><thead><tr><th>Module</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
         {mods.map(m => (
           <tr key={m.id}>

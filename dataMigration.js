@@ -139,6 +139,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'staff_portal_folders', phi: false, owner: 'staff-portal', note: 'Drive folders the office assigned to roles or people in My GFC: folder id, label, audience' },
   { key: 'staff_paystubs', phi: false, owner: 'staff-portal', note: 'pay stubs imported from the payroll Apps Script: person, pay date, period, gross, net, hours, Drive pointer' },
   { key: 'staff_profiles', phi: false, owner: 'staff-portal', note: 'per staff member: website title, bio, headshot Drive pointer' },
+  { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'onboarding_manual_versions', phi: false, owner: 'onboarding', note: 'per manual version: section fingerprints (hashes, never text) and the computed change from the prior version' },
   // The four forms a caregiver signs IN THE APP rather than printing: the

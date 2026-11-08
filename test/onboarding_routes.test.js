@@ -64,7 +64,14 @@ test('her door: she sees her track only once the office starts it, and is told w
   me = await h.call('GET', '/api/onboarding/me');
   assert.strictEqual(me.data.started, true);
   assert.strictEqual(me.data.track.items[0].steps[0].actorBasis, undefined, 'the internal basis never reaches her');
-  assert.ok(me.data.track.checks.byModule['TRN-003'], 'check questions arrive read from the SOP');
+  assert.deepStrictEqual(me.data.track.checks.byModule, {}, 'check questions are OFF for staff by default');
+  h.as(OFFICE);
+  await h.call('PUT', '/api/onboarding/admin/settings', { checkQuestionsForStaff: true });
+  h.as(NP);
+  me = await h.call('GET', '/api/onboarding/me');
+  assert.ok(me.data.track.checks.byModule['TRN-003'], 'switched on, they arrive read from the SOP');
+  h.as(NP);
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/settings', { checkQuestionsForStaff: false })).status, 403, 'only the office switches them');
 });
 
 test('she cannot complete an office step through her own door', async (t) => {

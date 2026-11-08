@@ -113,6 +113,12 @@ module.exports = function createOnboardingRoutes(deps) {
     return track;
   }
 
+  // CHECK QUESTIONS ARE OFF FOR STAFF until the office switches them on
+  // (owner, 2026-11-08: the SOPs behind them are still being written). Off
+  // means the server never sends them, not that the page hides them.
+  const SETTINGS = 'onboarding_settings';
+  const settings = async () => Object.assign({ checkQuestionsForStaff: false }, (await db.get(SETTINGS)) || {});
+
   // Check questions for the modules she can take now, read live from Drive.
   async function checksFor(track) {
     try {
@@ -259,7 +265,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const rec = find(await all(), req.user.id);
     if (!rec) return res.json({ viewer, started: false });
     const track = await buildFor(rec, 'new_hire');
-    track.checks = await checksFor(track);
+    track.checks = (await settings()).checkQuestionsForStaff ? await checksFor(track) : { ok: true, byModule: {}, off: true, errors: [] };
     return res.json({ viewer, started: true, track });
   });
   router.post('/api/onboarding/me/items/:itemId/steps/:index', authenticateToken, requireStaff, async (req, res) => {
@@ -459,6 +465,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const revs = await reviews();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
     return res.json({
+      settings: await settings(),
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
       modules: MODULES.map(x => ({
         id: x.id, title: x.title, phase: x.phase, phaseLabel: (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
@@ -467,6 +474,13 @@ module.exports = function createOnboardingRoutes(deps) {
         plannedSop: x.plannedSop, flag: flags[x.id], review: revs[x.id] || null
       }))
     });
+  });
+  router.put('/api/onboarding/admin/settings', authenticateToken, requireOffice, async (req, res) => {
+    const next = Object.assign(await settings(), { checkQuestionsForStaff: req.body && req.body.checkQuestionsForStaff === true,
+      updatedAt: nowIso(), updatedByName: req.user.name || req.user.email });
+    await db.set(SETTINGS, next);
+    await logActivity(req.user.id, req.user.name, 'onboarding_settings_changed', 'onboarding_settings', null, { checkQuestionsForStaff: next.checkQuestionsForStaff });
+    return res.json(next);
   });
   // The Clinical Director records a review against the current manual, which
   // clears a flag; or confirms a module's drafted manual sections, which makes
