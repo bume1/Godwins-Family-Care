@@ -206,13 +206,32 @@ test('no export puts a stored instant or a UTC date slice into a cell', () => {
     // appears for two different reasons cannot tell you about either.
     assert.ok(!/const d = String\(l\.clock_in_at \|\| ''\)\.slice\(0, 10\)/.test(body),
       `${route} filters on the UTC date, so an evening Georgia shift falls in the wrong range`);
-    assert.ok(/const d = sched\.csvLocalDate\(l\.clock_in_at\)/.test(body),
+    // REPOINTED 2026-11-06, not relaxed. The filter used to read
+    // `csvLocalDate(l.clock_in_at)` directly; it now goes through
+    // `exportRowDate`, which answers the Georgia date of the CLOCK and falls
+    // back to the SCHEDULE when a visit was never clocked into — the fix for a
+    // completed visit dropping out of both sheets entirely. The UTC-slice
+    // protection this guard exists for is unchanged and is re-asserted on
+    // `exportRowDate` itself below, one level up.
+    assert.ok(/const d = sched\.exportRowDate\(l\)/.test(body),
       `${route} should filter on the date the shift happened in Georgia`);
   }
 
+  // `exportRowDate` is now the one answer to "which Georgia day is this row",
+  // so the rule that protected the three filters is asserted where it lives.
+  const repo = read('schedulingRepository.js');
+  const e = repo.indexOf('function exportRowDate');
+  assert.ok(e > 0, 'exportRowDate exists — the guard above is pointed at it');
+  const fn = repo.slice(e, repo.indexOf('\n}', e));
+  assert.ok(/csvLocalDate\(log && log\.clock_in_at\)/.test(fn),
+    'the clock decides the row date, through the Georgia formatter');
+  assert.ok(/csvLocalDate\(log && log\.scheduled_start\)/.test(fn),
+    'and a visit with no clock falls back to its schedule, also in Georgia');
+  assert.ok(!/slice\(0,\s*10\)/.test(fn), 'never a UTC date slice');
+
   // And the pay period is derived from that same Georgia date, not the slice.
   const payroll = bodyOf('/api/scheduling/payroll.csv');
-  assert.ok(/const shiftDate = sched\.csvLocalDate\(l\.clock_in_at\)/.test(payroll),
+  assert.ok(/const shiftDate = sched\.exportRowDate\(l\)/.test(payroll),
     'the pay period is derived from shiftDate, so shiftDate must be the Georgia date');
 
   // The three date/time columns and the three filters, all on the helpers.
