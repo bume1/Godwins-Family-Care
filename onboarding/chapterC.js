@@ -274,6 +274,19 @@ const ITEMS = Object.freeze([
     classifications: [], classificationNote: NO_CLASS }
 ].map(it => Object.freeze(Object.assign({ chapter: 'C' }, it))));
 
+// ---- GFC's service lines (owner, 2026-11-08) --------------------------------
+// GFC runs three service lines. The Playbook's C.8 table calls its four rows
+// "service lines", but they are readiness gates for scope and billing, and
+// they sit INSIDE GFC's lines: IME is the Veteran Exams line; private pay,
+// insurance billing and psych all open within In-Home Primary and Psych Care.
+// Private Home Care is the caregiver and nurse line (Chapters A and B), so a
+// clinician has no gate for it. Screens group the gates under these.
+const SERVICE_LINES = Object.freeze([
+  { id: 'VETERAN_EXAMS', label: 'Veteran Exams (IME)' },
+  { id: 'IN_HOME_PRIMARY_PSYCH', label: 'In-Home Primary and Psych Care' },
+  { id: 'PRIVATE_HOME_CARE', label: 'Private Home Care' }
+].map(Object.freeze));
+
 // ---- C.8 · Readiness Determination ----------------------------------------
 // Each service line opens on its own conditions, recorded by a named owner:
 // who reviewed the file, what was verified, the approved scope, and the date.
@@ -283,21 +296,21 @@ const ITEMS = Object.freeze([
 // The conditions are the C.8 table's clauses, as references. `modules` come
 // from each module's own `required_for`, never listed here.
 const DETERMINATIONS = Object.freeze([
-  { id: 'IME', title: 'Independent medical examinations', label: 'Veteran Exams (IME)', ref: P('C.8'),
+  { id: 'IME', title: 'Independent medical examinations', label: 'Veteran Exams (IME)', serviceLine: 'VETERAN_EXAMS', ref: P('C.8'),
     conditions: ['Examiner credentialing complete with the contracting organization',
                  'The applicable protocol on file', 'Templates assigned'],
     // Playbook C.2 note and R3.7, Manual §4.1: the non-prescribing protocol
     // under O.C.G.A. 43-34-23 is unverified and requires counsel. Until then
     // the clinician practices under a filed agreement.
     openItem: 'NON_PRESCRIBING_PROTOCOL' },
-  { id: 'PRIVATE_PAY', title: 'Private pay primary care', label: 'Private Pay Visits', ref: P('C.8'),
+  { id: 'PRIVATE_PAY', title: 'Private pay primary care', label: 'Private Pay Patients', serviceLine: 'IN_HOME_PRIMARY_PSYCH', ref: P('C.8'),
     conditions: ['Protocol agreement in force, and filed and approved where the clinician prescribes',
                  'Malpractice coverage confirmed for the scope',
                  'Clinical record system and electronic prescribing access provisioned'] },
-  { id: 'INSURED', title: 'Insured billing', label: 'Insurance Billing', ref: P('C.8'), perPayer: true, includes: ['PRIVATE_PAY'],
+  { id: 'INSURED', title: 'Insured billing', label: 'Insurance Billing', serviceLine: 'IN_HOME_PRIMARY_PSYCH', ref: P('C.8'), perPayer: true, includes: ['PRIVATE_PAY'],
     conditions: ['Approved individual enrollment and reassignment', 'Active group enrollment',
                  'Written confirmation of network participation from each payer'] },
-  { id: 'BEHAVIORAL', title: 'Behavioral health', label: 'Behavioral Health', ref: P('C.8'),
+  { id: 'BEHAVIORAL', title: 'Behavioral health', label: 'Psych Care', serviceLine: 'IN_HOME_PRIMARY_PSYCH', ref: P('C.8'),
     conditions: ['Both certifications verified',
                  'Psychiatric taxonomy active on the national provider identifier',
                  'Behavioral health scope written expressly into the protocol agreement',
@@ -333,4 +346,4 @@ const RECURRING = Object.freeze([
     classification: cls('Regulatory', 'Every five years', P('C.9')) }
 ].map(Object.freeze));
 
-module.exports = { CHAPTER, PHASES, ACKNOWLEDGMENTS, ITEMS, DETERMINATIONS, RECURRING };
+module.exports = { CHAPTER, PHASES, ACKNOWLEDGMENTS, ITEMS, SERVICE_LINES, DETERMINATIONS, RECURRING };

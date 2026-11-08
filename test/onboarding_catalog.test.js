@@ -275,3 +275,9 @@ test('every phase and service line has a plain label and number for the screens;
   });
   for (const d of C.DETERMINATIONS) assert.ok(d.label && !/\bC\.\d/.test(d.label), d.id);
 });
+
+test('readiness gates sit under GFC\'s three service lines, never presented as lines of their own', () => {
+  assert.deepStrictEqual(C.SERVICE_LINES.map(l => l.label), ['Veteran Exams (IME)', 'In-Home Primary and Psych Care', 'Private Home Care']);
+  const by = Object.fromEntries(C.DETERMINATIONS.map(d => [d.id, d.serviceLine]));
+  assert.deepStrictEqual(by, { IME: 'VETERAN_EXAMS', PRIVATE_PAY: 'IN_HOME_PRIMARY_PSYCH', INSURED: 'IN_HOME_PRIMARY_PSYCH', BEHAVIORAL: 'IN_HOME_PRIMARY_PSYCH' });
+});

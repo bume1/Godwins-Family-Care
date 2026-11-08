@@ -305,7 +305,8 @@ function determinationStatus(det, inputs, record, flags) {
   const outstandingModules = all.filter(m => !moduleState(m, (record.training || {})[m.id], flags[m.id]).complete)
     .map(m => m.id);
   return {
-    id: det.id, title: det.title, label: det.label, ref: det.ref,
+    id: det.id, title: det.title, label: det.label, serviceLine: det.serviceLine,
+    serviceLineLabel: (C.SERVICE_LINES.find(l => l.id === det.serviceLine) || {}).label || null, ref: det.ref,
     conditions: det.conditions, perPayer: !!det.perPayer,
     openItem: det.openItem || null,
     requiredModules: all.map(m => m.id),
