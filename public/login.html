@@ -46,6 +46,10 @@
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
   </style>
   <script src="/mfa-step.js"></script>
+  <!-- The Portal Hub lives on this page once someone is signed in, so it
+       carries the session guard too: idle sign-out and the "View as" banner
+       with its Exit button (owner, 2026-11-08). It does nothing with no token. -->
+  <script src="/session-guard.js"></script>
   <!-- The office phone lives in ONE place: ORG in consent-text.js. -->
   <script src="/consent-text.js"></script>
 </head>

@@ -15,6 +15,9 @@
        GFC_TIME's helpers explicitly, because code that says what it means
        outlives a shim. See public/gfc-time.js. -->
   <script src="/gfc-time.js"></script>
+  <!-- Idle sign-out, sign-out on a revoked session, and the "View as" banner
+       with its Exit button. Every signed-in page carries it. -->
+  <script src="/session-guard.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
