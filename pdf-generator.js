@@ -2573,7 +2573,169 @@ async function generateMessageNotePDF(d) {
   return done;
 }
 
+// ---- Private Home Care invoice (owner's sample, 2026-11-08) -----------------
+// One page in the layout of the owner's LTC carrier invoices: cream header
+// band with the logo and INVOICE, FROM / BILL TO, SERVICE DETAILS, the navy
+// line table, totals, PAYMENT and the footer. Every number on it is already
+// worked out (phcInvoices.js): this only draws. The FROM block is the app's
+// one ORG block, never typed again.
+async function generatePhcInvoicePDF(inv) {
+  return new Promise((resolve, reject) => {
+    try {
+      const ORG = consentText.ORG;
+      const doc = new PDFDocument({ size: 'LETTER', margin: 48, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const NAVY = '#033D50', GOLD = '#C9A44A', CREAM = '#FAF7F2', INK = '#1a1a1a', MUTED = '#777777', RULE = '#BBBBBB';
+      const L = 48, R = 612 - 48, W = R - L, MID = 312, BOTTOM = 715;
+      const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+      let y = 0;
+      const room = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 48; } };
+
+      // Header band
+      doc.rect(0, 0, 612, 100).fill(CREAM);
+      doc.image(path.join(__dirname, 'public', 'brand', 'logo-full-color-transparent.png'), L, 20, { width: 168, height: 58 });
+      doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(22).text('INVOICE', MID, 20, { width: R - MID, align: 'right' });
+      const meta = [['Invoice #', inv.displayNumber], ['Invoice date', inv.invoiceDate],
+        inv.serviceDateLabel ? ['Service date', inv.serviceDateLabel] : ['Service period', inv.periodLabel]].filter(([, v]) => v);
+      let my = 47;
+      for (const [k, v] of meta) {
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8.5).text(`${k}  ${v}`, MID, my, { width: R - MID, align: 'right' });
+        my += 11;
+      }
+      y = 122;
+
+      const sectionHead = (label, x, w, rule) => {
+        doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(8).text(label, x, y, { characterSpacing: 0.3 });
+        doc.moveTo(x, y + 11).lineTo(x + w, y + 11).lineWidth(0.7).strokeColor(rule || RULE).stroke();
+      };
+
+      // FROM / BILL TO
+      sectionHead('FROM', L, MID - L - 30);
+      sectionHead('BILL TO', MID, R - MID);
+      const col = (x, w, lines) => {
+        let yy = y + 19;
+        lines.forEach(([t, bold], i) => {
+          if (t === '') { yy += 7; return; }
+          doc.fillColor(INK).font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(i === 0 ? 8.8 : 8.3).text(t, x, yy, { width: w });
+          yy = doc.y + 2.5;
+        });
+        return yy;
+      };
+      // "4300 Paces Ferry Rd SE, Suite 500, Atlanta, GA 30339" -> street line, city line
+      const parts = String(ORG.address).split(/,\s*/);
+      const streetLine = parts.slice(0, Math.max(1, parts.length - 2)).join(', ');
+      const cityLine = parts.slice(Math.max(1, parts.length - 2)).join(', ');
+      const fromLines = [[ORG.name, true], [streetLine], [cityLine], [`Tel ${ORG.phone}  ·  Fax ${ORG.fax}`], [ORG.email]];
+      const b = inv.billTo || {};
+      const billLines = [[b.name || '', true], b.attn ? [`Attn: ${b.attn}`] : null, ...(b.addressLines || []).map(l => [l]), b.email ? [b.email] : null]
+        .filter(Boolean);
+      if (b.type === 'carrier') {
+        billLines.push(['']);
+        billLines.push([`Insured: ${b.insuredName}`]);
+        billLines.push([`Policy #: ${b.policyNumber}`]);
+        if (b.claimNumber) billLines.push([`Claim #: ${b.claimNumber}`]);
+      }
+      y = Math.max(col(L, MID - L - 30, fromLines), col(MID, R - MID, billLines)) + 16;
+
+      // SERVICE DETAILS: one block per shift on a carrier invoice. A family
+      // invoice covers a period, so its line table carries the shifts.
+      sectionHead('SERVICE DETAILS', L, W, GOLD);
+      y += 19;
+      const detail = (k, v) => {
+        doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text(k, L, y, { width: 115 });
+        doc.fillColor(INK).font('Helvetica').fontSize(8.3).text(String(v), L + 118, y, { width: W - 118 });
+        y = Math.max(doc.y, y + 10) + 3.5;
+      };
+      if (inv.format === 'carrier') {
+        (inv.shifts || []).forEach((s, i) => {
+          room(100);
+          if (i > 0) { y += 6; doc.moveTo(L, y - 4).lineTo(L + 220, y - 4).lineWidth(0.4).strokeColor(RULE).stroke(); }
+          if (i === 0) detail('Client', inv.clientName);
+          detail('Caregiver', `${s.caregiverName}${s.levelLabel ? `, ${s.levelLabel}` : ''}`);
+          detail('Service', s.service);
+          detail('Date of service', s.date);
+          detail('Shift start (ET)', s.start);
+          detail('Shift end (ET)', s.end);
+          detail('Billed duration', s.duration);
+        });
+      } else {
+        detail('Client', inv.clientName);
+        detail('Service', [...new Set((inv.shifts || []).map(s => s.service))].join('; ') || 'Private home care services');
+        detail('Service period', inv.periodLabel);
+        detail('Visits', String((inv.shifts || []).length));
+        detail('Billed duration', inv.billedDuration);
+      }
+      y += 14;
+
+      // Line table
+      const cHours = R - 190, cRate = R - 120, cAmt = R - 70;
+      const header = () => {
+        doc.rect(L, y, W, 20).fill(NAVY);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(7.8);
+        doc.text('DESCRIPTION', L + 8, y + 6.5);
+        doc.text('HOURS', cHours - 30, y + 6.5, { width: 60, align: 'right' });
+        doc.text('RATE', cRate - 20, y + 6.5, { width: 70, align: 'right' });
+        doc.text('AMOUNT', cAmt - 10, y + 6.5, { width: 72, align: 'right' });
+        y += 20;
+      };
+      room(48);
+      header();
+      // A family invoice lists two weeks of shifts, so its rows are tighter.
+      const rowMin = inv.format === 'family' ? 17 : 24, pad = inv.format === 'family' ? 4.5 : 8;
+      for (const l of inv.lines || []) {
+        const h = Math.max(rowMin, doc.font('Helvetica').fontSize(8.3).heightOfString(l.description, { width: cHours - 40 - L }) + pad * 2 - 2);
+        if (y + h > BOTTOM) { doc.addPage(); y = 48; header(); }
+        doc.fillColor(INK).font('Helvetica').fontSize(8.3).text(l.description, L + 8, y + pad, { width: cHours - 40 - L });
+        doc.text(Number(l.hours).toFixed(2), cHours - 30, y + pad, { width: 60, align: 'right' });
+        doc.text(`${usd(l.rateCents)}/hr`, cRate - 20, y + pad, { width: 70, align: 'right' });
+        doc.text(usd(l.amountCents), cAmt - 10, y + pad, { width: 72, align: 'right' });
+        y += h;
+        doc.moveTo(L, y).lineTo(R, y).lineWidth(0.4).strokeColor('#E2E2E2').stroke();
+      }
+      y += 12;
+      room(70);
+      const tot = (k, v) => {
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8.3).text(k, cRate - 100, y, { width: 150, align: 'right' });
+        doc.fillColor(INK).text(v, cAmt - 10, y, { width: 72, align: 'right' });
+        y += 16;
+      };
+      tot('Subtotal', usd(inv.totalCents));
+      tot('Sales tax (0%)', usd(0));
+      doc.moveTo(cRate - 150, y).lineTo(R, y).lineWidth(0.8).strokeColor(GOLD).stroke();
+      y += 8;
+      doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(11).text('TOTAL DUE', cRate - 100, y, { width: 150, align: 'right' });
+      doc.text(usd(inv.totalCents), cAmt - 20, y, { width: 82, align: 'right' });
+      y += 36;
+
+      // PAYMENT
+      room(70);
+      sectionHead('PAYMENT', L, W);
+      y += 19;
+      for (const t of [`Payable to: ${ORG.name}`, 'Terms: Due Upon Receipt', `Questions: ${ORG.email}  ·  ${ORG.phone}`]) {
+        doc.fillColor(INK).font('Helvetica').fontSize(8.3).text(t, L, y);
+        y = doc.y + 3;
+      }
+
+      // Footer on every page
+      const pages = doc.bufferedPageRange();
+      for (let i = 0; i < pages.count; i++) {
+        doc.switchToPage(pages.start + i);
+        doc.page.margins.bottom = 0;   // the footer sits below the margin; without this pdfkit adds a page for it
+        doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor(RULE).stroke();
+        doc.fillColor(MUTED).font('Helvetica').fontSize(6.8)
+          .text(`Care That Sees You. ${ORG.name}  ·  ${ORG.phone}`, L, 748, { lineBreak: false });
+        if (pages.count > 1) doc.text(`Page ${i + 1} of ${pages.count}`, L, 748, { width: W, align: 'right', lineBreak: false });
+      }
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
 module.exports = {
+  generatePhcInvoicePDF,
   generateMessageNotePDF,
   generateSignedNotePDF,
   generateAfterVisitSummaryPDF,

@@ -57,14 +57,14 @@ const shift = (id, isoDate, status, clientName) => ({
   id, status, clientName,
   start: at(isoDate, '09:00'), end: at(isoDate, '13:00'),
   requiredLicenseLevel: null, levelRequirementLabel: 'Open to all license levels',
-  poolVisibility: 'all_eligible', caregiverName: status === 'open' ? null : 'Tasha Green'
+  poolVisibility: 'all_eligible', caregiverName: status === 'open' ? null : 'Tara Gibbs'
 });
 const SHIFTS = [
-  shift('s-open-0901', '2026-09-01', 'open', 'Dorothy Martuscello'),
+  shift('s-open-0901', '2026-09-01', 'open', 'Jane Smith'),
   shift('s-conf-1002', '2026-10-02', 'confirmed', 'Juanita Guess'),
-  shift('s-done-1003', '2026-10-03', 'completed', 'Dorothy Martuscello'),
+  shift('s-done-1003', '2026-10-03', 'completed', 'Jane Smith'),
   shift('s-clam-1004', '2026-10-04', 'claimed', 'Juanita Guess'),
-  shift('s-canc-1005', '2026-10-05', 'cancelled', 'Dorothy Martuscello'),
+  shift('s-canc-1005', '2026-10-05', 'cancelled', 'Jane Smith'),
   shift('s-open-1106', '2026-11-06', 'open', 'Juanita Guess')
 ];
 const IN_OCT = ['s-conf-1002', 's-done-1003', 's-clam-1004', 's-canc-1005'];
@@ -136,7 +136,7 @@ const posted = [];   // every POST body the page sends
       return route.fulfill({ status: 200, contentType: 'application/json',
         body: JSON.stringify({ caregivers: [
           { id: 'cg1', name: 'Danielle Carter', licenseLabel: 'CNA' },
-          { id: 'cg2', name: 'Tasha Green', licenseLabel: 'LPN' }
+          { id: 'cg2', name: 'Tara Gibbs', licenseLabel: 'LPN' }
         ] }) });
     }
     if (url.pathname === '/api/scheduling/availability') {
