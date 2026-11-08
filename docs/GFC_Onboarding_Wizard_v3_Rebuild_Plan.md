@@ -6,8 +6,12 @@ any merged code is touched.
 
 Owner decisions already taken, 2026-11-08:
 
-- **The hiring manager's wizard is the primary surface.** The clinician keeps a
-  narrower view of her own items so she can still upload and sign.
+- **Two full surfaces, not one.** The hiring manager's side is the robust one
+  and drives the chapter. The person being onboarded keeps a view that is **as
+  workable for input as the caregiver welcome packet is today** — uploading,
+  signing, marking their own items done, adding notes. **For every role, not
+  just clinicians.** Core edit and activity functions on the staff side do not
+  change.
 - **Plan first, build nothing.** This document is that plan.
 
 ---
@@ -45,6 +49,10 @@ itself on the playbook that states it.
 A hiring manager opens a new hire, picks their role chapter, and the wizard
 walks that chapter from pre-hire screening to independent practice, holding
 what was done, by whom, and when.
+
+The person being onboarded works their own half of it from their own screen,
+the way a caregiver completes the welcome packet today. Both sides write to
+one record. §3.8 sets out how they divide.
 
 The playbook is the specification. Where the two disagree, **the playbook is
 right and the wizard is the defect.** That sentence is worth building a test
@@ -143,6 +151,30 @@ by chapter; and `manual_version` drives the flagging in §6 below.
 Every completion records who, when, and against which primary source. This
 already exists and does not change.
 
+### 3.8 Two surfaces over one record
+
+**The split follows the item's owner, which the item library already carries.**
+Nothing new has to be invented to decide who does what: an item owned by the
+person is theirs, an item owned by GFC or an outside body is the office's.
+Both sides see the whole track, so neither is guessing about the other.
+
+| | The person being onboarded | The hiring manager |
+|---|---|---|
+| Sees | Their whole chapter, their own items first | The whole chapter, plus the roster across everyone |
+| Does | Uploads, signs, marks their own items done, writes notes, answers module checks | Everything above for items the office owns, plus verification against primary source, recording readiness determinations, and moving a phase on |
+| Cannot | Verify their own credential, record a determination, open a phase | Sign in somebody else's name |
+
+**This is the rule that already holds and must keep holding:** a person marking
+their own item done makes it *submitted*, never *complete*, on anything with a
+primary source behind it. They cannot verify their own licence, and recording
+their say-so as a verification would put an unchecked fact behind a readiness
+determination.
+
+**What already exists and is not rebuilt.** Chapter A's person-facing surface
+is the caregiver welcome packet, which works. Chapter C's is the clinician
+wizard. The work is the manager side done properly, plus the chapters that
+have no person-facing surface yet: B, D, E, F, G and H.
+
 ---
 
 ## 4. Gates to phases: what happens to each one
@@ -175,7 +207,8 @@ than a field on one.
 | `clinicianResources.js` | **RES-31 comes off the shelf** (§9, below) |
 | `clinicianPrivileges.js` | Unchanged |
 | `routes/clinicianOnboarding.js` | Gate routes become phase and determination routes. Document, note and upload routes unchanged |
-| `public/clinician-onboarding.html` | "What unlocks when" becomes the phase track. The hiring manager's view becomes primary |
+| `public/clinician-onboarding.html` | "What unlocks when" becomes the phase track. The manager's side gets the chapter driving, verification and determinations. **Her own input half stays as workable as it is now** |
+| `public/caregiver.html` | The welcome packet IS Chapter A's person-facing surface. Not rebuilt; it gains a chapter and phase parenting underneath |
 | `staffDocuments.js`, Drive routing | Unchanged |
 | `docs/GFC_NP_Training_Library_v1.md`, `docs/GFC_Wizard_Resource_Map_v1.md`, `docs/GFC_Clinical_SOPs_Set1_v1.docx` | **Deleted** (§2, §7). They are copies of source documents and must be Drive references |
 
@@ -267,9 +300,10 @@ RES-31 off the shelf, and delete the three source copies from `docs/`.
 
 ## 10. What this plan does not yet answer
 
-- **How much of the clinician's own view survives.** The decision is that she
-  keeps one. Which items she sees, and whether she can still mark anything
-  done herself, follows from Chapter C and is worth settling then.
+- **Whether the two surfaces are one page or two.** The caregiver packet and
+  the clinician wizard are separate pages today. One page that changes by who
+  is looking is less code; two pages are harder to get wrong. Worth settling
+  at step 2, when Chapter C makes it concrete.
 - **The module schema**, blocked above.
 - **Whether existing records migrate.** Nobody has completed a track yet, so
   the honest answer is probably that there is nothing to migrate. Worth
