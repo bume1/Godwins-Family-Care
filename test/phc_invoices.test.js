@@ -74,7 +74,7 @@ test('the server counts voided invoices as taken numbers, and Stripe never sees 
   // stripeSafe only accepts the GFC-INV reference as the product name.
   const inv = { id: '0f7a2b1c-1111-2222-3333-444455556666', number: 'GFC-INV-AAAAAA', displayNumber: 'GFC-NP-261006', totalCents: 14600 };
   const form = billing.checkoutForm(inv, { successUrl: 'https://app.example.com/portal?billing=paid', cancelUrl: 'https://app.example.com/portal?billing=cancelled' });
-  assert.ok(!JSON.stringify(form).includes('GFC-DM'), 'initials never reach Stripe');
+  assert.ok(!JSON.stringify(form).includes('GFC-NP'), 'initials never reach Stripe');
   assert.ok(billing.stripeSafe(form));
 });
 

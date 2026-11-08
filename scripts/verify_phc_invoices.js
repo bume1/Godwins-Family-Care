@@ -49,7 +49,7 @@ const FAMILY = { id: 'cl_ray', role: 'client', email: 'ray@example.test', name: 
   rateAgreement: { hourlyRate: 32.5, dailyMinimumHours: 4 } };
 const CLINICAL = { id: 'cl_ihpc', role: 'client', email: 'ivy@example.test', name: 'Ivy Clinic', serviceLine: 'IHPC', enrollmentStatus: 'enrolled', consents: {},
   rateAgreement: { hourlyRate: 30, dailyMinimumHours: 4 }, billing: { billTo: { type: 'family', name: 'Ivy Clinic', addressLines: [] } } };
-const CG = { id: 'cg_tasha', role: 'vendor', email: 'tasha@example.test', name: 'Tara Gibbs', licenseLevel: 'pca' };
+const CG = { id: 'cg_tara', role: 'vendor', email: 'tara@example.test', name: 'Tara Gibbs', licenseLevel: 'pca' };
 const ADMIN = { id: 'admin_inv', role: 'admin', email: 'invadmin@example.test', name: 'Inv Admin' };
 const CM = { id: 'cm_inv', role: 'caseManager', email: 'cm@example.test', name: 'Cass CM' };
 const log = (id, client, ymd, a, b) => ({ id, caregiver_id: CG.id, caregiver_name: CG.name, license_level: 'pca', client_id: client.id, client_name: client.name,

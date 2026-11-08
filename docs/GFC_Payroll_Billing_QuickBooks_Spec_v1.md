@@ -226,7 +226,7 @@ Both documents are generated as branded PDFs from one shared HTML template syste
 | Totals | Subtotal, prior balance, payments received, amount due |
 | Payment | How to pay, remit address, terms |
 
-- One invoice per client per service date (matches GFC's current LTC carrier invoice format; works for any carrier). Invoice number = GFC-\[client initials\]-\[YYMMDD of service date\], for example GFC-DM-260901. Bill-to block includes Insured name, Policy # and Claim # for insurer payers. Amount is calculated from billed minutes × rate ÷ 60 and rounded to the cent (292 min × $30/hr = $146.00); hours display to 2 decimals plus "X hr Y min".
+- One invoice per client per service date (matches GFC's current LTC carrier invoice format; works for any carrier). Invoice number = GFC-\[client initials\]-\[YYMMDD of service date\], for example GFC-JS-261006. Bill-to block includes Insured name, Policy # and Claim # for insurer payers. Amount is calculated from billed minutes × rate ÷ 60 and rounded to the cent (292 min × $30/hr = $146.00); hours display to 2 decimals plus "X hr Y min".
 - Rebalanced lines carry a small marker and a footnote stating the period total is unchanged.
 - Invoice numbers are sequential and never reused.
 
