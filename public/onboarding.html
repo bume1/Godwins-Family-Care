@@ -369,7 +369,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         ) : (
           <div>
-            <label className="f">Steps</label>
+            {item.steps.length > 0 && <label className="f">Steps</label>}
             <div className="steps">
               {item.steps.map(s => (
                 <div key={s.index} className={`step ${s.done ? 'done' : ''}`}>
@@ -408,6 +408,14 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               ))}
             </div>
           </div>
+        )}
+
+        {item.packet && item.packet.length > 0 && (
+          <div><label className="f">From the welcome packet</label>
+            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen.</div>
+            <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
+              <li key={r.kind}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b></li>
+            ))}</ul></div>
         )}
 
         {item.elements && item.elements.length > 0 && (
@@ -573,7 +581,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>{({ B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -657,12 +665,12 @@ const LINE_CHOICES = [
   ['INSURED', 'In-Home Primary Care · Insurance Billing'], ['BEHAVIORAL', 'Psych Care']
 ];
 // Which Playbook chapter a person is onboarded on.
-const CHAPTER_CHOICES = [['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)']];
+const CHAPTER_CHOICES = [['A', 'Caregiver, employed (companion, PCA or licensed nursing)'], ['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)']];
 const Setup = ({ userId, inputs, onSaved }) => {
   const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '', chapter: 'C', workState: 'GA' }, inputs || {}));
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
   const toggle = (k, v) => setF(Object.assign({}, f, { [k]: f[k].includes(v) ? f[k].filter(x => x !== v) : f[k].concat([v]) }));
-  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license', entersResidence: 'Role involves entering a client residence', federallyReimbursed: 'Role supports a Medicare or Medicaid service line', variableComp: 'Has a commission or bonus', supervisoryDelegation: 'Clinical Director delegates supervisory visits and caregiver competency checks', directsTraining: 'Directs the forty-hour PCA training program', baaRequired: 'Access or role requires a business associate agreement' })[k]}</label>;
+  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license', entersResidence: 'Role involves entering a client residence', federallyReimbursed: 'Role supports a Medicare or Medicaid service line', variableComp: 'Has a commission or bonus', supervisoryDelegation: 'Clinical Director delegates supervisory visits and caregiver competency checks', directsTraining: 'Directs the forty-hour PCA training program', baaRequired: 'Access or role requires a business associate agreement', fortyHourRoute: 'Qualifies as a PCA through the GFC forty-hour training program' })[k]}</label>;
   const save = async () => {
     setErr(''); setMsg('');
     try { await call(`/api/onboarding/admin/people/${userId}/inputs`, { method: 'PUT', body: f }); setMsg('Saved. Her checklist updates to match.'); await onSaved(); } catch (e) { setErr(e.message); }
@@ -674,7 +682,17 @@ const Setup = ({ userId, inputs, onSaved }) => {
       <select value={f.chapter} onChange={e => setF(Object.assign({}, f, { chapter: e.target.value }))} style={{ maxWidth: 520 }}>
         {CHAPTER_CHOICES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
       </select>
-      {f.chapter === 'B' ? <>
+      {f.chapter === 'A' ? <>
+        <label className="f">Classification</label>
+        <select value={f.caregiverClass || ''} onChange={e => setF(Object.assign({}, f, { caregiverClass: e.target.value || null }))} style={{ maxWidth: 360 }}>
+          <option value="">Not set yet</option>
+          <option value="COMPANION">Companion or sitter</option>
+          <option value="PCA">Personal care assistant</option>
+          <option value="NURSING">Licensed nursing (LPN or RN)</option>
+        </select>
+        <label className="f">Their situation</label>
+        {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+      </> : f.chapter === 'B' ? <>
         <label className="f">Her responsibilities</label>
         {['supervisoryDelegation', 'directsTraining'].map(k => <div key={k}>{flag(k)}</div>)}
       </> : ['C', 'D', 'E'].includes(f.chapter) ? <>
@@ -738,7 +756,7 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.notStarted.length > 0 && (
         <div className="card"><div className="card-h"><h2>Clinicians Not Yet Set Up</h2></div>
-          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
+          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>

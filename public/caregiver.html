@@ -2337,8 +2337,19 @@ const App = () => {
       onOpen={openClient} onClose={() => setClientDetail(null)}
       onMessages={() => { setClientDetail(null); setTab('more'); }} />;
   } else if (tab === 'onboarding') {
-    // A caregiver's onboarding is the welcome packet and its checklist.
-    content = <OnboardingCard me={me} />;
+    // A caregiver's onboarding is the welcome packet and its checklist. The
+    // Playbook's Chapter A adds three policies and the drug testing consent
+    // the packet does not carry; those are signed on the onboarding page.
+    content = (
+      <>
+        <OnboardingCard me={me} />
+        <div className="card" style={{ marginTop: 12 }}>
+          <b>Policies to read and sign</b>
+          <p style={{ margin: '6px 0 10px', fontSize: 14 }}>The Field Addendum, the Private Home Care Policies and your job description, plus the drug testing consent. The office can also file these for you.</p>
+          <a className="btn" href="/onboarding" style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}>Open My Onboarding</a>
+        </div>
+      </>
+    );
   } else if (tab === 'documents') {
     // What they signed, then the documents they send the office (timesheets,
     // certifications...) with the upload, as it always worked.

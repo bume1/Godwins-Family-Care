@@ -25,11 +25,13 @@ const accountTypes = require('../accountTypes');
 
 // Who is onboarded on which chapter. Clinicians on C; the admin team on F;
 // the liaison on G, which carries F's screening and paperwork (owner, 2026-11-08). The office can change it in Setup.
-const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
+const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison', 'caregiver']);
 const defaultChapterFor = (u) => {
   const t = accountTypes.accountTypeOf(u);
   if (t === 'rn') return 'B';   // the registered nurse chapter (owner, 2026-11-08)
   if (t === 'liaison') return 'G';
+  // Caregivers: Chapter A, read through their welcome packet.
+  if (t === 'caregiver') return 'A';
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
@@ -38,6 +40,7 @@ const defaultChapterFor = (u) => {
   return (['provider', 'lcsw', 'lmsw'].includes(t) || (u && u.hasClinicalAccess && !u.isManager)) ? 'C' : 'F';
 };
 const CHAPTER_CHOICES = Object.freeze([
+  { id: 'A', label: 'Caregiver, employed (companion, PCA or licensed nursing)' },
   { id: 'B', label: 'Registered nurse, employed (private home care)' },
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
   { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
@@ -46,6 +49,7 @@ const CHAPTER_CHOICES = Object.freeze([
   { id: 'G', label: 'Community Care Liaison (remote business development)' }
 ]);
 const C = require('../onboarding/chapterC');
+const wpRepo = require('../welcomePacketRepository');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
@@ -121,13 +125,26 @@ module.exports = function createOnboardingRoutes(deps) {
     try { return await loader.manualState(); } catch (e) { return { ok: false, reason: e.message, changeLog: VF.SEEDED_CHANGES.slice() }; }
   }
 
+  // Chapter A reads the caregiver's welcome packet checklist, derived the
+  // same way the caregiver app and the scheduling gate derive it. Never
+  // stored here: a stored copy goes stale the moment a document is accepted.
+  async function packetRowsFor(rec) {
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return undefined;
+    const id = String(rec.userId);
+    const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
+    const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
+    const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === id);
+    return wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts);
+  }
+
   async function buildFor(rec, audience) {
     const m = await manual();
     const track = T.buildTrack({
       inputs: rec.inputs, record: rec, today: today(), audience,
       manualVersion: m.ok ? m.currentVersion : '2.2',
       moduleReviews: await reviews(),
-      legacy: await legacyFor(rec.userId)
+      legacy: await legacyFor(rec.userId),
+      packetRows: await packetRowsFor(rec)
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -401,8 +418,10 @@ module.exports = function createOnboardingRoutes(deps) {
     const users = await getUsers();
     const m = await manual();
     const revs = await reviews();
+    const packets = {};
+    for (const rec of rows) packets[rec.userId] = await packetRowsFor(rec);
     const people = rows.map(rec => {
-      const t = T.buildTrack({ inputs: rec.inputs, record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs });
+      const t = T.buildTrack({ inputs: rec.inputs, record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId] });
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
