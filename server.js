@@ -123,6 +123,9 @@ const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit l
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
 const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
+// W-2 staff clock in through My GFC; 1099 staff come in from other platforms
+// later (owner, 2026-11-08).
+const EMPLOYMENT_TYPES = Object.freeze(['W2', '1099']);
 const onboardingRoutes = require('./routes/onboarding'); // staff onboarding over the Playbook v3.0 catalog (2026-11-08; replaces #260)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
@@ -2483,6 +2486,9 @@ const authenticateToken = async (req, res, next) => {
         // Clinical (FNP/RN) access — gates the clinician workspace (Session 4.1)
         hasClinicalAccess: freshUser.hasClinicalAccess || false,
         licenseLevel: freshUser.licenseLevel || null,
+        // W-2 or 1099 (owner, 2026-11-08): W-2 staff without shifts clock in
+        // on the shared clock; read fresh so a change applies on the next request.
+        employmentType: freshUser.employmentType || null,
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
@@ -3280,7 +3286,7 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail
+      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail, employmentType
     } = req.body;
     let { email, password } = req.body;
 
@@ -3379,6 +3385,9 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       // gates nothing — so both of these are structured fields, admin-set, and
       // nothing infers either of them.
       prescriberCredential: controlled.PRESCRIBER_CREDENTIALS.includes(String(prescriberCredential || '')) ? String(prescriberCredential) : null,
+      // W-2 staff clock in through the app; 1099 staff do not (owner,
+      // 2026-11-08). Unset until an admin chooses.
+      employmentType: EMPLOYMENT_TYPES.includes(String(employmentType || '')) ? String(employmentType) : null,
       deaNumber: controlled.normalizeDea(deaNumber),
       deaSchedules: controlled.normalizeDeaSchedules(deaSchedules),
       deaExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(String(deaExpiresAt || '')) ? String(deaExpiresAt) : null,
@@ -4753,6 +4762,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // and for a DEA registration that is a prescriber who can no longer record
       // a controlled substance with nobody having decided that.
       prescriberCredential: u.prescriberCredential || null,
+      employmentType: u.employmentType || null,
       deaNumber: u.deaNumber || null,
       deaSchedules: Array.isArray(u.deaSchedules) ? u.deaSchedules : [],
       deaExpiresAt: u.deaExpiresAt || null,
@@ -4833,7 +4843,7 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa
+      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa, employmentType
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -4962,6 +4972,13 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
     // somebody else, and storing nothing while the form says saved leaves an
     // admin believing a prescriber is registered when the record says they are
     // not. Blank CLEARS, which is how a lapsed registration is removed.
+    if (employmentType !== undefined) {
+      const wantedType = employmentType === null || employmentType === '' ? null : String(employmentType);
+      if (wantedType !== null && !EMPLOYMENT_TYPES.includes(wantedType)) {
+        return res.status(400).json({ error: 'employmentType must be W2 or 1099 (or empty).', code: 'EMPLOYMENT_TYPE_INVALID' });
+      }
+      users[idx].employmentType = wantedType;
+    }
     if (prescriberCredential !== undefined) {
       const wanted = prescriberCredential === null || prescriberCredential === '' ? null : String(prescriberCredential);
       if (wanted !== null && !controlled.PRESCRIBER_CREDENTIALS.includes(wanted)) {

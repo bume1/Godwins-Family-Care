@@ -152,6 +152,7 @@ module.exports = function createStaffPortalRoutes(deps) {
       isAdmin: isAdminTeam(req.user),
       isCaregiver: type === 'caregiver',
       isLiaison: type === 'liaison',
+      employmentType: req.user.employmentType || null,
       isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess
     });
   });
