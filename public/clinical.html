@@ -505,6 +505,10 @@
       // an RN wants to know which protocols exist and what they permit — while
       // every WRITE control is drawn from the served capability.
       { key: 'protocols', tab: 'Protocols', icon: 'ti-file-certificate', group: 'work' },
+      // Owner, 2026-11-08: My GFC, every clinician's own staff portal
+      // (documents, policies, shared Drive folders, pay, bio), one click from
+      // the sidebar. Its own page, so `href` leaves the workspace.
+      { key: 'mygfc', tab: 'My GFC', icon: 'ti-id-badge-2', group: 'foot', href: '/my' },
       { key: 'settings', tab: 'Settings', icon: 'ti-settings', group: 'foot' }
     ]);
 
@@ -10074,7 +10078,7 @@
             <a className="btn ghost" href="/account"><i className="ti ti-shield-lock" />Account &amp; Security</a>
             {/* My GFC, her staff portal: onboarding, documents, policies and
                 the Drive folders shared with her role (owner, 2026-11-08). */}
-            <a className="btn ghost" href="/my"><i className="ti ti-id-badge-2" />My Portal</a>
+            <a className="btn ghost" href="/my"><i className="ti ti-id-badge-2" />My GFC</a>
             <button className="btn ghost" onClick={signOut}><i className="ti ti-logout" />Sign Out</button>
           </div>
         </div>

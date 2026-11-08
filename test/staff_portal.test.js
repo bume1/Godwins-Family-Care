@@ -284,7 +284,7 @@ test('a shared file is never streamed by the app: the folder route returns Drive
 test('the portal page and the ways into it', () => {
 
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
-  assert.match(read('clinical.html'), /href="\/my"[^>]*>.*My Portal/);
+  assert.match(read('clinical.html'), /\{ key: 'mygfc', tab: 'My GFC', icon: 'ti-id-badge-2', group: 'foot', href: '\/my' \}/, 'My GFC is in the clinical sidebar');
   assert.ok(!/href="\/onboarding"/.test(read('clinical.html')), 'clinicians reach onboarding through My GFC now');
   // The caregiver app IS a caregiver's My GFC: the shared frame and sections.
   const cg = read('caregiver.html');
