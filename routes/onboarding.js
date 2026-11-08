@@ -20,6 +20,7 @@
 const express = require('express');
 const multer = require('multer');
 const T = require('../onboarding/track');
+const RN = require('../onboarding/renewals');
 const C = require('../onboarding/chapterC');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
@@ -131,6 +132,41 @@ module.exports = function createOnboardingRoutes(deps) {
     } catch (e) {
       return { ok: false, byModule: {}, errors: [{ reason: e.message }] };
     }
+  }
+
+  // ---- renewals, recurring duties, re-checks (one implementation, two doors) ----
+  async function doExpiry(req, res, rec, actor) {
+    const item = T.findItem(req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    try {
+      rec.items = rec.items || {};
+      rec.items[item.id] = RN.setExpiry(item.id, rec.items[item.id], String((req.body || {}).expiresOn || ''), actor, nowIso());
+      await save(rec);
+      await event({ userId: rec.userId, type: 'expiry_set', itemId: item.id, expiresOn: rec.items[item.id].expiresOn, byId: actor.id, byName: actor.name });
+      return res.json({ ok: true });
+    } catch (e) { return send(res, e); }
+  }
+  async function doRenew(req, res, rec, actor) {
+    const item = T.findItem(req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    try {
+      rec.items = rec.items || {};
+      rec.items[item.id] = RN.startRenewal(item.id, rec.items[item.id], actor, nowIso());
+      await save(rec);
+      await event({ userId: rec.userId, type: 'renewal_started', itemId: item.id, byId: actor.id, byName: actor.name });
+      return res.json({ ok: true });
+    } catch (e) { return send(res, e); }
+  }
+  async function doRecheck(req, res, rec, actor) {
+    const m = findModule(req.params.moduleId);
+    if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
+    try {
+      rec.training = rec.training || {};
+      rec.training[m.id] = RN.recordRecheck(m, rec.training[m.id], (req.body || {}).day, actor, nowIso(), new Date());
+      await save(rec);
+      await event({ userId: rec.userId, type: 'recheck', moduleId: m.id, day: Number((req.body || {}).day), byId: actor.id, byName: actor.name });
+      return res.json({ ok: true });
+    } catch (e) { return send(res, e); }
   }
 
   // ---- shared write paths (one implementation, two doors) ----------------
@@ -312,8 +348,20 @@ module.exports = function createOnboardingRoutes(deps) {
     await event({ userId: rec.userId, type: 'module_complete', moduleId: m.id, byId: req.user.id });
     return res.json({ ok: true });
   });
-  // Spaced re-checks (days 3, 10, 30, 90) arrive with their screen; a route
-  // with no screen fails the no-orphan-routes guard by design.
+  // She records her own document's expiration date, starts its renewal, and
+  // does her own spaced re-checks (Training Library TRN-406).
+  router.put('/api/onboarding/me/items/:itemId/expiry', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doExpiry(req, res, rec, actorOf(req));
+  });
+  router.post('/api/onboarding/me/items/:itemId/renew', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doRenew(req, res, rec, actorOf(req));
+  });
+  router.post('/api/onboarding/me/modules/:moduleId/recheck', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doRecheck(req, res, rec, actorOf(req));
+  });
 
   // ---- THE OFFICE ------------------------------------------------------------
   router.get('/api/onboarding/admin/overview', authenticateToken, requireOffice, async (req, res) => {
@@ -335,6 +383,7 @@ module.exports = function createOnboardingRoutes(deps) {
         waitingOnHer: t.counts.waitingOnHer, returned: t.counts.returned,
         waitingOnOffice: t.items.filter(i => i.next && !i.next.hers && i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE).length,
         expired: t.items.filter(i => i.status === T.STATUS.EXPIRED).length,
+        renewalsDue: t.counts.renewalsDue, recurringDue: t.counts.recurringDue, rechecksDue: t.counts.rechecksDue,
         updatedAt: rec.updatedAt
       };
     });
@@ -350,6 +399,8 @@ module.exports = function createOnboardingRoutes(deps) {
         waitingOnStaff: people.reduce((n, p) => n + p.waitingOnHer, 0),
         returned: people.reduce((n, p) => n + p.returned, 0),
         expired: people.reduce((n, p) => n + p.expired, 0),
+        renewalsDue: people.reduce((n, p) => n + p.renewalsDue, 0),
+        recurringDue: people.reduce((n, p) => n + p.recurringDue, 0),
         modulesFlagged: flags.filter(f => f.status === VF.STATUS.FLAGGED).length
       },
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
@@ -397,6 +448,30 @@ module.exports = function createOnboardingRoutes(deps) {
         T.returnStep(item, rec.items[item.id], (req.body || {}).step, officeActorOf(req), (req.body || {}).reason, nowIso()));
       await save(rec);
       await event({ userId: rec.userId, type: 'returned', itemId: item.id, byId: req.user.id, byName: req.user.name });
+      return res.json({ ok: true });
+    } catch (e) { return send(res, e); }
+  });
+  router.put('/api/onboarding/admin/people/:userId/items/:itemId/expiry', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doExpiry(req, res, rec, officeActorOf(req));
+  });
+  router.post('/api/onboarding/admin/people/:userId/items/:itemId/renew', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doRenew(req, res, rec, officeActorOf(req));
+  });
+  router.post('/api/onboarding/admin/people/:userId/modules/:moduleId/recheck', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doRecheck(req, res, rec, officeActorOf(req));
+  });
+  // The C.9 recurring duties are the office's to record (credentialing owner,
+  // delegating physician, Clinical Director).
+  router.post('/api/onboarding/admin/people/:userId/recurring/:recurringId', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    try {
+      const next = RN.recordRecurring(req.params.recurringId, rec, String((req.body || {}).doneOn || ''), officeActorOf(req), nowIso());
+      rec.recurring = next.recurring;
+      await save(rec);
+      await event({ userId: rec.userId, type: 'recurring_done', recurringId: req.params.recurringId, doneOn: req.body.doneOn, byId: req.user.id, byName: req.user.name });
       return res.json({ ok: true });
     } catch (e) { return send(res, e); }
   });

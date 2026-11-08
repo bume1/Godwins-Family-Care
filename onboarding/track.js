@@ -367,6 +367,8 @@ function openDetermination(detId, inputs, record, body, actor, flags, now) {
  */
 // `legacy` is { items, titles }: a #260 record's item states and the old
 // titles. Shown as evidence on the matching item; it never completes one.
+const R = require('./renewals');
+
 function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy } = {}) {
   const i = normalizeInputs(inputs);
   const rec = record || {};
@@ -379,7 +381,10 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const items = composeChecklist(i).map(it => {
     const st = (rec.items || {})[it.id] || null;
     const ns = nextStep(it, st);
-    const status = itemStatus(it, st, today);
+    // A completed item whose document has expired reads Renewal Due.
+    const expiry = R.expiryOf(it.id, st, today || new Date());
+    let status = itemStatus(it, st, today);
+    if (expiry && expiry.status === 'EXPIRED' && status === STATUS.COMPLETE) status = STATUS.EXPIRED;
     return {
       id: it.id, phase: it.phase, title: it.title, ref: it.ref,
       status,
@@ -409,6 +414,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
         : null,
       separateRecord: it.separateRecord || null,
       repeats: it.repeats || null,
+      expiry,
+      renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || []
     };
@@ -416,7 +423,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 
   const modules = MODULES.filter(m => moduleApplies(m, i)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
+    const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
+      rechecks,
       id: m.id, title: m.title, phase: m.phase, stage: m.stage, format: m.format,
       minutes: m.minutes, host: m.host, signoff: m.signoff,
       requiredFor: m.requiredFor, sopRefs: m.sopRefs, manualRefs: m.manualRefs,
@@ -458,6 +467,12 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       classification: { phrase: r.classification.phrase, legal: V.isLegalRequirement(r.classification) },
       ownerLabels: r.owner.map(o => V.ACTOR_LABELS[o])
     })),
+    renewals: {
+      items: items.filter(x => x.expiry).map(x => ({ id: x.id, title: x.title, status: x.status, expiry: x.expiry, renewals: x.renewals,
+        hers: !!(x.next ? x.next.hers : true) })),
+      recurring: R.recurringFor(C.RECURRING.filter(r => matchesWhen(r.when, i)), rec, i.startDate, today || new Date()),
+      basis: office ? R.EXPIRING_BASIS : undefined
+    },
     counts: {
       items: items.length,
       complete: items.filter(x => x.status === STATUS.COMPLETE || x.status === STATUS.NOT_APPLICABLE).length,
@@ -465,6 +480,11 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       returned: items.filter(x => x.status === STATUS.RETURNED).length
     }
   };
+  // What needs attention after the first ninety days, counted once here so
+  // the office overview and her home read the same numbers.
+  out.counts.renewalsDue = out.renewals.items.filter(x => x.expiry.status === 'EXPIRED' || x.expiry.status === 'SOON').length;
+  out.counts.recurringDue = out.renewals.recurring.filter(r => r.status === 'OVERDUE' || r.status === 'SOON').length;
+  out.counts.rechecksDue = modules.filter(m => m.rechecks && m.rechecks.dueNow.length).length;
   if (office) {
     out.moduleFlags = {
       flagged: Object.values(flags).filter(f => f.status === VF.STATUS.FLAGGED).map(f => f.moduleId),
