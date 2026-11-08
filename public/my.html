@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — My GFC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The look lives in /my-gfc.js, shared with the caregiver app. */
+    body{margin:0;background:#FAF7F2;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/session-guard.js"></script>
+<script type="text/babel" src="/my-gfc.js"></script>
+<script type="text/babel">
+const { Shell, Section, StaffTiles, StaffView, useStaffData, staffSectionsFor, OnboardingSummary, LiaisonClients, Tile } = window.MyGFC;
+
+// My GFC for everyone but caregivers, whose My GFC is /caregiver: the same
+// frame and sections plus their shift tools.
+function App() {
+  const data = useStaffData();
+  const { profile, fatal, onboarding, err } = data;
+  const [view, setView] = React.useState(() => (window.location.hash || '').slice(1) || 'home');
+  const go = (id) => { setView(id); window.history.replaceState(null, '', `#${id}`); window.scrollTo(0, 0); };
+
+  if (fatal) return <div className="mygfc" style={{ padding: 24 }}><div className="mg-err">{fatal}</div><a className="mg-btn" href="/login">Back to sign in</a></div>;
+  if (!profile) return <div className="mygfc" style={{ padding: 24 }}><p className="mg-note">Loading…</p></div>;
+  if (profile.isCaregiver) { window.location.replace(`/caregiver${window.location.hash || ''}`); return null; }
+
+  // A Community Care Liaison lands here and also has their clients (owner,
+  // 2026-11-08).
+  const sections = [{ id: 'home', label: 'Home', icon: 'ti-home' }]
+    .concat(profile.isLiaison ? [{ id: 'clients', label: 'My Clients', icon: 'ti-users', subtitle: 'Where each of your clients is in enrollment.' }] : [])
+    .concat(staffSectionsFor(profile));
+  const current = sections.find(s => s.id === view);
+  if (!current) { setView('home'); return null; }
+  // A liaison's home IS this page, so there is nowhere to go back to.
+  const home = profile.isLiaison ? null : profile.isClinician ? { href: '/clinical', label: 'Clinical Workspace' } : { href: '/login', label: 'Portal Hub' };
+  const signOut = () => { try { localStorage.clear(); } catch (e) { /* private mode */ } window.location.replace('/login'); };
+  // The phone menu fits five; everything else is a tile on Home.
+  const phoneTabs = sections.filter(s => !['account', 'onboarding', 'team'].includes(s.id)).slice(0, 5);
+
+  return (
+    <Shell sections={sections} phoneTabs={phoneTabs} view={view} go={go} name={profile.name} typeLabel={profile.typeLabel}
+      home={home} title={current.label}
+      footExtra={<div><button onClick={signOut} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>Sign Out</button></div>} subtitle={current.subtitle} firstName={(profile.name || '').split(' ')[0]}>
+      {err && <div className="mg-err">{err}</div>}
+      {view === 'home'
+        ? <div>
+            <StaffTiles data={data} go={go}
+              extra={profile.isLiaison ? <Tile key="clients" icon="ti-users" title="My Clients" sub="Where each client is in enrollment" onClick={() => go('clients')} /> : null} />
+            <Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section>
+          </div>
+        : view === 'clients' ? <Section><LiaisonClients /></Section>
+        : <StaffView view={view} data={data} />}
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

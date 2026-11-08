@@ -598,6 +598,36 @@ async function uploadMessageAttachmentFile(clientName, fileName, fileBuffer, mim
   return { fileId: response.data.id, fileName: response.data.name };
 }
 
+// Onboarding and staff documents, filed under one top-level folder per role
+// ("GFC Clinician Documents", "GFC Registered Nurse Documents" ...) with a
+// subfolder per person. The folder names live in onboarding/staffFolders.js;
+// each is created the first time a document is filed for that role.
+async function uploadStaffDocumentFile(roleFolderName, personName, fileName, fileBuffer, mimeType) {
+  if (!roleFolderName) throw new Error('A staff document needs its role folder');
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+
+  const rootFolderId = await findOrCreateFolder(roleFolderName, null);
+  const personFolderId = await findOrCreateFolder(personName || 'Unnamed', rootFolderId);
+
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [personFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name, webViewLink, webContentLink',
+    ...ALL_DRIVES
+  });
+
+  await maybeGrantAnyoneLink(drive, response.data.id);
+
+  console.log(`✅ Uploaded staff document to Google Drive (${roleFolderName}): ${response.data.name}`);
+  return {
+    fileId: response.data.id,
+    fileName: response.data.name,
+    webViewLink: response.data.webViewLink,
+    webContentLink: response.data.webContentLink
+  };
+}
+
 async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
   const drive = await getDriveClient();
   const { Readable } = require('stream');
@@ -674,6 +704,44 @@ function describeDriveError(err) {
   return { reason, hint: null, code: 'DRIVE_REFUSED' };
 }
 
+// A file's identity at this moment: its checksum changes when its bytes do,
+// which is what a "revised in place" Drive document is. Used to key any cache
+// of a source document so a revision can never be served stale.
+// The direct children of one folder: names, types and the Drive link each
+// opens at. Read as the service account; the staff portal only ever calls it
+// for folders an admin assigned, and a file still opens in Drive under the
+// viewer's own Google sign-in.
+async function listFolderChildren(folderId) {
+  if (!folderId) throw new Error('No Drive folder id given');
+  const drive = await getDriveClient();
+  const out = [];
+  let pageToken;
+  do {
+    const res = await drive.files.list({
+      q: `'${escapeDriveQueryValue(folderId)}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, iconLink)',
+      orderBy: 'folder,name', pageSize: 200, pageToken, ...ALL_DRIVES_LIST
+    });
+    (res.data.files || []).forEach(f => out.push({
+      id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime || null,
+      webViewLink: f.webViewLink || null, isFolder: f.mimeType === 'application/vnd.google-apps.folder'
+    }));
+    pageToken = res.data.nextPageToken;
+  } while (pageToken && out.length < 2000);
+  return out;
+}
+
+async function getFileFingerprint(fileId) {
+  if (!fileId) throw new Error('No Drive file id given');
+  const drive = await getDriveClient();
+  const res = await drive.files.get({ fileId, fields: 'id, name, mimeType, md5Checksum, modifiedTime, version', ...ALL_DRIVES });
+  return {
+    id: res.data.id, name: res.data.name, mimeType: res.data.mimeType,
+    md5Checksum: res.data.md5Checksum || null, modifiedTime: res.data.modifiedTime || null,
+    version: res.data.version || null
+  };
+}
+
 async function downloadFileBuffer(fileId) {
   // Asking Google about `undefined` comes back as "File not found", which reads
   // as a Drive problem when it is actually a row with no file behind it.
@@ -700,6 +768,9 @@ module.exports = {
   uploadClientDocumentFile,
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
+  uploadStaffDocumentFile,
+  getFileFingerprint,
+  listFolderChildren,
   uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,

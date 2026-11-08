@@ -568,13 +568,15 @@ test('hub: the rest of the Admin Hub API stays Super Admin only', () => {
   assert.ok(!/isManager|isHomeCareOffice/.test(gate));
 });
 
-test('hub: managers and coordinators get a User Management tile; nobody else new does', () => {
+test('hub: managers and coordinators reach User Management through People; nobody else new does', () => {
+  // User Management moved into the People block (owner, 2026-11-08).
+  const usersTile = (t) => ((accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).find(x => x.id === 'people') || {}).children || []).find(x => x.id === 'users');
   for (const t of ['manager', 'coordinator']) {
-    const tile = accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).find(x => x.id === 'users');
-    assert.ok(tile && tile.path === '/admin', t);
+    const tile = usersTile(t);
+    assert.ok(tile && tile.path === '/admin?view=users', t);
   }
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
-    assert.ok(!accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).some(x => x.id === 'users'), t);
+    assert.ok(!usersTile(t), t);
   }
 });
 

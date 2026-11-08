@@ -45,13 +45,19 @@ const PHI_PREFIXES = Object.freeze([
   '/api/veterans',
   // The IME record analyzer: a veteran's claim file and what was read from it.
   '/api/ime',
-  // Clinician onboarding and credentialing. Not PATIENT data, so the collection
+  // Staff onboarding and credentialing. Not PATIENT data, so the collection
   // is registered phi:false — but a credentialing file carries an NPDB report, a
   // DEA registration, immunization and TB results and a home address, and who
   // opened it is exactly what a durable audit trail is for. The playbook calls
   // the gate-opening record the credentialing committee decision; this is the
   // read side of the same thing.
-  '/api/clinician-onboarding'
+  '/api/onboarding',
+  // My GFC, the staff portal: a person's own employment documents, and which
+  // shared Drive folders they opened. Who read what belongs in the trail.
+  '/api/my',
+  // Pay stubs arriving from the payroll Apps Script. Not PHI, but pay is
+  // exactly what a durable record of who sent what should cover.
+  '/api/payroll'
 ]);
 // Not PHI by construction: auth handshakes (audited by their own events),
 // templates/config/announcements, email unsubscribe tokens, bootstrap.

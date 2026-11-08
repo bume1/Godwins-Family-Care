@@ -43,6 +43,7 @@ const TYPES = Object.freeze({
   LMSW: 'lmsw',
   COORDINATOR: 'coordinator',
   CAREGIVER: 'caregiver',
+  LIAISON: 'liaison',
   CLIENT: 'client',
   FAMILY: 'family'
 });
@@ -57,6 +58,7 @@ const ACCOUNT_TYPES = Object.freeze([
   { value: TYPES.LMSW, label: 'LMSW / Case Manager', staff: true },
   { value: TYPES.COORDINATOR, label: 'Care Coordinator', staff: true },
   { value: TYPES.CAREGIVER, label: 'Caregiver', staff: true },
+  { value: TYPES.LIAISON, label: 'Community Care Liaison', staff: true },
   { value: TYPES.CLIENT, label: 'Client', staff: false },
   { value: TYPES.FAMILY, label: 'Family / Authorized Contact', staff: false }
 ].map(Object.freeze));
@@ -110,6 +112,9 @@ function fieldsFor(type, { managerClinicalAccess } = {}) {
     // caregiver management) admits them with no second rule to keep in step.
     case TYPES.COORDINATOR: return base('user', true, 'coordinator');
     case TYPES.CAREGIVER: return base('vendor', false, null);
+    // Community Care Liaison (owner, 2026-11-08): My GFC and the enrollment
+    // summary of the clients assigned to them. No clinical role, no hub.
+    case TYPES.LIAISON: return base('liaison', false, null);
     case TYPES.CLIENT: return base('client', false, null);
     case TYPES.FAMILY: return base('family', false, null);
     default: return null;
@@ -129,6 +134,7 @@ function deriveType(u) {
   if (role === 'client') return TYPES.CLIENT;
   if (role === 'family') return TYPES.FAMILY;
   if (role === 'vendor') return TYPES.CAREGIVER;
+  if (role === 'liaison') return TYPES.LIAISON;
   // A care coordinator used to be stored as a case manager.
   if (cr === 'coordinator') return u.isManager && u.accountType === TYPES.MANAGER ? TYPES.MANAGER : TYPES.COORDINATOR;
   // A case manager is an LMSW. One an admin deliberately set to read-only (or
@@ -179,6 +185,8 @@ function landingFor(u) {
   if (type === TYPES.FAMILY) return '/portal';
   if (CLINICIAN_TYPES.includes(type)) return '/clinical';
   if (type === TYPES.CAREGIVER) return u.licenseLevel ? '/caregiver' : null;
+  // A liaison lands straight in My GFC (owner, 2026-11-08).
+  if (type === TYPES.LIAISON) return '/my';
   return null;   // admin, manager, coordinator → the hub
 }
 
@@ -192,6 +200,24 @@ const PRIVATE_HOME_CARE = Object.freeze([
   Object.freeze({ id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling',
     description: 'Shifts, availability, time tracking, payroll and client locations' })
 ]);
+// ---- People (owner, 2026-11-08) ---------------------------------------------
+// User Management moved out of the Admin Hub into its own block, beside staff
+// onboarding: the same shape as Private Home Care. User Management still runs
+// on the Admin Hub page, opened straight to that view. Staff Onboarding's
+// office side is admin-or-manager (routes/onboarding.js), so the tile appears
+// for exactly those accounts.
+const PEOPLE_USERS = Object.freeze({ id: 'users', name: 'User Management', path: '/admin?view=users',
+  description: 'Add and edit staff, caregivers, clients and family contacts' });
+const PEOPLE_ONBOARDING = Object.freeze({ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding',
+  description: 'Who is onboarding, whose turn it is, credentialing and readiness' });
+const MY_GFC = Object.freeze({ id: 'myGfc', name: 'My GFC', path: '/my',
+  description: 'Your onboarding, documents, policies and shared folders' });
+function peopleTile(u) {
+  const children = [PEOPLE_USERS];
+  if (u && (u.role === 'admin' || u.isManager === true)) children.push(PEOPLE_ONBOARDING);
+  return { id: 'people', name: 'People', children };
+}
+
 function hubTilesFor(u) {
   const type = accountTypeOf(u);
   const tiles = [];
@@ -204,18 +230,21 @@ function hubTilesFor(u) {
   // Managers and coordinators read Support and Admin Broadcasts here; the
   // Super Admin's inbox is in the Admin Hub.
   const messages = { id: 'messages', name: 'Messages', path: '/messages' };
-  // A manager or care coordinator opens the Admin Hub for User Management only
-  // (owner, 2026-11-04): caregivers, clients and family contacts.
-  const users = { id: 'users', name: 'User Management', path: '/admin' };
+  // User Management now sits inside People (owner, 2026-11-08). A manager or
+  // care coordinator still reaches only User Management in the Admin Hub.
+  const people = peopleTile(u);
+  // My GFC, the staff portal (owner, 2026-11-08): everyone's own onboarding,
+  // documents, policies and shared Drive folders. First, because it is theirs.
+  if ([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR].includes(type)) tiles.push(MY_GFC);
   if (type === TYPES.ADMIN) {
-    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billingTile,
+    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile, messages, users);
+    tiles.push(clinical, phc, enrollment, billingTile, messages, people);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile, messages, users);
+    tiles.push(phc, enrollment, billingTile, messages, people);
   }
   return tiles;
 }

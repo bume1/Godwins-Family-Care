@@ -33,7 +33,7 @@ const PATHS = Object.freeze({
   PORTAL_MESSAGES: '/portal#messages',       // client + family, straight to the Messages tab (the portal reads the fragment)
   CAREGIVER_APP: '/caregiver',              // caregiver home
   CAREGIVER_SCHEDULE: '/caregiver#schedule',// their shifts — where a shift notice belongs
-  CAREGIVER_MORE: '/caregiver#more',        // messages + documents live here
+  CAREGIVER_MORE: '/caregiver#more',        // Logs & Messages (messages live here)
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
   CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
   CLINICAL_TASKS: '/clinical#queues',
