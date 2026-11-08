@@ -305,7 +305,7 @@ function determinationStatus(det, inputs, record, flags) {
   const outstandingModules = all.filter(m => !moduleState(m, (record.training || {})[m.id], flags[m.id]).complete)
     .map(m => m.id);
   return {
-    id: det.id, title: det.title, ref: det.ref,
+    id: det.id, title: det.title, label: det.label, ref: det.ref,
     conditions: det.conditions, perPayer: !!det.perPayer,
     openItem: det.openItem || null,
     requiredModules: all.map(m => m.id),
@@ -431,7 +431,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
     const itemsOpen = its.filter(x => x.status !== STATUS.COMPLETE && x.status !== STATUS.NOT_APPLICABLE).map(x => x.id);
     return {
-      id: p.id, title: p.title, when: p.when, ref: p.ref, separateRecord: p.separateRecord || null,
+      id: p.id, number: p.number, label: p.label, plainWhen: p.plainWhen,
+      title: p.title, when: p.when, ref: p.ref, separateRecord: p.separateRecord || null,
       items: its.map(x => x.id), requiredModules: mods,
       outstandingItems: itemsOpen, outstandingModules: modsOpen,
       complete: itemsOpen.length === 0 && modsOpen.length === 0 && (its.length > 0 || mods.length > 0)

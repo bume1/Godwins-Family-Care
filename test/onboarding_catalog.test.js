@@ -266,3 +266,12 @@ test('every actor the owner confirmed reads OWNER_CONFIRMED; only owner addition
     if (s.actorBasis === 'INFERRED') assert.ok(it.addedBy, `${it.id} still inferred`);
   }
 });
+
+test('every phase and service line has a plain label and number for the screens; the Playbook id stays a reference', () => {
+  C.PHASES.forEach((p, i) => {
+    assert.strictEqual(p.number, i + 1);
+    assert.ok(p.label && p.plainWhen, p.id);
+    assert.doesNotMatch(p.label + p.plainWhen, /\bC\.\d/, `${p.id} label shows a Playbook code`);
+  });
+  for (const d of C.DETERMINATIONS) assert.ok(d.label && !/\bC\.\d/.test(d.label), d.id);
+});

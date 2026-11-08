@@ -66,16 +66,27 @@ const CHAPTER = Object.freeze({
 
 // Phase identifiers follow the Playbook's own positional numbering, scoped by
 // chapter, never global (Training Library §2.1).
+// `id` and `title` are the Playbook's. They are references and never shown to
+// a person on a screen (owner, 2026-11-08: "C.4" and "C.5.2" mean nothing to
+// the office or the new hire). Screens show `number` and `label`, with
+// `plainWhen` under it; the Playbook title stays available in the detail view
+// for anyone who wants the source.
 const PHASES = Object.freeze([
-  { id: 'C.4', title: 'Phase 1 · Pre-Hire Screening', when: 'Before an offer is extended', ref: P('C.4') },
-  { id: 'C.5', title: 'Phase 2 · Offer and Employment Documentation', when: 'At offer', ref: P('C.5') },
-  { id: 'C.6', title: 'Phase 3 · Credentialing and Compliance Activation', when: 'Begins on the date of signature', ref: P('C.6'),
+  { id: 'C.4', number: 1, label: 'Pre-Hire Screening', plainWhen: 'Before your offer',
+    title: 'Phase 1 · Pre-Hire Screening', when: 'Before an offer is extended', ref: P('C.4') },
+  { id: 'C.5', number: 2, label: 'Offer & Employment Paperwork', plainWhen: 'When you accept the offer',
+    title: 'Phase 2 · Offer and Employment Documentation', when: 'At offer', ref: P('C.5') },
+  { id: 'C.6', number: 3, label: 'Credentialing', plainWhen: 'Starts the day you sign',
+    title: 'Phase 3 · Credentialing and Compliance Activation', when: 'Begins on the date of signature', ref: P('C.6'),
     // C.6: tracked on the credentialing record SEPARATELY from the onboarding
     // checklist, so a payer delay never reads as not ready to practice.
     separateRecord: 'CREDENTIALING' },
-  { id: 'C.7', title: 'Phase 4 · Systems Access and Clinical Orientation', when: 'After clearance, before independent practice', ref: P('C.7') },
-  { id: 'C.8', title: 'Phase 5 · Readiness Determination', when: 'By service line', ref: P('C.8') },
-  { id: 'C.9', title: 'Supervised Practice and Ongoing Monitoring', when: 'From the first encounter', ref: P('C.9') }
+  { id: 'C.7', number: 4, label: 'Systems & Orientation', plainWhen: 'Before you see patients on your own',
+    title: 'Phase 4 · Systems Access and Clinical Orientation', when: 'After clearance, before independent practice', ref: P('C.7') },
+  { id: 'C.8', number: 5, label: 'Ready to See Patients', plainWhen: 'Each service line opens on its own',
+    title: 'Phase 5 · Readiness Determination', when: 'By service line', ref: P('C.8') },
+  { id: 'C.9', number: 6, label: 'First 90 Days', plainWhen: 'Your first visits and check-ins',
+    title: 'Supervised Practice and Ongoing Monitoring', when: 'From the first encounter', ref: P('C.9') }
 ].map(Object.freeze));
 
 // Acknowledgment versions. The Playbook's C.11 and R3.3 name Clinical
@@ -272,21 +283,21 @@ const ITEMS = Object.freeze([
 // The conditions are the C.8 table's clauses, as references. `modules` come
 // from each module's own `required_for`, never listed here.
 const DETERMINATIONS = Object.freeze([
-  { id: 'IME', title: 'Independent medical examinations', ref: P('C.8'),
+  { id: 'IME', title: 'Independent medical examinations', label: 'Veteran Exams (IME)', ref: P('C.8'),
     conditions: ['Examiner credentialing complete with the contracting organization',
                  'The applicable protocol on file', 'Templates assigned'],
     // Playbook C.2 note and R3.7, Manual §4.1: the non-prescribing protocol
     // under O.C.G.A. 43-34-23 is unverified and requires counsel. Until then
     // the clinician practices under a filed agreement.
     openItem: 'NON_PRESCRIBING_PROTOCOL' },
-  { id: 'PRIVATE_PAY', title: 'Private pay primary care', ref: P('C.8'),
+  { id: 'PRIVATE_PAY', title: 'Private pay primary care', label: 'Private Pay Visits', ref: P('C.8'),
     conditions: ['Protocol agreement in force, and filed and approved where the clinician prescribes',
                  'Malpractice coverage confirmed for the scope',
                  'Clinical record system and electronic prescribing access provisioned'] },
-  { id: 'INSURED', title: 'Insured billing', ref: P('C.8'), perPayer: true, includes: ['PRIVATE_PAY'],
+  { id: 'INSURED', title: 'Insured billing', label: 'Insurance Billing', ref: P('C.8'), perPayer: true, includes: ['PRIVATE_PAY'],
     conditions: ['Approved individual enrollment and reassignment', 'Active group enrollment',
                  'Written confirmation of network participation from each payer'] },
-  { id: 'BEHAVIORAL', title: 'Behavioral health', ref: P('C.8'),
+  { id: 'BEHAVIORAL', title: 'Behavioral health', label: 'Behavioral Health', ref: P('C.8'),
     conditions: ['Both certifications verified',
                  'Psychiatric taxonomy active on the national provider identifier',
                  'Behavioral health scope written expressly into the protocol agreement',
