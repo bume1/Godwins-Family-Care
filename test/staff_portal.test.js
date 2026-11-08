@@ -330,3 +330,10 @@ test('the portal page and the ways into it', () => {
   assert.match(page, /<script src="\/session-guard\.js"><\/script>/);
   for (const f of ['my.html', 'my-gfc.js']) assert.ok(!/drive_file_id|driveFileId/.test(read(f)), `${f} never handles a Drive id`);
 });
+
+test('the request user carries employmentType, or the W-2 clock refuses every W-2 person', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = src.indexOf('      req.user = {');
+  const body = src.slice(at, src.indexOf('};', at));
+  assert.ok(at > 0 && /employmentType: freshUser\.employmentType \|\| null/.test(body));
+});

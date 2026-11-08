@@ -84,7 +84,9 @@ const PHASES = Object.freeze([
   { id: 'C.7', number: 4, label: 'Systems & Orientation', plainWhen: 'Before you see patients on your own',
     title: 'Phase 4 · Systems Access and Clinical Orientation', when: 'After clearance, before independent practice', ref: P('C.7') },
   { id: 'C.8', number: 5, label: 'Ready to See Patients', plainWhen: 'Each service line opens on its own',
-    title: 'Phase 5 · Readiness Determination', when: 'By service line', ref: P('C.8') },
+    title: 'Phase 5 · Readiness Determination', when: 'By service line', ref: P('C.8'),
+    // The phase opened service line by service line rather than by items.
+    readiness: true },
   { id: 'C.9', number: 6, label: 'First 90 Days', plainWhen: 'Your first visits and check-ins',
     title: 'Supervised Practice and Ongoing Monitoring', when: 'From the first encounter', ref: P('C.9') }
 ].map(Object.freeze));

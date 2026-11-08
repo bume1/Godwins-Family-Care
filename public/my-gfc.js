@@ -497,6 +497,21 @@ function TeamBios() {
 }
 
 
+// ---- The W-2 time clock -------------------------------------------------------
+// The SAME clock caregivers use (owner, 2026-11-08: "nothing should be
+// recreated"): the shared schedule component, mounted in staff mode, writing
+// the same time logs the admin corrects and exports on the scheduling board.
+function StaffClockMount() {
+  const id = 'mygfc-staff-clock';
+  useEffect(() => {
+    const lib = window.GFCCaregiverSchedule;
+    if (!lib) return undefined;
+    lib.mount(id, { authToken: getToken(), staffOnly: true });
+    return () => lib.unmount(id);
+  }, []);
+  return <div id={id} />;
+}
+
 // ---- A liaison's clients --------------------------------------------------------
 // The enrollment summary of each client assigned to this liaison: status, how
 // complete, and what is still needed. Nothing clinical (owner, 2026-11-08).
@@ -597,7 +612,7 @@ const STAFF_SECTIONS = [
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text', short: 'Documents', subtitle: 'What you signed, and every file on record for you.' },
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders', short: 'Folders', subtitle: 'The Drive folders set up for your role.' },
-  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your pay stubs from payroll.' },
+  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your time clock, hours and pay stubs.' },
   { id: 'account', label: 'Account', icon: 'ti-user-circle', subtitle: 'Your headshot, website bio and sign-in.' },
   { id: 'team', label: 'Team Bios', icon: 'ti-users', adminTeam: true, subtitle: 'Headshots and bios for the website. Each person keeps their own up to date.' }
 ];
@@ -673,8 +688,11 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
+        {!profile.isCaregiver && profile.employmentType === 'W2' && <Section title="Time Clock" sub="Clock in when you start work and out when you stop."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
+        {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected and exported for payroll in Caregiver Scheduling → Time Logs.</p><a className="mg-btn mg-ghost" href="/scheduling">Open Caregiver Scheduling</a></Section>}
       </div>
     );
   }

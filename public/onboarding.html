@@ -573,7 +573,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>Clinician, Employed (W-2){t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{t.chapter.id === 'C' ? 'Clinician' : 'Admin Team / Non-Clinical'}, Employed (W-2){t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -581,7 +581,9 @@ const Person = ({ userId, onBack }) => {
           </div>
         </div>
         <div className="tabs">
-          {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']].map(([k, l]) =>
+          {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']]
+            // Credentialing, readiness and the clinical Training Library are the clinician chapter's.
+            .filter(([k]) => t.chapter.id === 'C' || !['credentialing', 'readiness', 'training'].includes(k)).map(([k, l]) =>
             <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}
         </div>
       </div>
@@ -598,7 +600,7 @@ const Person = ({ userId, onBack }) => {
           </div>
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
             {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}</div>
-          {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.number === 5 ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
+          {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)}>
               <Dot status={i.status} />
@@ -653,11 +655,13 @@ const LINE_CHOICES = [
   ['IME', 'Veteran Exams (IME)'], ['PRIVATE_PAY', 'In-Home Primary Care · Private Pay Patients'],
   ['INSURED', 'In-Home Primary Care · Insurance Billing'], ['BEHAVIORAL', 'Psych Care']
 ];
+// Which Playbook chapter a person is onboarded on.
+const CHAPTER_CHOICES = [['C', 'Clinician (NP, MD, PA), employed'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)']];
 const Setup = ({ userId, inputs, onSaved }) => {
-  const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '' }, inputs || {}));
+  const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '', chapter: 'C', workState: 'GA' }, inputs || {}));
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
   const toggle = (k, v) => setF(Object.assign({}, f, { [k]: f[k].includes(v) ? f[k].filter(x => x !== v) : f[k].concat([v]) }));
-  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license' })[k]}</label>;
+  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license', entersResidence: 'Role involves entering a client residence', federallyReimbursed: 'Role supports a Medicare or Medicaid service line', variableComp: 'Has a commission or bonus' })[k]}</label>;
   const save = async () => {
     setErr(''); setMsg('');
     try { await call(`/api/onboarding/admin/people/${userId}/inputs`, { method: 'PUT', body: f }); setMsg('Saved. Her checklist updates to match.'); await onSaved(); } catch (e) { setErr(e.message); }
@@ -665,12 +669,24 @@ const Setup = ({ userId, inputs, onSaved }) => {
   return (
     <div className="card"><div className="card-h"><h2>Setup</h2></div>
       {err && <div className="err">{err}</div>}{msg && <div className="ok">{msg}</div>}
-      <label className="f">What she will cover</label>
-      {LINE_CHOICES.map(([k, l]) => <label key={k} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.serviceLines.includes(k)} onChange={() => toggle('serviceLines', k)} />{l}</label>)}
-      <label className="f">Certifications</label>
-      {['FNP', 'PMHNP'].map(c => <label key={c} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.credentials.includes(c)} onChange={() => toggle('credentials', c)} />{c}</label>)}
-      <label className="f">Her situation</label>
-      {['prescribes', 'controlledSubstances', 'drives', 'telehealth', 'outsideEmployment', 'residenceUnderPhc'].map(k => <div key={k}>{flag(k)}</div>)}
+      <label className="f">Onboarding track</label>
+      <select value={f.chapter} onChange={e => setF(Object.assign({}, f, { chapter: e.target.value }))} style={{ maxWidth: 520 }}>
+        {CHAPTER_CHOICES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+      {f.chapter === 'C' ? <>
+        <label className="f">What she will cover</label>
+        {LINE_CHOICES.map(([k, l]) => <label key={k} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.serviceLines.includes(k)} onChange={() => toggle('serviceLines', k)} />{l}</label>)}
+        <label className="f">Certifications</label>
+        {['FNP', 'PMHNP'].map(c => <label key={c} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.credentials.includes(c)} onChange={() => toggle('credentials', c)} />{c}</label>)}
+        <label className="f">Her situation</label>
+        {['prescribes', 'controlledSubstances', 'drives', 'telehealth', 'outsideEmployment', 'residenceUnderPhc'].map(k => <div key={k}>{flag(k)}</div>)}
+      </> : <>
+        <label className="f">State they physically work from</label>
+        <input type="text" maxLength={2} value={f.workState || 'GA'} onChange={e => setF(Object.assign({}, f, { workState: e.target.value.toUpperCase() }))} style={{ maxWidth: 90 }} />
+        <div style={{ fontSize: 13, color: 'var(--mut)' }}>Outside Georgia adds work-state registration before their first paid hour.</div>
+        <label className="f">Their role</label>
+        {['entersResidence', 'federallyReimbursed', 'variableComp'].map(k => <div key={k}>{flag(k)}</div>)}
+      </>}
       <label className="f">Start date</label>
       <input type="date" value={f.startDate || ''} onChange={e => setF(Object.assign({}, f, { startDate: e.target.value }))} style={{ maxWidth: 220 }} />
       <div style={{ marginTop: 12 }}><button className="btn" onClick={save}>Save Setup</button></div>
@@ -690,7 +706,7 @@ const Overview = ({ onOpen }) => {
   return (
     <div>
       <div className="stats">
-        <Stat icon="ti-users" bg="#E6EEF2" color="var(--navy)" n={d.counts.active} l="Onboarding Now" s="All clinicians" />
+        <Stat icon="ti-users" bg="#E6EEF2" color="var(--navy)" n={d.counts.active} l="Onboarding Now" s="Clinicians and the admin team" />
         <Stat icon="ti-building" bg="#FFF6E2" color="#A97E2B" n={d.counts.waitingOnOffice} l="Waiting on the Office" s="Items to verify or record" />
         <Stat icon="ti-user" bg="#E6EEF2" color="var(--navy)" n={d.counts.waitingOnStaff} l="Waiting on Staff" s="Items for the new hires" />
         <Stat icon="ti-arrow-back-up" bg="#FBE9E5" color="var(--red)" n={d.counts.returned} l="Returned" s="Sent back with a reason" />
@@ -718,7 +734,7 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.notStarted.length > 0 && (
         <div className="card"><div className="card-h"><h2>Clinicians Not Yet Set Up</h2></div>
-          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
+          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{u.chapter === 'C' ? 'Clinician track' : 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>
@@ -850,8 +866,8 @@ const Mine = ({ viewer, track, onChanged }) => {
                 <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'}`} />
               </div>
               {isOpen && <div className="acc-b">
-                {its.length === 0 && ph.number === 5 && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
-                {its.length === 0 && ph.number !== 5 && <div className="note">Nothing here for you to do.</div>}
+                {its.length === 0 && ph.readiness && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
+                {its.length === 0 && !ph.readiness && <div className="note">Nothing here for you to do.</div>}
                 {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} />)}
               </div>}
             </div>
@@ -875,7 +891,7 @@ const Mine = ({ viewer, track, onChanged }) => {
           </div>))}
       </>}
       <div className="bottom">
-        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].map(([k, l, ic]) =>
+        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0).map(([k, l, ic]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><i className={`ti ${ic}`} />{l}</button>)}
       </div>
       {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} />}

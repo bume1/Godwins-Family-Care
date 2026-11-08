@@ -30,5 +30,7 @@ test('a person folder is their name, never a role prefix', () => {
 test('clinician onboarding uploads no longer go to the caregiver folder', () => {
   const r = fs.readFileSync(path.join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
   assert.doesNotMatch(r, /uploadCaregiverDocumentFile\s*\(/);
-  assert.match(r, /uploadStaffDocumentFile\(staffFolders\.folderForChapter\('C'\)/);
+  // The folder follows the person's chapter: clinicians to the clinician
+  // folder, the admin team to the non-clinical staff folder.
+  assert.match(r, /uploadStaffDocumentFile\(staffFolders\.folderForChapter\(\(rec\.inputs && rec\.inputs\.chapter\) \|\| 'C'\)/);
 });

@@ -195,6 +195,27 @@ module.exports = function createSchedulingRoutes(deps) {
     return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
   };
 
+  // W-2 STAFF WITHOUT SHIFTS (owner, 2026-11-08: "all W-2 staff clock in via
+  // the site", using the clock that already exists). Clinicians, the admin
+  // team and liaisons on W-2 clock in on this same clock and write the same
+  // time_logs rows, with no shift and no client, so the admin's Time Logs
+  // screen, its corrections and the payroll export carry them unchanged.
+  // Caregivers keep clocking in on their shifts. 1099 staff do not clock in.
+  const isW2Staff = (u) => !!u && u.employmentType === 'W2' && !cg.isCaregiver(u)
+    && ![ROLES.CLIENT, ROLES.FAMILY, ROLES.VENDOR].includes(u.role);
+  const requireW2Staff = (req, res, next) => (isW2Staff(req.user) ? next()
+    : res.status(403).json({ error: req.user && req.user.employmentType === '1099' ? 'Contractors record hours on their own platform, not here.' : 'This clock is for W-2 staff without shifts. Ask the office to set your employment type.', code: 'STAFF_CLOCK_W2_ONLY' }));
+  const requireSchedulableOrStaff = (req, res, next) => (isW2Staff(req.user) ? next() : requireSchedulable(req, res, next));
+  // Playbook F.6, the compensation gate: an out-of-state employee records no
+  // hours until payroll can pay lawfully in their work state.
+  const compensationGate = async (u) => {
+    const rec = ((await db.get('onboarding_records')) || []).find(r => r && String(r.userId) === String(u.id));
+    if (!rec || !rec.inputs || !rec.inputs.outOfState) return null;
+    const gate = rec.items && rec.items['F.6.02'];
+    return gate && gate.steps && gate.steps[0] ? null
+      : 'Payroll has not finished setting up your work state yet, so hours cannot be recorded. The office will tell you when it is done.';
+  };
+
   // Admin sees the whole board; a caregiver sees only their own rows. This is
   // the line every read below is measured against.
   const isAdmin = (u) => u.role === ROLES.ADMIN;
@@ -1425,7 +1446,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // ONLY their own shifts. A caregiver cannot read another caregiver's shifts.
   router.get('/api/scheduling/shifts', authenticateToken, async (req, res) => {
     try {
-      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isSchedulable(req.user) && !isW2Staff(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shifts');
@@ -2467,6 +2488,53 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // The same clock, for W-2 staff without a shift. No client, so no geofence
+  // and no visit log; the row says it was clocked on a device, like any other.
+  router.post('/api/scheduling/staff-clock/clock-in', authenticateToken, requireW2Staff, async (req, res) => {
+    try {
+      const u = req.user;
+      const gate = await compensationGate(u);
+      if (gate) return res.status(409).json({ error: gate, code: 'COMPENSATION_GATE' });
+      const logs = await readRows('time_logs');
+      if (logs.some(l => l && l.caregiver_id === u.id && !l.shift_id && !l.clock_out_at)) {
+        return res.status(409).json({ error: 'You are already clocked in.', code: 'ALREADY_CLOCKED_IN' });
+      }
+      const at = nowIso();
+      const row = {
+        id: uuidv4(), shift_id: null, client_id: null, client_name: null, kind: 'staff',
+        caregiver_id: u.id, caregiver_name: u.name || u.email, license_level: null,
+        scheduled_start: null, scheduled_end: null,
+        clock_in_at: at, clock_in_gps: null, clock_in_geofence: null,
+        clock_out_at: null, clock_out_gps: null, clock_out_geofence: null,
+        total_minutes: null, flags: [], edited: false, edit_reason: null, created_at: at
+      };
+      logs.push(row);
+      await db.set('time_logs', logs);
+      await logActivity(u.id, row.caregiver_name, 'clock_in', 'time_log', row.id, { staff: true });
+      res.json({ timeLog: publicTimeLog(row), message: 'Clocked in.' });
+    } catch (error) {
+      console.error('Staff clock-in error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  router.post('/api/scheduling/staff-clock/clock-out', authenticateToken, requireW2Staff, async (req, res) => {
+    try {
+      const logs = await readRows('time_logs');
+      const li = logs.findIndex(l => l && l.caregiver_id === req.user.id && !l.shift_id && !l.clock_out_at);
+      if (li === -1) return res.status(409).json({ error: 'You are not clocked in.', code: 'NO_OPEN_TIME_LOG' });
+      const at = nowIso();
+      const log = logs[li];
+      log.clock_out_at = at;
+      log.total_minutes = sched.totalMinutes(log.clock_in_at, at);
+      await db.set('time_logs', logs);
+      await logActivity(req.user.id, log.caregiver_name, 'clock_out', 'time_log', log.id, { staff: true, totalMinutes: log.total_minutes });
+      res.json({ timeLog: publicTimeLog(log), message: 'Clocked out.' });
+    } catch (error) {
+      console.error('Staff clock-out error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   router.post('/api/scheduling/shifts/:id/clock-out', authenticateToken, requireSchedulable, async (req, res) => {
     try {
       const rows = await readRows('shifts');
@@ -3139,6 +3207,8 @@ module.exports = function createSchedulingRoutes(deps) {
         payRateSource: resolved.rate === null ? 'not set' : resolved.source,
         grossPay: gross,
         caregiverName: l.caregiver_name,
+        // Caregiver (clocked on a client shift) or W-2 staff (no shift).
+        workerType: l.kind === 'staff' || !l.shift_id && !l.client_id ? 'W-2 staff' : 'Caregiver',
         licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
         clientName: l.client_name,
         shiftDate: sched.csvDate(l.clock_in_at || l.scheduled_start),
@@ -3187,6 +3257,9 @@ module.exports = function createSchedulingRoutes(deps) {
       .filter(l => l && (l.clock_out_at || concluded(l)))
       .concat(shiftsWithNoTimeLog(shiftRows, allLogs, ['completed']).map(s => pseudoLog(s, usersById)))
       .filter(l => {
+        // A W-2 staff member's hours (no shift, no client) are payroll, never
+        // a client invoice line (owner, 2026-11-08).
+        if (!l.client_id || l.kind === 'staff') return false;
         if (onlyClient && String(l.client_id) !== onlyClient) return false;
         const d = sched.exportRowDate(l);   // Georgia's date, not UTC's
         return !!d && d >= from && d <= to;
@@ -3305,7 +3378,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // records. Resolved from the token, so there is no id to pass and no other
   // caregiver's rows to reach. The date range is optional here (unlike
   // payroll): this is someone pulling their own timesheet, not a pay run.
-  router.get('/api/scheduling/my-hours.csv', authenticateToken, requireSchedulable, async (req, res) => {
+  router.get('/api/scheduling/my-hours.csv', authenticateToken, requireSchedulableOrStaff, async (req, res) => {
     try {
       const from = req.query.from ? String(req.query.from) : '';
       const to = req.query.to ? String(req.query.to) : '';

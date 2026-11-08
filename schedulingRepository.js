@@ -690,7 +690,11 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'scheduleCorrected', header: 'Schedule Corrected' },
   { key: 'scheduleCorrectedBy', header: 'Corrected By' },
   { key: 'payPeriodStart', header: 'Pay Period Start' },
-  { key: 'payPeriodEnd', header: 'Pay Period End' }
+  { key: 'payPeriodEnd', header: 'Pay Period End' },
+  // Owner, 2026-11-08: W-2 staff clock in on the same clock, so payroll says
+  // which kind of worker each row is. LAST, so a payroll import mapped by
+  // column position keeps working.
+  { key: 'workerType', header: 'Worker Type' }
 ]);
 
 // ---- Client billing CSV ----------------------------------------------------

@@ -23,6 +23,15 @@
 
 const V = require('./vocabulary');
 const C = require('./chapterC');
+// Every chapter built so far. A person's record names theirs in inputs.chapter
+// (owner, 2026-11-08: clinicians first, the admin team next, the rest after).
+const CHAPTERS = Object.freeze({ C, F: require('./chapterF') });
+const chapterOf = (inputs) => CHAPTERS[(inputs && inputs.chapter) || 'C'] || C;
+// Item and acknowledgment ids are unique across chapters, so one lookup serves all.
+const ALL_ITEMS = Object.freeze([].concat(...Object.values(CHAPTERS).map(ch => ch.ITEMS)));
+const ALL_ACKS = Object.freeze(Object.values(Object.values(CHAPTERS).reduce((acc, ch) => {
+  ch.ACKNOWLEDGMENTS.forEach(a => { if (!acc[a.id]) acc[a.id] = a; }); return acc;
+}, {})));
 const { MODULES } = require('./modules');
 const VF = require('./versionFlags');
 const { carryOver } = require('./legacy260');
@@ -50,8 +59,9 @@ function normalizeInputs(raw) {
   const r = raw || {};
   const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
   const serviceLines = Array.from(new Set(arr(r.serviceLines).filter(s => SERVICE_LINES.includes(s))));
+  const workState = String(r.workState || 'GA').trim().toUpperCase().slice(0, 2) || 'GA';
   return {
-    chapter: 'C',
+    chapter: CHAPTERS[r.chapter] ? r.chapter : 'C',
     serviceLines,
     credentials: arr(r.credentials),                 // e.g. FNP, PMHNP
     payers: arr(r.payers),                           // insured billing is per payer
@@ -61,6 +71,12 @@ function normalizeInputs(raw) {
     drives: r.drives === true,
     prescribes: r.prescribes === true,
     telehealth: r.telehealth === true,
+    // Chapter F (non-clinical) inputs.
+    workState,
+    outOfState: workState !== 'GA',
+    federallyReimbursed: r.federallyReimbursed === true,
+    entersResidence: r.entersResidence === true,
+    variableComp: r.variableComp === true,
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -83,15 +99,19 @@ function matchesWhen(when, inputs) {
   if (when.drives === true && !inputs.drives) return false;
   if (when.prescribes === true && !inputs.prescribes) return false;
   if (when.telehealth === true && !inputs.telehealth) return false;
+  if (when.outOfState === true && !inputs.outOfState) return false;
+  if (when.federallyReimbursed === true && !inputs.federallyReimbursed) return false;
+  if (when.entersResidence === true && !inputs.entersResidence) return false;
+  if (when.variableComp === true && !inputs.variableComp) return false;
   return true;
 }
 
 function composeChecklist(inputs) {
   const i = normalizeInputs(inputs);
-  return C.ITEMS.filter(it => matchesWhen(it.when, i));
+  return chapterOf(i).ITEMS.filter(it => matchesWhen(it.when, i));
 }
 
-const findItem = (id) => C.ITEMS.find(it => it.id === String(id || '')) || null;
+const findItem = (id) => ALL_ITEMS.find(it => it.id === String(id || '')) || null;
 
 // ---- one item's state ------------------------------------------------------
 // Stored shape, per item id:
@@ -105,7 +125,7 @@ function ackStatus(item, state) {
   if (!item.acknowledges) return null;
   const acks = (state && state.acknowledgments) || {};
   return item.acknowledges.map(id => {
-    const doc = C.ACKNOWLEDGMENTS.find(a => a.id === id);
+    const doc = ALL_ACKS.find(a => a.id === id);
     const got = acks[id] || null;
     const current = !!(got && (doc.version === 'Current' || String(got.version) === String(doc.version)));
     return {
@@ -371,6 +391,7 @@ const R = require('./renewals');
 
 function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy } = {}) {
   const i = normalizeInputs(inputs);
+  const ch = chapterOf(i);
   const rec = record || {};
   const carried = carryOver(legacy && legacy.items, legacy && legacy.titles);
   const flags = Object.fromEntries(VF.evaluateAll(MODULES, {
@@ -421,7 +442,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     };
   });
 
-  const modules = MODULES.filter(m => moduleApplies(m, i)).map(m => {
+  // The Training Library is the clinical curriculum. A non-clinical role's
+  // training is its written role training plan (F.7), an item, not modules.
+  const modules = MODULES.filter(m => ch === C && moduleApplies(m, i)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
     const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
@@ -442,35 +465,37 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     return out;
   });
 
-  const phases = C.PHASES.map(p => {
+  const phases = ch.PHASES.map(p => {
     const its = items.filter(x => x.phase === p.id);
     const mods = phaseModules(p.id, i).map(m => m.id);
     const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
     const itemsOpen = its.filter(x => x.status !== STATUS.COMPLETE && x.status !== STATUS.NOT_APPLICABLE).map(x => x.id);
     return {
       id: p.id, number: p.number, label: p.label, plainWhen: p.plainWhen,
-      title: p.title, when: p.when, ref: p.ref, separateRecord: p.separateRecord || null,
+      title: p.title, when: p.when, ref: p.ref, separateRecord: p.separateRecord || null, readiness: !!p.readiness,
       items: its.map(x => x.id), requiredModules: mods,
       outstandingItems: itemsOpen, outstandingModules: modsOpen,
       complete: itemsOpen.length === 0 && modsOpen.length === 0 && (its.length > 0 || mods.length > 0)
     };
   });
 
-  const determinations = C.DETERMINATIONS.filter(d => i.serviceLines.includes(d.id))
+  const determinations = ch.DETERMINATIONS.filter(d => i.serviceLines.includes(d.id))
     .map(d => determinationStatus(d, i, rec, flags));
 
   const out = {
-    chapter: C.CHAPTER, inputs: i, lanes: lanesOf(i),
+    chapter: ch.CHAPTER, inputs: i, lanes: lanesOf(i),
     phases, items, modules, determinations,
-    recurring: C.RECURRING.filter(r => matchesWhen(r.when, i)).map(r => ({
+    recurring: ch.RECURRING.filter(r => matchesWhen(r.when, i)).map(r => ({
       id: r.id, interval: r.interval, requirement: r.requirement,
-      classification: { phrase: r.classification.phrase, legal: V.isLegalRequirement(r.classification) },
+      // A row the Playbook does not classify carries none; it is never filled in.
+      classification: r.classification ? { phrase: r.classification.phrase, legal: V.isLegalRequirement(r.classification) } : null,
+      classificationNote: r.classificationNote || null,
       ownerLabels: r.owner.map(o => V.ACTOR_LABELS[o])
     })),
     renewals: {
       items: items.filter(x => x.expiry).map(x => ({ id: x.id, title: x.title, status: x.status, expiry: x.expiry, renewals: x.renewals,
         hers: !!(x.next ? x.next.hers : true) })),
-      recurring: R.recurringFor(C.RECURRING.filter(r => matchesWhen(r.when, i)), rec, i.startDate, today || new Date()),
+      recurring: R.recurringFor(ch.RECURRING.filter(r => matchesWhen(r.when, i)), rec, i.startDate, today || new Date()),
       basis: office ? R.EXPIRING_BASIS : undefined
     },
     counts: {
@@ -498,5 +523,6 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 module.exports = {
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
-  moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack
+  moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
+  CHAPTERS, ALL_ACKS, chapterOf
 };

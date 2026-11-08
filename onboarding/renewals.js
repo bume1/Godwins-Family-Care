@@ -101,7 +101,7 @@ function recurringFor(applicable, rec, startDate, today) {
 }
 
 function recordRecurring(rid, rec, doneOn, actor, now) {
-  if (!C.RECURRING.some(r => r.id === rid)) { const e = new Error('Unknown recurring duty.'); e.code = 'RECURRING_UNKNOWN'; throw e; }
+  if (![C, require('./chapterF')].some(ch => ch.RECURRING.some(r => r.id === rid))) { const e = new Error('Unknown recurring duty.'); e.code = 'RECURRING_UNKNOWN'; throw e; }
   if (!isYmd(doneOn)) { const e = new Error('Give the date it was done.'); e.code = 'RECURRING_DATE_REQUIRED'; throw e; }
   const out = JSON.parse(JSON.stringify(rec || {}));
   out.recurring = out.recurring || {};

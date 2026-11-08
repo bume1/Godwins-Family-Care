@@ -21,6 +21,16 @@ const express = require('express');
 const multer = require('multer');
 const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
+const accountTypes = require('../accountTypes');
+
+// Who is onboarded on which chapter. Clinicians on C; the admin team and the
+// liaison on F (owner, 2026-11-08). The office can change it in Setup.
+const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
+const defaultChapterFor = (u) => (['provider', 'rn', 'lcsw', 'lmsw'].includes(accountTypes.accountTypeOf(u)) || (u && u.hasClinicalAccess && !u.isManager) ? 'C' : 'F');
+const CHAPTER_CHOICES = Object.freeze([
+  { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
+  { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
+]);
 const C = require('../onboarding/chapterC');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
@@ -52,7 +62,7 @@ module.exports = function createOnboardingRoutes(deps) {
   const isOffice = (u) => !!u && (u.role === 'admin' || u.isManager === true);
   const requireOffice = (req, res, next) => (isOffice(req.user) ? next()
     : res.status(403).json({ error: 'This is the office\'s onboarding view.', code: 'ONBOARDING_OFFICE_ONLY' }));
-  const requireStaff = (req, res, next) => (req.user && (req.user.hasClinicalAccess || isOffice(req.user)) ? next()
+  const requireStaff = (req, res, next) => (req.user && (req.user.hasClinicalAccess || isOffice(req.user) || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(req.user))) ? next()
     : res.status(403).json({ error: 'Onboarding is for GFC staff.', code: 'ONBOARDING_NOT_STAFF' }));
   const actorOf = (req) => ({ id: req.user.id, name: req.user.name || req.user.email, isOffice: false });
   const officeActorOf = (req) => ({ id: req.user.id, name: req.user.name || req.user.email, isOffice: true });
@@ -100,7 +110,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
       (it.acknowledgments || []).forEach(a => {
-        const doc = C.ACKNOWLEDGMENTS.find(d => d.id === a.id);
+        const doc = T.ALL_ACKS.find(d => d.id === a.id);
         a.links = (doc.driveFileIds || []).map(id => `https://drive.google.com/file/d/${id}/view`);
       });
       // Files: our own ids only. A Drive id never leaves the server.
@@ -213,7 +223,7 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
     let stored;
     try {
-      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter('C'),
+      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter((rec.inputs && rec.inputs.chapter) || 'C'),
         staffFolders.personFolderName(rec.userName, rec.userId), prepared.safeName, req.file.buffer, prepared.mime);
     } catch (err) {
       // A storage failure REFUSES the upload: a row pointing at nothing would
@@ -313,7 +323,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // text nobody showed her.
   router.post('/api/onboarding/me/items/:itemId/acknowledgments/:ackId', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
-    const doc = C.ACKNOWLEDGMENTS.find(d => d.id === req.params.ackId);
+    const doc = T.ALL_ACKS.find(d => d.id === req.params.ackId);
     if (!doc) return res.status(404).json({ error: 'Unknown document.', code: 'ACK_UNKNOWN' });
     return doAck(req, res, rec, actorOf(req), doc.version);
   });
@@ -376,7 +386,7 @@ module.exports = function createOnboardingRoutes(deps) {
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
         userId: rec.userId, name: rec.userName || u.name, credential: u.prescriberCredential || u.licenseLevel || null,
-        relationship: rec.inputs.relationship || 'W2', chapter: 'C', startDate: rec.inputs.startDate || null,
+        relationship: rec.inputs.relationship || 'W2', chapter: (rec.inputs && rec.inputs.chapter) || 'C', startDate: rec.inputs.startDate || null,
         progress: t.counts.items ? Math.round((t.counts.complete / t.counts.items) * 100) : 0,
         currentPhase: current ? { number: current.number, label: current.label } : null,
         next: next ? { title: next.title, waitingOnHer: next.next.hers, actorLabel: next.next.actorLabel } : null,
@@ -388,8 +398,10 @@ module.exports = function createOnboardingRoutes(deps) {
       };
     });
     // Clinicians with no onboarding record yet, so nobody is invisible.
-    const notStarted = users.filter(u => u.hasClinicalAccess && u.accountStatus !== 'inactive' && !rows.some(r => String(r.userId) === String(u.id)))
-      .map(u => ({ userId: u.id, name: u.name || u.email }));
+    // Everyone onboarded here with no record yet, so nobody is invisible:
+    // clinicians, the admin team and liaisons.
+    const notStarted = users.filter(u => (u.hasClinicalAccess || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(u))) && u.accountStatus !== 'inactive' && !rows.some(r => String(r.userId) === String(u.id)))
+      .map(u => ({ userId: u.id, name: u.name || u.email, chapter: defaultChapterFor(u) }));
     const flags = VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog });
     return res.json({
       people, notStarted,
@@ -404,6 +416,7 @@ module.exports = function createOnboardingRoutes(deps) {
         modulesFlagged: flags.filter(f => f.status === VF.STATUS.FLAGGED).length
       },
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
+      chapters: CHAPTER_CHOICES,
       serviceLines: C.SERVICE_LINES, determinations: C.DETERMINATIONS.map(d => ({ id: d.id, label: d.label, serviceLine: d.serviceLine }))
     });
   });
@@ -414,7 +427,7 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!rec && create) {
       const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId));
       if (!u) { res.status(404).json({ error: 'No such person.', code: 'PERSON_UNKNOWN' }); return null; }
-      rec = { id: uuidv4(), userId: String(u.id), userName: u.name || u.email, createdAt: nowIso(), inputs: T.normalizeInputs({}), items: {}, training: {}, determinations: {} };
+      rec = { id: uuidv4(), userId: String(u.id), userName: u.name || u.email, createdAt: nowIso(), inputs: T.normalizeInputs({ chapter: defaultChapterFor(u) }), items: {}, training: {}, determinations: {} };
     }
     if (!rec) { res.status(404).json({ error: 'Onboarding has not been started for this person.', code: 'ONBOARDING_NOT_STARTED' }); return null; }
     return rec;
@@ -430,7 +443,11 @@ module.exports = function createOnboardingRoutes(deps) {
   router.put('/api/onboarding/admin/people/:userId/inputs', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res, { create: true }); if (!rec) return;
     const before = rec.inputs;
-    rec.inputs = Object.assign(T.normalizeInputs(req.body || {}), { relationship: 'W2' });
+    // The chapter: what the office chose, else what the record already has,
+    // else what the person's account type implies.
+    const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
+    const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter })), { relationship: 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });
@@ -490,7 +507,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // version printed on it. An older version reads stale, never complete.
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/acknowledgments/:ackId', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
-    const doc = C.ACKNOWLEDGMENTS.find(d => d.id === req.params.ackId);
+    const doc = T.ALL_ACKS.find(d => d.id === req.params.ackId);
     if (!doc) return res.status(404).json({ error: 'Unknown document.', code: 'ACK_UNKNOWN' });
     return doAck(req, res, rec, officeActorOf(req), trim((req.body || {}).version, 20) || doc.version);
   });
