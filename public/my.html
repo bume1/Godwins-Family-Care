@@ -15,61 +15,92 @@
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>
-    :root{--navy:#033D50;--navy-soft:#0A4F66;--gold:#C9A44A;--gold-pale:#F1E2BE;--cream:#FAF7F2;--ink:#1B2A33;--mut:#4F6470;--line:#E1D9C9;--green:#3F7A5C;--red:#B5462E}
+    /* The patient portal's look (portal.html, .gfc.v2), for every staff member
+       (owner, 2026-11-08): white sidebar with the full-colour logo, cream page,
+       soft cards, Cormorant Garamond + DM Sans, the banner photo on Home. */
+    :root{--navy:#033D50;--navy2:#0a5066;--goldd:#C9A44A;--gold-ink:#9A7430;--cream:#FAF7F2;--wash:#F6EFE2;
+      --ink:#1a2a32;--mut:#41555f;--edge:#ECE4D6;--edge2:#E1D7C5;--green:#1d7a5a;--red:#B5462E;--side:248px}
     *{box-sizing:border-box}
     body{margin:0;font-family:'DM Sans',system-ui,sans-serif;background:var(--cream);color:var(--ink);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
     h1,h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600;color:var(--navy);margin:0;line-height:1.15}
-    h1{font-size:32px} h2{font-size:22px}
     a{color:var(--navy)} button{font-family:inherit}
-    .shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
-    .side{background:var(--navy);color:#fff;padding:18px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
-    .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 18px}
-    .brand img{width:38px;height:38px}
-    .brand b{font-family:'Cormorant Garamond',serif;font-size:19px;line-height:1.05;color:#fff}
-    .nav button{display:flex;gap:12px;align-items:center;width:100%;background:none;border:0;color:#fff;padding:11px 12px;border-radius:10px;font-size:15px;cursor:pointer;text-align:left}
-    .nav button.on{background:#9A7A33}
-    .nav button:hover:not(.on){background:var(--navy-soft)}
-    .nav i{font-size:20px}
-    .who{margin-top:auto;padding:12px 8px 0;border-top:1px solid rgba(255,255,255,.15);font-size:13px}
-    .who a{color:#F5CD85;text-decoration:none}
-    .main{padding:24px 28px 80px;max-width:1100px;width:100%}
-    .sub{color:var(--mut);font-family:'Cormorant Garamond',serif;font-size:19px;margin:4px 0 18px}
-    .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
-    .card-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
-    .card-h h2{border-bottom:2px solid var(--gold);padding-bottom:4px}
-    .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:16px}
-    .tile{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;cursor:pointer;text-align:left;display:flex;gap:12px;align-items:flex-start}
-    .tile:hover{border-color:var(--gold)}
-    .tile .ic{width:44px;height:44px;border-radius:12px;background:#EEF4F6;color:var(--navy);display:flex;align-items:center;justify-content:center;font-size:23px;flex:none}
-    .tile b{display:block;color:var(--navy);font-size:15.5px} .tile small{color:var(--mut);font-size:13px}
-    .row{display:flex;align-items:center;gap:12px;padding:11px 4px;border-bottom:1px solid #F1ECE1}
+    /* The sidebar's white is painted on the whole row, so it runs the full
+       height of the page however long the page is. */
+    .shell{display:flex;min-height:100vh;position:relative}
+    .side{display:none}
+    .main{flex:1;min-width:0;position:relative}
+    .body{padding:18px 16px 110px;max-width:1080px;margin:0 auto;position:relative;z-index:1}
+    .top{position:sticky;top:0;z-index:20;background:rgba(250,247,242,.96);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--edge)}
+    .top img{height:34px} .top a{font-size:14px;font-weight:600;text-decoration:none}
+    .main.home .top{background:transparent;border-bottom:none;backdrop-filter:none;position:relative;z-index:2}
+    /* Banner photo behind the top of Home, fading into the page. */
+    .main.home::before{content:"";position:absolute;left:0;right:0;top:0;height:380px;z-index:0;pointer-events:none;
+      background:linear-gradient(to bottom,rgba(250,247,242,.35),rgba(250,247,242,.1) 38%,rgba(250,247,242,0) 55%),url('/banners/banner-portal.jpg') 36% top / cover no-repeat;
+      -webkit-mask-image:linear-gradient(to bottom,#000 66%,transparent 100%);mask-image:linear-gradient(to bottom,#000 66%,transparent 100%)}
+    .hello{padding:0 2px 96px}
+    .hello h1,.hello p{text-shadow:0 0 14px rgba(250,247,242,.95),0 0 4px rgba(250,247,242,.9)}
+    .ptitle{margin:6px 0 18px}
+    h1{font-size:32px}
+    .ptitle p,.hello p{font-size:15.5px;color:var(--mut);margin:4px 0 0;font-weight:500}
+    .card{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}
+    .card-h{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+    .card-h h2{font-size:22px}
+    .card > p.lead{margin:0 0 10px;color:var(--mut);font-size:14.5px}
+    .tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px}
+    .tile{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:14px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:8px;min-height:118px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}
+    .tile:hover{border-color:var(--goldd)}
+    .tile .ic{width:42px;height:42px;border-radius:12px;background:var(--wash);display:flex;align-items:center;justify-content:center;color:var(--navy);font-size:22px}
+    .tile b{display:block;font-size:15px;font-weight:700;color:var(--navy)} .tile small{display:block;font-size:13px;color:var(--gold-ink);font-weight:600}
+    .row{display:flex;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid var(--edge)}
     .row:last-child{border-bottom:0}
-    .row .grow{flex:1;min-width:0} .row .grow b{display:block;overflow-wrap:anywhere} .row .grow small{color:var(--mut);font-size:13px}
-    .row i.big{font-size:24px;color:var(--navy)}
-    .btn{border-radius:9px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;display:inline-flex;gap:7px;align-items:center;text-decoration:none}
-    .btn.ghost{background:#fff;color:var(--navy)} .btn.warn{background:#fff;color:var(--red);border-color:var(--red)}
-    .btn.sm{padding:6px 10px;font-size:13px} .btn[disabled]{opacity:.5;cursor:not-allowed}
-    .pill{display:inline-flex;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600;white-space:nowrap;background:#E6EEF2;color:var(--navy)}
-    .pill.ok{background:#E7F1EB;color:var(--green)} .pill.bad{background:#FBE9E5;color:var(--red)} .pill.wait{background:#F8EED7;color:#7A5A12}
-    .bar{height:9px;background:#EFE8DA;border-radius:6px;overflow:hidden;margin:8px 0}
-    .bar>span{display:block;height:100%;background:#A97E2B}
-    .note{background:var(--cream);border:1px solid var(--line);border-radius:10px;padding:12px;color:var(--mut);font-size:14px}
-    .err{background:#FBE9E5;color:var(--red);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:14px}
+    .row .grow{flex:1;min-width:0} .row .grow b{display:block;overflow-wrap:anywhere;color:var(--navy);font-weight:700} .row .grow small{color:var(--mut);font-size:13px}
+    .row i.big{font-size:22px;color:var(--navy);width:40px;height:40px;border-radius:12px;background:var(--wash);display:flex;align-items:center;justify-content:center;flex:none}
+    .btn{border-radius:12px;padding:10px 16px;font-size:14.5px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;display:inline-flex;gap:7px;align-items:center;text-decoration:none;box-shadow:0 6px 16px -8px rgba(3,61,80,.6)}
+    .btn.ghost{background:#fff;color:var(--navy);border:1.5px solid var(--edge2);box-shadow:none}
+    .btn.warn{background:#fff;color:var(--red);border:1.5px solid rgba(181,70,46,.4);box-shadow:none}
+    .btn.sm{padding:7px 12px;font-size:13.5px;border-radius:10px} .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .pill{display:inline-flex;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600;white-space:nowrap;background:var(--wash);color:var(--navy)}
+    .pill.ok{background:#e7f4ee;color:var(--green)} .pill.bad{background:#fdecea;color:var(--red)} .pill.wait{background:#FBF1DC;color:#6b5121}
+    .bar{height:9px;background:var(--wash);border-radius:6px;overflow:hidden;margin:10px 0 14px}
+    .bar>span{display:block;height:100%;background:var(--goldd)}
+    .note{background:var(--wash);border:1px solid var(--edge);border-radius:12px;padding:12px 14px;color:var(--mut);font-size:14px;margin:6px 0}
+    .err{background:#fdecea;border:1px solid rgba(181,70,46,.3);color:var(--red);border-radius:11px;padding:11px 13px;margin-bottom:12px;font-size:14px}
     .crumbs{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:10px;font-size:14px}
     .crumbs button{background:none;border:0;color:var(--navy);cursor:pointer;padding:2px 4px;text-decoration:underline;font-size:14px}
-    label{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:10px 0 4px}
-    input[type=text],textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;background:#fff}
+    label{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:12px 0 5px}
+    input[type=text],textarea{width:100%;background:#fff;border:1px solid var(--edge2);border-radius:11px;padding:11px 13px;font:inherit;color:var(--ink)}
+    input[type=text]:focus,textarea:focus{outline:none;border-color:var(--navy);box-shadow:0 0 0 3px rgba(3,61,80,.1)}
     .checks{display:flex;flex-wrap:wrap;gap:8px}
-    .checks label{display:inline-flex;gap:6px;align-items:center;margin:0;font-weight:500;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:5px 9px;background:#fff}
-    .mob{display:none}
-    @media (max-width:820px){
-      .shell{grid-template-columns:1fr}.side{display:none}.main{padding:16px 16px 90px}
-      .mob{display:flex;position:fixed;bottom:0;left:0;right:0;background:var(--navy);justify-content:space-around;padding:6px 2px calc(6px + env(safe-area-inset-bottom));z-index:5}
-      .mob button{background:none;border:0;color:#fff;display:flex;flex-direction:column;align-items:center;font-size:11px;gap:2px;padding:4px 6px;border-radius:8px;cursor:pointer}
-      .mob button.on{background:#9A7A33} .mob i{font-size:21px}
-      .mtop{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+    .checks label{display:inline-flex;gap:6px;align-items:center;margin:0;font-weight:500;color:var(--ink);border:1px solid var(--edge2);border-radius:10px;padding:6px 10px;background:#fff}
+    /* phone menu */
+    .tabs{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--edge);display:flex;z-index:30;box-shadow:0 -4px 16px rgba(3,61,80,.06);padding-bottom:env(safe-area-inset-bottom)}
+    .tabs button{flex:1;background:none;border:none;padding:9px 2px 12px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--mut);font-size:11px;font-weight:600;position:relative}
+    .tabs button i{font-size:22px;color:var(--navy)}
+    .tabs button.on{color:var(--gold-ink)} .tabs button.on i{color:var(--gold-ink)}
+    .tabs button.on::before{content:"";position:absolute;top:0;left:28%;right:28%;height:3px;border-radius:0 0 3px 3px;background:var(--goldd)}
+    @media (min-width:640px){.tiles{grid-template-columns:repeat(3,1fr)} .body{padding:22px 28px 110px}}
+    @media (min-width:1024px){
+      .shell{background:linear-gradient(90deg,#fff calc(var(--side) - 1px),var(--edge) calc(var(--side) - 1px),var(--edge) var(--side),transparent var(--side))}
+      .side{display:flex;flex-direction:column;width:var(--side);flex-shrink:0;position:sticky;top:0;height:100vh;padding:22px 14px;overflow-y:auto}
+      .side img.logo{height:46px;align-self:flex-start;margin:0 10px 8px}
+      .side .tag{font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;color:var(--gold-ink);margin:0 14px 18px}
+      .side button{display:flex;width:100%;align-items:center;gap:13px;background:none;border:none;border-radius:12px;padding:12px 14px;font-size:15px;font-weight:600;color:var(--navy);cursor:pointer;text-align:left;margin-bottom:2px}
+      .side button i{font-size:21px;color:var(--navy)}
+      .side button:hover{background:var(--wash)}
+      .side button.on{background:var(--goldd);color:#fff} .side button.on i{color:#fff}
+      .side .foot{margin-top:auto;padding:16px 8px 0;border-top:1px solid var(--edge);font-size:13px;color:var(--mut)}
+      .side .foot b{display:block;color:var(--navy);font-size:14px}
+      .side .foot a{display:inline-block;margin-top:8px;font-weight:600;text-decoration:none}
+      .top,.tabs{display:none}
+      .body{padding:32px clamp(24px,3vw,48px) 48px;max-width:1160px}
+      .main.home::before{height:clamp(300px,25vw,480px);background:url('/banners/banner-portal.jpg') right 40% / cover no-repeat;
+        -webkit-mask-image:linear-gradient(90deg,transparent 0%,rgba(0,0,0,.14) 30%,rgba(0,0,0,.75) 56%,#000 72%),linear-gradient(to bottom,#000 58%,transparent 100%);
+        -webkit-mask-composite:source-in;
+        mask-image:linear-gradient(90deg,transparent 0%,rgba(0,0,0,.14) 30%,rgba(0,0,0,.75) 56%,#000 72%),linear-gradient(to bottom,#000 58%,transparent 100%);mask-composite:intersect}
+      .hello{padding:clamp(20px,3vw,48px) 0 clamp(48px,6vw,96px);min-height:clamp(180px,15vw,290px);display:flex;flex-direction:column;justify-content:center}
+      h1{font-size:40px}
+      .tiles{grid-template-columns:repeat(3,1fr);gap:16px}
     }
-    @media (min-width:821px){.mtop{display:none}}
   </style>
 </head>
 <body>
@@ -129,8 +160,8 @@ const sectionsFor = (profile) => SECTIONS.filter(s => !s.adminTeam || profile.is
 function Section({ title, sub, children, right }) {
   return (
     <div className="card">
-      <div className="card-h"><h2>{title}</h2>{right}</div>
-      {sub && <p style={{ marginTop: 0, color: 'var(--mut)' }}>{sub}</p>}
+      {(title || right) && <div className="card-h">{title ? <h2>{title}</h2> : <span />}{right}</div>}
+      {sub && <p className="lead">{sub}</p>}
       {children}
     </div>
   );
@@ -553,7 +584,7 @@ function App() {
       </div>
     );
   } else if (view === 'onboarding') {
-    body = <Section title="My Onboarding"><OnboardingSummary onboarding={onboarding} /></Section>;
+    body = <Section><OnboardingSummary onboarding={onboarding} /></Section>;
   } else if (view === 'documents') {
     body = (
       <div>
@@ -562,11 +593,11 @@ function App() {
       </div>
     );
   } else if (view === 'policies') {
-    body = <Section title="Policies" sub="The latest version of every policy you work under."><Policies policies={policies} /></Section>;
+    body = <Section><Policies policies={policies} /></Section>;
   } else if (view === 'folders') {
     body = (
       <div>
-        <Section title="Shared Folders" sub="The Drive folders the office set up for your role."><SharedFolders folders={folders} /></Section>
+        <Section><SharedFolders folders={folders} /></Section>
         {profile.isAdmin && <Section title="Manage Shared Folders" sub="Choose which Drive folders each role or person sees here."><ManageFolders onChanged={loadFolders} /></Section>}
       </div>
     );
@@ -588,35 +619,47 @@ function App() {
       </div>
     );
   } else if (view === 'team' && profile.isAdmin) {
-    body = <Section title="Team Bios" sub="Headshots and bios for the website. Each person keeps their own up to date."><TeamBios /></Section>;
+    body = <Section><TeamBios /></Section>;
   }
 
+  const SUBTITLES = {
+    onboarding: 'Your checklist, uploads and training.',
+    documents: 'What you signed, and every file on record for you.',
+    policies: 'The latest version of every policy you work under.',
+    folders: 'The Drive folders set up for your role.',
+    hours: 'Your pay stubs from payroll.',
+    account: 'Your headshot, website bio and sign-in.',
+    team: 'Headshots and bios for the website. Each person keeps their own up to date.'
+  };
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand"><img src="/brand/logo-mark-white-transparent.png" alt="" /><b>My GFC</b></div>
-        <nav className="nav">
+        <img className="logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+        <div className="tag">My GFC</div>
+        <nav>
           {sectionsFor(profile).map(s => (
             <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
           ))}
         </nav>
-        <div className="who">
-          <div>{profile.name}</div>
-          <div style={{ opacity: .75 }}>{profile.typeLabel}</div>
-          <a href={home.href}>← {home.label}</a>
+        <div className="foot">
+          <b>{profile.name}</b>{profile.typeLabel}
+          <div><a href={home.href}>← {home.label}</a></div>
         </div>
       </aside>
-      <main className="main">
-        <div className="mtop">
-          <img src="/brand/logo-mark-transparent.png" alt="" style={{ width: 34, height: 34 }} />
-          <a href={home.href} style={{ marginLeft: 'auto', fontSize: 14 }}>← {home.label}</a>
+      <main className={`main${view === 'home' ? ' home' : ''}`}>
+        <div className="top">
+          <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+          <a href={home.href}>← {home.label}</a>
         </div>
-        <h1>{view === 'home' ? `Hi, ${firstName}` : SECTIONS.find(s => s.id === view).label}</h1>
-        <div className="sub">{profile.typeLabel} · Godwins Family Care</div>
-        {err && <div className="err">{err}</div>}
-        {body}
+        <div className="body">
+          {view === 'home'
+            ? <div className="hello"><h1>Hi, {firstName}</h1><p>{profile.typeLabel} · Godwins Family Care</p></div>
+            : <div className="ptitle"><h1>{SECTIONS.find(s => s.id === view).label}</h1><p>{SUBTITLES[view]}</p></div>}
+          {err && <div className="err">{err}</div>}
+          {body}
+        </div>
       </main>
-      <nav className="mob">
+      <nav className="tabs">
         {SECTIONS.filter(s => !['account', 'onboarding'].includes(s.id) && !s.adminTeam).map(s => (
           <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label.replace('My ', '').replace(' & Pay', '').replace('Shared ', '')}</button>
         ))}
