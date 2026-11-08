@@ -32,7 +32,9 @@ if (process.env.NODE_ENV === 'production' &&
 // Clients, family and caregivers are not gated today (owner decision pending).
 // A floor: MFA_REQUIRED_ROLES can add roles but never remove one, so a narrowed
 // env var cannot silently drop clinicians and case managers from 2FA.
-const MFA_REQUIRED_ROLES_FLOOR = Object.freeze(['admin', 'user', 'caseManager']);
+// A liaison reads client names and enrollment status, which is PHI, so they
+// sign in with two-step too.
+const MFA_REQUIRED_ROLES_FLOOR = Object.freeze(['admin', 'user', 'caseManager', 'liaison']);
 const MFA_REQUIRED_ROLES = Object.freeze([...new Set([
   ...MFA_REQUIRED_ROLES_FLOOR,
   ...String(process.env.MFA_REQUIRED_ROLES || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -107,9 +109,14 @@ const ROLES = Object.freeze({
   CLIENT: 'client',
   VENDOR: 'vendor',
   CASE_MANAGER: 'caseManager',
-  FAMILY: 'family'
+  FAMILY: 'family',
+  // Community Care Liaison (owner, 2026-11-08). A role of its own so that no
+  // existing gate admits it by accident: 'user' is enrollment staff and
+  // clinical everywhere. It reaches My GFC and its own assigned clients' enrollment
+  // summary, and nothing else.
+  LIAISON: 'liaison'
 });
-const ALL_ROLES = Object.freeze([ROLES.ADMIN, ROLES.USER, ROLES.CLIENT, ROLES.VENDOR, ROLES.CASE_MANAGER, ROLES.FAMILY]);
+const ALL_ROLES = Object.freeze([ROLES.ADMIN, ROLES.USER, ROLES.CLIENT, ROLES.VENDOR, ROLES.CASE_MANAGER, ROLES.FAMILY, ROLES.LIAISON]);
 
 // ---- Project & Task Statuses ----
 const PROJECT_STATUSES = Object.freeze(['active', 'paused', 'completed']);

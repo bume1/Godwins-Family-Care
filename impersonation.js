@@ -50,8 +50,9 @@ const BLOCKED_WHILE_ACTING_AS = Object.freeze([
   { method: 'POST', pattern: /^\/api\/gfc\/transfer-roi\/submit$/, what: 'signing a record release' },
   { method: 'PUT', pattern: /^\/api\/client\/service-reports\/[^/]+\/sign$/, what: 'signing a service report' },
   // Clinician onboarding and credentialing signatures
-  { method: 'POST', pattern: /^\/api\/clinician-onboarding\/me\/resources\/[^/]+\/sign$/, what: 'signing an onboarding document' },
-  { method: 'POST', pattern: /^\/api\/clinician-onboarding\/admin\/[^/]+\/privileges\/co-sign$/, what: 'co-signing a privilege list' },
+  { method: 'POST', pattern: /^\/api\/onboarding\/me\/items\/[^/]+\/acknowledgments\/[^/]+$/, what: 'acknowledging an onboarding document' },
+  { method: 'POST', pattern: /^\/api\/onboarding\/me\/modules\/[^/]+\/complete$/, what: 'attesting to a training module' },
+  { method: 'POST', pattern: /^\/api\/onboarding\/admin\/people\/[^/]+\/determinations\/[^/]+$/, what: 'opening a service line' },
   // Caregiver signatures
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/submit$/, what: 'signing the welcome packet' },
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/attestations\/[^/]+$/, what: 'signing a caregiver form' },

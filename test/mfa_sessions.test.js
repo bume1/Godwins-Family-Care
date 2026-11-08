@@ -171,10 +171,12 @@ test('MFA_REQUIRED_ROLES can widen the floor but never narrow it', () => {
   const rolesWith = (value) => JSON.parse(execFileSync(process.execPath,
     ['-e', "process.stdout.write(JSON.stringify(require('./config').MFA_REQUIRED_ROLES))"],
     { cwd: root, env: { ...process.env, NODE_ENV: 'test', MFA_REQUIRED_ROLES: value } }).toString());
-  assert.deepEqual(rolesWith('admin'), ['admin', 'user', 'caseManager'], 'narrowing to admin keeps clinicians and case managers');
-  assert.deepEqual(rolesWith(''), ['admin', 'user', 'caseManager']);
-  assert.deepEqual(rolesWith('vendor, client'), ['admin', 'user', 'caseManager', 'vendor', 'client'], 'widening still works');
-  assert.deepEqual(rolesWith('caseManager,admin'), ['admin', 'user', 'caseManager'], 'no duplicates');
+  // A liaison reads client names and enrollment status, so they are on the floor too (2026-11-08).
+  const FLOOR = ['admin', 'user', 'caseManager', 'liaison'];
+  assert.deepEqual(rolesWith('admin'), FLOOR, 'narrowing to admin keeps clinicians, case managers and liaisons');
+  assert.deepEqual(rolesWith(''), FLOOR);
+  assert.deepEqual(rolesWith('vendor, client'), FLOOR.concat(['vendor', 'client']), 'widening still works');
+  assert.deepEqual(rolesWith('caseManager,admin'), FLOOR, 'no duplicates');
 });
 
 // ---- 2. Sessions ----
@@ -284,7 +286,7 @@ test('production refuses MFA_ENFORCE=false and a missing EMR_TOKEN_ENCRYPTION_KE
   assert.match(cfg, /if \(!MFA_ENFORCE\) throw new Error\('MFA_ENFORCE=false is not permitted in production/);
   assert.match(cfg, /EMR_TOKEN_ENCRYPTION_KEY must be set in production/);
   assert.equal(require('../config').SESSION_IDLE_MINUTES, 15);
-  assert.deepEqual(require('../config').MFA_REQUIRED_ROLES, ['admin', 'user', 'caseManager']);
+  assert.deepEqual(require('../config').MFA_REQUIRED_ROLES, ['admin', 'user', 'caseManager', 'liaison']);
 });
 
 // ---- 5. pages ----

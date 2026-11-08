@@ -122,7 +122,8 @@ const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
-const clinicianOnboardingRoutes = require('./routes/clinicianOnboarding'); // clinician onboarding, credentialing + privileging (2026-11)
+const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
+const onboardingRoutes = require('./routes/onboarding'); // staff onboarding over the Playbook v3.0 catalog (2026-11-08; replaces #260)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
                                                        // timeline asks it rather than restating it.
@@ -3025,18 +3026,20 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
   // rule the consent signatures follow.
   hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
 
-// Clinician onboarding: the four inputs build the checklist, the checklist
-// decides the gates, and a gate is signed open by a person. Credentialing is
-// office work, so the router gates its own admin half on admin-or-manager
-// rather than on clinical write — a provider must never verify their own
-// licence or sign their own gate open.
-app.use(clinicianOnboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+// Staff onboarding (Playbook v3.0). Collaborative: she completes her own
+// steps and the office completes or verifies the rest. The office half is
+// gated on admin-or-manager rather than clinical write, so a provider never
+// verifies her own licence or opens her own service line.
+app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
   drive: googledrive,
-  detectFileType: (buf) => detectFileType(buf),
-  // The signer's own address, hashed — the same rule the consent and packet
-  // signatures follow: the forwarding chain is not the signer.
-  hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET)
+  detectFileType: (buf) => detectFileType(buf)
 }));
+// My GFC: a staff member's own documents, policies and the Drive folders the
+// office assigned to their role or to them by name.
+app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
+  detectFileType: (buf) => detectFileType(buf),
+  // Wrapped: the enrollment helpers are declared further down this file.
+  enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
@@ -20899,6 +20902,21 @@ const enrollmentListRow = (client) => {
   };
 };
 
+// What a Community Care Liaison sees of a client assigned to them (owner,
+// 2026-11-08): the enrollment summary only. Status, how complete, and what is
+// still needed, by name. Never the intake answers, the chart or a document.
+const liaisonEnrollmentView = (client) => {
+  const row = enrollmentListRow(client);
+  const comp = computeEnrollmentCompletion(client);
+  return {
+    id: row.id, name: row.name, serviceLine: row.serviceLine,
+    enrollmentStatus: row.enrollmentStatus, reviewState: row.reviewState,
+    completionPct: row.completionPct, submittedAt: row.submittedAt, reviewedAt: row.reviewedAt,
+    needsFollowUp: row.needsFollowUp,
+    stillNeeded: { consents: comp.missingConsentLabels, details: comp.missingFieldLabels }
+  };
+};
+
 const enrollmentDetail = (client) => {
   const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
   const intake = client.intake || {};
@@ -31560,8 +31578,12 @@ app.get('/admin/enrollment', (req, res) => {
 
 // Clinician workspace (Session 4.1). Page shell is public; every
 // /api/clinical/* route it calls enforces requireClinicalRead / requireClinicalWrite.
+app.get('/my', (req, res) => {
+  res.sendFile(__dirname + '/public/my.html');
+});
+
 app.get('/onboarding', (req, res) => {
-  res.sendFile(__dirname + '/public/clinician-onboarding.html');
+  res.sendFile(__dirname + '/public/onboarding.html');
 });
 
 app.get('/clinical', (req, res) => {
