@@ -1,8 +1,19 @@
-# Onboarding Wizard v3 — rebuild plan
+# Onboarding wizard v3 — the rebuild, decided
 
-**Written 2026-11-08 against GFC-WIZ-PROMPT v1.0 and Onboarding Playbook v3.0.**
-Nothing in this plan is built yet. It exists to be read and corrected before
-any merged code is touched.
+**2026-11-08. Decided against GFC-WIZ-PROMPT v1.0 and Onboarding Playbook v3.0,
+both read from Drive.** Nothing is built yet. This records what was decided and
+what was found, to be corrected before any merged code moves.
+
+**No document in this repository governs this work.** The Drive documents are
+the specification; a repository document describes how the app implements
+something and never establishes an onboarding requirement. Where the two
+differ, Drive is right and the repository is the defect. This file is a
+decision record, not a specification.
+
+> **Corrected in place:** this started life as `docs/GFC_Onboarding_Wizard_v3_Rebuild_Plan.md`.
+> The updated prompt forbids adding a new specification file to `docs/` for
+> this work, so it moved here. The rule is right: a plan sitting in `docs/`
+> beside the real specifications is the next thing somebody builds against.
 
 Owner decisions already taken, 2026-11-08:
 
@@ -30,7 +41,7 @@ Every source was read from Drive, not from a copy. Versions checked against
 | **Clinician Training Library** | **not in Current** | "to be added" | ⛔ |
 
 **⛔ The Training Library is the one blocker.** §5 says to take the module
-record schema from it. It is not in `01 Company / 03 Policies and Procedures /
+record schema from it. It is not in `01 Company / Policies & Procedures /
 Current`, and §2 says to say so rather than build against something else. So
 everything in this plan that touches module records stops at the schema and
 waits. Nothing else is blocked by it.
@@ -170,10 +181,35 @@ primary source behind it. They cannot verify their own licence, and recording
 their say-so as a verification would put an unchecked fact behind a readiness
 determination.
 
-**What already exists and is not rebuilt.** Chapter A's person-facing surface
-is the caregiver welcome packet, which works. Chapter C's is the clinician
-wizard. The work is the manager side done properly, plus the chapters that
-have no person-facing surface yet: B, D, E, F, G and H.
+**What already exists.** Chapter A's person-facing surface is the caregiver
+welcome packet. Chapter C's is the clinician wizard. The work is the manager
+side done properly, plus the chapters with no person-facing surface yet: B, D,
+E, F, G and H.
+
+**⚠️ But the caregiver packet does not meet Chapter A, and that is exactly what
+the rule in §2 predicts.** The packet was built against
+`docs/GFC_Caregiver_Welcome_Packet_v1.md`, a repository document that describes
+an implementation and never established a requirement. Read against Chapter A
+of the Playbook, checked item by item on 2026-11-08:
+
+| Chapter A Phase 3 requires | Shipped |
+|---|---|
+| Criminal records check: **GCHEXS initiates, GAPS fingerprints, DCH determines**. Employment stays conditional until the determination arrives | One office checkbox, `fingerprinting`. It covers the middle step only and holds no determination |
+| Exclusion screening against OIG LEIE, the System for Award Management, and the Georgia Medicaid excluded provider list, dated, repeated on the A.10 schedule | **Absent.** Not in the packet, not in the office items |
+| **Qualifying route**: which of companion/sitter, personal care assistant or licensed nursing applies; for a PCA which of four routes under Rule 111-8-65-.09(5)(c)1; verified at its own source; route and verification both recorded | **Absent.** One flat "CNA, HHA, PCA or LPN certificate" upload. A companion needs no certificate at all, and three of the four PCA routes are not certificates |
+| Driving record and licence where the caregiver transports clients | Auto insurance only |
+| TB screening, annually | ✅ |
+| Drug screening, **a GFC requirement rather than a private home care rule** | Present, but not labelled by source (§6) |
+
+The forty-hour PCA route carries its own rule the packet cannot express:
+**twenty hours before the caregiver serves any client**, the rest within six
+months, under a named directing nurse.
+
+**None of this is a defect in the packet's code.** It is a gap between what was
+specified in the repository and what Chapter A requires, which is the reason
+§2 now says no repository document governs this work. Chapter A's rebuild is
+therefore larger than "add phases to the existing packet", and step 4 of the
+sequence should be sized accordingly.
 
 ---
 
@@ -249,7 +285,7 @@ chapter's directive wording for D, and must not record a supervisory sign-off
 that implies control of how the clinician practises. This wants a build guard,
 not a style note.
 
-**Canonical copy.** Link to `01 Company / 03 Policies and Procedures /
+**Canonical copy.** Link to `01 Company / Policies & Procedures /
 Current`. Do not store a copy, and do not cache content in a way that survives
 a revision. Drive's Manage versions keeps the file id stable, so a stored link
 stays valid.
@@ -295,6 +331,11 @@ Following §8 of the prompt.
 
 Two things worth doing before step 1, because they are live and cheap: take
 RES-31 off the shelf, and delete the three source copies from `docs/`.
+
+**Step 4 is bigger than it looks.** Chapter A is not "add phases to the
+caregiver packet" — the clearance and qualifying-route gaps above are real
+work, and a caregiver can currently be marked cleared without an exclusion
+screening or a recorded qualifying route.
 
 ---
 
