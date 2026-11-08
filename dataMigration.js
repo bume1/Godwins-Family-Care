@@ -92,6 +92,13 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Patient statements: copays and home care hours. Amounts and dates of
   // service for a named client. Stripe holds only the invoice number.
   { key: 'patient_invoices', phi: true, owner: 'billing 10/2026' },
+  // The office's list of LTC carriers it invoices: names, addresses, claims
+  // emails. Organization data; the client's policy and claim numbers live on
+  // the client record and are copied onto each invoice.
+  { key: 'billing_payers', phi: false, owner: 'PHC invoices 11/2026' },
+  // Each hours file used to make invoices, kept with the invoices made from
+  // it: caregiver and client names with shift times.
+  { key: 'invoice_hour_imports', phi: true, owner: 'PHC invoices 11/2026' },
   // B1: every eligibility result a biller recorded, append-only. The client
   // record holds the CURRENT answer per rank; this is how it got there.
   { key: 'insurance_verification_events', phi: true, owner: 'insurance eligibility 10/2026' },

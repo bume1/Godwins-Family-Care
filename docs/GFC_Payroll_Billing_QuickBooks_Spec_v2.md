@@ -18,7 +18,7 @@ Medicaid waiver, VA and Medicare B as **home care** payers: later.
 
 ## 2. Decisions from the review
 
-1. **QuickBooks gets PHC only.** It never receives clinical clients or claims. PHC customers in QuickBooks: **OPEN item (a)** below.
+1. **QuickBooks gets PHC only.** It never receives clinical clients or claims. PHC customers are entered **with the client's name and an account number** (owner, 2026-11-08: acceptable for the private home care line). Only the name, account number and amounts go; never care details.
 2. **No rebalancing.** Hours are never moved between days. Invoices are generated from the **final approved payroll hours**. That source is either the app's own approved hours, or an **uploaded hours file** (CSV) when the hours were kept outside the app. The upload is checked, previewed and approved before any invoice is made from it.
 3. **Bill the hours as worked.** No daily limit is applied on any invoice, nothing is held, and nothing is moved (owner, round 2; this replaces "hold over-cap minutes").
 4. **No change to how caregivers clock in and out**, or how clocked hours become billed hours. Drive time between clients is not added to pay (owner decision 2026-11-08, made knowing the wage-law note in the review).
@@ -28,7 +28,7 @@ Medicaid waiver, VA and Medicare B as **home care** payers: later.
 8. **Hours come from the existing time logs** (caregiver GPS clock-in and out). Clinician visit time comes from the start and end stamps on My Day. Non-visit staff time (admin, training) gets a simple clock.
 9. **Pay rates keep their three levels:** shift → per client → base.
 10. **Invoices build on the existing statements** (`patient_invoices`) and **Stripe** online pay.
-11. **Invoice numbers are sequential and never reused** (`GFC-000123`). Client initials and the service date appear on the PDF only, never in the number. Stripe sees only the number and the amount.
+11. **Invoice numbers keep the carrier style** (owner, 2026-11-08): `GFC-{client initials}-{YYMMDD}` from the service date, e.g. `GFC-NP-261006`. A family invoice uses its period's last day. A second invoice on the same initials and date gets `-2`, `-3`. Numbers are never reused, even after a void. **Stripe never sees this number:** a statement paid online keeps its own `GFC-INV-XXXXXX` reference, which is all Stripe gets.
 12. **LTC carriers get one invoice per client per service date**, their current format. **Families are billed every two weeks.**
 13. **Gusto's onboarding paperwork moves into the app** with Phase 1: W-4, G-4, I-9, direct deposit, offer letter and handbook acknowledgement, and electronic-delivery consent. Without these, payroll cannot run.
 14. **Payroll's scheduled automations run in Google Apps Script** (owner, round 2), alongside the Apps Script projects already tied to the app. They include:
@@ -145,12 +145,10 @@ These v1 sections stand as written, adjusted only by section 2:
 
 ## 8. OPEN, for the owner
 
-- **(a)** PHC customers in QuickBooks: Intuit signs no HIPAA agreement. Real names, or an account number with the name kept in the app? (Only affects the QuickBooks step.)
 - **(i)** PNC payment timeline: the owner will update.
-- **(k)** Invoice numbers: the samples use the carrier format `GFC-DM-260902` (client initials + service date), but decision 11 says sequential. See the owner's answer.
 - VES rate sheet (owner sending); LSGS rates (placeholder until uploaded).
 
-Settled in round 2: (b) no hold, bill as worked; (c) families every two weeks; (d) Apps Script; (e) pay periods; (f) examiners paid every two weeks; (g) payments and denials list in the app; (h) the import matches the app's export.
+Settled in round 2: (b) no hold, bill as worked; (c) families every two weeks; (d) Apps Script; (e) pay periods; (f) examiners paid every two weeks; (g) payments and denials list in the app; (h) the import matches the app's export. Settled 2026-11-08: (a) QuickBooks customers by name and account number; (k) carrier-style invoice numbers.
 
 ## 9. Build order
 
@@ -161,7 +159,7 @@ Settled in round 2: (b) no hold, bill as worked; (c) families every two weeks; (
 | 3 | Payroll run from time logs + clinician stamps + staff clock, OT | Draft run shows gross, each tax, net and cash needed |
 | 4 | Owner approval, lock, link-only stubs | Approved run locks its hours; stubs show current and YTD |
 | 5 | PNC payment sheet + confirmations | Run is paid only when every worker has a confirmation |
-| 6 | Generate Invoice from approved hours or an imported export file, matching the owner's invoice | Sequential numbers; carrier per service date, family every two weeks; billed as worked; looks like the owner's sample |
+| 6 | Generate Invoice from approved hours or an imported export file, matching the owner's invoice | Carrier-style numbers; carrier per service date, family every two weeks; billed as worked; looks like the owner's sample |
 | 7 | IME fee schedules, exam invoices, examiner pay | A report-submitted exam bills at its entity's rate once |
 | 8 | Contractor invoice portal | Submit, approve, pay, 1099 total |
 | 9 | QuickBooks (sandbox, then live), PHC only | Each event posts once; no clinical data ever sent |

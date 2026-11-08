@@ -920,8 +920,22 @@ const BillingSettings = () => {
   );
 };
 
-// ---- Patient statements ----------------------------------------------------
+// ---- Statements and invoices -----------------------------------------------
 const STATEMENT_CHIP = { draft: 'bg-stone-100 text-stone-600', open: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700', void: 'bg-red-50 text-red-700' };
+// The invoice PDF, opened with the sign-in token in the header (never the URL).
+const openInvoicePdf = async (inv) => {
+  const w = window.open('', '_blank');
+  try {
+    const res = await fetch(`${API}/api/gfc/admin/billing/invoices/${enc(inv.id)}/pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) { let j = {}; try { j = await res.json(); } catch (e) { /* not json */ } throw new Error(j.error || `Could not open the invoice (${res.status})`); }
+    const url = URL.createObjectURL(await res.blob());
+    if (w) w.location.href = url; else window.location.href = url;
+  } catch (e) { if (w) w.close(); throw e; }
+};
+const statementLabel = (i) => i.kind === 'copay' ? 'Copay'
+  : i.format === 'carrier' ? `Carrier invoice · ${(i.billTo && i.billTo.name) || ''}${i.serviceDate ? ` · ${i.serviceDate}` : ''}`
+  : i.format === 'family' ? `Home care invoice${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`
+  : `Home care${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`;
 const Statements = ({ data, reload }) => {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState('');
@@ -933,9 +947,9 @@ const Statements = ({ data, reload }) => {
   const rows = data.invoices.filter(i => show === 'all' ? true : show === 'outstanding' ? (i.status === 'draft' || i.status === 'open') : i.status === show);
   return (
     <div className="card">
-      <div className="card-h"><h2>Patient Statements</h2></div>
+      <div className="card-h"><h2>Statements and Invoices</h2></div>
       <div className="p-4">
-        <p className="text-[13px] text-stone-500 mb-3">Copays and home care hours. A draft is checked here, then sent to the patient.</p>
+        <p className="text-[13px] text-stone-500 mb-3">Copays, home care invoices and LTC carrier invoices. A draft is checked here, then sent. A carrier invoice is sent to the carrier as its PDF; the patient never sees it.</p>
         {!data.stripe.configured && <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[13px] p-3 mb-3">Online payment is not set up yet. Statements still work; patients are told to call to pay.</div>}
         {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 text-[13px] p-3 mb-3">{err}</div>}
         <div className="flex gap-2 mb-3 overflow-x-auto">
@@ -948,26 +962,25 @@ const Statements = ({ data, reload }) => {
         {rows.map(i => (
           <div className="flex flex-wrap justify-between gap-3 py-3 border-b border-stone-100 last:border-0" key={i.id}>
             <div className="text-[13.5px]">
-              <b className="text-primary">{i.clientName || 'Client'}</b> · {i.number}
-              <div className="text-[12.5px] text-stone-500">{i.kind === 'copay' ? 'Copay' : `Home care${i.period ? ` ${i.period.from} to ${i.period.to}` : ''}`} · created {fmtDate(i.createdAt)}</div>
+              <b className="text-primary">{i.clientName || 'Client'}</b> · {i.displayNumber || i.number}
+              <div className="text-[12.5px] text-stone-500">{statementLabel(i)} · created {fmtDate(i.createdAt)}</div>
               {i.status === 'void' && <div className="text-[12.5px] text-stone-500">Voided: {i.voidReason}</div>}
               {i.status === 'paid' && <div className="text-[12.5px] text-stone-500">Paid {fmtDate(i.paidAt)} by {((i.payments || []).slice(-1)[0] || {}).method}</div>}
             </div>
             <div className="text-right">
               <div><b className="text-primary">{usd(i.totalCents)}</b> <span className={`chip ${STATEMENT_CHIP[i.status] || ''}`}>{i.status === 'open' ? 'SENT' : String(i.status).toUpperCase()}</span></div>
-              {(i.status === 'draft' || i.status === 'open') && (
-                <div className="flex flex-wrap gap-2 justify-end mt-2">
-                  {i.status === 'draft' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => act(i, 'send')}>Send to Patient</button>}
-                  {i.status === 'open' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => {
-                    const m = window.prompt('Paid how? Type check, cash or other.');
-                    if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
-                  }}>Record Payment</button>}
-                  <button className="btn ghost !py-1.5" disabled={busy === i.id} onClick={() => {
-                    const r = window.prompt('Why void this statement? The patient sees it as cancelled.');
-                    if (r && r.trim()) act(i, 'void', { reason: r.trim() });
-                  }}>Void</button>
-                </div>
-              )}
+              <div className="flex flex-wrap gap-2 justify-end mt-2">
+                {i.format && <button className="btn ghost !py-1.5" onClick={() => openInvoicePdf(i).catch(e => setErr(e.message))}>View PDF</button>}
+                {i.status === 'draft' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => act(i, 'send')}>{i.format === 'carrier' ? 'Mark Sent' : 'Send to Patient'}</button>}
+                {i.status === 'open' && <button className="btn !py-1.5" disabled={busy === i.id} onClick={() => {
+                  const m = window.prompt('Paid how? Type check, cash or other.');
+                  if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
+                }}>Record Payment</button>}
+                {(i.status === 'draft' || i.status === 'open') && <button className="btn ghost !py-1.5" disabled={busy === i.id} onClick={() => {
+                  const r = window.prompt(i.format === 'carrier' ? 'Why void this invoice?' : 'Why void this statement? The patient sees it as cancelled.');
+                  if (r && r.trim()) act(i, 'void', { reason: r.trim() });
+                }}>Void</button>}
+              </div>
             </div>
           </div>
         ))}
@@ -976,33 +989,122 @@ const Statements = ({ data, reload }) => {
   );
 };
 
-// ---- New statement / copay for one client ---------------------------------
-const NewStatement = ({ data, reload }) => {
+// ---- Generate Invoices: approved hours in, drafts out ----------------------
+// The hours are the app's completed shifts (the payroll export's rows) or a
+// file in that export's format. LTC carriers get one invoice per client per
+// service date; families one per period. The server decides every number.
+const GenerateInvoices = ({ data, reload }) => {
+  const [source, setSource] = useState('app');
+  const [range, setRange] = useState(() => (data.lastPeriod ? { ...data.lastPeriod } : { from: '', to: '' }));
+  const [file, setFile] = useState(null);   // { name, text }
+  const [preview, setPreview] = useState(null);
+  const [rowErrors, setRowErrors] = useState(null);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState('');
+  const body = () => ({ source, from: range.from, to: range.to, ...(source === 'import' && file ? { csv: file.text, fileName: file.name } : {}) });
+  const reset = () => { setPreview(null); setRowErrors(null); setErr(''); setMsg(''); };
+  const run = (key, fn) => { setBusy(key); setErr(''); setMsg(''); setRowErrors(null);
+    return fn().catch(e => { setErr(e.message); if (e.data && e.data.rowErrors) setRowErrors(e.data.rowErrors); return null; }).finally(() => setBusy('')); };
+  const ready = range.from && range.to && (source === 'app' || file);
+  return (
+    <div className="card">
+      <div className="card-h"><h2>Generate Invoices</h2></div>
+      <div className="p-4 grid gap-4 text-[13.5px]">
+        <p className="text-stone-500">Private home care only. Hours are billed as worked, with the client's daily minimum as its own line. LTC carriers get one invoice per client per date of service; families get one for the period.</p>
+        <div className="flex flex-wrap gap-2">
+          {[['app', 'Hours in the app'], ['import', 'Import an hours file']].map(([k, l]) => (
+            <button key={k} onClick={() => { setSource(k); reset(); }}
+              className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border ${source === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+          ))}
+        </div>
+        {source === 'import' && (
+          <Field label="Hours file">
+            <p className="text-[12.5px] text-stone-500 mb-1.5">The payroll export from the Scheduling page, as downloaded or edited. Every row is checked; one bad row stops the import and is named.</p>
+            <input type="file" accept=".csv,text/csv" onChange={e => {
+              reset();
+              const f = e.target.files && e.target.files[0];
+              if (!f) { setFile(null); return; }
+              f.text().then(text => setFile({ name: f.name, text })).catch(() => setErr('That file could not be read.'));
+            }} />
+          </Field>
+        )}
+        <Field label="Dates of service">
+          <div className="flex flex-wrap items-center gap-2">
+            <input className="inp !w-44" type="date" value={range.from} onChange={e => { setRange({ ...range, from: e.target.value }); reset(); }} />
+            <span>to</span>
+            <input className="inp !w-44" type="date" value={range.to} onChange={e => { setRange({ ...range, to: e.target.value }); reset(); }} />
+            <button className="btn ghost" disabled={!ready || busy === 'preview'} onClick={() => run('preview', () => post('/api/gfc/admin/billing-invoices/preview', body())).then(r => r && setPreview(r))}>Preview</button>
+          </div>
+          {data.lastPeriod && <p className="text-[12.5px] text-stone-500 mt-1">Starts on the last finished two-week period, Monday through the second Sunday.</p>}
+        </Field>
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}
+          {rowErrors && <ul className="list-disc pl-5 mt-2 text-[12.5px]">{rowErrors.map((r, k) => <li key={k}>Row {r.line}: {r.message}</li>)}</ul>}
+        </div>}
+        {msg && <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 p-3">{msg}</div>}
+        {preview && (
+          <div className="border border-stone-200 rounded-lg p-3">
+            {preview.invoices.length === 0 && <p className="text-stone-500">Nothing new to invoice in those dates.</p>}
+            {preview.invoices.map(i => (
+              <div key={i.displayNumber} className="py-2 border-b border-stone-100">
+                <div className="flex justify-between gap-3"><span><b className="text-primary">{i.clientName}</b> · {i.displayNumber} · {i.format === 'carrier' ? `to ${i.billTo}` : `to ${i.billTo} (family)`}</span><b>{i.total}</b></div>
+                {i.lines.map((l, k) => <div key={k} className={`flex justify-between text-[12.5px] ${l.minimum ? 'text-amber-800' : 'text-stone-500'}`}><span>{l.description}</span><span>{Number(l.hours).toFixed(2)} hrs · {l.amount}</span></div>)}
+              </div>
+            ))}
+            {preview.skipped.length > 0 && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3 mt-3 text-[12.5px]">
+                <b>Not invoiced:</b>
+                <ul className="list-disc pl-5">{preview.skipped.map((s, k) => <li key={k}>{s.clientName}: {s.reason}</li>)}</ul>
+              </div>
+            )}
+            {preview.alreadyInvoiced > 0 && <p className="text-[12.5px] text-stone-500 mt-2">{preview.alreadyInvoiced} shift{preview.alreadyInvoiced === 1 ? ' is' : 's are'} already on an invoice and left off.</p>}
+            {preview.invoices.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
+                <b>{preview.invoices.length} invoice{preview.invoices.length === 1 ? '' : 's'} · {usd(preview.totalCents)}</b>
+                <button className="btn" disabled={busy === 'create'} onClick={() => run('create', () => post('/api/gfc/admin/billing-invoices', body())).then(r => {
+                  if (r) { setPreview(null); setMsg(`${r.created.length} draft invoice${r.created.length === 1 ? '' : 's'} made. Check each under Statements, then send.`); reload(); }
+                })}>Create Draft Invoices</button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ---- One client: copay and Bill To ------------------------------------------
+const EMPTY_BILL_TO = { type: 'family', payerId: '', insuredName: '', policyNumber: '', claimNumber: '', name: '', attn: '', addressLines: '', claimsEmail: '' };
+const ClientBilling = ({ data, reload }) => {
   const [clientId, setClientId] = useState('');
   const [d, setD] = useState(null);
   const [copay, setCopay] = useState('');
-  const [range, setRange] = useState({ from: '', to: '' });
-  const [preview, setPreview] = useState(null);
+  const [bt, setBt] = useState(EMPTY_BILL_TO);
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState('');
   useEffect(() => {
-    setD(null); setPreview(null); setErr(''); setMsg('');
+    setD(null); setErr(''); setMsg('');
     if (!clientId) return;
     call(`/api/gfc/admin/billing/${enc(clientId)}`)
-      .then(r => { setD(r); setCopay(r.copayCents ? (r.copayCents / 100).toFixed(2) : ''); })
+      .then(r => {
+        setD(r);
+        setCopay(r.copayCents ? (r.copayCents / 100).toFixed(2) : '');
+        const b = r.billTo;
+        setBt(b ? { ...EMPTY_BILL_TO, ...b, addressLines: (b.addressLines || []).join('\n'), claimsEmail: b.email || '' } : EMPTY_BILL_TO);
+      })
       .catch(e => setErr(e.message));
   }, [clientId]);
   const run = (key, fn) => { setBusy(key); setErr(''); setMsg(''); return fn().catch(e => { setErr(e.message); return null; }).finally(() => setBusy('')); };
+  const carriers = (data.payers || []).filter(p => !p.retired);
   return (
     <div className="card">
-      <div className="card-h"><h2>Copay and Home Care Statements</h2></div>
+      <div className="card-h"><h2>One Client: Copay and Bill To</h2></div>
       <div className="p-4 grid gap-4 text-[13.5px]">
-        <p className="text-stone-500">Choose a client to set their copay or make a home care statement from completed caregiver visits.</p>
         <Field label="Client">
           <select className="inp max-w-sm" value={clientId} onChange={e => setClientId(e.target.value)}>
             <option value="">-- Choose a client --</option>
-            {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}{c.billToType ? '' : ' (no Bill To)'}</option>)}
           </select>
         </Field>
         {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
@@ -1011,38 +1113,43 @@ const NewStatement = ({ data, reload }) => {
         {d && (
           <>
             <div>
+              <span className="lblu block mb-1">Who home care is billed to</span>
+              <p className="text-[12.5px] text-stone-500 mb-1.5">{d.rate ? `Agreed rate ${usd(Math.round(d.rate.hourlyRate * 100))}/hour, ${d.rate.dailyMinimumHours}-hour daily minimum.` : 'No agreed rate on file. Set it on the client\'s enrollment record first.'}</p>
+              <div className="flex gap-2 mb-2">
+                {[['carrier', 'LTC carrier'], ['family', 'Client or family']].map(([k, l]) => (
+                  <button key={k} onClick={() => setBt({ ...bt, type: k })}
+                    className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border ${bt.type === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+                ))}
+              </div>
+              {bt.type === 'carrier' ? (
+                <div className="grid gap-2 max-w-lg">
+                  {carriers.length === 0 && <p className="text-amber-800 text-[12.5px]">No carriers on the payers list yet. Add one under Settings.</p>}
+                  {d.ltcOnFile && <p className="text-[12.5px] text-stone-500">At enrollment the client listed {d.ltcOnFile.carrier || 'an LTC policy'}{d.ltcOnFile.policyNumber ? `, policy ${d.ltcOnFile.policyNumber}` : ''}{d.ltcOnFile.policyHolder ? `, held by ${d.ltcOnFile.policyHolder}` : ''}.</p>}
+                  <select className="inp" value={bt.payerId} onChange={e => setBt({ ...bt, payerId: e.target.value })}>
+                    <option value="">-- Choose the carrier --</option>
+                    {carriers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <input className="inp" placeholder="Insured's name" value={bt.insuredName} onChange={e => setBt({ ...bt, insuredName: e.target.value })} />
+                  <input className="inp" placeholder="Policy #" value={bt.policyNumber} onChange={e => setBt({ ...bt, policyNumber: e.target.value })} />
+                  <input className="inp" placeholder="Claim # (if the carrier gave one)" value={bt.claimNumber} onChange={e => setBt({ ...bt, claimNumber: e.target.value })} />
+                </div>
+              ) : (
+                <div className="grid gap-2 max-w-lg">
+                  <input className="inp" placeholder="Name billed" value={bt.name} onChange={e => setBt({ ...bt, name: e.target.value })} />
+                  <input className="inp" placeholder="Attn (optional)" value={bt.attn} onChange={e => setBt({ ...bt, attn: e.target.value })} />
+                  <textarea className="inp" rows={3} placeholder="Mailing address, one line each" value={bt.addressLines} onChange={e => setBt({ ...bt, addressLines: e.target.value })} />
+                  <input className="inp" placeholder="Email (optional)" value={bt.claimsEmail} onChange={e => setBt({ ...bt, claimsEmail: e.target.value })} />
+                </div>
+              )}
+              <button className="btn mt-2" disabled={busy === 'billto'} onClick={() => run('billto', () => call(`/api/gfc/admin/billing/${enc(clientId)}/bill-to`, { method: 'PUT', body: JSON.stringify(bt) })).then(r => { if (r) { setMsg('Bill To saved.'); reload(); } })}>Save Bill To</button>
+            </div>
+            <div>
               <span className="lblu block mb-1">Fixed copay per visit</span>
               <p className="text-[12.5px] text-stone-500 mb-1.5">Only for plans with a set copay. Leave blank for none: for Medicare the patient's share comes from the insurance payment, not from here.</p>
               <div className="flex flex-wrap items-center gap-2">
                 <span>$</span><input className="inp !w-32" inputMode="decimal" value={copay} onChange={e => setCopay(e.target.value)} placeholder="none" />
                 <button className="btn" disabled={busy === 'copay'} onClick={() => run('copay', () => call(`/api/gfc/admin/billing/${enc(clientId)}/copay`, { method: 'PUT', body: JSON.stringify({ copay: copay.trim() || null }) })).then(r => r && setMsg('Copay saved.'))}>Save Copay</button>
               </div>
-            </div>
-            <div>
-              <span className="lblu block mb-1">Home care statement</span>
-              <p className="text-[12.5px] text-stone-500 mb-1.5">{d.rate ? `From completed caregiver visits at ${usd(Math.round(d.rate.hourlyRate * 100))}/hour, ${d.rate.dailyMinimumHours}-hour daily minimum.` : 'No agreed rate on file. Set it on the client\'s enrollment record first.'}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <input className="inp !w-44" type="date" value={range.from} onChange={e => setRange({ ...range, from: e.target.value })} />
-                <span>to</span>
-                <input className="inp !w-44" type="date" value={range.to} onChange={e => setRange({ ...range, to: e.target.value })} />
-                <button className="btn ghost" disabled={!range.from || !range.to || busy === 'preview'} onClick={() => run('preview', () => post(`/api/gfc/admin/billing/${enc(clientId)}/home-care/preview`, range)).then(r => r && setPreview(r))}>Preview</button>
-              </div>
-              {preview && (
-                <div className="border border-stone-200 rounded-lg p-3 mt-3">
-                  {preview.lines.length === 0 && <p className="text-stone-500">No completed caregiver visits in those dates.</p>}
-                  {preview.lines.map(l => (
-                    <div key={l.date} className="flex justify-between py-1 border-b border-stone-100">
-                      <span>{l.date} · {l.hours} h{l.minimumApplied ? ` (minimum; worked ${l.actualHours})` : ''}</span><span>{usd(l.amountCents)}</span>
-                    </div>
-                  ))}
-                  {preview.lines.length > 0 && <div className="flex justify-between py-1"><b>Total</b><b>{usd(preview.totalCents)}</b></div>}
-                  {preview.lines.length > 0 && (
-                    <button className="btn mt-2" disabled={busy === 'create'} onClick={() => run('create', () => post(`/api/gfc/admin/billing/${enc(clientId)}/home-care`, range)).then(r => {
-                      if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it under Statements, then send it.`); reload(); }
-                    })}>Create Draft Statement</button>
-                  )}
-                </div>
-              )}
             </div>
           </>
         )}
@@ -1051,7 +1158,53 @@ const NewStatement = ({ data, reload }) => {
   );
 };
 
-const TABS = [['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Copay & Home Care'], ['settings', 'Settings']];
+// ---- The office's LTC carriers ----------------------------------------------
+const EMPTY_PAYER = { name: '', attn: '', addressLines: '', claimsEmail: '', phone: '' };
+const PayersCard = ({ payers, reload }) => {
+  const [form, setForm] = useState(EMPTY_PAYER);
+  const [editing, setEditing] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = () => {
+    setBusy(true); setErr('');
+    const req = editing ? call(`/api/gfc/admin/billing-payers/${enc(editing)}`, { method: 'PUT', body: JSON.stringify(form) }) : post('/api/gfc/admin/billing-payers', form);
+    req.then(() => { setForm(EMPTY_PAYER); setEditing(null); reload(); }).catch(e => setErr(e.message)).finally(() => setBusy(false));
+  };
+  const live = (payers || []).filter(p => !p.retired);
+  return (
+    <div className="card mt-4">
+      <div className="card-h"><h2>LTC Carriers</h2></div>
+      <div className="p-4 grid gap-3 text-[13.5px]">
+        <p className="text-stone-500">What prints under Bill To on a carrier invoice. Each client's policy and claim numbers are set on that client.</p>
+        {live.length === 0 && <p className="text-stone-500">No carriers yet.</p>}
+        {live.map(p => (
+          <div key={p.id} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
+            <div><b className="text-primary">{p.name}</b>{p.attn ? ` · Attn: ${p.attn}` : ''}<div className="text-[12.5px] text-stone-500">{(p.addressLines || []).join(', ')}{p.claimsEmail ? ` · ${p.claimsEmail}` : ''}</div></div>
+            <div className="flex gap-2">
+              <button className="btn ghost !py-1.5" onClick={() => { setEditing(p.id); setForm({ ...EMPTY_PAYER, ...p, addressLines: (p.addressLines || []).join('\n') }); }}>Edit</button>
+              <button className="btn ghost !py-1.5" onClick={() => { if (window.confirm(`Retire ${p.name}? Invoices already made keep their copy.`)) call(`/api/gfc/admin/billing-payers/${enc(p.id)}`, { method: 'PUT', body: JSON.stringify({ retired: true }) }).then(reload).catch(e => setErr(e.message)); }}>Retire</button>
+            </div>
+          </div>
+        ))}
+        <div className="grid gap-2 max-w-lg">
+          <span className="lblu">{editing ? 'Edit carrier' : 'Add a carrier'}</span>
+          <input className="inp" placeholder="Carrier name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+          <input className="inp" placeholder="Attn (e.g. Claims Department)" value={form.attn} onChange={e => setForm({ ...form, attn: e.target.value })} />
+          <textarea className="inp" rows={3} placeholder="Mailing address, one line each" value={form.addressLines} onChange={e => setForm({ ...form, addressLines: e.target.value })} />
+          <input className="inp" placeholder="Claims email" value={form.claimsEmail} onChange={e => setForm({ ...form, claimsEmail: e.target.value })} />
+          {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
+          <div className="flex gap-2">
+            <button className="btn" disabled={busy || !form.name.trim()} onClick={save}>{editing ? 'Save Carrier' : 'Add Carrier'}</button>
+            {editing && <button className="btn ghost" onClick={() => { setEditing(null); setForm(EMPTY_PAYER); }}>Cancel</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TABS = [['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Home Care Invoices'], ['settings', 'Settings']];
+
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'claims'));
   const [data, setData] = useState(null);
@@ -1104,8 +1257,8 @@ const App = () => {
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && tab === 'claims' && <ClaimsView names={names} initialClaim={initialClaim} isAdmin={isAdmin} />}
         {data && tab === 'statements' && <Statements data={data} reload={load} />}
-        {data && tab === 'new' && <NewStatement data={data} reload={load} />}
-        {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /></div>}
+        {data && tab === 'new' && <div className="grid gap-4"><GenerateInvoices data={data} reload={load} /><ClientBilling data={data} reload={load} /></div>}
+        {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /><PayersCard payers={data.payers} reload={load} /></div>}
       </div>
     </>
   );

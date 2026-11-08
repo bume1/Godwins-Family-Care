@@ -70,13 +70,16 @@ function homeCareLines(timeLogs, { clientId, from, to, hourlyRate, dailyMinimumH
     if (!d || d < from || d > to) continue;
     byDay.set(d, (byDay.get(d) || 0) + Number(l.total_minutes));
   }
+  // Money is figured from MINUTES, never from rounded hours (owner,
+  // 2026-11-08): 292 minutes at $30 is $146.00, not 4.87 x 30 = $146.10.
+  const minMins = Math.round(minHours * 60);
   const lines = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, mins]) => {
-    const actual = Math.round((mins / 60) * 100) / 100;
-    const hours = Math.max(actual, minHours);
+    const billed = Math.max(mins, minMins);
     return {
       date, description: LINE_LABEL.home_care,
-      hours, actualHours: actual, minimumApplied: hours > actual,
-      rateCents, amountCents: Math.round(hours * rateCents)
+      hours: Math.round((billed / 60) * 100) / 100, actualHours: Math.round((mins / 60) * 100) / 100,
+      minutes: billed, minimumApplied: billed > mins,
+      rateCents, amountCents: Math.round((billed * rateCents) / 60)
     };
   });
   return { lines };
@@ -121,9 +124,15 @@ function transition(inv, to, { at, by, reason, method, reference } = {}) {
 }
 
 // What the patient's screen is given: their statement, never who on staff did what.
+// An invoice billed to an LTC carrier is the carrier's to pay, not the patient's:
+// it never appears on the portal and cannot be paid online.
+const patientPays = (inv) => !!inv && inv.format !== 'carrier';
+
 function publicInvoice(inv) {
   return {
-    id: inv.id, number: inv.number, kind: inv.kind, status: inv.status,
+    // The number printed on the invoice (carrier style) when there is one.
+    // Stripe still only ever sees inv.number (GFC-INV-XXXXXX).
+    id: inv.id, number: inv.displayNumber || inv.number, kind: inv.kind, status: inv.status,
     totalCents: inv.totalCents, total: fmtUsd(inv.totalCents),
     lines: (inv.lines || []).map(l => ({ date: l.date, description: l.description, hours: l.hours != null ? l.hours : null, minimumApplied: !!l.minimumApplied, amount: fmtUsd(l.amountCents) })),
     sentAt: inv.sentAt || null, paidAt: inv.paidAt || null,
@@ -193,6 +202,7 @@ function stripeStatus() {
 }
 
 module.exports = {
+  patientPays,
   KINDS, STATUSES, LINE_LABEL, toCents, fmtUsd, invoiceNumber, normalizeCopaySetting, homeCareLines,
   buildInvoice, transition, publicInvoice, checkoutForm, stripeSafe, verifyStripeSignature, stripeStatus, STRIPE_SAFE_KEYS
 };
