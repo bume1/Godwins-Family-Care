@@ -337,3 +337,9 @@ test('the request user carries employmentType, or the W-2 clock refuses every W-
   const body = src.slice(at, src.indexOf('};', at));
   assert.ok(at > 0 && /employmentType: freshUser\.employmentType \|\| null/.test(body));
 });
+
+test('the private home care P&P is in the policies of RNs and caregivers, not clinicians or the office', () => {
+  const ids = (ty) => portal.policiesFor(ty).map(p => p.id);
+  assert.ok(ids('rn').includes('PHC_MANUAL') && ids('caregiver').includes('PHC_MANUAL'));
+  assert.ok(!ids('provider').includes('PHC_MANUAL') && !ids('admin').includes('PHC_MANUAL'));
+});

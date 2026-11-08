@@ -1647,9 +1647,27 @@ function buildBulkEditBody(shift, input) {
   return out;
 }
 
+// ---- Whether a person's availability covers a time -------------------------
+// Owner, 2026-11-08: clinicians submit availability the same way caregivers
+// do, and booking a clinical visit checks it. One answer for both:
+//   NONE     no availability on file
+//   INSIDE   the submission in force covers the whole visit
+//   OUTSIDE  it does not
+// The submission in force is the newest (availability is append-only).
+function availabilityVerdict(rows, personId, start, end) {
+  const mine = (rows || []).filter(r => r && String(r.caregiver_id) === String(personId))
+    .sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
+  const current = mine[0];
+  if (!current) return { status: 'NONE', submittedAt: null };
+  const covers = availabilityCoversShift({
+    effectiveFrom: current.effective_from, blackoutDates: current.blackout_dates || [], windows: current.windows || []
+  }, { start, end });
+  return { status: covers ? 'INSIDE' : 'OUTSIDE', submittedAt: current.submitted_at || null };
+}
+
 module.exports = {
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
-  validateAvailability, availabilityCoversShift, AVAILABILITY_CHANGE_LEAD_DAYS,
+  validateAvailability, availabilityCoversShift, availabilityVerdict, AVAILABILITY_CHANGE_LEAD_DAYS,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,

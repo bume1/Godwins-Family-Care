@@ -230,3 +230,21 @@ test('the admin team is onboarded on Chapter F: no clinical training, and a Fiel
   assert.ok(q.items.some(i => i.id === 'F.5.06') && q.items.some(i => i.id === 'F.6.01'));
   void COORD;
 });
+
+test('a registered nurse is onboarded on Chapter B: PHC P&P 3.1, clearance before client contact, supervisory items only when delegated', async (t) => {
+  const T = require('../onboarding/track');
+  const b = T.buildTrack({ inputs: { chapter: 'B' }, record: {} });
+  assert.strictEqual(b.chapter.id, 'B');
+  assert.strictEqual(b.modules.length, 0);
+  assert.ok(!b.items.some(i => i.id === 'B.7.04') && !b.items.some(i => i.id === 'B.7.05'), 'no delegated duties unless set');
+  const ack = b.items.find(i => i.id === 'B.5.03').acknowledgments.find(a => a.id === 'PHC_MANUAL');
+  assert.strictEqual(ack.required, '3.1');
+  assert.strictEqual(T.ALL_ACKS.find(a => a.id === 'PHC_MANUAL').playbookStates, '3.0', 'the Playbook figure stays visible');
+  const d = T.buildTrack({ inputs: { chapter: 'B', supervisoryDelegation: true, directsTraining: true }, record: {} });
+  assert.ok(d.items.some(i => i.id === 'B.7.04') && d.items.some(i => i.id === 'B.7.05'));
+  assert.ok(d.recurring.some(r => r.id === 'B.8.R3'), 'supervisory visits recur when delegated');
+  assert.deepStrictEqual(d.renewals.items.map(x => x.id), ['B.6.01', 'B.6.04', 'B.6.05']);
+  // An RN account starts on Chapter B without anybody choosing it.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
+  assert.match(src, /if \(t === 'rn'\) return 'B';/);
+});

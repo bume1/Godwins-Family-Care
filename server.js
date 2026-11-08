@@ -11689,6 +11689,36 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRea
 // POST /api/clinical/patients/:clientId/appointments — create on the
 // provider's OpenEMR calendar. Double-booking is rejected against the LIVE
 // OpenEMR list (the availability authority) with a specific 409.
+// CLINICIAN AVAILABILITY (owner, 2026-11-08). Clinicians submit availability
+// the same way caregivers do (the shared schedule component, same records). A
+// visit booked outside the availability in force is WARNED, never blocked:
+// home visits move, and a hard block would push bookings straight into
+// OpenEMR, where the day-before reminders never fire. Booking anyway needs a
+// reason, which is recorded. No availability on file is a warning only.
+async function clinicianAvailabilityCheck(providerId, body, minutes, req) {
+  const users = await getUsers();
+  const clinician = users.find(u => u && String(u.openEmrProviderId || '') === String(providerId || ''));
+  if (!clinician || !body.date || !body.startTime) return { ok: true };
+  const sch = require('./schedulingRepository');
+  const start = practiceTime.instantFromZoned(String(body.date), String(body.startTime).slice(0, 5));
+  if (!start) return { ok: true };
+  const end = new Date(Date.parse(start) + (Number(minutes) || 30) * 60000).toISOString();
+  const rows = (await db.get('caregiver_availability')) || [];
+  const v = sch.availabilityVerdict(rows, clinician.id, start, end);
+  const name = clinician.name || 'This clinician';
+  if (v.status === 'NONE') return { ok: true, warning: `${name} has no availability on file yet.` };
+  if (v.status === 'INSIDE') return { ok: true };
+  const reason = String(body.outsideAvailabilityReason || '').trim();
+  if (!reason) {
+    return { ok: false, status: 409, body: {
+      error: `That time is outside ${name}'s availability. To book it anyway, say why.`,
+      code: 'APPOINTMENT_OUTSIDE_AVAILABILITY', clinicianName: name } };
+  }
+  await logActivity(req.user.id, req.user.name, 'appointment_outside_availability', 'appointment', null,
+    { clinicianId: clinician.id, date: body.date, startTime: body.startTime, reason: reason.slice(0, 500) });
+  return { ok: true, warning: `Booked outside ${name}'s availability: ${reason.slice(0, 200)}` };
+}
+
 app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -11736,6 +11766,10 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     // clinician. Say what is actually wrong, in words that are not about POS.
     const apptSetupGap = appointmentSetupGap(built.fields);
     if (apptSetupGap) return res.status(409).json(apptSetupGap);
+
+    const avail = await clinicianAvailabilityCheck(providerId, body, built.minutes, req);
+    if (!avail.ok) return res.status(avail.status).json(avail.body);
+    if (avail.warning) apptWarnings.push(avail.warning);
 
     const rows = await emr.listAppointmentRows();
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
@@ -11962,6 +11996,8 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     }
     const rsSetupGap = appointmentSetupGap(built.fields);
     if (rsSetupGap) return res.status(409).json(rsSetupGap);
+    const rsAvail = await clinicianAvailabilityCheck(providerId, body, built.minutes, req);
+    if (!rsAvail.ok) return res.status(rsAvail.status).json(rsAvail.body);
 
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
       providerId, date: body.date, startTime: body.startTime,
@@ -11984,6 +12020,7 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     // migrateAppointmentLinkage exists, one layer along.
     await migrateVideoLink(row.pc_eid, newEid);
     const rsWarnings = [];
+    if (rsAvail.warning) rsWarnings.push(rsAvail.warning);
     let rsVideo = null;
     const rsClient = (await clinicalClientsByPuuid()).get(String(row.puuid)) || null;
     if (clinicalRepo.locationNeedsVideoRoom(rsLocation)) {
