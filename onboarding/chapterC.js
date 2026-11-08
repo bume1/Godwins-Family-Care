@@ -12,6 +12,12 @@
 //              the item text)
 //   INFERRED — the Playbook describes the work but names nobody; the actor is
 //              our reading and is listed for the owner to confirm.
+//   OWNER_CONFIRMED — an inferred actor the owner has confirmed.
+//
+// OWNER ADDITIONS. A few items are not in Playbook v3.0 Chapter C and were
+// kept by the owner from the #260 checklist. They carry `addedBy` and point at
+// the Clinical Manual section that requires them where one does, never at the
+// Playbook. The Playbook should be revised to list them.
 //
 // `classifications` are copied from the C.2 Applicable Requirements table, or
 // from the Clinical Manual's §1.6 table where C.2 carries no row and the
@@ -25,6 +31,9 @@
 //   outsideEmployment   she holds another clinical position
 //   residenceUnderPhc   she provides services in a client residence under the
 //                       private home care license (C.2, criminal records check)
+//   drives              she drives to patients
+//   prescribes          her scope includes prescribing
+//   telehealth          she will conduct telehealth visits
 // ============================================================================
 
 'use strict';
@@ -39,6 +48,12 @@ const C2 = P('C.2');
 const step = (actor, action, actorBasis) => Object.freeze({ actor, action, actorBasis });
 const STATED = 'STATED';
 const INFERRED = 'INFERRED';
+// The owner confirmed every inferred actor in the first transcription
+// (2026-11-08). Actors on items added later start INFERRED again.
+const CONFIRMED = 'OWNER_CONFIRMED';
+const M_ = (section) => ref('CLINICAL_MANUAL', section);
+const OWNER_ADDED = 'Owner addition, 2026-11-08: kept from the #260 checklist though Playbook v3.0 Chapter C does not list it.';
+const NO_CLASS = 'Owner addition; neither Playbook C.2 nor Clinical Manual §1.6 classifies it.';
 const NO_C2_ROW = 'Playbook C.2 carries no row for this item.';
 
 const CHAPTER = Object.freeze({
@@ -81,22 +96,22 @@ const ACKNOWLEDGMENTS = Object.freeze([
 const ITEMS = Object.freeze([
   // ---- C.4 · Pre-Hire Screening -------------------------------------------
   { id: 'C.4.01', phase: 'C.4', title: 'Licensure and authorization verification before interview', ref: P('C.4'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, STATED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CREDENTIALING_OWNER, X.VERIFY, STATED)],
     classifications: [
       cls('Statutory', 'Registered nurse licensure', C2),
       cls('Regulatory', 'Advanced practice authorization', C2)
     ] },
   { id: 'C.4.02', phase: 'C.4', title: 'Data bank self-query', ref: P('C.4'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.4.03', phase: 'C.4', title: 'Documentation sample', ref: P('C.4'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CLINICAL_DIRECTOR, X.RECORD, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.4.04', phase: 'C.4', title: 'Clinical references', ref: P('C.4'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.RECORD, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CREDENTIALING_OWNER, X.RECORD, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.4.05', phase: 'C.4', title: 'Ten-year employment history', ref: P('C.4'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     classifications: [cls('Accreditation standard', 'Ten-year employment history', C2)] },
 
   // ---- C.5 · Offer and Employment Documentation ---------------------------
@@ -115,7 +130,7 @@ const ITEMS = Object.freeze([
     acknowledges: ACKNOWLEDGMENTS.map(a => a.id),
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.5.05', phase: 'C.5', title: 'Scheduling expectations', ref: P('C.5'),
-    steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, INFERRED), step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED)],
+    steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, CONFIRMED), step(A.NEW_HIRE, X.ACKNOWLEDGE, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
 
   // ---- C.6 · Credentialing and Compliance Activation ----------------------
@@ -150,10 +165,10 @@ const ITEMS = Object.freeze([
       cls('Statutory and regulatory', 'Criminal records check', C2)
     ] },
   { id: 'C.6.02', phase: 'C.6', title: 'National provider identifier and taxonomy', ref: P('C.6'),
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.6.03', phase: 'C.6', title: 'Nurse protocol agreement', ref: P('C.6'),
-    steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED),   // remaining delegation capacity
+    steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED),   // remaining delegation capacity
             step(A.DELEGATING_PHYSICIAN, X.EXECUTE, STATED),
             step(A.NEW_HIRE, X.SIGN, STATED),
             step(A.DELEGATING_PHYSICIAN, X.RECORD, STATED)],   // files with the Board
@@ -162,11 +177,11 @@ const ITEMS = Object.freeze([
       cls('Statutory', 'Delegation capacity', C2)
     ] },
   { id: 'C.6.04', phase: 'C.6', title: 'Designated alternate physician', ref: P('C.10'),
-    steps: [step(A.DELEGATING_PHYSICIAN, X.RECORD, INFERRED)],
+    steps: [step(A.DELEGATING_PHYSICIAN, X.RECORD, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW + ' C.10 and R1.3 cite Rule 360-32-.02(3).' },
   { id: 'C.6.05', phase: 'C.6', title: 'Controlled substance authority', ref: P('C.6'),
     when: { controlledSubstances: true },
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     // Playbook C.2 says Statutory. Clinical Manual §1.6 says Statutory and
     // regulatory for the same prohibition. Both are carried, each with its
     // source; neither is chosen for the other. Open for the owner.
@@ -175,12 +190,12 @@ const ITEMS = Object.freeze([
       cls('Statutory and regulatory', 'Prohibition on APRN prescribing of Schedule I and II, subject to the emergency exception', M('1.6'))
     ] },
   { id: 'C.6.06', phase: 'C.6', title: 'Malpractice coverage', ref: P('C.6'),
-    steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     classifications: [cls('Internal policy', 'Malpractice coverage', C2)] },
   { id: 'C.6.07', phase: 'C.6', title: 'Payer enrollment', ref: P('C.6'),
     when: { serviceLines: ['INSURED'] },
-    steps: [step(A.CREDENTIALING_OWNER, X.RECORD, INFERRED), step(A.NEW_HIRE, X.COMPLETE, INFERRED),
-            step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    steps: [step(A.CREDENTIALING_OWNER, X.RECORD, CONFIRMED), step(A.NEW_HIRE, X.COMPLETE, CONFIRMED),
+            step(A.CREDENTIALING_OWNER, X.VERIFY, CONFIRMED)],
     separateRecord: 'PAYER_ENROLLMENT',
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.6.08', phase: 'C.6', title: 'Exclusion screening and monitoring enrollment', ref: P('C.6'),
@@ -188,22 +203,22 @@ const ITEMS = Object.freeze([
     classifications: [cls('Recommended practice', 'Exclusion screening', C2)] },
   { id: 'C.6.09', phase: 'C.6', title: 'Outside employment review', ref: P('C.6'),
     when: { outsideEmployment: true },
-    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.EXECUTIVE_DIRECTOR, X.RECORD, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, CONFIRMED), step(A.EXECUTIVE_DIRECTOR, X.RECORD, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
 
   // ---- C.7 · Systems Access and Clinical Orientation ----------------------
   { id: 'C.7.01', phase: 'C.7', title: 'Clinical system identity', ref: P('C.7'),
-    steps: [step(A.EXECUTIVE_DIRECTOR, X.PROVISION, INFERRED), step(A.NEW_HIRE, X.COMPLETE, INFERRED)],
+    steps: [step(A.EXECUTIVE_DIRECTOR, X.PROVISION, CONFIRMED), step(A.NEW_HIRE, X.COMPLETE, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.7.02', phase: 'C.7', title: 'Clinical orientation', ref: P('C.7'),
     steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.RECORD, STATED)],
     modulesFrom: 'phase:C.7',
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.7.03', phase: 'C.7', title: 'Documentation standards', ref: P('C.7'),
-    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.OBSERVE, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.OBSERVE, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.7.04', phase: 'C.7', title: 'Service line protocols', ref: P('C.7'),
-    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.RECORD, CONFIRMED)],
     perServiceLine: true,
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.7.05', phase: 'C.7', title: 'Competency evaluation', ref: P('C.7'),
@@ -213,11 +228,39 @@ const ITEMS = Object.freeze([
 
   // ---- C.9 · Supervised Practice ------------------------------------------
   { id: 'C.9.01', phase: 'C.9', title: 'First encounters observed or paired, with a same-day debriefing', ref: P('C.9'),
-    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.OBSERVE, INFERRED)],
+    steps: [step(A.NEW_HIRE, X.COMPLETE, STATED), step(A.CLINICAL_DIRECTOR, X.OBSERVE, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.9.02', phase: 'C.9', title: 'Early records reviewed, with written feedback', ref: P('C.9'),
-    steps: [step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
-    classifications: [], classificationNote: NO_C2_ROW }
+    steps: [step(A.CLINICAL_DIRECTOR, X.RECORD, CONFIRMED)],
+    classifications: [], classificationNote: NO_C2_ROW },
+  // ---- Owner additions (2026-11-08) ---------------------------------------
+  { id: 'C.5.06', phase: 'C.5', title: 'Twenty-four hour self-reporting duty acknowledged', ref: M_('5.3'), addedBy: OWNER_ADDED,
+    steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.10', phase: 'C.6', title: 'Tuberculosis screening', ref: M_('16.5'), addedBy: OWNER_ADDED,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    repeats: 'annually',
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.11', phase: 'C.6', title: 'Immunization record', ref: M_('16.5'), addedBy: OWNER_ADDED,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.RECORD, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.12', phase: 'C.6', title: "Driver's license and personal auto insurance", ref: null, addedBy: OWNER_ADDED,
+    when: { drives: true },
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.13', phase: 'C.6', title: 'Licensed in the state where each telehealth patient is located', ref: M_('26.2'), addedBy: OWNER_ADDED,
+    when: { telehealth: true },
+    steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.14', phase: 'C.6', title: 'Controlled prescribing by telehealth follows the DEA rule in effect', ref: null, addedBy: OWNER_ADDED,
+    when: { telehealth: true, controlledSubstances: true },
+    steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED), step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.7.06', phase: 'C.7', title: 'Annual pharmacology training documented', ref: null, addedBy: OWNER_ADDED,
+    when: { prescribes: true },
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
+    repeats: 'annually',
+    classifications: [], classificationNote: NO_CLASS }
 ].map(it => Object.freeze(Object.assign({ chapter: 'C' }, it))));
 
 // ---- C.8 · Readiness Determination ----------------------------------------

@@ -58,6 +58,9 @@ function normalizeInputs(raw) {
     controlledSubstances: r.controlledSubstances === true,
     outsideEmployment: r.outsideEmployment === true,
     residenceUnderPhc: r.residenceUnderPhc === true,
+    drives: r.drives === true,
+    prescribes: r.prescribes === true,
+    telehealth: r.telehealth === true,
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -77,6 +80,9 @@ function matchesWhen(when, inputs) {
   if (when.controlledSubstances === true && !inputs.controlledSubstances) return false;
   if (when.outsideEmployment === true && !inputs.outsideEmployment) return false;
   if (when.residenceUnderPhc === true && !inputs.residenceUnderPhc) return false;
+  if (when.drives === true && !inputs.drives) return false;
+  if (when.prescribes === true && !inputs.prescribes) return false;
+  if (when.telehealth === true && !inputs.telehealth) return false;
   return true;
 }
 

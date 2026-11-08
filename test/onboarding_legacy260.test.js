@@ -40,8 +40,8 @@ test('carried records are shown as evidence and never complete the new item', ()
   assert.strictEqual(i9.carriedOver[0].proofFiles[0].driveFileId, undefined);
   assert.deepStrictEqual(t.modules.find(m => m.id === 'TRN-006').carriedOver.map(e => e.oldId), ['CLIN-17']);
   assert.strictEqual(t.items.find(x => x.id === 'C.4.02').carriedOver.length, 0);
-  const tb = t.legacyUnmapped.find(e => e.oldId === 'CLIN-12');
-  assert.match(tb.reason, /16\.5/);
+  assert.deepStrictEqual(t.items.find(x => x.id === 'C.6.10').carriedOver.map(e => e.oldId), ['CLIN-12']);
+  assert.strictEqual(LEGACY_MAP['W2-03'].none, 'Dropped by owner decision, 2026-11-08.');
 });
 
 test('the office sees what has no Chapter C home; her view does not carry that list', () => {

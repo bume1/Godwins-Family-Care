@@ -56,12 +56,19 @@ test('Chapter C items: unique ids, known phases, valid actors, every step says w
     assert.ok(!ids.has(it.id), `duplicate ${it.id}`); ids.add(it.id);
     assert.ok(phases.has(it.phase), `${it.id} phase ${it.phase}`);
     assert.ok(it.id.startsWith(it.phase + '.'), `${it.id} not numbered under its phase`);
-    assert.strictEqual(it.ref.source, 'PLAYBOOK', it.id);
+    if (it.addedBy) {
+      // An owner addition cites the manual section that requires it, or
+      // nothing; never the Playbook, which does not list it.
+      assert.ok(it.ref === null || it.ref.source === 'CLINICAL_MANUAL', `${it.id} owner addition cites ${it.ref && it.ref.source}`);
+      assert.match(it.addedBy, /Owner addition/);
+    } else {
+      assert.strictEqual(it.ref.source, 'PLAYBOOK', it.id);
+    }
     assert.ok(it.steps.length >= 1, it.id);
     for (const s of it.steps) {
       assert.ok(Object.values(V.ACTORS).includes(s.actor), `${it.id} actor ${s.actor}`);
       assert.ok(Object.values(V.ACTIONS).includes(s.action), `${it.id} action ${s.action}`);
-      assert.ok(['STATED', 'INFERRED'].includes(s.actorBasis), `${it.id} actorBasis`);
+      assert.ok(['STATED', 'INFERRED', 'OWNER_CONFIRMED'].includes(s.actorBasis), `${it.id} actorBasis`);
     }
   }
 });
@@ -244,4 +251,18 @@ test('fingerprints catch a wording change in one section and ignore a reflow', (
 test('the version is read from a control table, never a filename', () => {
   assert.strictEqual(VF.readControlVersion('| Document number | GFC-CLIN-v2.2 |\n| Version | 2.2 |'), '2.2');
   assert.strictEqual(VF.readControlVersion('GFC_Clinical_Policies_v2.2.docx'), null);
+});
+
+test('owner additions: TB, immunizations, driving, self-reporting, pharmacology and telehealth are on the checklist; Hep B is not', () => {
+  const added = C.ITEMS.filter(i => i.addedBy).map(i => i.title);
+  for (const t of ['Tuberculosis screening', 'Immunization record', "Driver's license and personal auto insurance",
+    'Twenty-four hour self-reporting duty acknowledged', 'Annual pharmacology training documented']) assert.ok(added.includes(t), t);
+  assert.ok(!C.ITEMS.some(i => /hepatitis/i.test(i.title)));
+  assert.strictEqual(C.ITEMS.find(i => i.id === 'C.6.10').ref.section, '16.5');
+});
+
+test('every actor the owner confirmed reads OWNER_CONFIRMED; only owner additions are still INFERRED', () => {
+  for (const it of C.ITEMS) for (const s of it.steps) {
+    if (s.actorBasis === 'INFERRED') assert.ok(it.addedBy, `${it.id} still inferred`);
+  }
 });

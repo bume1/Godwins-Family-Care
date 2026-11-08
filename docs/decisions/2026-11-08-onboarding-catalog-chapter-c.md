@@ -23,6 +23,10 @@ This step adds the catalog only (`onboarding/`). It does not change the shipped 
 
   Clinician uploads used to land in the caregiver folder as "Clinician <name>". New ones go to the clinician folder. **Files already in the caregiver folder were not moved.** Moving them is the owner's call.
 
+- **Items kept from #260 that Playbook v3.0 Chapter C does not list (owner, 2026-11-08):** TB screening (Manual §16.5), the immunization record (§16.5), the driver's licence and auto insurance for anyone driving, the 24-hour self-reporting duty (§5.3), annual pharmacology training for prescribers, telehealth licensure in the patient's state (§26.2), and controlled prescribing by telehealth. Each carries `addedBy` and cites the manual, never the Playbook. **The Hepatitis B offer is dropped.**
+- **Every actor inferred in the first transcription is confirmed by the owner** (`OWNER_CONFIRMED`). Only actors on the owner's additions still read `INFERRED`.
+- **No clinician files were found in "GFC Caregiver Documents"**, so there was nothing to move. Its subfolders are caregivers and test data.
+
 ## What a later session must not undo
 
 - **⚠️ #260's RECORDS ARE CARRIED OVER AS EVIDENCE, NEVER AS COMPLETION** (`onboarding/legacy260.js`). Each old item state is shown on the Chapter C item it matches, with who did it and when. It never ticks the new item: three old ticks are not proof that one new step is done. Every #260 item is accounted for and build-enforced: a Chapter C item, a training module, or a stated reason why it has no home in Chapter C.
@@ -52,8 +56,7 @@ This step adds the catalog only (`onboarding/`). It does not change the shipped 
 5. **The Playbook should be corrected to name Clinical P&P v2.2 and Admin P&P v2.3.**
 6. **Admin P&P v2.3's cover says effective Nov 7, but its version record says Nov 8.** §17.2 names "06 People / Onboarding Library" and "06 People / Training", while the build prompt names "06 People / Onboarding / Training".
 7. **The inferred actors in `onboarding/chapterC.js` need confirming.**
-8. **#260 required several items that Playbook v3.0 Chapter C does not list:** TB screening, the immunization record, the driver's licence, the 24-hour self-reporting duty, the Hepatitis B offer, annual pharmacology training, and two telehealth items. The Clinical Manual requires some of them (TB at §16.5, self-reporting at §5.3). They are kept as history. Should they be added to the Playbook or dropped?
-9. **Clinician files #260 already put in "GFC Caregiver Documents" were not moved** to the new clinician folder.
+8. **The Playbook should be revised to list the owner's additions** (below), so the document and the app agree again.
 
 ## Next
 
