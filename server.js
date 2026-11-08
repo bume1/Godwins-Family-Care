@@ -125,7 +125,8 @@ const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onbo
 const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
 // W-2 staff clock in through My GFC; 1099 staff come in from other platforms
 // later (owner, 2026-11-08).
-const EMPLOYMENT_TYPES = Object.freeze(['W2', '1099']);
+// HYBRID: employed (W-2) for clinical care and contracted (1099) for exams.
+const EMPLOYMENT_TYPES = Object.freeze(['W2', '1099', 'HYBRID']);
 const onboardingRoutes = require('./routes/onboarding'); // staff onboarding over the Playbook v3.0 catalog (2026-11-08; replaces #260)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
