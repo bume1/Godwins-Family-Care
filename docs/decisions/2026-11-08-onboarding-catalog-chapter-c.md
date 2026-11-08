@@ -40,6 +40,15 @@ This step adds the catalog only (`onboarding/`). It does not change the shipped 
 - **A document's version is read from its control table, never its filename.** The filenames carry a version that becomes wrong after the first in-place revision.
 - **Module ids are the Library's and are never renumbered.** Build-enforced as an exact list.
 
+## Reading the documents from Drive at runtime
+
+- `onboarding/documentText.js` reads a .docx (a zip, unpacked with zlib, so no new dependency) or the Playbook's HTML into lines. Tables become `| a | b |` rows, and italic text, which is how a check question is marked, gets `*` around it.
+- `onboarding/sourceParsers.js` reads a document's version from its control table (the Playbook's from its "v3.0" banner). It also reads the manual's section fingerprints, the check questions from SOP Set 1 and the Training Library, and runs **a drift check of the catalog's C.2 classifications against the live Playbook table**.
+- **The drift check against the real Drive Playbook found zero differences.**
+- `onboarding/sourceLoader.js` caches in memory only, keyed by the file's Drive checksum, so a document revised in place is never served stale.
+- **Each manual version's section fingerprints are stored** in `onboarding_manual_versions`. These are hashes, never text, and that is build-enforced. When a new version appears, its changed sections are computed rather than typed.
+- **NOT proven from the sandbox:** the .docx reader was built against generated files, never the live Word documents. Run `node scripts/verify_onboarding_sources.js` on the deployment to prove it reads the real files.
+
 ## Verified
 
 - `test/onboarding_catalog.test.js`: 25 tests. 11 of 11 mutations were confirmed to fail a test. One first-draft mutation was a no-op in behaviour (the chain's final line already returns unknown) and was replaced rather than counted.

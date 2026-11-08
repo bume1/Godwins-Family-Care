@@ -704,6 +704,20 @@ function describeDriveError(err) {
   return { reason, hint: null, code: 'DRIVE_REFUSED' };
 }
 
+// A file's identity at this moment: its checksum changes when its bytes do,
+// which is what a "revised in place" Drive document is. Used to key any cache
+// of a source document so a revision can never be served stale.
+async function getFileFingerprint(fileId) {
+  if (!fileId) throw new Error('No Drive file id given');
+  const drive = await getDriveClient();
+  const res = await drive.files.get({ fileId, fields: 'id, name, mimeType, md5Checksum, modifiedTime, version', ...ALL_DRIVES });
+  return {
+    id: res.data.id, name: res.data.name, mimeType: res.data.mimeType,
+    md5Checksum: res.data.md5Checksum || null, modifiedTime: res.data.modifiedTime || null,
+    version: res.data.version || null
+  };
+}
+
 async function downloadFileBuffer(fileId) {
   // Asking Google about `undefined` comes back as "File not found", which reads
   // as a Drive problem when it is actually a row with no file behind it.
@@ -731,6 +745,7 @@ module.exports = {
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
   uploadStaffDocumentFile,
+  getFileFingerprint,
   uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,
