@@ -32,12 +32,15 @@ const defaultChapterFor = (u) => {
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
+  // Employed AND contracted: the full W-2 chapter plus the exam contract (E).
+  if (t === 'provider' && u && u.employmentType === 'HYBRID') return 'E';
   return (['provider', 'lcsw', 'lmsw'].includes(t) || (u && u.hasClinicalAccess && !u.isManager)) ? 'C' : 'F';
 };
 const CHAPTER_CHOICES = Object.freeze([
   { id: 'B', label: 'Registered nurse, employed (private home care)' },
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
-  { id: 'D', label: 'Clinician (NP, PA), contracted (1099)' },
+  { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
+  { id: 'E', label: 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)' },
   { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
 ]);
 const C = require('../onboarding/chapterC');

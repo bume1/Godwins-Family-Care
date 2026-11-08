@@ -201,7 +201,9 @@ module.exports = function createSchedulingRoutes(deps) {
   // time_logs rows, with no shift and no client, so the admin's Time Logs
   // screen, its corrections and the payroll export carry them unchanged.
   // Caregivers keep clocking in on their shifts. 1099 staff do not clock in.
-  const isW2Staff = (u) => !!u && u.employmentType === 'W2' && !cg.isCaregiver(u)
+  // A hybrid clocks in for the employed side only; exam cases are paid by case
+  // and never on this clock (Playbook E.3, separate time records).
+  const isW2Staff = (u) => !!u && ['W2', 'HYBRID'].includes(u.employmentType) && !cg.isCaregiver(u)
     && ![ROLES.CLIENT, ROLES.FAMILY, ROLES.VENDOR].includes(u.role);
   const requireW2Staff = (req, res, next) => (isW2Staff(req.user) ? next()
     : res.status(403).json({ error: req.user && req.user.employmentType === '1099' ? 'Contractors record hours on their own platform, not here.' : 'This clock is for W-2 staff without shifts. Ask the office to set your employment type.', code: 'STAFF_CLOCK_W2_ONLY' }));

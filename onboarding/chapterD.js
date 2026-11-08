@@ -1,6 +1,9 @@
 // ============================================================================
 // CHAPTER D · CLINICIAN, CONTRACTED — transcribed from Onboarding Playbook v3.0
 // ============================================================================
+// TRUE CONTRACTORS ONLY (owner, 2026-11-08). A hybrid — employed and also
+// contracted for exams — is Chapter E and clears every W-2 requirement.
+//
 // A nurse practitioner or physician assistant retained as an independent
 // contractor (1099). D.1: GFC VERIFIES competence, orients the clinician to its
 // systems and standards, and holds them to deliverables by contract. It does

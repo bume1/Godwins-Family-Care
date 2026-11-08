@@ -25,10 +25,11 @@ const V = require('./vocabulary');
 const C = require('./chapterC');
 // Every chapter built so far. A person's record names theirs in inputs.chapter
 // (owner, 2026-11-08: clinicians first, the admin team next, the rest after).
-const CHAPTERS = Object.freeze({ B: require('./chapterB'), C, D: require('./chapterD'), F: require('./chapterF') });
+const CHAPTERS = Object.freeze({ B: require('./chapterB'), C, D: require('./chapterD'), E: require('./chapterE'), F: require('./chapterF') });
 const chapterOf = (inputs) => CHAPTERS[(inputs && inputs.chapter) || 'C'] || C;
 // Item and acknowledgment ids are unique across chapters, so one lookup serves all.
-const ALL_ITEMS = Object.freeze([].concat(...Object.values(CHAPTERS).map(ch => ch.ITEMS)));
+// Chapter E carries C's items as they are, so an id appears once here.
+const ALL_ITEMS = Object.freeze(Array.from(new Map([].concat(...Object.values(CHAPTERS).map(ch => ch.ITEMS)).map(it => [it.id, it])).values()));
 const ALL_ACKS = Object.freeze(Object.values(Object.values(CHAPTERS).reduce((acc, ch) => {
   ch.ACKNOWLEDGMENTS.forEach(a => { if (!acc[a.id]) acc[a.id] = a; }); return acc;
 }, {})));
@@ -456,7 +457,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 
   // The Training Library is the clinical curriculum. A non-clinical role's
   // training is its written role training plan (F.7), an item, not modules.
-  const modules = MODULES.filter(m => ch === C && moduleApplies(m, i)).map(m => {
+  const modules = MODULES.filter(m => (ch === C || ch.CHAPTER.usesTrainingLibrary === true) && moduleApplies(m, i)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
     const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
