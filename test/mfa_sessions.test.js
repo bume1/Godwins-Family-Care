@@ -289,7 +289,9 @@ test('production refuses MFA_ENFORCE=false and a missing EMR_TOKEN_ENCRYPTION_KE
 
 // ---- 5. pages ----
 test('every signed-in page carries the session guard and every login surface carries the MFA step', () => {
-  for (const p of ['index', 'admin-hub', 'portal', 'clinical', 'caregiver', 'scheduling', 'admin-enrollment', 'service-portal']) {
+  // caregivers (Caregiver Management) and login (the Portal Hub) added
+  // 2026-11-08: without the guard, "View as" showed no banner and no Exit there.
+  for (const p of ['index', 'admin-hub', 'portal', 'clinical', 'caregiver', 'scheduling', 'admin-enrollment', 'service-portal', 'caregivers', 'login']) {
     assert.match(read(`public/${p}.html`), /<script src="\/session-guard\.js"><\/script>/, `${p}.html lacks the session guard`);
   }
   for (const p of ['login', 'portal', 'admin-hub', 'admin-enrollment', 'service-portal', 'clinical']) {

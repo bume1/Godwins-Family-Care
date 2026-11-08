@@ -88,6 +88,15 @@ const expiresAt = (nowMs = Date.now()) => new Date(nowMs + IMPERSONATION_MINUTES
 // a caregiver, 'user' a clinician), and the banner is read by a person.
 const ROLE_LABELS = Object.freeze({ user: 'clinician', vendor: 'caregiver', caseManager: 'case manager', client: 'client', family: 'family' });
 const roleLabel = (role) => ROLE_LABELS[role] || role || null;
+// The banner names the person's ACCOUNT TYPE when it is known, so a manager
+// reads "Manager", not "clinician" (both are stored as role `user`).
+const accountTypeLabel = (user) => {
+  if (!user) return null;
+  const at = require('./accountTypes');
+  const type = at.accountTypeOf(user);
+  const hit = type && at.ACCOUNT_TYPES.find(t => t.value === type);
+  return hit ? hit.label : null;
+};
 
 // What the browser is told about the current session. Never more than names.
 const describe = (session, user) => {
@@ -98,7 +107,7 @@ const describe = (session, user) => {
     userId: user ? user.id : session.userId,
     userName: user ? (user.name || user.email || null) : null,
     role: user ? user.role : session.role || null,
-    roleLabel: roleLabel(user ? user.role : session.role),
+    roleLabel: accountTypeLabel(user) || roleLabel(user ? user.role : session.role),
     expiresAt: session.absoluteExpiresAt || null
   };
 };

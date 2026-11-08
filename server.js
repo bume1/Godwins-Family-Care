@@ -3802,12 +3802,48 @@ app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
 // account; signatures, OpenEMR and account changes stay blocked. The new
 // session is tied to the admin's own session and capped at 60 minutes.
 // ============================================================
-const viewAsDestination = (u) => {
-  const home = appLinks.homeFor(u);
-  if (home !== appLinks.PATHS.LOGIN) return home;
-  // Managers and care coordinators land on the Portal Hub (accountTypes.js).
-  return appLinks.PATHS.LOGIN;
+// THE account profile a sign-in hands the browser: who they are, their account
+// type, where they land and which hub tiles they see. Shared by the real
+// sign-in and by "View as", so viewing as someone shows exactly what their
+// own sign-in would (owner, 2026-11-08: View as had been handing the page a
+// cut-down copy, so a manager's hub showed "No Portals Available").
+const loginProfileFor = (user) => {
+  const isManager = user.isManager || false;
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    // Manager flag - provides limited admin access
+    isManager: isManager,
+    hasImplementationsAccess: user.hasImplementationsAccess || false,
+    // Where this account lands and which hub tiles it sees, answered ONCE on
+    // the server (accountTypes.js) so the login page cannot drift from it.
+    accountType: accountTypes.accountTypeOf(user),
+    clinicalRole: clinicalRoles.resolveClinicalRole(user),
+    landing: accountTypes.landingFor(user),
+    hubTiles: accountTypes.hubTilesFor(user),
+    assignedProjects: user.assignedProjects || [],
+    assignedClients: user.assignedClients || [],
+    // GFC role fields — the login page's directDestination() routes on
+    // these, so they MUST be in the login response (their absence sent
+    // clinicians to an empty Portal Hub).
+    hasClinicalAccess: user.hasClinicalAccess || false,
+    licenseLevel: user.licenseLevel || null,
+    openEmrProviderId: user.openEmrProviderId || null,
+    familyOfClientId: user.familyOfClientId || null,
+    familyIsPoa: user.familyIsPoa || false,
+    // A family account linked to several patients chooses one in the portal.
+    familyLinkCount: familyLinks.linksOf(user).length,
+    // Password reset flag
+    requirePasswordChange: user.requirePasswordChange || false
+  };
 };
+
+// Where their OWN sign-in would send them (accountTypes.landingFor), so a
+// manager lands on their Portal Hub, not the Clinical Workspace. `null` means
+// the hub, which lives at /login.
+const viewAsDestination = (u) => accountTypes.landingFor(u) || appLinks.PATHS.LOGIN;
 app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -3822,7 +3858,13 @@ app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, asyn
     const minutes = impersonation.IMPERSONATION_MINUTES;
     const token = jwt.sign({ id: target.id, email: target.email, name: target.name, role: target.role, sid: row.id }, JWT_SECRET, { expiresIn: `${minutes}m` });
     await logActivity(req.user.id, req.user.name || req.user.email, 'impersonation_started', 'user', target.id, { targetName: target.name || target.email, targetRole: target.role, sid: row.id, expiresAt: row.absoluteExpiresAt });
-    const user = { id: target.id, email: target.email, name: target.name, role: target.role, slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }), licenseLevel: target.licenseLevel || null };
+    // Their own profile, as their sign-in would hand it over, with two
+    // differences: a password-change prompt is skipped (changing their
+    // password is blocked while viewing as them), and a client's portal
+    // fields ride along as they do on a client sign-in.
+    const user = { ...loginProfileFor(target), requirePasswordChange: false,
+      ...(target.role === config.ROLES.CLIENT ? { practiceName: target.practiceName, isNewClient: target.isNewClient } : {}),
+      slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }) };
     res.json({ token, user, destination: viewAsDestination(target), actingAs: impersonation.describe(row, target) });
   } catch (error) {
     console.error('impersonation start failed:', error.message);
@@ -3866,36 +3908,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.accountStatus === 'inactive') {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
-    const isManager = user.isManager || false;
-    const userResponse = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      // Manager flag - provides limited admin access
-      isManager: isManager,
-      hasImplementationsAccess: user.hasImplementationsAccess || false,
-      // Where this account lands and which hub tiles it sees, answered ONCE on
-      // the server (accountTypes.js) so the login page cannot drift from it.
-      accountType: accountTypes.accountTypeOf(user),
-      clinicalRole: clinicalRoles.resolveClinicalRole(user),
-      landing: accountTypes.landingFor(user),
-      hubTiles: accountTypes.hubTilesFor(user),
-      assignedProjects: user.assignedProjects || [],
-      assignedClients: user.assignedClients || [],
-      // GFC role fields — the login page's directDestination() routes on
-      // these, so they MUST be in the login response (their absence sent
-      // clinicians to an empty Portal Hub).
-      hasClinicalAccess: user.hasClinicalAccess || false,
-      licenseLevel: user.licenseLevel || null,
-      openEmrProviderId: user.openEmrProviderId || null,
-      familyOfClientId: user.familyOfClientId || null,
-      familyIsPoa: user.familyIsPoa || false,
-      // A family account linked to several patients chooses one in the portal.
-      familyLinkCount: familyLinks.linksOf(user).length,
-      // Password reset flag
-      requirePasswordChange: user.requirePasswordChange || false
-    };
+    const userResponse = loginProfileFor(user);
     // Include client-specific fields
     if (user.role === config.ROLES.CLIENT) {
       userResponse.practiceName = user.practiceName;
