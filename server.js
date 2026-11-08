@@ -3036,7 +3036,9 @@ app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken,
 // My GFC: a staff member's own documents, policies and the Drive folders the
 // office assigned to their role or to them by name.
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
-  detectFileType: (buf) => detectFileType(buf) }));
+  detectFileType: (buf) => detectFileType(buf),
+  // Wrapped: the enrollment helpers are declared further down this file.
+  enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
@@ -20706,6 +20708,21 @@ const enrollmentListRow = (client) => {
     reviewedAt: (client.enrollmentReview && client.enrollmentReview.reviewedAt) || null,
     needsFollowUp: client.reviewStatus === 'needs_followup',
     pendingApprovals: enrollmentChanges.pendingCount(client)
+  };
+};
+
+// What a Community Care Liaison sees of a client assigned to them (owner,
+// 2026-11-08): the enrollment summary only. Status, how complete, and what is
+// still needed, by name. Never the intake answers, the chart or a document.
+const liaisonEnrollmentView = (client) => {
+  const row = enrollmentListRow(client);
+  const comp = computeEnrollmentCompletion(client);
+  return {
+    id: row.id, name: row.name, serviceLine: row.serviceLine,
+    enrollmentStatus: row.enrollmentStatus, reviewState: row.reviewState,
+    completionPct: row.completionPct, submittedAt: row.submittedAt, reviewedAt: row.reviewedAt,
+    needsFollowUp: row.needsFollowUp,
+    stillNeeded: { consents: comp.missingConsentLabels, details: comp.missingFieldLabels }
   };
 };
 

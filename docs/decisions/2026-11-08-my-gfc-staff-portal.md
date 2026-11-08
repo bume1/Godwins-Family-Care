@@ -89,3 +89,17 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 - Shift emails (`/caregiver#schedule`) and message emails (`/caregiver#more`) still land where they did.
 - **One shared file, `public/my-gfc.js`,** holds the frame and the staff sections for both pages. It runs in its own scope as `window.MyGFC`, and every class it styles starts with `mg-`, so neither page's styles can restyle the other's.
 - Rendered in Chromium at 1280px and 390px as a caregiver: Home, My Documents, Hours & Pay, More and Schedule. No page errors.
+
+## Who lands where, and the Community Care Liaison (owner, 2026-11-08)
+
+- **Caregivers** land in My GFC, which is `/caregiver`.
+- **Clinicians** (provider, RN, LCSW, LMSW / case manager) land in the clinical workspace. **My GFC is a sidebar item** above Settings, and is in the phone's More menu.
+- **Admins, managers and care coordinators** land on the Portal Hub, where the My GFC tile comes first.
+- **Community Care Liaison** is a new account type:
+  - **It is its own role, `liaison`.** No existing gate admits it, because `user` would have been enrollment staff and clinical everywhere.
+  - A liaison lands straight in My GFC. There are no hub tiles and no clinical workspace.
+  - They use **two-step sign-in**, because they read client names and enrollment status. `liaison` is on `MFA_REQUIRED_ROLES_FLOOR`.
+  - They get every My GFC section except Logs & Messages.
+  - **My Clients** lists only the clients assigned to them on their account. Assignment uses the same `assignedClients` list a caregiver's uses, ticked under "Liaison's Clients" on the user form. Only an admin creates a liaison.
+  - For each client they see the **enrollment summary only** (`liaisonEnrollmentView` in `server.js`): status, how complete, and which forms and details are still needed. They never see the intake answers, the chart or a document.
+  - Liaison uploads land in `GFC Community Care Liaison Documents`.

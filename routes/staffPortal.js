@@ -28,10 +28,11 @@ const { SOURCES } = require('../onboarding/sources');
 const attestations = require('../caregiverAttestations');
 
 const FOLDERS = 'staff_portal_folders';
-const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver']);
+const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'liaison']);
 const TYPE_LABELS = Object.freeze({
   admin: 'Administrator', manager: 'Manager', coordinator: 'Care Coordinator', provider: 'Clinician',
-  rn: 'Registered Nurse', lcsw: 'Clinical Social Worker', lmsw: 'Social Worker', caregiver: 'Caregiver'
+  rn: 'Registered Nurse', lcsw: 'Clinical Social Worker', lmsw: 'Social Worker', caregiver: 'Caregiver',
+  liaison: 'Community Care Liaison'
 });
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 // A Drive folder link or a bare id. Ids are long base64url strings.
@@ -83,6 +84,7 @@ function roleFolderFor(type) {
   if (type === 'caregiver') return staffFolders.folderForChapter('A');
   if (type === 'rn') return staffFolders.folderForChapter('B');
   if (CLINICIAN_TYPES.includes(type)) return staffFolders.folderForChapter('C');
+  if (type === 'liaison') return staffFolders.folderForChapter('G');
   return staffFolders.folderForChapter('F');
 }
 
@@ -128,7 +130,7 @@ function canSee(folder, u) {
 }
 
 module.exports = function createStaffPortalRoutes(deps) {
-  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType } = deps;
+  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType, enrollmentSummary } = deps;
   const payrollKey = () => deps.payrollIngestKey !== undefined ? deps.payrollIngestKey : process.env.PAYROLL_INGEST_KEY;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
   const router = express.Router();
@@ -149,8 +151,28 @@ module.exports = function createStaffPortalRoutes(deps) {
       type, typeLabel: TYPE_LABELS[type],
       isAdmin: isAdminTeam(req.user),
       isCaregiver: type === 'caregiver',
+      isLiaison: type === 'liaison',
       isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess
     });
+  });
+
+  // ---- a liaison's clients ------------------------------------------------------
+  // Owner, 2026-11-08: a Community Care Liaison sees the clients assigned to
+  // them when their account is set up, and for each only the enrollment
+  // summary: status, how complete, and what is still needed. Never the intake
+  // answers, the chart or anything clinical. Assignment is the same
+  // `assignedClients` list a caregiver's uses, matched by id or (older rows) name.
+  const requireLiaison = (req, res, next) => (audienceOf(req.user) === 'liaison' ? next()
+    : res.status(403).json({ error: 'My Clients is for community care liaisons.', code: 'LIAISON_ONLY' }));
+  const assignedTo = (u, client) => {
+    const list = (u.assignedClients || []).map(String);
+    return list.includes(String(client.id)) || (client.name && list.includes(String(client.name)));
+  };
+  router.get('/api/my/clients', authenticateToken, requireLiaison, async (req, res) => {
+    const mine = (await getUsers()).filter(u => u.role === 'client' && assignedTo(req.user, u));
+    const clients = mine.map(c => enrollmentSummary(c)).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    await logActivity(req.user.id, req.user.name, 'liaison_clients_read', 'client', null, { count: clients.length });
+    return res.json({ clients });
   });
 
   // ---- policies (live) ----------------------------------------------------------

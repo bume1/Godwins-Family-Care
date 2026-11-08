@@ -15,8 +15,9 @@ const hubSrc = fs.readFileSync(path.join(root, 'public', 'admin-hub.html'), 'utf
 
 // ---- The ten types and what each stores --------------------------------
 
-test('there are exactly the ten account types the owner listed', () => {
-  assert.deepEqual(at.ALL_TYPES, ['admin', 'manager', 'provider', 'rn', 'lcsw', 'lmsw', 'coordinator', 'caregiver', 'client', 'family']);
+test('there are exactly the eleven account types the owner listed', () => {
+  // Community Care Liaison added by the owner, 2026-11-08.
+  assert.deepEqual(at.ALL_TYPES, ['admin', 'manager', 'provider', 'rn', 'lcsw', 'lmsw', 'coordinator', 'caregiver', 'liaison', 'client', 'family']);
   assert.equal(at.ACCOUNT_TYPES.find(t => t.value === 'lmsw').label, 'LMSW / Case Manager');
   assert.equal(at.ACCOUNT_TYPES.find(t => t.value === 'coordinator').label, 'Care Coordinator',
     'no "unlicensed" in the label (owner, 2026-10-15)');

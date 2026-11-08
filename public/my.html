@@ -24,7 +24,7 @@
 <script src="/session-guard.js"></script>
 <script type="text/babel" src="/my-gfc.js"></script>
 <script type="text/babel">
-const { Shell, Section, StaffTiles, StaffView, useStaffData, staffSectionsFor, OnboardingSummary } = window.MyGFC;
+const { Shell, Section, StaffTiles, StaffView, useStaffData, staffSectionsFor, OnboardingSummary, LiaisonClients, Tile } = window.MyGFC;
 
 // My GFC for everyone but caregivers, whose My GFC is /caregiver: the same
 // frame and sections plus their shift tools.
@@ -38,18 +38,31 @@ function App() {
   if (!profile) return <div className="mygfc" style={{ padding: 24 }}><p className="mg-note">Loading…</p></div>;
   if (profile.isCaregiver) { window.location.replace(`/caregiver${window.location.hash || ''}`); return null; }
 
-  const sections = [{ id: 'home', label: 'Home', icon: 'ti-home' }].concat(staffSectionsFor(profile));
+  // A Community Care Liaison lands here and also has their clients (owner,
+  // 2026-11-08).
+  const sections = [{ id: 'home', label: 'Home', icon: 'ti-home' }]
+    .concat(profile.isLiaison ? [{ id: 'clients', label: 'My Clients', icon: 'ti-users', subtitle: 'Where each of your clients is in enrollment.' }] : [])
+    .concat(staffSectionsFor(profile));
   const current = sections.find(s => s.id === view);
   if (!current) { setView('home'); return null; }
-  const home = profile.isClinician ? { href: '/clinical', label: 'Clinical Workspace' } : { href: '/login', label: 'Portal Hub' };
-  const phoneTabs = sections.filter(s => !['account', 'onboarding', 'team'].includes(s.id));
+  // A liaison's home IS this page, so there is nowhere to go back to.
+  const home = profile.isLiaison ? null : profile.isClinician ? { href: '/clinical', label: 'Clinical Workspace' } : { href: '/login', label: 'Portal Hub' };
+  const signOut = () => { try { localStorage.clear(); } catch (e) { /* private mode */ } window.location.replace('/login'); };
+  // The phone menu fits five; everything else is a tile on Home.
+  const phoneTabs = sections.filter(s => !['account', 'onboarding', 'team'].includes(s.id)).slice(0, 5);
 
   return (
     <Shell sections={sections} phoneTabs={phoneTabs} view={view} go={go} name={profile.name} typeLabel={profile.typeLabel}
-      home={home} title={current.label} subtitle={current.subtitle} firstName={(profile.name || '').split(' ')[0]}>
+      home={home} title={current.label}
+      footExtra={<div><button onClick={signOut} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>Sign Out</button></div>} subtitle={current.subtitle} firstName={(profile.name || '').split(' ')[0]}>
       {err && <div className="mg-err">{err}</div>}
       {view === 'home'
-        ? <div><StaffTiles data={data} go={go} /><Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section></div>
+        ? <div>
+            <StaffTiles data={data} go={go}
+              extra={profile.isLiaison ? <Tile key="clients" icon="ti-users" title="My Clients" sub="Where each client is in enrollment" onClick={() => go('clients')} /> : null} />
+            <Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section>
+          </div>
+        : view === 'clients' ? <Section><LiaisonClients /></Section>
         : <StaffView view={view} data={data} />}
     </Shell>
   );

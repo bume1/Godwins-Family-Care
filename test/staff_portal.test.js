@@ -16,6 +16,8 @@ const NP = { id: 'n1', name: 'Bethel Godwins', email: 'Bethel@GFC.test', role: '
 const RN = { id: 'r1', name: 'Rae Nurse', role: 'user', accountType: 'rn', clinicalRole: 'rn', hasClinicalAccess: true };
 const CG = { id: 'c1', name: 'Cara Giver', role: 'vendor', accountType: 'caregiver', licenseLevel: 'PCA' };
 const CLIENT = { id: 'p1', name: 'Pat Client', role: 'client', accountType: 'client' };
+const CLIENT2 = { id: 'p2', name: 'Quinn Other', role: 'client', accountType: 'client', intake: { medications: ['secret'] } };
+const LIAISON = { id: 'l1', name: 'Lia Ison', role: 'liaison', accountType: 'liaison', email: 'lia@gfc.test', assignedClients: ['p1'] };
 
 // A tiny Drive: ROOT holds a subfolder SUB and a file; OTHER is a folder
 // nobody assigned.
@@ -44,7 +46,8 @@ async function mount(t, opts = {}) {
     db, uuidv4: () => Math.random().toString(36).slice(2), drive, payrollIngestKey: opts.key === undefined ? 'k3y-payroll' : opts.key,
     detectFileType: (buf) => (buf.slice(0, 3).toString('hex') === 'ffd8ff' ? 'image/jpeg' : buf.slice(0, 4).toString() === '%PDF' ? 'application/pdf' : null),
     logActivity: async (...a) => { logged.push(a); },
-    getUsers: async () => [ADMIN, COORD, NP, RN, CG, CLIENT],
+    getUsers: async () => [ADMIN, COORD, NP, RN, CG, CLIENT, LIAISON, CLIENT2],
+    enrollmentSummary: (c) => ({ id: c.id, name: c.name, reviewState: 'intake_pending', completionPct: 40, stillNeeded: { consents: ['Service Agreement'], details: [] } }),
     authenticateToken: (req, _res, next) => { req.user = current; next(); }
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -279,6 +282,35 @@ test('a shared file is never streamed by the app: the folder route returns Drive
   const body = src.slice(at, src.indexOf('// ---- pay stubs', at));
   assert.ok(at > 0 && body.length > 200);
   assert.ok(!/downloadFileBuffer|res\.send\(/.test(body));
+});
+
+test('a community care liaison lands in My GFC and sees only the enrollment summary of her own clients', async (t) => {
+  const at = require('../accountTypes');
+  const f = at.fieldsFor('liaison');
+  assert.strictEqual(f.role, 'liaison');
+  assert.strictEqual(f.hasClinicalAccess, false);
+  assert.strictEqual(at.landingFor(f), '/my');
+  assert.deepStrictEqual(at.hubTilesFor(f), [], 'no hub, no clinical workspace');
+  assert.ok(require('../config').MFA_REQUIRED_ROLES.includes('liaison'), 'two-step sign-in: they read client names');
+  const h = await mount(t);
+  h.as(LIAISON);
+  const p = (await h.call('GET', '/api/my/profile')).data;
+  assert.strictEqual(p.isLiaison, true);
+  const r = (await h.call('GET', '/api/my/clients')).data.clients;
+  assert.deepStrictEqual(r.map(c => c.id), ['p1'], 'only the clients assigned to her');
+  assert.ok(!JSON.stringify(r).includes('secret'));
+  h.as(NP);
+  assert.strictEqual((await h.call('GET', '/api/my/clients')).data.code, 'LIAISON_ONLY');
+  h.as(COORD);
+  assert.strictEqual((await h.call('GET', '/api/my/clients')).data.code, 'LIAISON_ONLY');
+});
+
+test('the server tells a liaison only status and what is still needed, never the intake', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = src.indexOf('const liaisonEnrollmentView = (client) => {');
+  const body = src.slice(at, src.indexOf('};', at));
+  assert.ok(at > 0);
+  assert.ok(!/intake|dob|careTier|consents\s*:/.test(body.replace(/stillNeeded: \{ consents: comp\.missingConsentLabels/, '')), 'nothing beyond the summary');
 });
 
 test('the portal page and the ways into it', () => {

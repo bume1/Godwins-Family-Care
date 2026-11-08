@@ -22,6 +22,7 @@ const { useState, useEffect, useCallback } = React;
 .mg-body{padding:18px 16px 110px;max-width:1080px;margin:0 auto;position:relative;z-index:1}
 .mg-top{position:sticky;top:0;z-index:20;background:rgba(250,247,242,.96);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--edge)}
 .mg-top img{height:34px} .mg-top a{font-size:14px;font-weight:600;text-decoration:none;color:var(--navy)}
+.mg-top button{font-family:inherit;font-size:14px;font-weight:600;color:var(--navy);background:none;border:0;cursor:pointer;padding:0;width:auto;margin:0}
 .mg-main.mg-home .mg-top{background:transparent;border-bottom:none;backdrop-filter:none;position:relative;z-index:2}
 .mg-main.mg-home::before{content:"";position:absolute;left:0;right:0;top:0;height:380px;z-index:0;pointer-events:none;
   background:linear-gradient(to bottom,rgba(250,247,242,.35),rgba(250,247,242,.1) 38%,rgba(250,247,242,0) 55%),url('/banners/banner-portal.jpg') 36% top / cover no-repeat;
@@ -496,6 +497,53 @@ function TeamBios() {
 }
 
 
+// ---- A liaison's clients --------------------------------------------------------
+// The enrollment summary of each client assigned to this liaison: status, how
+// complete, and what is still needed. Nothing clinical (owner, 2026-11-08).
+const ENROLLMENT_LABELS = { intake_pending: ['mg-wait', 'Intake in progress'], ready_for_review: ['mg-wait', 'With the office for review'],
+  needs_followup: ['mg-bad', 'Needs follow-up'], enrolled: ['mg-ok', 'Enrolled'] };
+const SERVICE_LINE_LABELS = { PHC: 'Private Home Care', IHPC: 'In-Home Primary Care', BOTH: 'Home Care and Primary Care' };
+
+function LiaisonClients() {
+  const [clients, setClients] = useState(null); const [err, setErr] = useState(''); const [open, setOpen] = useState(null);
+  useEffect(() => { call('/api/my/clients').then(d => setClients(d.clients)).catch(e => setErr(e.message)); }, []);
+  if (err) return <div className="mg-err">{err}</div>;
+  if (!clients) return <p className="mg-note">Loading…</p>;
+  if (!clients.length) return <p className="mg-note">No clients are assigned to you yet. The office assigns them on your account.</p>;
+  return clients.map(c => {
+    const st = ENROLLMENT_LABELS[c.reviewState] || ['', c.enrollmentStatus];
+    const needed = c.stillNeeded.consents.length + c.stillNeeded.details.length;
+    return (
+      <div key={c.id}>
+        <div className="mg-row" style={{ cursor: 'pointer' }} onClick={() => setOpen(open === c.id ? null : c.id)}>
+          <i className="ti ti-user mg-big" />
+          <div className="mg-grow">
+            <b>{c.name}</b>
+            <small>{SERVICE_LINE_LABELS[c.serviceLine] || 'Service not chosen yet'} · {c.completionPct}% complete{c.submittedAt ? ` · Intake sent ${fmtDate(c.submittedAt)}` : ''}</small>
+          </div>
+          <span className={`mg-pill ${st[0]}`}>{st[1]}</span>
+          <i className={`ti ${open === c.id ? 'ti-chevron-up' : 'ti-chevron-down'}`} />
+        </div>
+        {open === c.id && (
+          <div style={{ padding: '4px 4px 14px 54px' }}>
+            <div className="mg-bar"><span style={{ width: `${c.completionPct}%` }} /></div>
+            {needed === 0
+              ? <p className="mg-note">Nothing is outstanding on this client's enrollment.</p>
+              : (
+                <div>
+                  {c.stillNeeded.consents.length > 0 && (<div><b style={{ color: 'var(--navy)' }}>Forms still to sign</b>
+                    <ul style={{ margin: '4px 0 10px', paddingLeft: 20 }}>{c.stillNeeded.consents.map(x => <li key={x}>{x}</li>)}</ul></div>)}
+                  {c.stillNeeded.details.length > 0 && (<div><b style={{ color: 'var(--navy)' }}>Details still needed</b>
+                    <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>{c.stillNeeded.details.map(x => <li key={x}>{x}</li>)}</ul></div>)}
+                </div>
+              )}
+          </div>
+        )}
+      </div>
+    );
+  });
+}
+
 // ---- The shell -------------------------------------------------------------------
 // One frame for every staff member (owner, 2026-11-08): the patient portal's
 // look. A white sidebar on a computer, a white menu along the bottom of a
@@ -523,7 +571,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
         <main className={`mg-main${isHome ? ' mg-home' : ''}`}>
           <div className="mg-top">
             <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
-            {home ? <a href={home.href}>← {home.label}</a> : <span />}
+            {home ? <a href={home.href}>← {home.label}</a> : (footExtra || <span />)}
           </div>
           {banner}
           <div className="mg-body">
@@ -588,7 +636,7 @@ function useStaffData() {
 }
 
 // The tiles on Home that lead to the staff sections.
-function StaffTiles({ data, go, only }) {
+function StaffTiles({ data, go, only, extra }) {
   const { docs, signed, policies, folders, stubs } = data;
   const all = [
     { id: 'onboarding', el: <Tile key="onboarding" icon="ti-route" title="Onboarding" sub="Your checklist and training" onClick={() => go('onboarding')} /> },
@@ -598,7 +646,7 @@ function StaffTiles({ data, go, only }) {
     { id: 'hours', el: <Tile key="hours" icon="ti-clock" title="Hours & Pay" sub={stubs && stubs.length ? `Last paid ${fmtDay(stubs[0].payDate)}` : 'Pay stubs'} onClick={() => go('hours')} /> },
     { id: 'account', el: <Tile key="account" icon="ti-user-circle" title="Account" sub="Headshot, bio and sign-in" onClick={() => go('account')} /> }
   ];
-  return <div className="mg-tiles">{all.filter(t => !only || only.includes(t.id)).map(t => t.el)}</div>;
+  return <div className="mg-tiles">{extra}{all.filter(t => !only || only.includes(t.id)).map(t => t.el)}</div>;
 }
 
 // The body of one staff section. Returns null for a view it does not own.
@@ -646,5 +694,5 @@ function StaffView({ view, data }) {
 }
 
 window.MyGFC = { Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor,
-  OnboardingSummary, call, getToken, openFile };
+  OnboardingSummary, LiaisonClients, call, getToken, openFile };
 })();

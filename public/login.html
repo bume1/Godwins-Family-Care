@@ -673,6 +673,7 @@
         if (u.isManager) return null; // manager and care coordinator → the hub
         if (u.hasClinicalAccess || u.role === 'caseManager') return '/clinical';
         if (u.role === 'vendor' && u.licenseLevel) return '/caregiver';
+        if (u.role === 'liaison') return '/my'; // Community Care Liaison → My GFC
         return null; // no access anywhere → hub renders its empty state
       };
       const destination = directDestination(user);

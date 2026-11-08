@@ -3476,6 +3476,32 @@
                     </div>
                   )}
 
+                  {/* Community Care Liaison (owner, 2026-11-08): the clients this
+                      liaison follows. They see only these clients, and only the
+                      enrollment summary (status and what is still needed) in
+                      My GFC. Stored by client id, as a caregiver's assignments are. */}
+                  {formData.role === 'liaison' && (
+                    <div className="border-t pt-4">
+                      <h3 className="font-medium text-gray-800 mb-1">Liaison's Clients</h3>
+                      <p className="text-xs text-gray-500 mb-2">The clients this liaison sees in My GFC. They see where each one is in enrollment and nothing clinical.</p>
+                      <div className="max-h-48 overflow-y-auto border rounded-lg p-2 space-y-1">
+                        {clients.length > 0 ? clients.map(client => {
+                          const current = formData.assignedClients || [];
+                          const on = current.includes(client.id) || current.includes(client.name);
+                          return (
+                            <label key={client.id} className="flex items-center gap-2 text-sm px-1 py-1">
+                              <input type="checkbox" checked={on}
+                                onChange={() => setFormData({ ...formData, assignedClients: on
+                                  ? current.filter(c => c !== client.id && c !== client.name)
+                                  : current.concat([client.id]) })} />
+                              {client.name || client.email}
+                            </label>
+                          );
+                        }) : <p className="text-xs text-gray-500 p-1">No client accounts yet.</p>}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Vendor-specific fields */}
                   {formData.role === 'vendor' && (
                     <div className="border-t pt-4">
