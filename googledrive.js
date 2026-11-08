@@ -707,6 +707,30 @@ function describeDriveError(err) {
 // A file's identity at this moment: its checksum changes when its bytes do,
 // which is what a "revised in place" Drive document is. Used to key any cache
 // of a source document so a revision can never be served stale.
+// The direct children of one folder: names, types and the Drive link each
+// opens at. Read as the service account; the staff portal only ever calls it
+// for folders an admin assigned, and a file still opens in Drive under the
+// viewer's own Google sign-in.
+async function listFolderChildren(folderId) {
+  if (!folderId) throw new Error('No Drive folder id given');
+  const drive = await getDriveClient();
+  const out = [];
+  let pageToken;
+  do {
+    const res = await drive.files.list({
+      q: `'${escapeDriveQueryValue(folderId)}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, iconLink)',
+      orderBy: 'folder,name', pageSize: 200, pageToken, ...ALL_DRIVES_LIST
+    });
+    (res.data.files || []).forEach(f => out.push({
+      id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime || null,
+      webViewLink: f.webViewLink || null, isFolder: f.mimeType === 'application/vnd.google-apps.folder'
+    }));
+    pageToken = res.data.nextPageToken;
+  } while (pageToken && out.length < 2000);
+  return out;
+}
+
 async function getFileFingerprint(fileId) {
   if (!fileId) throw new Error('No Drive file id given');
   const drive = await getDriveClient();
@@ -746,6 +770,7 @@ module.exports = {
   uploadCaregiverDocumentFile,
   uploadStaffDocumentFile,
   getFileFingerprint,
+  listFolderChildren,
   uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,

@@ -88,7 +88,7 @@ test('the Super Admin, a manager and a care coordinator land on the hub', () => 
 const ids = (u) => at.hubTilesFor(u).map(t => t.id);
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
-  assert.deepEqual(ids(at.fieldsFor('admin')), ['admin', 'people', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'service', 'clientPortalAdmin']);
+  assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'admin', 'people', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -97,9 +97,9 @@ test('only the Super Admin sees the Admin Hub, the Service Portal and the Client
 test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
   // 'people' holds User Management, the one part of the Admin Hub open to
   // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['privateHomeCare', 'enrollment', 'billing', 'messages', 'people'],
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['myGfc', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);

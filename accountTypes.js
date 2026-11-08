@@ -202,6 +202,8 @@ const PEOPLE_USERS = Object.freeze({ id: 'users', name: 'User Management', path:
   description: 'Add and edit staff, caregivers, clients and family contacts' });
 const PEOPLE_ONBOARDING = Object.freeze({ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding',
   description: 'Who is onboarding, whose turn it is, credentialing and readiness' });
+const MY_GFC = Object.freeze({ id: 'myGfc', name: 'My GFC', path: '/my',
+  description: 'Your onboarding, documents, policies and shared folders' });
 function peopleTile(u) {
   const children = [PEOPLE_USERS];
   if (u && (u.role === 'admin' || u.isManager === true)) children.push(PEOPLE_ONBOARDING);
@@ -223,6 +225,9 @@ function hubTilesFor(u) {
   // User Management now sits inside People (owner, 2026-11-08). A manager or
   // care coordinator still reaches only User Management in the Admin Hub.
   const people = peopleTile(u);
+  // My GFC, the staff portal (owner, 2026-11-08): everyone's own onboarding,
+  // documents, policies and shared Drive folders. First, because it is theirs.
+  if ([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR].includes(type)) tiles.push(MY_GFC);
   if (type === TYPES.ADMIN) {
     tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },

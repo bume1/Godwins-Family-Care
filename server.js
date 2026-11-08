@@ -121,6 +121,7 @@ const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
+const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
 const onboardingRoutes = require('./routes/onboarding'); // staff onboarding over the Playbook v3.0 catalog (2026-11-08; replaces #260)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
@@ -3032,6 +3033,9 @@ app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken,
   drive: googledrive,
   detectFileType: (buf) => detectFileType(buf)
 }));
+// My GFC: a staff member's own documents, policies and the Drive folders the
+// office assigned to their role or to them by name.
+app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive }));
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
@@ -31365,6 +31369,10 @@ app.get('/admin/enrollment', (req, res) => {
 
 // Clinician workspace (Session 4.1). Page shell is public; every
 // /api/clinical/* route it calls enforces requireClinicalRead / requireClinicalWrite.
+app.get('/my', (req, res) => {
+  res.sendFile(__dirname + '/public/my.html');
+});
+
 app.get('/onboarding', (req, res) => {
   res.sendFile(__dirname + '/public/onboarding.html');
 });

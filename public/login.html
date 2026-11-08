@@ -324,6 +324,7 @@
         messages: { icon: Icons.portal, color: 'from-primary-500 to-primary-700', description: 'Support conversations and admin broadcasts' },
         billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600', description: 'Claims waiting on billing, patient statements, copays and home care hours' },
         users: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Add and edit caregivers, clients and family contacts' },
+        myGfc: { icon: Icons.portal, color: 'from-primary-600 to-primary-800', description: 'Your onboarding, documents, policies and shared folders' },
         people: { icon: Icons.admin, color: 'from-primary-600 to-teal-600', description: 'User management and staff onboarding' },
         onboarding: { icon: Icons.clientPortal, color: 'from-teal-600 to-primary-700' },
         caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
@@ -342,10 +343,11 @@
           { id: 'users', name: 'User Management', path: '/admin?view=users', description: 'Add and edit staff, caregivers, clients and family contacts' },
           ...((isAdmin || user.isManager) ? [{ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding', description: 'Who is onboarding, whose turn it is, credentialing and readiness' }] : [])
         ] };
-        if (isAdmin) return [{ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billing,
+        const myGfc = { id: 'myGfc', name: 'My GFC', path: '/my' };
+        if (isAdmin) return [myGfc, { id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billing,
           { id: 'service', name: 'Service Portal', path: '/service-portal' },
           { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
-        if (user.isManager) return [...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' }, people];
+        if (user.isManager) return [myGfc, ...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' }, people];
         return [];
       };
       const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();

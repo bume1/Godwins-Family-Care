@@ -1362,6 +1362,11 @@ const MoreTab = ({ visitLogs, queued, me }) => (
       <button className="btn ghost" onClick={() => { window.location.href = '/account'; }}>
         <i className="ti ti-shield-lock"></i> Password &amp; Security
       </button>
+      {/* My GFC, the staff portal: documents, policies and the Drive folders
+          shared with caregivers (owner, 2026-11-08). */}
+      <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => { window.location.href = '/my'; }}>
+        <i className="ti ti-id-badge-2"></i> My GFC
+      </button>
       <p className="sub" style={{ marginTop: 8 }}>
         Change your password, set up two-step sign-in, and see every device signed in as you.
       </p>

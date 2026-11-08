@@ -136,6 +136,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'clinician_onboarding_events', phi: false, owner: 'clinician-onboarding', note: 'append-only: gate openings, verifications, privilege decisions' },
   { key: 'onboarding_records', phi: false, owner: 'onboarding', note: 'per person: inputs, item steps, acknowledgments at a version, files (pointers), training, readiness determinations' },
   { key: 'onboarding_events', phi: false, owner: 'onboarding', note: 'append-only: steps, returns, filings on her behalf, sign-offs, determinations' },
+  { key: 'staff_portal_folders', phi: false, owner: 'staff-portal', note: 'Drive folders the office assigned to roles or people in My GFC: folder id, label, audience' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'onboarding_manual_versions', phi: false, owner: 'onboarding', note: 'per manual version: section fingerprints (hashes, never text) and the computed change from the prior version' },
   // The four forms a caregiver signs IN THE APP rather than printing: the
