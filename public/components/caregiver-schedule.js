@@ -22,6 +22,8 @@
  *
  *   Staff mode (2026-11-08): `staffOnly: true` shows only the time clock and
  *   My hours, for W-2 staff without shifts. My GFC mounts it that way.
+ *   `onlyTabs: ['availability']` shows just the availability form; the
+ *   clinical Schedule view mounts it that way for clinicians.
  *
  * `caregiverId` is passed for display and for the host page's own bookkeeping.
  * It is NOT what authorizes anything: every route below resolves the caregiver
@@ -199,7 +201,11 @@
     // STAFF MODE (owner, 2026-11-08): W-2 staff without shifts use this same
     // clock. They have no shifts, offers or availability, so they get the
     // clock and their hours, and nothing else.
-    var tabs = state.staffOnly ? [
+    // `onlyTabs` (2026-11-08): a host that needs only part of this screen,
+    // such as the clinical Schedule view's Availability, names the tabs.
+    var tabs = state.onlyTabs ? state.onlyTabs.map(function (id) {
+      return { id: id, label: ({ clock: 'Time clock', time: 'My hours', availability: 'Availability' })[id] || id };
+    }) : state.staffOnly ? [
       { id: 'clock', label: 'Time clock' },
       { id: 'time', label: 'My hours' }
     ] : [
@@ -462,8 +468,11 @@
         // thing they came to do.
         ? 'You can change this at short notice — the earliest it can start is ' + esc(earliest) + '. ' +
           'Your new answer replaces the one before it; the office works from your most recent one. ' +
-          '<strong>Shifts you have already accepted do not change.</strong> To move or hand back one of those, ' +
-          'use Request a change on the shift itself.'
+          // A clinician (availability-only mount) has visits, not shifts.
+          (state.onlyTabs
+            ? '<strong>Visits already booked do not change.</strong> Reschedule those from the calendar.'
+            : '<strong>Shifts you have already accepted do not change.</strong> To move or hand back one of those, ' +
+              'use Request a change on the shift itself.')
         : 'Availability is submitted at least ' + lead +
           ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '. ' +
           'Submitting again replaces what you have now — the office works from your most recent one.') +
@@ -756,6 +765,14 @@
 
   // ---- Data ---------------------------------------------------------------
   function refresh(state) {
+    if (state.onlyTabs && state.onlyTabs.indexOf('availability') !== -1 && state.onlyTabs.length === 1) {
+      return api(state, '/api/scheduling/availability').catch(function () { return { availability: [] }; }).then(function (r) {
+        state.availability = r.availability || [];
+        state.availabilityRules = r.rules || null;
+        state.loading = false;
+        render(state);
+      });
+    }
     if (state.staffOnly) {
       return api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; }).then(function (r) {
         state.timeLogs = r.timeLogs || [];
@@ -811,7 +828,8 @@
       // rather than this component trying to render a form it does not own.
       onVisitLogRequired: options.onVisitLogRequired || null,
       staffOnly: !!options.staffOnly,
-      tab: options.initialTab || (options.staffOnly ? 'clock' : 'schedule'),
+      onlyTabs: Array.isArray(options.onlyTabs) && options.onlyTabs.length ? options.onlyTabs.slice() : null,
+      tab: options.initialTab || (Array.isArray(options.onlyTabs) && options.onlyTabs.length ? options.onlyTabs[0] : options.staffOnly ? 'clock' : 'schedule'),
       loading: true,
       error: '', notice: '',
       mine: [], offers: [], open: [], availability: [], availabilityRules: null, timeLogs: [], totalHours: null,

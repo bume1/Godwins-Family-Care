@@ -22,6 +22,9 @@
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
   <!-- Session 9 messaging: the same thread component every portal mounts. -->
   <script src="/components/gfc-messaging.js"></script>
+  <!-- The shared schedule component: a clinician's availability uses the same
+       form caregivers use (owner, 2026-11-08). -->
+  <script src="/components/caregiver-schedule.js"></script>
   <!-- Note formatting (2026-09-27): the six shapes a note field may carry. The
        server and the signed-note PDF read the same file, so what a clinician
        formats here is what every copy shows. -->
@@ -6590,6 +6593,9 @@
         notes: (isRes && appt.notes) || ''
       });
       const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      // Outside the clinician's availability (owner, 2026-11-08): warned, never
+      // blocked. The server asks for a reason; the form shows a box for it.
+      const [outside, setOutside] = useState(null); const [outsideReason, setOutsideReason] = useState('');
       // SERVED, not decided here. The server answers this from the same
       // function the booking route enforces with, so the picker cannot offer
       // (or withhold) a calendar the route disagrees about. It was
@@ -6601,12 +6607,16 @@
         if (!isRes && !f.clientId) { setErr('Pick a patient.'); return; }
         setBusy(true);
         const body = { providerId: f.providerId, date: f.date, startTime: f.startTime,
-          durationMinutes: Number(f.durationMinutes), title: f.title, location: f.location, notes: f.notes };
+          durationMinutes: Number(f.durationMinutes), title: f.title, location: f.location, notes: f.notes,
+          outsideAvailabilityReason: outside ? outsideReason : undefined };
         (isRes ? api.rescheduleAppointment(appt.eid, body) : api.createAppointment(f.clientId, body))
           // The server's warnings (a superseded row it could not remove, for one)
           // were dropped, leaving an unexplained duplicate on the calendar.
           .then(r => { if (r && r.warnings && r.warnings.length) window.alert(r.warnings.join('\n\n')); onSaved(r); })
-          .catch(e => { setErr(e.message); setBusy(false); });
+          .catch(e => {
+            if (e.data && e.data.code === 'APPOINTMENT_OUTSIDE_AVAILABILITY') { setOutside(e.message); setBusy(false); return; }
+            setErr(e.message); setBusy(false);
+          });
       };
       return (
         <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
@@ -6652,12 +6662,18 @@
                 </Field>
               </div>
               <Field label="Notes"><textarea className="inp" rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
+              {outside && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900">
+                  <b>{outside}</b>
+                  <textarea className="inp mt-2" rows={2} placeholder="Why book outside their availability?" value={outsideReason} onChange={e => setOutsideReason(e.target.value)} />
+                </div>
+              )}
               {err && <p className="text-red-600 text-sm">{err}</p>}
               <div className="flex flex-wrap items-center gap-2 justify-end">
                 {isRes && <Hint className="w-full order-last">The original slot stays on the calendar as a cancelled entry — nothing is deleted.</Hint>}
                 <button className="btn ghost" onClick={onClose}>Close</button>
-                <button className="btn" disabled={busy} onClick={submit}>
-                  {busy ? 'Saving to OpenEMR…' : (isRes ? 'Reschedule' : 'Book Visit')}
+                <button className="btn" disabled={busy || (outside && !outsideReason.trim())} onClick={submit}>
+                  {busy ? 'Saving to OpenEMR…' : outside ? 'Book Anyway' : (isRes ? 'Reschedule' : 'Book Visit')}
                 </button>
               </div>
             </div>
@@ -6795,6 +6811,28 @@
               </div>
             );
           })}
+        </div>
+      );
+    };
+
+    // A clinician's availability (owner, 2026-11-08): the caregiver availability
+    // form, mounted from the shared component, saving to the same records.
+    // Booking a visit outside it warns and asks for a reason.
+    const MyAvailability = () => {
+      const [open, setOpen] = useState(false);
+      useEffect(() => {
+        const lib = window.GFCCaregiverSchedule;
+        if (!open || !lib) return undefined;
+        lib.mount('clinical-my-availability', { authToken: getToken(), onlyTabs: ['availability'] });
+        return () => lib.unmount('clinical-my-availability');
+      }, [open]);
+      return (
+        <div className="card mt-4">
+          <div className="card-h"><h2>My Availability</h2>
+            <button className="btn ghost sm" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Update Availability'}</button>
+          </div>
+          <div className="px-4 pb-4 text-sm text-stone-600">When you can see patients. Booking a visit outside it asks for a reason.</div>
+          {open && <div className="px-4 pb-4"><div id="clinical-my-availability" /></div>}
         </div>
       );
     };
@@ -10548,6 +10586,7 @@
                 onOpenChart={(clientId) => openChartById(clientId)}
                 onDocument={documentFromSchedule} />
             )}
+            {view === 'schedule' && user && user.hasClinicalAccess && <MyAvailability />}
             {view === 'charts' && !sel && (
               <PatientsView patients={patients} err={err} q={q} setQ={setQ} onRetry={loadPatients}
                 onClearSearch={() => api.patients('').then(r => setPatients(r.patients)).catch(e => setErr(e.message))}
