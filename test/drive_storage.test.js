@@ -267,7 +267,7 @@ const mountCaregiver = async (t, { as = CAREGIVER, users = [CAREGIVER, OTHER_CG,
     }
   });
   const app = express();
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: config.BODY_PARSER_LIMIT }));
   app.use(router);
   const server = app.listen(0);
   t.after(() => server.close());
@@ -467,7 +467,8 @@ test('an empty or oversize file is refused before Drive is touched', async (t) =
   const empty = await upload(h, { fileDataB64: '' });
   assert.strictEqual(empty.status, 400);
 
-  const huge = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(config.MAX_FILE_SIZE + 1024)]);
+  // Staff documents carry the 25 MB staff ceiling (owner, 2026-11-08).
+  const huge = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(config.STAFF_DOCUMENT_MAX_SIZE + 1024)]);
   const big = await upload(h, { fileDataB64: huge.toString('base64') });
   assert.strictEqual(big.status, 400);
   assert.strictEqual((await big.json()).code, 'DOC_TOO_LARGE');

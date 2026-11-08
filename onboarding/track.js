@@ -310,7 +310,15 @@ function moduleState(m, progress, flag) {
 }
 
 // ---- phases and determinations ---------------------------------------------
+// A chapter that names its own TRAINING list (D) takes exactly those Library
+// modules, placed in its own phases; everything else is untouched.
+function chapterTraining(ch) {
+  return Array.isArray(ch.TRAINING) ? new Map(ch.TRAINING.map(t => [t.id, t])) : null;
+}
+
 function phaseModules(phaseId, inputs) {
+  const own = chapterTraining(chapterOf(inputs));
+  if (own) return MODULES.filter(m => own.has(m.id) && own.get(m.id).phase === phaseId && moduleApplies(m, inputs));
   return MODULES.filter(m => moduleApplies(m, inputs)
     && m.requiredFor.some(r => r.kind === 'phase' && r.target === phaseId));
 }
@@ -457,12 +465,13 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 
   // The Training Library is the clinical curriculum. A non-clinical role's
   // training is its written role training plan (F.7), an item, not modules.
-  const modules = MODULES.filter(m => (ch === C || ch.CHAPTER.usesTrainingLibrary === true) && moduleApplies(m, i)).map(m => {
+  const own = chapterTraining(ch);
+  const modules = MODULES.filter(m => (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
     const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
       rechecks,
-      id: m.id, title: m.title, phase: m.phase, stage: m.stage, format: m.format,
+      id: m.id, title: m.title, phase: own ? own.get(m.id).phase : m.phase, stage: m.stage, format: m.format,
       minutes: m.minutes, host: m.host, signoff: m.signoff,
       requiredFor: m.requiredFor, sopRefs: m.sopRefs, manualRefs: m.manualRefs,
       unlocksAfter: m.unlocksAfter, ref: m.libraryRef,

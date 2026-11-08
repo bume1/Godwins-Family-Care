@@ -1180,7 +1180,7 @@ const DocumentsCard = () => {
 
   const submit = async () => {
     if (!file) { setMsg({ ok: false, text: 'Choose a file first.' }); return; }
-    if (file.size > 10 * 1024 * 1024) { setMsg({ ok: false, text: 'That file is over 10 MB. Try photographing it again at a smaller size.' }); return; }
+    if (file.size > 25 * 1024 * 1024) { setMsg({ ok: false, text: 'That file is over 25 MB. Try photographing it again at a smaller size.' }); return; }
     setBusy(true); setMsg(null);
     try {
       const b64 = await new Promise((resolve, reject) => {
@@ -1786,8 +1786,8 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, attestations
 
   const upload = async (row, file) => {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      setMsg({ ok: false, text: 'That file is over 10 MB. Try photographing it again at a smaller size.' });
+    if (file.size > 25 * 1024 * 1024) {
+      setMsg({ ok: false, text: 'That file is over 25 MB. Try photographing it again at a smaller size.' });
       return;
     }
     setBusyKind(row.kind); setMsg(null);
@@ -1973,7 +1973,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
 
   const importPdf = async (file) => {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) { setErr('That file is over 10 MB.'); return; }
+    if (file.size > 25 * 1024 * 1024) { setErr('That file is over 25 MB.'); return; }
     setBusy(true); setErr(''); setImportNote(null);
     try {
       const b64 = await new Promise((resolve, reject) => {

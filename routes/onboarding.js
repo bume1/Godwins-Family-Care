@@ -59,12 +59,20 @@ const RECORDS = 'onboarding_records';
 const EVENTS = 'onboarding_events';
 const REVIEWS = 'onboarding_module_reviews';
 const LEGACY = 'clinician_onboarding';
-const MAX_BYTES = 15 * 1024 * 1024;
+// Fallback only; the live ceiling is config.STAFF_DOCUMENT_MAX_SIZE (25 MB).
+const MAX_BYTES = 25 * 1024 * 1024;
 
 module.exports = function createOnboardingRoutes(deps) {
   const { db, config, logActivity, getUsers, authenticateToken, drive, detectFileType, uuidv4 } = deps;
   const router = express.Router();
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BYTES } });
+  const STAFF_MAX = (config && config.STAFF_DOCUMENT_MAX_SIZE) || MAX_BYTES;
+  const multerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: STAFF_MAX } });
+  // An oversized file is refused with the limit named, never a bare 500.
+  const upload = { single: (field) => (req, res, next) => multerUpload.single(field)(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: `File exceeds the ${Math.round(STAFF_MAX / (1024 * 1024))} MB limit.`, code: 'DOC_TOO_LARGE' });
+    return next(err);
+  }) };
   const loader = deps.sourceLoader || createSourceLoader({ drive, db });
   const nowIso = () => new Date().toISOString();
   const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -232,7 +240,7 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
     const prepared = staffDocs.prepareStaffDocument({
       buffer: req.file.buffer, fileName: req.file.originalname, detectFileType,
-      maxBytes: (config && config.MAX_FILE_SIZE) || MAX_BYTES, keyPrefix: item.id
+      maxBytes: STAFF_MAX, keyPrefix: item.id
     });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
     let stored;

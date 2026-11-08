@@ -16,8 +16,14 @@
 //   * no Form I-9 or Form W-4 is collected, only a W-9;
 //   * the Employee Handbook is not issued (D.8), nor the Code of Conduct,
 //     which is an employee policy;
-//   * no Training Library module, competency evaluation, orientation or
-//     probation item — readiness (C.8) is determined without modules;
+//   * no CLINICAL training: no competency evaluation, observed skill,
+//     countersigned manual or probation item, and readiness (C.8) is
+//     determined without modules. The contractor DOES take a short set of
+//     NON-CLINICAL Training Library modules (owner, 2026-11-08): systems,
+//     privacy, the AI policy, the documentation standard and the role card's
+//     escalation contacts, signed off as standards acknowledged (ATTEST), never
+//     as competency. That is D.6's "systems and standards", not instruction in
+//     clinical practice.
 //   * no scheduling-expectations item (mandatory shifts point to employment).
 //
 // D.1 and D.5: C.2's clinical and regulatory requirements apply WITHOUT
@@ -153,6 +159,22 @@ const ITEMS = Object.freeze([
 // D.7: monitoring follows C.9, with the clinician's own malpractice renewal
 // verified annually by certificate rather than administered by GFC. Copied
 // row by row, classification and citation unchanged.
+// Owner, 2026-11-08: non-clinical modules for contractors, chosen from the
+// Training Library by id (never copied, never renumbered) and all placed in
+// D.6. Each must sign off as ATTEST, CERTIFICATE or NONE; a module the
+// Library signs off as OBSERVED or COUNTERSIGN is clinical evaluation and is
+// refused by the build guard.
+const TRAINING = Object.freeze([
+  { id: 'TRN-002', why: 'Role card: boundaries of the engagement and escalation contacts' },
+  { id: 'TRN-003', why: 'GFC systems' },
+  { id: 'TRN-004', why: 'Application tour' },
+  { id: 'TRN-005', why: 'Privacy and security' },
+  { id: 'TRN-008', why: 'Artificial intelligence policy' },
+  { id: 'TRN-205', why: 'The documentation standard she has contracted to meet' },
+  { id: 'TRN-101', why: 'What an examination is and is not (IME scope only)' },
+  { id: 'TRN-103', why: "The contracting organization's required training (IME scope only)" }
+].map(t => Object.freeze(Object.assign({ phase: 'D.6' }, t))));
+
 const RECURRING = Object.freeze(C.RECURRING.map(r => Object.freeze(Object.assign({}, r, {
   id: r.id.replace(/^C\.9\./, 'D.7.'),
   copiedFrom: r.id,
@@ -163,4 +185,4 @@ const RECURRING = Object.freeze(C.RECURRING.map(r => Object.freeze(Object.assign
 
 // D.7: readiness determinations follow C.8, the same service lines and the
 // same conditions.
-module.exports = { CHAPTER, PHASES, ACKNOWLEDGMENTS, ITEMS, SERVICE_LINES: C.SERVICE_LINES, DETERMINATIONS: C.DETERMINATIONS, RECURRING };
+module.exports = { CHAPTER, PHASES, ACKNOWLEDGMENTS, ITEMS, TRAINING, SERVICE_LINES: C.SERVICE_LINES, DETERMINATIONS: C.DETERMINATIONS, RECURRING };

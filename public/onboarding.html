@@ -582,9 +582,9 @@ const Person = ({ userId, onBack }) => {
         </div>
         <div className="tabs">
           {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']]
-            // Credentialing and readiness are the clinician chapters' (C and D). The
-            // Training Library is C's alone: a contracted clinician is not trained (D.1).
-            .filter(([k]) => k === 'training' ? ['C', 'E'].includes(t.chapter.id) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
+            // Credentialing and readiness are the clinician chapters'. A contracted
+            // clinician (D) gets only the non-clinical modules her chapter names.
+            .filter(([k]) => k === 'training' ? ['C', 'D', 'E'].includes(t.chapter.id) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
             <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}
         </div>
       </div>

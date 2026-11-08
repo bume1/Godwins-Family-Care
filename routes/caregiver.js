@@ -1161,7 +1161,7 @@ module.exports = function createCaregiverRoutes(deps) {
       // judgements that are its own (which kinds it accepts, whose document
       // it is, and whether the office filing it means accepted on sight).
       const prepared = staffDocs.prepareStaffDocument({
-        buffer, fileName, detectFileType, maxBytes: config.MAX_FILE_SIZE, keyPrefix: kind
+        buffer, fileName, detectFileType, maxBytes: config.STAFF_DOCUMENT_MAX_SIZE || config.MAX_FILE_SIZE, keyPrefix: kind
       });
       if (!prepared.ok) {
         return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
