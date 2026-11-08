@@ -25,6 +25,7 @@ const V = require('./vocabulary');
 const C = require('./chapterC');
 const { MODULES } = require('./modules');
 const VF = require('./versionFlags');
+const { carryOver } = require('./legacy260');
 
 const { ACTORS, ACTIONS, FILED_BY } = V;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -350,9 +351,12 @@ function openDetermination(detId, inputs, record, body, actor, flags, now) {
  * and whether the Playbook stated that actor or we inferred it, and every
  * module's version flag. Her view leaves the internal basis out.
  */
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews } = {}) {
+// `legacy` is { items, titles }: a #260 record's item states and the old
+// titles. Shown as evidence on the matching item; it never completes one.
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy } = {}) {
   const i = normalizeInputs(inputs);
   const rec = record || {};
+  const carried = carryOver(legacy && legacy.items, legacy && legacy.titles);
   const flags = Object.fromEntries(VF.evaluateAll(MODULES, {
     currentVersion: manualVersion || '2.2', reviews: moduleReviews || {}
   }).map(f => [f.moduleId, f]));
@@ -391,7 +395,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
         : null,
       separateRecord: it.separateRecord || null,
       repeats: it.repeats || null,
-      notApplicable: st && st.notApplicable ? st.notApplicable : null
+      notApplicable: st && st.notApplicable ? st.notApplicable : null,
+      carriedOver: carried.byItem[it.id] || []
     };
   });
 
@@ -402,6 +407,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       minutes: m.minutes, host: m.host, signoff: m.signoff,
       requiredFor: m.requiredFor, sopRefs: m.sopRefs, manualRefs: m.manualRefs,
       unlocksAfter: m.unlocksAfter, ref: m.libraryRef,
+      carriedOver: carried.byModule[m.id] || [],
       ...s
     };
     if (office) {
@@ -449,6 +455,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       flagged: Object.values(flags).filter(f => f.status === VF.STATUS.FLAGGED).map(f => f.moduleId),
       pending: Object.values(flags).filter(f => f.status === VF.STATUS.PENDING).map(f => f.moduleId)
     };
+    out.legacyUnmapped = carried.unmapped;
   }
   return out;
 }

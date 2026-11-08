@@ -976,8 +976,8 @@ const mountOnboarding = async (t, { user, inputs }) => {
     set: async (k, v) => { store[k] = JSON.parse(JSON.stringify(v)); }
   };
   const driveStub = {
-    uploadCaregiverDocumentFile: async (folder, name, buf, mime) => {
-      driveStub.last = { folder, name, bytes: buf.length, mime };
+    uploadStaffDocumentFile: async (roleFolder, folder, name, buf, mime) => {
+      driveStub.last = { roleFolder, folder, name, bytes: buf.length, mime };
       return { fileId: 'drv_1', id: 'drv_1' };
     },
     downloadFileBuffer: async () => PNG,
@@ -1044,6 +1044,10 @@ test('a file she attaches lands in the store User Management reads', async (t) =
   assert.strictEqual(d.size_bytes, PNG.length);
   assert.strictEqual(d.drive_file_id, 'drv_1');
   assert.match(d.note, /^Onboarding: /, 'named by the item it answers');
+  // Her own folder under the clinician root, never the caregiver folder it
+  // used to land in (owner, 2026-11-08: one Drive folder per role).
+  assert.strictEqual(h.drive.last.roleFolder, 'GFC Clinician Documents');
+  assert.ok(!/^Clinician /.test(h.drive.last.folder), 'the role is the parent folder, not a name prefix');
   assert.strictEqual(d.clinician_item_id, 'NP-01');
   // A licence is verified against a primary source, so it is still waiting on
   // the office — the row mirrors the item rather than inventing a second rule.
@@ -1085,7 +1089,7 @@ test('a Drive failure refuses the upload rather than recording a row with no fil
     user: OFFICE_NP,
     inputs: { roles: ['NP'], relationship: 'W2', lanes: ['CLINICAL'], addons: [] }
   });
-  h.drive.uploadCaregiverDocumentFile = async () => { throw new Error('Drive is down'); };
+  h.drive.uploadStaffDocumentFile = async () => { throw new Error('Drive is down'); };
   const fd = new FormData();
   fd.append('file', new Blob([PNG], { type: 'image/png' }), 'licence.png');
   const res = await fetch(`${h.base}/api/clinician-onboarding/me/items/NP-01/proof`,

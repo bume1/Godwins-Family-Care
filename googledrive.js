@@ -598,6 +598,36 @@ async function uploadMessageAttachmentFile(clientName, fileName, fileBuffer, mim
   return { fileId: response.data.id, fileName: response.data.name };
 }
 
+// Onboarding and staff documents, filed under one top-level folder per role
+// ("GFC Clinician Documents", "GFC Registered Nurse Documents" ...) with a
+// subfolder per person. The folder names live in onboarding/staffFolders.js;
+// each is created the first time a document is filed for that role.
+async function uploadStaffDocumentFile(roleFolderName, personName, fileName, fileBuffer, mimeType) {
+  if (!roleFolderName) throw new Error('A staff document needs its role folder');
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+
+  const rootFolderId = await findOrCreateFolder(roleFolderName, null);
+  const personFolderId = await findOrCreateFolder(personName || 'Unnamed', rootFolderId);
+
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [personFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name, webViewLink, webContentLink',
+    ...ALL_DRIVES
+  });
+
+  await maybeGrantAnyoneLink(drive, response.data.id);
+
+  console.log(`✅ Uploaded staff document to Google Drive (${roleFolderName}): ${response.data.name}`);
+  return {
+    fileId: response.data.id,
+    fileName: response.data.name,
+    webViewLink: response.data.webViewLink,
+    webContentLink: response.data.webContentLink
+  };
+}
+
 async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
   const drive = await getDriveClient();
   const { Readable } = require('stream');
@@ -700,6 +730,7 @@ module.exports = {
   uploadClientDocumentFile,
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
+  uploadStaffDocumentFile,
   uploadImeCaseFile,
   getSheetsClient,
   getDriveClient,

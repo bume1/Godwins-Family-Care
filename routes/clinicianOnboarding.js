@@ -29,6 +29,8 @@ const { contentDisposition } = require('../contentDisposition');
 // caregiver document route. See staffDocuments.js for why the launch board's
 // own task-file upload is deliberately not folded in.
 const staffDocs = require('../staffDocuments');
+// One Drive folder per role (owner, 2026-11-08).
+const staffFolders = require('../onboarding/staffFolders');
 
 const MAX_PROOF_BYTES = 15 * 1024 * 1024;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PROOF_BYTES } });
@@ -369,9 +371,12 @@ module.exports = function createClinicianOnboardingRoutes(deps) {
         // does not exist would tick a credentialing item with no proof behind it.
         let stored;
         try {
-          stored = await drive.uploadCaregiverDocumentFile(
-            `Clinician ${rec.userName || rec.userId}`, name, req.file.buffer,
-            prepared.mime);
+          // The clinician's own folder under "GFC Clinician Documents", not
+          // the caregiver folder it used to land in (owner, 2026-11-08).
+          stored = await drive.uploadStaffDocumentFile(
+            staffFolders.folderForChapter('C'),
+            staffFolders.personFolderName(rec.userName, rec.userId),
+            name, req.file.buffer, prepared.mime);
         } catch (err) {
           return res.status(502).json({
             error: 'We could not store that file. Please try again.',
