@@ -172,6 +172,26 @@ test('what she signed at onboarding shows in My Documents, not only in onboardin
   assert.deepStrictEqual((await h.call('GET', '/api/my/documents')).data.signed, [], 'never another person\'s');
 });
 
+test('policies are the live library: canonical copy, scoped by role, flagged when updated since she signed', async (t) => {
+  const ids = (ty) => portal.policiesFor(ty).map(p => p.id);
+  assert.ok(ids('provider').includes('CLINICAL_MANUAL') && !ids('provider').includes('ADMIN_MANUAL'));
+  for (const ty of ['admin', 'manager', 'coordinator']) {
+    assert.ok(ids(ty).includes('ADMIN_MANUAL'), ty);
+    assert.ok(!ids(ty).includes('CLINICAL_MANUAL') && !ids(ty).includes('FIELD_ADDENDUM'), ty);
+  }
+  assert.ok(ids('caregiver').includes('FIELD_ADDENDUM') && !ids('caregiver').includes('CLINICAL_MANUAL'));
+  const h = await mount(t);
+  h.store.onboarding_records = [{ userId: NP.id, items: { 'C.5.04': { acknowledgments: {
+    CLINICAL_MANUAL: { version: '2.2', at: '2026-11-05T15:00:00Z' }, EMPLOYEE_HANDBOOK: { version: '1.0', at: '2026-11-04T15:00:00Z' } } } } }];
+  h.as(NP);
+  const pol = (await h.call('GET', '/api/my/policies')).data.policies;
+  const clin = pol.find(p => p.id === 'CLINICAL_MANUAL');
+  assert.ok(clin.url.includes('1LBCQ-OHx1x6be9TfiXOTg7-O0a3-rwN6') && clin.previewUrl.endsWith('/preview'), 'the canonical copy');
+  assert.strictEqual(clin.signed.current, true);
+  assert.strictEqual(pol.find(p => p.id === 'EMPLOYEE_HANDBOOK').signed.current, false, 'updated since she signed');
+  assert.strictEqual(pol.find(p => p.id === 'CODE_OF_CONDUCT').signed, null);
+});
+
 test('a caregiver\'s signed welcome packet and attestations are in her documents', async (t) => {
   const h = await mount(t);
   h.store.welcome_packets = [{ caregiver_id: CG.id, signed_at: '2026-10-01T12:00:00Z' }];
@@ -262,7 +282,7 @@ test('a shared file is never streamed by the app: the folder route returns Drive
 });
 
 test('the portal page and the ways into it', () => {
-  assert.ok(!/id: 'policies'/.test(fs.readFileSync(path.join(__dirname, '..', 'public', 'my.html'), 'utf8')), 'signed documents live in My Documents, not a Policies tab');
+
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
   assert.match(read('clinical.html'), /href="\/my"[^>]*>.*My Portal/);
   assert.ok(!/href="\/onboarding"/.test(read('clinical.html')), 'clinicians reach onboarding through My GFC now');

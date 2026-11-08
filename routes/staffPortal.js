@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { ACKNOWLEDGMENTS, ITEMS } = require('../onboarding/chapterC');
 const staffFolders = require('../onboarding/staffFolders');
+const { SOURCES } = require('../onboarding/sources');
 const attestations = require('../caregiverAttestations');
 
 const FOLDERS = 'staff_portal_folders';
@@ -52,6 +53,29 @@ const ADMIN_TEAM_TYPES = Object.freeze(['admin', 'manager', 'coordinator']);
 const viewUrl = (id) => `https://drive.google.com/file/d/${id}/view`;
 const ACK_BY_ID = Object.fromEntries(ACKNOWLEDGMENTS.map(a => [a.id, a]));
 const ITEM_BY_ID = Object.fromEntries(ITEMS.map(i => [i.id, i]));
+
+/**
+ * The LIVE policy library (owner, 2026-11-08): each policy a person works
+ * under, always the canonical copy in Policies / Current, which is the one
+ * the office updates in place. Signed copies live in My Documents; this is
+ * where the current text is read. Clinicians get the Clinical P&P, the admin
+ * team the Administrative P&P, field staff the Field Addendum.
+ */
+function policiesFor(type) {
+  const field = CLINICIAN_TYPES.includes(type) || type === 'caregiver';
+  const out = [];
+  for (const a of ACKNOWLEDGMENTS) {
+    if (!a.driveFileIds.length) continue;
+    if (a.id === 'CLINICAL_MANUAL' && !CLINICIAN_TYPES.includes(type)) continue;
+    if (a.id === 'FIELD_ADDENDUM' && !field) continue;
+    out.push({ id: a.id, title: a.title, version: a.version, fileId: a.driveFileIds[0] });
+  }
+  if (ADMIN_TEAM_TYPES.includes(type)) {
+    const m = SOURCES.ADMIN_MANUAL;
+    out.push({ id: 'ADMIN_MANUAL', title: m.title, version: m.transcribedFromVersion, fileId: m.driveFileId });
+  }
+  return out;
+}
 
 // The Drive folder a person's own files (headshot, pay stubs) land in: the
 // same per-role folders onboarding uploads already use.
@@ -127,6 +151,22 @@ module.exports = function createStaffPortalRoutes(deps) {
       isCaregiver: type === 'caregiver',
       isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess
     });
+  });
+
+  // ---- policies (live) ----------------------------------------------------------
+  // Each policy with whether this person has signed the CURRENT version, so a
+  // policy update shows as "new version" until they acknowledge it.
+  router.get('/api/my/policies', authenticateToken, requireStaff, async (req, res) => {
+    const rec = ((await db.get('onboarding_records')) || []).find(r => String(r.userId) === String(req.user.id));
+    const acks = {};
+    for (const st of Object.values((rec && rec.items) || {})) Object.assign(acks, (st && st.acknowledgments) || {});
+    const policies = policiesFor(audienceOf(req.user)).map(p => {
+      const a = acks[p.id];
+      return { id: p.id, title: p.title, version: p.version,
+        url: viewUrl(p.fileId), previewUrl: `https://drive.google.com/file/d/${p.fileId}/preview`,
+        signed: a ? { version: a.version, at: a.at, current: String(a.version) === String(p.version) } : null };
+    });
+    return res.json({ policies });
   });
 
   // ---- my documents ----------------------------------------------------------
@@ -403,6 +443,7 @@ module.exports = function createStaffPortalRoutes(deps) {
 
 module.exports.canSee = canSee;
 module.exports.validateStub = validateStub;
+module.exports.policiesFor = policiesFor;
 module.exports.roleFolderFor = roleFolderFor;
 module.exports.folderIdFrom = folderIdFrom;
 module.exports.STAFF_TYPES = STAFF_TYPES;

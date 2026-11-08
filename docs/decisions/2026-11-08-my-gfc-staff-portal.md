@@ -4,7 +4,7 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 
 ## What changed
 
-- **`/my` (`public/my.html`)** has six sections: Home, Onboarding, My Documents, Shared Folders, Hours & Pay and Account. The admin team gets a seventh, Team Bios. It uses the sidebar layout on desktop and a bottom menu on a phone.
+- **`/my` (`public/my.html`)** is for **every employee**, scoped by role. It has seven sections: Home, Onboarding, My Documents, Policies, Shared Folders, Hours & Pay and Account. The admin team gets a seventh, Team Bios. It uses the sidebar layout on desktop and a bottom menu on a phone.
 - **`routes/staffPortal.js`** serves `/api/my/*`. It is open to the eight staff account types and refuses clients and family (`STAFF_PORTAL_STAFF_ONLY`).
 - **Ways in:**
   - The clinical workspace's "My Onboarding" button became **My Portal**.
@@ -26,7 +26,11 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 - **My Documents has two parts** (owner, 2026-11-08: signed documents must not stay inside onboarding, which is for tracking):
   - **What You Signed** lists each policy acknowledgment at its version and date, linked to the canonical copy. An older version reads as superseded. A caregiver also sees her signed welcome packet and in-app attestations.
   - **Files on Record** lists everything in `caregiver_documents` under this person, named by the onboarding item it answered. Another person's file reads as absent (404). No Drive id reaches the browser.
-- **The Policies tab was removed** (owner: "not really clear what that is").
+- **Policies is the LIVE library** (owner, revised 2026-11-08):
+  - Each policy a person works under is listed by role. Clinicians get the Clinical P&P, the admin team the Administrative P&P, and field staff the Field Addendum.
+  - Each one always opens the canonical copy in Policies / Current, which the office updates in place. It can be previewed in Drive's own viewer or opened in Drive.
+  - A policy updated since the person signed it says so.
+  - Signed copies are not kept here; they are in My Documents.
 - **Hours & Pay:**
   - **Pay stubs come from the payroll Apps Script.** It POSTs to `/api/payroll/paystubs` with `X-GFC-Payroll-Key`, which must equal `PAYROLL_INGEST_KEY`. Without that variable the door answers 503 and stores nothing.
   - Each person is matched by sign-in email. A stub carries the pay date, period, gross, net and hours, plus a PDF sent as bytes (filed in the person's role folder) or as a Drive file id.

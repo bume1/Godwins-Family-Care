@@ -118,6 +118,7 @@ const SECTIONS = [
   { id: 'home', label: 'Home', icon: 'ti-home' },
   { id: 'onboarding', label: 'Onboarding', icon: 'ti-route' },
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text' },
+  { id: 'policies', label: 'Policies', icon: 'ti-book' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders' },
   { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock' },
   { id: 'account', label: 'Account', icon: 'ti-user-circle' },
@@ -209,6 +210,37 @@ function Documents({ docs, onError }) {
       </div>
     );
   });
+}
+
+// ---- Policies (live) --------------------------------------------------------------
+// Always the canonical copy in Drive, which the office updates in place. The
+// preview is Drive's own viewer, so it shows whatever version is current.
+function Policies({ policies }) {
+  const [open, setOpen] = useState(null);
+  if (!policies) return <p className="note">Loading…</p>;
+  return (
+    <div>
+      {policies.map(p => (
+        <div key={p.id}>
+          <div className="row">
+            <i className="ti ti-book big" />
+            <div className="grow">
+              <b>{p.title}</b>
+              <small>Current version {p.version}</small>
+              {p.signed && p.signed.current && <small style={{ display: 'block', color: 'var(--green)' }}>You signed this version {fmtDate(p.signed.at)}</small>}
+              {p.signed && !p.signed.current && <small style={{ display: 'block', color: 'var(--red)' }}>Updated since you signed version {p.signed.version}. Please read the new version.</small>}
+            </div>
+            <button className="btn ghost sm" onClick={() => setOpen(open === p.id ? null : p.id)}>{open === p.id ? 'Close' : 'Preview'}</button>
+            <a className="btn ghost sm" href={p.url} target="_blank" rel="noopener noreferrer">Open in Drive</a>
+          </div>
+          {open === p.id && (
+            <iframe title={p.title} src={p.previewUrl} style={{ width: '100%', height: 560, border: '1px solid var(--line)', borderRadius: 10, margin: '6px 0 12px' }} allow="autoplay" />
+          )}
+        </div>
+      ))}
+      <p className="note" style={{ marginTop: 12 }}>These always open the current version in Google Drive. Sign in with your GFC Google account if Drive asks. Copies you signed are in My Documents.</p>
+    </div>
+  );
 }
 
 // ---- Shared folders ---------------------------------------------------------
@@ -469,6 +501,7 @@ function App() {
   const [onboarding, setOnboarding] = useState(null);
   const [docs, setDocs] = useState(null);
   const [signed, setSigned] = useState(null);
+  const [policies, setPolicies] = useState(null);
   const [stubs, setStubs] = useState(null);
   const [folders, setFolders] = useState(null);
   const [hours, setHours] = useState(null);
@@ -482,6 +515,7 @@ function App() {
       setProfile(p);
       call('/api/onboarding/me').then(setOnboarding).catch(() => setOnboarding({ error: true }));
       call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message));
+      call('/api/my/policies').then(d => setPolicies(d.policies)).catch(e => setErr(e.message));
       call('/api/my/paystubs').then(d => setStubs(d.paystubs)).catch(e => setErr(e.message));
       loadFolders();
       if (p.isCaregiver) {
@@ -510,6 +544,7 @@ function App() {
         <div className="tiles">
           <Tile icon="ti-route" title="Onboarding" sub="Your checklist and training" onClick={() => go('onboarding')} />
           <Tile icon="ti-file-text" title="My Documents" sub={docs && signed ? `${signed.length} signed · ${docs.length} on file` : 'What you signed and sent'} onClick={() => go('documents')} />
+          <Tile icon="ti-book" title="Policies" sub={policies && policies.some(p => p.signed && !p.signed.current) ? 'A policy was updated' : 'The current version of each policy'} onClick={() => go('policies')} />
           <Tile icon="ti-folders" title="Shared Folders" sub={folders ? `${folders.length} assigned to you` : 'Drive folders for your role'} onClick={() => go('folders')} />
           <Tile icon="ti-clock" title="Hours & Pay" sub={stubs && stubs.length ? `Last paid ${fmtDay(stubs[0].payDate)}` : 'Pay stubs'} onClick={() => go('hours')} />
           <Tile icon="ti-user-circle" title="Account" sub="Headshot, bio and sign-in" onClick={() => go('account')} />
@@ -526,6 +561,8 @@ function App() {
         <Section title="Files on Record" sub="Everything on file for you, whether you sent it or the office filed it."><Documents docs={docs} onError={setErr} /></Section>
       </div>
     );
+  } else if (view === 'policies') {
+    body = <Section title="Policies" sub="The latest version of every policy you work under."><Policies policies={policies} /></Section>;
   } else if (view === 'folders') {
     body = (
       <div>
@@ -580,8 +617,8 @@ function App() {
         {body}
       </main>
       <nav className="mob">
-        {SECTIONS.filter(s => s.id !== 'account' && !s.adminTeam).map(s => (
-          <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label.replace('My ', '').replace(' & Pay', '')}</button>
+        {SECTIONS.filter(s => !['account', 'onboarding'].includes(s.id) && !s.adminTeam).map(s => (
+          <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label.replace('My ', '').replace(' & Pay', '').replace('Shared ', '')}</button>
         ))}
       </nav>
     </div>
