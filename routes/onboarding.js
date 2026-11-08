@@ -29,11 +29,15 @@ const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provi
 const defaultChapterFor = (u) => {
   const t = accountTypes.accountTypeOf(u);
   if (t === 'rn') return 'B';   // the registered nurse chapter (owner, 2026-11-08)
+  // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
+  // through the employee chapter is what D.2 warns converts the classification.
+  if (t === 'provider' && u && u.employmentType === '1099') return 'D';
   return (['provider', 'lcsw', 'lmsw'].includes(t) || (u && u.hasClinicalAccess && !u.isManager)) ? 'C' : 'F';
 };
 const CHAPTER_CHOICES = Object.freeze([
   { id: 'B', label: 'Registered nurse, employed (private home care)' },
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
+  { id: 'D', label: 'Clinician (NP, PA), contracted (1099)' },
   { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
 ]);
 const C = require('../onboarding/chapterC');
@@ -391,7 +395,7 @@ module.exports = function createOnboardingRoutes(deps) {
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
         userId: rec.userId, name: rec.userName || u.name, credential: u.prescriberCredential || u.licenseLevel || null,
-        relationship: rec.inputs.relationship || 'W2', chapter: (rec.inputs && rec.inputs.chapter) || 'C', startDate: rec.inputs.startDate || null,
+        relationship: rec.inputs.relationship || ((T.CHAPTERS[rec.inputs.chapter] || {}).CHAPTER || {}).relationship || 'W2', chapter: (rec.inputs && rec.inputs.chapter) || 'C', startDate: rec.inputs.startDate || null,
         progress: t.counts.items ? Math.round((t.counts.complete / t.counts.items) * 100) : 0,
         currentPhase: current ? { number: current.number, label: current.label } : null,
         next: next ? { title: next.title, waitingOnHer: next.next.hers, actorLabel: next.next.actorLabel } : null,
@@ -452,7 +456,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter })), { relationship: 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });

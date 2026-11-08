@@ -25,7 +25,7 @@ const V = require('./vocabulary');
 const C = require('./chapterC');
 // Every chapter built so far. A person's record names theirs in inputs.chapter
 // (owner, 2026-11-08: clinicians first, the admin team next, the rest after).
-const CHAPTERS = Object.freeze({ B: require('./chapterB'), C, F: require('./chapterF') });
+const CHAPTERS = Object.freeze({ B: require('./chapterB'), C, D: require('./chapterD'), F: require('./chapterF') });
 const chapterOf = (inputs) => CHAPTERS[(inputs && inputs.chapter) || 'C'] || C;
 // Item and acknowledgment ids are unique across chapters, so one lookup serves all.
 const ALL_ITEMS = Object.freeze([].concat(...Object.values(CHAPTERS).map(ch => ch.ITEMS)));
@@ -80,6 +80,8 @@ function normalizeInputs(raw) {
     // Chapter B (registered nurse) inputs.
     supervisoryDelegation: r.supervisoryDelegation === true,
     directsTraining: r.directsTraining === true,
+    // Chapter D (contracted clinician) inputs.
+    baaRequired: r.baaRequired === true,
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -108,6 +110,7 @@ function matchesWhen(when, inputs) {
   if (when.variableComp === true && !inputs.variableComp) return false;
   if (when.supervisoryDelegation === true && !inputs.supervisoryDelegation) return false;
   if (when.directsTraining === true && !inputs.directsTraining) return false;
+  if (when.baaRequired === true && !inputs.baaRequired) return false;
   return true;
 }
 
@@ -311,7 +314,11 @@ function phaseModules(phaseId, inputs) {
     && m.requiredFor.some(r => r.kind === 'phase' && r.target === phaseId));
 }
 
+// A chapter that does not train clinically (D: contracted, D.1-D.2) opens its
+// service lines on the C.8 conditions alone. Requiring a module there would
+// make the readiness record evidence of employment.
 function determinationModules(detId, inputs) {
+  if (chapterOf(inputs).CHAPTER.trainsClinically === false) return [];
   return MODULES.filter(m => moduleApplies(m, inputs)
     && m.requiredFor.some(r => r.kind === 'determination' && r.target === detId));
 }
@@ -351,9 +358,9 @@ function determinationStatus(det, inputs, record, flags) {
 /** The owner's written determination. Refused while modules are outstanding. */
 function openDetermination(detId, inputs, record, body, actor, flags, now) {
   if (!actor || !actor.isOffice) throw refuse('DETERMINATION_OFFICE_ONLY', 'A readiness determination is recorded by its named owner.');
-  const det = C.DETERMINATIONS.find(d => d.id === detId);
-  if (!det) throw refuse('DETERMINATION_UNKNOWN', 'No such service line.');
   const i = normalizeInputs(inputs);
+  const det = chapterOf(i).DETERMINATIONS.find(d => d.id === detId);
+  if (!det) throw refuse('DETERMINATION_UNKNOWN', 'No such service line.');
   if (!i.serviceLines.includes(detId)) throw refuse('DETERMINATION_NOT_IN_SCOPE', 'This service line is not in her scope.');
   const status = determinationStatus(det, i, record, flags || {});
   if (!status.eligible) {
