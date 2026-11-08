@@ -573,7 +573,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>{({ B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{({ B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -657,7 +657,7 @@ const LINE_CHOICES = [
   ['INSURED', 'In-Home Primary Care · Insurance Billing'], ['BEHAVIORAL', 'Psych Care']
 ];
 // Which Playbook chapter a person is onboarded on.
-const CHAPTER_CHOICES = [['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)']];
+const CHAPTER_CHOICES = [['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)']];
 const Setup = ({ userId, inputs, onSaved }) => {
   const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '', chapter: 'C', workState: 'GA' }, inputs || {}));
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
@@ -689,7 +689,7 @@ const Setup = ({ userId, inputs, onSaved }) => {
         <input type="text" maxLength={2} value={f.workState || 'GA'} onChange={e => setF(Object.assign({}, f, { workState: e.target.value.toUpperCase() }))} style={{ maxWidth: 90 }} />
         <div style={{ fontSize: 13, color: 'var(--mut)' }}>Outside Georgia adds work-state registration before their first paid hour.</div>
         <label className="f">Their role</label>
-        {['entersResidence', 'federallyReimbursed', 'variableComp'].map(k => <div key={k}>{flag(k)}</div>)}
+        {(f.chapter === 'G' ? ['entersResidence', 'federallyReimbursed'] : ['entersResidence', 'federallyReimbursed', 'variableComp']).map(k => <div key={k}>{flag(k)}</div>)}
       </>}
       <label className="f">Start date</label>
       <input type="date" value={f.startDate || ''} onChange={e => setF(Object.assign({}, f, { startDate: e.target.value }))} style={{ maxWidth: 220 }} />
@@ -738,7 +738,7 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.notStarted.length > 0 && (
         <div className="card"><div className="card-h"><h2>Clinicians Not Yet Set Up</h2></div>
-          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
+          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>

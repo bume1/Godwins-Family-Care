@@ -23,12 +23,13 @@ const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
 const accountTypes = require('../accountTypes');
 
-// Who is onboarded on which chapter. Clinicians on C; the admin team and the
-// liaison on F (owner, 2026-11-08). The office can change it in Setup.
+// Who is onboarded on which chapter. Clinicians on C; the admin team on F;
+// the liaison on G, which carries F's screening and paperwork (owner, 2026-11-08). The office can change it in Setup.
 const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
 const defaultChapterFor = (u) => {
   const t = accountTypes.accountTypeOf(u);
   if (t === 'rn') return 'B';   // the registered nurse chapter (owner, 2026-11-08)
+  if (t === 'liaison') return 'G';
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
@@ -41,7 +42,8 @@ const CHAPTER_CHOICES = Object.freeze([
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
   { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
   { id: 'E', label: 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)' },
-  { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
+  { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination)' },
+  { id: 'G', label: 'Community Care Liaison (remote business development)' }
 ]);
 const C = require('../onboarding/chapterC');
 const { MODULES, findModule } = require('../onboarding/modules');
