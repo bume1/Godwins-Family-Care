@@ -2734,7 +2734,86 @@ async function generatePhcInvoicePDF(inv) {
   });
 }
 
+// ---- Pay stub (spec v1 "Pay stub contents"; owner, 2026-11-08) ---------------
+// Current and year-to-date for every line. Last four of the SSN and the
+// deposit account only. Drawn from the approved run's frozen numbers; nothing
+// is recalculated here.
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod }) {
+  return new Promise((resolve, reject) => {
+    try {
+      const ORG = consentText.ORG;
+      const doc = new PDFDocument({ size: 'LETTER', margin: 48 });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const NAVY = '#033D50', GOLD = '#C9A44A', CREAM = '#FAF7F2', INK = '#1a1a1a', MUTED = '#777777';
+      const L = 48, R = 564, W = R - L;
+      const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+      const day = (ymd) => gfcTime.fmtDate(`${ymd}T12:00:00Z`);
+      const p = worker.pay, y = ytd || { grossCents: 0, netCents: 0, taxes: {}, earnings: {}, reimbursementsCents: 0 };
+
+      doc.rect(0, 0, 612, 92).fill(CREAM);
+      doc.image(path.join(__dirname, 'public', 'brand', 'logo-full-color-transparent.png'), L, 18, { width: 150, height: 52 });
+      doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(20).text('PAY STUB', 312, 18, { width: R - 312, align: 'right' });
+      let my = 44;
+      for (const t of [`Pay date  ${day(run.period.payDate)}`, `Pay period  ${day(run.period.start)} to ${day(run.period.end)}`, `Stub  ${run.id.slice(0, 8).toUpperCase()}`]) {
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8.5).text(t, 312, my, { width: R - 312, align: 'right' }); my += 11;
+      }
+      let y0 = 110;
+      const head = (label, x, w) => { doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(8).text(label, x, y0); doc.moveTo(x, y0 + 11).lineTo(x + w, y0 + 11).lineWidth(0.7).strokeColor('#BBBBBB').stroke(); };
+      head('EMPLOYER', L, 230); head('EMPLOYEE', 312, R - 312);
+      const lines = (x, arr) => { let yy = y0 + 18; arr.forEach(([t, b]) => { doc.fillColor(INK).font(b ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).text(t, x, yy, { width: 240 }); yy = doc.y + 2; }); return yy; };
+      const parts = String(ORG.address).split(/,\s*/);
+      y0 = Math.max(
+        lines(L, [[ORG.name, true], [parts.slice(0, parts.length - 2).join(', ')], [parts.slice(parts.length - 2).join(', ')], [employerEin ? `EIN ${employerEin}` : 'EIN not set']]),
+        lines(312, [[worker.name, true], [ssnLast4 ? `SSN •••-••-${ssnLast4}` : 'SSN not on file'], ['Work state: Georgia']])
+      ) + 14;
+
+      const table = (title, rows, cols) => {
+        doc.rect(L, y0, W, 18).fill(NAVY);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(7.8);
+        doc.text(title, L + 8, y0 + 5.5);
+        cols.forEach(([label, x, w]) => doc.text(label, x, y0 + 5.5, { width: w, align: 'right' }));
+        y0 += 18;
+        for (const r of rows) {
+          doc.fillColor(INK).font(r.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.3).text(r.label, L + 8, y0 + 5, { width: 250 });
+          r.cells.forEach((c, i) => doc.text(c, cols[i][1], y0 + 5, { width: cols[i][2], align: 'right' }));
+          y0 += 18;
+          doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.4).strokeColor('#E2E2E2').stroke();
+        }
+        y0 += 12;
+      };
+      const hrs = (m) => (m ? (m / 60).toFixed(2) : '');
+      table('EARNINGS', worker.earnings.map(e => ({
+        label: e.label + (e.note ? ` · ${e.note}` : ''),
+        cells: [e.minutes ? hrs(e.minutes) : e.count ? String(e.count) : '', usd(e.amountCents), usd((y.earnings || {})[e.code] || 0)]
+      })).concat(p.reimbursementsCents ? [{ label: 'Reimbursements (not taxed)', cells: ['', usd(p.reimbursementsCents), usd(y.reimbursementsCents)] }] : []),
+      [['HOURS / QTY', 330, 70], ['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'], ['Georgia income tax', 'georgia']];
+      table('TAXES WITHHELD', tl.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
+      table('TOTALS', [
+        { label: 'Gross pay', cells: [usd(p.grossCents), usd(y.grossCents)] },
+        { label: 'Taxes withheld', cells: [usd(p.taxCents), usd(ytdTax)] },
+        { label: 'Deductions', cells: [usd(0), usd(0)] },
+        { label: 'Net pay', bold: true, cells: [usd(p.netCents), usd(y.netCents)] }
+      ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
+      y0 += 10;
+      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : 'Payment method not set';
+      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${how}`, L, y0);
+      doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
+      doc.page.margins.bottom = 0;   // the footer sits below the margin
+      doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor('#BBBBBB').stroke();
+      doc.fillColor(MUTED).font('Helvetica').fontSize(6.8).text(`Care That Sees You. ${ORG.name}  ·  ${ORG.phone}`, L, 748, { lineBreak: false });
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
 module.exports = {
+  generatePayStubPDF,
   generatePhcInvoicePDF,
   generateMessageNotePDF,
   generateSignedNotePDF,

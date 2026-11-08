@@ -2690,6 +2690,12 @@ module.exports = function createSchedulingRoutes(deps) {
     const idx = logs.findIndex(l => l && l.id === timeLogId);
     if (idx === -1) return { error: { status: 404, error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' } };
     const log = logs[idx];
+    // Paid hours are locked (payroll, 2026-11-08). An approved payroll run
+    // paid this row; changing it now would make the stub and the timesheet
+    // disagree. A correction goes into the next run as an adjustment.
+    if (log.payroll_run_id) {
+      return { error: { status: 409, error: 'These hours were paid in an approved payroll run and are locked. Add a correction to the next payroll run instead.', code: 'TIME_LOG_PAYROLL_LOCKED' } };
+    }
 
     const before = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
     const nextIn = clockInAt !== undefined ? isoOrNull(clockInAt) : log.clock_in_at;

@@ -123,6 +123,9 @@ const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit l
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
 const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
+const payrollRoutes = require('./routes/payroll'); // in-app payroll, wired into My GFC's Hours & Pay (2026-11-08)
+const payrollTaxTables = require('./payrollTaxTables');
+const quickbooks = require('./quickbooks');   // QuickBooks Online: private home care and payroll only (2026-11-08)
 const onboardingRoutes = require('./routes/onboarding'); // staff onboarding over the Playbook v3.0 catalog (2026-11-08; replaces #260)
 const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
                                                        // this conversation" (PR #88). The chart
@@ -3040,6 +3043,67 @@ app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4
   detectFileType: (buf) => detectFileType(buf),
   // Wrapped: the enrollment helpers are declared further down this file.
   enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
+// Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
+// contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
+// approved runs write into the same staff_paystubs store the Apps Script
+// fills; automations share the Apps Script's PAYROLL_INGEST_KEY.
+// QuickBooks Online (spec v2 item 1): private home care and payroll only.
+// One instance; payroll, the invoice routes and the Stripe webhook call it,
+// and every call is best effort: a QuickBooks failure never undoes the event.
+const qbo = quickbooks.createQbo({ db, uuid: uuidv4, logActivity, getUsers: () => getUsers(),
+  getRuns: async () => (await db.get('payroll_runs')) || [] });
+app.use(payrollRoutes({
+  db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
+  // Wrapped: requireAdmin is declared further down this file.
+  requireAdmin: (req, res, next) => requireAdmin(req, res, next),
+  accountTypeOf: (u) => accountTypes.accountTypeOf(u),
+  localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate,
+  resolvePayRate: (cg, clientId, shift) => caregiverRepo.resolvePayRate(cg, clientId, shift),
+  pdf: pdfGenerator, drive: googledrive,
+  roleFolderFor: staffPortalRoutes.roleFolderFor,
+  personFolderName: require('./onboarding/staffFolders').personFolderName,
+  hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET),
+  getAppBaseUrl: () => getAppBaseUrl(),
+  onRunApproved: (run) => qbo.runApproved(run),
+  onWorkerPaid: (run, w) => qbo.workerPaid(run, w),
+  onContractorPaid: (inv) => qbo.contractorPaid(inv),
+  onTaxPaid: (pay) => qbo.taxPaid(pay),
+  qboRetry: () => qbo.retry()
+}));
+// QuickBooks connection, the owner's (Super Admin).
+app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+  try { res.json(await qbo.status()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+app.get('/api/payroll/admin/qbo/connect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+  const missing = qbo.missing();
+  if (missing.length) return res.status(503).json({ error: `QuickBooks is not set up on the server. Missing: ${missing.join(', ')}.`, code: 'QBO_NOT_CONFIGURED' });
+  res.json({ url: await qbo.connectUrl(req.user) });
+});
+app.post('/api/payroll/admin/qbo/retry', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+  try { res.json(await qbo.retry()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/payroll/admin/qbo/disconnect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+  await qbo.disconnect(req.user); res.json({ ok: true });
+});
+// Intuit sends the owner back here. The state is single use and was minted for
+// a signed-in Super Admin, so nothing in the query string picks who connects.
+app.get('/oauth/quickbooks/callback', async (req, res) => {
+  try {
+    await qbo.handleCallback({ code: String(req.query.code || ''), state: String(req.query.state || ''), realmId: String(req.query.realmId || '') });
+    res.redirect('/payroll?qbo=connected#qbo');
+  } catch (e) {
+    res.redirect(`/payroll?qbo=error&reason=${encodeURIComponent(e.code || 'QBO_ERROR')}#qbo`);
+  }
+});
+// The shipped tax tables are added STAGED at boot; nothing pays from them
+// until the owner approves them (spec v2 item 14).
+(async () => {
+  try {
+    const existing = (await db.get('payroll_tax_tables')) || [];
+    const add = payrollTaxTables.seedRows(existing, { uuid: uuidv4, at: new Date().toISOString() });
+    if (add.length) { await db.set('payroll_tax_tables', [...existing, ...add]); console.log(`[PAYROLL] Staged ${add.length} shipped tax table(s) for the owner to approve.`); }
+  } catch (e) { console.error('[PAYROLL] Tax table seed failed (non-fatal):', e.message); }
+})();
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
@@ -17495,6 +17559,80 @@ app.get('/api/gfc/admin/billing/invoices/:id/pdf', authenticateToken, requireBil
   } catch (error) { console.error('Invoice PDF error:', error); res.status(500).json({ error: 'Server error' }); }
 });
 
+// ---- IME / C&P billing (spec v2 §5; owner, 2026-11-08) ----
+// Rules: imeBilling.js. A fee schedule per contracting entity; an exam with its
+// report submitted bills once, at its entity's rate. VES's rates are coming
+// and LSGS is a placeholder: an entity with no rates bills nothing.
+// Never sent to QuickBooks (spec v2 §1: IME is payroll and contractor pay only).
+const imeBilling = require('./imeBilling');
+const IME_SCHEDULES = 'ime_fee_schedules', IME_INVOICES = 'ime_invoices';
+const readImeSchedules = async () => (await db.get(IME_SCHEDULES)) || {};
+app.get('/api/gfc/admin/ime-billing', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const schedules = await readImeSchedules();
+    const invoices = (await db.get(IME_INVOICES)) || [];
+    res.json({
+      entities: imeBilling.ENTITIES,
+      schedules: Object.fromEntries(Object.keys(imeBilling.ENTITIES).map(k => [k, schedules[k] || { entity: k, rates: [], placeholder: true }])),
+      unbilled: imeBilling.unbilled((await db.get('ime_cases')) || [], invoices, schedules),
+      invoices: invoices.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      canEditRates: req.user.role === 'admin'
+    });
+  } catch (error) { console.error('IME billing read error:', error); res.status(500).json({ error: 'Server error' }); }
+});
+// Rates are the owner's (spec v2 item 17).
+app.put('/api/gfc/admin/ime-billing/schedules/:entity', authenticateToken, requireBilling, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only the Super Admin sets IME rates.', code: 'IME_RATES_ADMIN_ONLY' });
+  const n = imeBilling.normalizeSchedule(req.params.entity, req.body);
+  if (n.error) return res.status(400).json(n);
+  const all = await readImeSchedules();
+  all[req.params.entity] = { ...n.value, updatedAt: new Date().toISOString(), updatedBy: req.user.name || req.user.email };
+  await db.set(IME_SCHEDULES, all);
+  await logActivity(req.user.id, req.user.name || req.user.email, 'ime_fee_schedule_set', 'ime_fee_schedule', req.params.entity, { rates: n.value.rates.length });
+  res.json({ schedule: all[req.params.entity] });
+});
+app.post('/api/gfc/admin/ime-billing/invoices', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const invoices = (await db.get(IME_INVOICES)) || [];
+    const r = imeBilling.buildInvoice({ entity: b.entity, picks: b.picks, cases: (await db.get('ime_cases')) || [], invoices, schedules: await readImeSchedules(),
+      period: b.from && b.to ? { from: String(b.from), to: String(b.to) } : null });
+    if (r.error) return res.status(400).json(r);
+    const at = new Date().toISOString();
+    const inv = { id: uuidv4(), number: imeBilling.invoiceNumber(b.entity, (practiceTime.zonedParts(at) || {}).isoDate || at.slice(0, 10), new Set(invoices.map(i => i.number))),
+      ...r.value, status: 'draft', createdAt: at, createdBy: req.user.name || req.user.email };
+    invoices.push(inv);
+    await db.set(IME_INVOICES, invoices);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ime_invoice_created', 'ime_invoice', inv.id, { entity: inv.entity, exams: inv.lines.length, totalCents: inv.totalCents });
+    res.json({ invoice: inv });
+  } catch (error) { console.error('IME invoice error:', error); res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/gfc/admin/ime-billing/invoices/:id/:action', authenticateToken, requireBilling, async (req, res) => {
+  const to = { send: 'sent', 'record-payment': 'paid', void: 'void' }[req.params.action];
+  if (!to) return res.status(404).json({ error: 'Unknown action' });
+  const invoices = (await db.get(IME_INVOICES)) || [];
+  const i = invoices.findIndex(x => x.id === req.params.id);
+  const t = imeBilling.transition(invoices[i], to, { at: new Date().toISOString(), by: req.user.name || req.user.email, reason: (req.body || {}).reason, reference: (req.body || {}).reference });
+  if (t.error) return res.status(t.code === 'IME_INVOICE_NOT_FOUND' ? 404 : 409).json(t);
+  invoices[i] = t.inv;
+  await db.set(IME_INVOICES, invoices);
+  await logActivity(req.user.id, req.user.name || req.user.email, `ime_invoice_${to}`, 'ime_invoice', t.inv.id, { totalCents: t.inv.totalCents });
+  res.json({ invoice: t.inv });
+});
+// The invoice as a CSV for the entity's own portal or email.
+app.get('/api/gfc/admin/ime-billing/invoices/:id/csv', authenticateToken, requireBilling, async (req, res) => {
+  const inv = ((await db.get(IME_INVOICES)) || []).find(x => x.id === req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  const q = (v) => { const s = String(v == null ? '' : v); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = [['Invoice', 'Entity', 'Claim reference', 'Exam date', 'Exam type', 'Amount'].join(','),
+    ...inv.lines.map(l => [inv.number, inv.entityLabel, l.referenceId || '', l.examDate || '', l.label, (l.amountCents / 100).toFixed(2)].map(q).join(',')),
+    ['', '', '', '', 'Total', (inv.totalCents / 100).toFixed(2)].join(',')];
+  await logActivity(req.user.id, req.user.name || req.user.email, 'ime_invoice_exported', 'ime_invoice', inv.id, {});
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', contentDisposition('attachment', `${inv.number}.csv`));
+  res.send(rows.join('\r\n') + '\r\n');
+});
+
 app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requireBilling, async (req, res) => {
   try {
     const to = { send: 'open', void: 'void', 'record-payment': 'paid' }[req.params.action];
@@ -17513,6 +17651,9 @@ app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requi
     await logActivity(req.user.id, req.user.name || req.user.email, `invoice_${req.params.action.replace('-', '_')}`, 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
     // A carrier's invoice is sent to the carrier (the PDF), not announced to the patient.
     if (to === 'open' && billing.patientPays(t.inv)) notifyStatement(t.inv.clientId);
+    // QuickBooks: private home care only (quickbooks.assertPhc). Best effort.
+    if (to === 'open') qbo.invoiceSent(t.inv).catch(e => console.error('QuickBooks invoice sync (non-fatal):', e.message));
+    if (to === 'paid') qbo.invoicePaid(t.inv).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
     res.json({ invoice: t.inv });
   } catch (error) {
     console.error('Invoice action error:', error);
@@ -17546,6 +17687,7 @@ app.post('/api/webhooks/stripe', async (req, res) => {
     rows[i] = t.inv;
     await db.set('patient_invoices', rows);
     await logActivity('stripe', 'Stripe', 'invoice_paid_online', 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
+    qbo.invoicePaid(t.inv).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
     res.json({ received: true });
   } catch (error) {
     console.error('Stripe webhook error:', error);
@@ -31613,6 +31755,12 @@ app.get('/messages', (req, res) => {
 // coordinators. Shell is public; every route it calls is requireBilling.
 app.get('/billing', (req, res) => {
   res.sendFile(__dirname + '/public/billing.html');
+});
+
+// The owner's payroll screen (2026-11-08). Shell is public; every route it
+// calls is Super Admin only.
+app.get('/payroll', (req, res) => {
+  res.sendFile(__dirname + '/public/payroll.html');
 });
 
 // Your own account (owner, "Fix all", 2026-11-06). Five routes a signed-in
