@@ -118,11 +118,12 @@ const SECTIONS = [
   { id: 'home', label: 'Home', icon: 'ti-home' },
   { id: 'onboarding', label: 'Onboarding', icon: 'ti-route' },
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text' },
-  { id: 'policies', label: 'Policies', icon: 'ti-book' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders' },
   { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock' },
-  { id: 'account', label: 'Account', icon: 'ti-user-circle' }
+  { id: 'account', label: 'Account', icon: 'ti-user-circle' },
+  { id: 'team', label: 'Team Bios', icon: 'ti-users', adminTeam: true }
 ];
+const sectionsFor = (profile) => SECTIONS.filter(s => !s.adminTeam || profile.isAdmin);
 
 function Section({ title, sub, children, right }) {
   return (
@@ -169,6 +170,27 @@ function OnboardingSummary({ onboarding, compact }) {
 }
 
 // ---- Documents --------------------------------------------------------------
+const signedFileUrl = (d) => (d.pdf === 'packet' ? '/api/caregiver/welcome-packet/signed.pdf'
+  : `/api/caregiver/welcome-packet/attestations/${d.kind}.pdf`);
+
+function Signed({ signed, onError }) {
+  if (!signed) return <p className="note">Loading…</p>;
+  if (!signed.length) return <p className="note">Nothing signed yet. What you sign during onboarding shows here.</p>;
+  return signed.map(d => (
+    <div className="row" key={d.id}>
+      <i className="ti ti-signature big" />
+      <div className="grow">
+        <b>{d.title}</b>
+        <small>{d.version ? `Version ${d.version} · ` : ''}Signed {fmtDate(d.signedAt)}{d.filedByOffice ? ` · Filed by ${d.filedByName || 'the office'}` : ''}</small>
+        {d.current === false && <small style={{ display: 'block', color: 'var(--red)' }}>A newer version is out. You'll be asked to sign it.</small>}
+      </div>
+      {d.pdf
+        ? <button className="btn ghost sm" onClick={() => openFile(signedFileUrl(d), `${d.title}.pdf`).catch(e => onError(e.message))}>Open</button>
+        : (d.links || []).slice(0, 1).map(u => <a key={u} className="btn ghost sm" href={u} target="_blank" rel="noopener noreferrer">Open</a>)}
+    </div>
+  ));
+}
+
 function Documents({ docs, onError }) {
   if (!docs) return <p className="note">Loading…</p>;
   if (!docs.length) return <p className="note">Nothing is on file for you yet. Documents you or the office upload will show here.</p>;
@@ -179,7 +201,7 @@ function Documents({ docs, onError }) {
         <i className="ti ti-file big" />
         <div className="grow">
           <b>{d.fileName}</b>
-          <small>{KIND_LABELS[d.kind] || 'Document'} · {fmtDate(d.uploadedAt)} · {d.filedByOffice ? `Filed by ${d.uploadedByName || 'the office'}` : 'You sent this'}</small>
+          <small>{d.itemTitle || KIND_LABELS[d.kind] || 'Document'} · {fmtDate(d.uploadedAt)} · {d.filedByOffice ? `Filed by ${d.uploadedByName || 'the office'}` : 'You sent this'}</small>
           {d.reviewNote && <small style={{ display: 'block', color: 'var(--red)' }}>Sent back: {d.reviewNote}</small>}
         </div>
         {pill && <span className={`pill ${pill[0]}`}>{pill[1]}</span>}
@@ -187,20 +209,6 @@ function Documents({ docs, onError }) {
       </div>
     );
   });
-}
-
-// ---- Policies ---------------------------------------------------------------
-function Policies({ policies }) {
-  if (!policies) return <p className="note">Loading…</p>;
-  return policies.map(p => (
-    <div className="row" key={p.id}>
-      <i className="ti ti-book big" />
-      <div className="grow"><b>{p.title}</b><small>Version {p.version}</small></div>
-      {p.links.map((u, i) => (
-        <a key={u} className="btn ghost sm" href={u} target="_blank" rel="noopener noreferrer">{i === 0 ? 'Open' : 'Acknowledgment form'}</a>
-      ))}
-    </div>
-  ));
 }
 
 // ---- Shared folders ---------------------------------------------------------
@@ -254,7 +262,15 @@ function SharedFolders({ folders }) {
   ));
 }
 
-// The admin's side: which folders each role or person sees.
+// Quick picks. The admin team is administrators, managers AND care
+// coordinators (owner, 2026-11-08).
+const AUDIENCE_GROUPS = [
+  { id: 'adminTeam', label: 'Admin team', types: ['admin', 'manager', 'coordinator'] },
+  { id: 'clinicians', label: 'All clinicians', types: ['provider', 'rn', 'lcsw', 'lmsw'] },
+  { id: 'caregivers', label: 'Caregivers', types: ['caregiver'] }
+];
+
+// The admin team's side: which folders each role or person sees.
 function ManageFolders({ onChanged }) {
   const [data, setData] = useState(null);
   const [form, setForm] = useState({ link: '', label: '', description: '', types: [], userIds: [] });
@@ -301,6 +317,11 @@ function ManageFolders({ onChanged }) {
       <label>Description (optional)</label>
       <input type="text" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
       <label>Everyone in these roles</label>
+      <div className="checks" style={{ marginBottom: 8 }}>
+        {AUDIENCE_GROUPS.map(g => (
+          <button key={g.id} type="button" className="btn ghost sm" onClick={() => setForm(f => ({ ...f, types: Array.from(new Set(f.types.concat(g.types))) }))}>+ {g.label}</button>
+        ))}
+      </div>
       <div className="checks">
         {data.types.map(t => (
           <label key={t.id}><input type="checkbox" checked={form.types.includes(t.id)} onChange={() => toggle('types', t.id)} />{t.label}</label>
@@ -320,16 +341,31 @@ function ManageFolders({ onChanged }) {
   );
 }
 
-// ---- Hours ------------------------------------------------------------------
-function Hours({ profile, hours }) {
-  if (!profile.isCaregiver) {
-    return <p className="note">Hours and pay stubs for salaried and clinical staff aren't in the app yet. Pay questions go to the office.</p>;
-  }
+// ---- Hours & pay -------------------------------------------------------------
+const usd = (n) => (n == null ? '' : Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' }));
+// A bare pay date read at midday UTC, so it is the same calendar day in Georgia.
+const fmtDay = (ymd) => (ymd ? fmtDate(`${ymd}T12:00:00Z`) : '');
+
+function PayStubs({ stubs, onError }) {
+  if (!stubs) return <p className="note">Loading…</p>;
+  if (!stubs.length) return <p className="note">No pay stubs yet. Each one shows here after payroll runs.</p>;
+  return stubs.map(p => (
+    <div className="row" key={p.id}>
+      <i className="ti ti-receipt big" />
+      <div className="grow">
+        <b>Paid {fmtDay(p.payDate)} · {usd(p.net)} net</b>
+        <small>{fmtDay(p.periodStart)} – {fmtDay(p.periodEnd)} · {usd(p.gross)} gross{p.hours != null ? ` · ${p.hours} hours` : ''}</small>
+      </div>
+      {p.hasPdf && <button className="btn ghost sm" onClick={() => openFile(`/api/my/paystubs/${p.id}/file`, `Pay stub ${p.payDate}.pdf`).catch(e => onError(e.message))}>Open</button>}
+    </div>
+  ));
+}
+
+function Hours({ hours }) {
   if (!hours) return <p className="note">Loading…</p>;
   return (
     <div>
-      <p style={{ marginTop: 0 }}>You clock in and out from <a href="/caregiver#schedule">My Schedule</a>. Pay stubs come from payroll, not this app.</p>
-      <p><b>{hours.totalHours || 0}</b> hours on record in the last 30 days.</p>
+      <p style={{ marginTop: 0 }}>You clock in and out from <a href="/caregiver#schedule">My Schedule</a>. <b>{hours.totalHours || 0}</b> hours on record in the last 30 days.</p>
       {hours.timeLogs.slice(0, 15).map(l => (
         <div className="row" key={l.id}>
           <i className="ti ti-clock big" />
@@ -343,6 +379,85 @@ function Hours({ profile, hours }) {
   );
 }
 
+// ---- Headshot and bio -----------------------------------------------------------
+// An image behind the token: fetched with the header, shown from a blob URL.
+function AuthImage({ path, version, alt, size }) {
+  const [src, setSrc] = useState(null);
+  useEffect(() => {
+    if (!path) return undefined;
+    let url = null; let live = true;
+    fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
+      .then(r => (r.ok ? r.blob() : null)).then(b => { if (b && live) { url = URL.createObjectURL(b); setSrc(url); } }).catch(() => {});
+    return () => { live = false; if (url) URL.revokeObjectURL(url); };
+  }, [path, version]);
+  const box = { width: size, height: size, borderRadius: '50%', objectFit: 'cover', background: '#EEF4F6', flex: 'none',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--navy)', fontSize: size / 2.6 };
+  return src ? <img src={src} alt={alt} style={box} /> : <span style={box}><i className="ti ti-user" /></span>;
+}
+
+function BioEditor() {
+  const [bio, setBio] = useState(null);
+  const [form, setForm] = useState({ title: '', bio: '' });
+  const [msg, setMsg] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  useEffect(() => { call('/api/my/bio').then(b => { setBio(b); setForm({ title: b.title, bio: b.bio }); }).catch(e => setErr(e.message)); }, []);
+  const save = async () => {
+    setBusy(true); setErr(''); setMsg('');
+    try { setBio(await call('/api/my/bio', { method: 'PUT', body: form })); setMsg('Saved.'); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const uploadPhoto = async (file) => {
+    if (!file) return;
+    setBusy(true); setErr(''); setMsg('');
+    const fd = new FormData(); fd.append('file', file);
+    try {
+      const res = await fetch('/api/my/bio/headshot', { method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }, body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'That photo could not be uploaded.');
+      setBio(data); setMsg('Photo updated.');
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  if (!bio) return err ? <div className="err">{err}</div> : <p className="note">Loading…</p>;
+  return (
+    <div>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <AuthImage path={bio.hasHeadshot ? '/api/my/bio/headshot' : ''} version={bio.updatedAt} alt="Your headshot" size={96} />
+        <label className="btn ghost sm" style={{ margin: 0 }}>
+          <i className="ti ti-camera" />{bio.hasHeadshot ? 'Replace Photo' : 'Upload Photo'}
+          <input type="file" accept="image/jpeg,image/png" style={{ display: 'none' }} onChange={e => uploadPhoto(e.target.files[0])} />
+        </label>
+      </div>
+      <label>Title as it should read on the website</label>
+      <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Family Nurse Practitioner" />
+      <label>Bio</label>
+      <textarea rows={6} value={form.bio} onChange={e => setForm({ ...form, bio: e.target.value })} placeholder="A few sentences about you, your experience and why you do this work." />
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 10 }}>
+        <button className="btn" disabled={busy} onClick={save}>Save Bio</button>
+        {msg && <span style={{ color: 'var(--green)' }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+function TeamBios() {
+  const [team, setTeam] = useState(null); const [err, setErr] = useState('');
+  useEffect(() => { call('/api/my/admin/bios').then(d => setTeam(d.team)).catch(e => setErr(e.message)); }, []);
+  if (err) return <div className="err">{err}</div>;
+  if (!team) return <p className="note">Loading…</p>;
+  return team.map(p => (
+    <div className="row" key={p.id} style={{ alignItems: 'flex-start' }}>
+      <AuthImage path={p.hasHeadshot ? `/api/my/admin/bios/${p.id}/headshot` : ''} version={p.updatedAt} alt={p.name} size={56} />
+      <div className="grow">
+        <b>{p.name}</b>
+        <small>{p.title || p.typeLabel}</small>
+        <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginTop: 4, color: p.bio ? 'var(--ink)' : 'var(--mut)' }}>{p.bio || 'No bio yet.'}</div>
+      </div>
+      {p.hasHeadshot && <button className="btn ghost sm" onClick={() => openFile(`/api/my/admin/bios/${p.id}/headshot`, `${p.name}.jpg`).catch(() => {})}>Download Photo</button>}
+    </div>
+  ));
+}
+
 // ---- The page ---------------------------------------------------------------
 function App() {
   const [profile, setProfile] = useState(null);
@@ -353,7 +468,8 @@ function App() {
   });
   const [onboarding, setOnboarding] = useState(null);
   const [docs, setDocs] = useState(null);
-  const [policies, setPolicies] = useState(null);
+  const [signed, setSigned] = useState(null);
+  const [stubs, setStubs] = useState(null);
   const [folders, setFolders] = useState(null);
   const [hours, setHours] = useState(null);
   const [err, setErr] = useState('');
@@ -365,8 +481,8 @@ function App() {
     call('/api/my/profile').then(p => {
       setProfile(p);
       call('/api/onboarding/me').then(setOnboarding).catch(() => setOnboarding({ error: true }));
-      call('/api/my/documents').then(d => setDocs(d.documents)).catch(e => setErr(e.message));
-      call('/api/my/policies').then(d => setPolicies(d.policies)).catch(e => setErr(e.message));
+      call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message));
+      call('/api/my/paystubs').then(d => setStubs(d.paystubs)).catch(e => setErr(e.message));
       loadFolders();
       if (p.isCaregiver) {
         const from = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
@@ -380,6 +496,8 @@ function App() {
   if (fatal) return <div className="main"><div className="err">{fatal}</div><a className="btn" href="/login">Back to sign in</a></div>;
   if (!profile) return <div className="main"><p className="note">Loading…</p></div>;
 
+  // Team Bios is the admin team's; anyone else asking for it lands on Home.
+  if (!sectionsFor(profile).some(s => s.id === view)) { setView('home'); return null; }
   const firstName = (profile.name || '').split(' ')[0];
   const home = profile.isCaregiver ? { href: '/caregiver', label: 'Caregiver App' }
     : profile.isClinician ? { href: '/clinical', label: 'Clinical Workspace' }
@@ -391,11 +509,10 @@ function App() {
       <div>
         <div className="tiles">
           <Tile icon="ti-route" title="Onboarding" sub="Your checklist and training" onClick={() => go('onboarding')} />
-          <Tile icon="ti-file-text" title="My Documents" sub={docs ? `${docs.length} on file` : 'Your files'} onClick={() => go('documents')} />
-          <Tile icon="ti-book" title="Policies" sub="The policies you work under" onClick={() => go('policies')} />
+          <Tile icon="ti-file-text" title="My Documents" sub={docs && signed ? `${signed.length} signed · ${docs.length} on file` : 'What you signed and sent'} onClick={() => go('documents')} />
           <Tile icon="ti-folders" title="Shared Folders" sub={folders ? `${folders.length} assigned to you` : 'Drive folders for your role'} onClick={() => go('folders')} />
-          <Tile icon="ti-clock" title="Hours & Pay" sub={profile.isCaregiver ? 'Your clocked hours' : 'Pay questions'} onClick={() => go('hours')} />
-          <Tile icon="ti-user-circle" title="Account" sub="Password, sign-in and devices" onClick={() => go('account')} />
+          <Tile icon="ti-clock" title="Hours & Pay" sub={stubs && stubs.length ? `Last paid ${fmtDay(stubs[0].payDate)}` : 'Pay stubs'} onClick={() => go('hours')} />
+          <Tile icon="ti-user-circle" title="Account" sub="Headshot, bio and sign-in" onClick={() => go('account')} />
         </div>
         <Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section>
       </div>
@@ -403,9 +520,12 @@ function App() {
   } else if (view === 'onboarding') {
     body = <Section title="My Onboarding"><OnboardingSummary onboarding={onboarding} /></Section>;
   } else if (view === 'documents') {
-    body = <Section title="My Documents" sub="Everything on file for you, whether you sent it or the office filed it."><Documents docs={docs} onError={setErr} /></Section>;
-  } else if (view === 'policies') {
-    body = <Section title="Policies" sub="The current version of each policy you work under. Each opens in Google Drive."><Policies policies={policies} /></Section>;
+    body = (
+      <div>
+        <Section title="What You Signed" sub="Policies and forms you signed, with the version and date."><Signed signed={signed} onError={setErr} /></Section>
+        <Section title="Files on Record" sub="Everything on file for you, whether you sent it or the office filed it."><Documents docs={docs} onError={setErr} /></Section>
+      </div>
+    );
   } else if (view === 'folders') {
     body = (
       <div>
@@ -414,14 +534,24 @@ function App() {
       </div>
     );
   } else if (view === 'hours') {
-    body = <Section title="Hours & Pay"><Hours profile={profile} hours={hours} /></Section>;
+    body = (
+      <div>
+        <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
+        {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
+      </div>
+    );
   } else if (view === 'account') {
     body = (
-      <Section title="Account">
-        <p style={{ marginTop: 0 }}>Change your password, set up two-step sign-in and see the devices you're signed in on.</p>
-        <a className="btn" href="/account"><i className="ti ti-shield-lock" />Account & Security</a>
-      </Section>
+      <div>
+        <Section title="Headshot and Bio" sub="Used for your profile on the GFC website."><BioEditor /></Section>
+        <Section title="Sign-in and Security">
+          <p style={{ marginTop: 0 }}>Change your password, set up two-step sign-in and see the devices you're signed in on.</p>
+          <a className="btn" href="/account"><i className="ti ti-shield-lock" />Account & Security</a>
+        </Section>
+      </div>
     );
+  } else if (view === 'team' && profile.isAdmin) {
+    body = <Section title="Team Bios" sub="Headshots and bios for the website. Each person keeps their own up to date."><TeamBios /></Section>;
   }
 
   return (
@@ -429,7 +559,7 @@ function App() {
       <aside className="side">
         <div className="brand"><img src="/brand/logo-mark-white-transparent.png" alt="" /><b>My GFC</b></div>
         <nav className="nav">
-          {SECTIONS.map(s => (
+          {sectionsFor(profile).map(s => (
             <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
           ))}
         </nav>
@@ -450,7 +580,7 @@ function App() {
         {body}
       </main>
       <nav className="mob">
-        {SECTIONS.filter(s => s.id !== 'account').map(s => (
+        {SECTIONS.filter(s => s.id !== 'account' && !s.adminTeam).map(s => (
           <button key={s.id} className={view === s.id ? 'on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label.replace('My ', '').replace(' & Pay', '')}</button>
         ))}
       </nav>

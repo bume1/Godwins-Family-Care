@@ -3035,7 +3035,8 @@ app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken,
 }));
 // My GFC: a staff member's own documents, policies and the Drive folders the
 // office assigned to their role or to them by name.
-app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive }));
+app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
+  detectFileType: (buf) => detectFileType(buf) }));
 
 app.use(schedulingRoutes({
   db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,

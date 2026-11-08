@@ -4,7 +4,7 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 
 ## What changed
 
-- **`/my` (`public/my.html`)** has seven sections: Home, Onboarding, My Documents, Policies, Shared Folders, Hours & Pay and Account. It uses the sidebar layout on desktop and a bottom menu on a phone.
+- **`/my` (`public/my.html`)** has six sections: Home, Onboarding, My Documents, Shared Folders, Hours & Pay and Account. The admin team gets a seventh, Team Bios. It uses the sidebar layout on desktop and a bottom menu on a phone.
 - **`routes/staffPortal.js`** serves `/api/my/*`. It is open to the eight staff account types and refuses clients and family (`STAFF_PORTAL_STAFF_ONLY`).
 - **Ways in:**
   - The clinical workspace's "My Onboarding" button became **My Portal**.
@@ -23,30 +23,51 @@ Owner, 2026-11-08: staff get a portal of their own, the counterpart of the patie
 
 ## Other sections
 
-- **My Documents** lists everything in `caregiver_documents` under this person, filed by them or by the office, and opens through the app. Another person's document reads as absent (404). No Drive id reaches the browser.
-- **Policies** links each canonical copy in Policies / Current. Clinicians get the Clinical P&P v2.2, the office gets the Administrative P&P v2.3, and field staff get the Field Addendum.
-- **Hours & Pay:** caregivers see their last 30 days of clocked hours and can download them. Nobody else has hours in the app yet. **Pay stubs are not built,** pending the owner's decision on the payroll provider.
-- **Onboarding** shows progress and links to `/onboarding`, which already shows each person their own checklist.
+- **My Documents has two parts** (owner, 2026-11-08: signed documents must not stay inside onboarding, which is for tracking):
+  - **What You Signed** lists each policy acknowledgment at its version and date, linked to the canonical copy. An older version reads as superseded. A caregiver also sees her signed welcome packet and in-app attestations.
+  - **Files on Record** lists everything in `caregiver_documents` under this person, named by the onboarding item it answered. Another person's file reads as absent (404). No Drive id reaches the browser.
+- **The Policies tab was removed** (owner: "not really clear what that is").
+- **Hours & Pay:**
+  - **Pay stubs come from the payroll Apps Script.** It POSTs to `/api/payroll/paystubs` with `X-GFC-Payroll-Key`, which must equal `PAYROLL_INGEST_KEY`. Without that variable the door answers 503 and stores nothing.
+  - Each person is matched by sign-in email. A stub carries the pay date, period, gross, net and hours, plus a PDF sent as bytes (filed in the person's role folder) or as a Drive file id.
+  - The same person, pay date and reference replace an earlier stub rather than doubling it. Rows the app cannot place are returned to the script with the reason.
+  - `scripts/payroll_paystubs.gs` is the starter the owner pastes in.
+  - Caregivers also see their clocked hours.
+- **Account:**
+  - Each person uploads a **headshot** (JPG or PNG, typed by its bytes) and writes a **title and bio** for the website (`staff_profiles`).
+  - The **admin team**, meaning administrators, managers and care coordinators, reads everyone's in Team Bios and can download photos.
+  - Sign-in and security still link to `/account`.
+- **Who counts as the admin team:** administrators, managers and care coordinators manage shared folders and read Team Bios. Folder assignment has quick picks for "Admin team", "All clinicians" and "Caregivers".
+- **Onboarding** shows progress and links to `/onboarding`.
 
 ## What a later session must not undo
 
 - **No route under `/api/my/folders` may send file bytes.**
+- **The pay stub door stays shut without `PAYROLL_INGEST_KEY`,** and the key is compared in constant time.
 - **Every folder step is verified against Drive's own parent listing.**
 - `/api/my` is a PHI-prefix audit path: who opened which document or folder is recorded.
 
 ## Verified
 
-- `test/staff_portal.test.js`: 9 tests through the real router.
-- Three mutations, each caught: folder path verification dropped, audience check always true, and the Clinical P&P shown to every role.
-- Full suite: 3242 passing, 0 failing.
-- Rendered in Chromium as a clinician at 1280px and 390px and as the admin. No page errors.
+- `test/staff_portal.test.js`: 14 tests through the real router.
+- Seven mutations, each caught:
+  - folder path verification dropped
+  - the audience check always true
+  - the payroll key check skipped
+  - the shut door opened
+  - another person's pay stubs shown
+  - a headshot accepted that is not an image
+  - a signed acknowledgment dropped
+- Full suite: 3247 passing, 0 failing.
+- Rendered in Chromium (documents, hours, account and team bios) at 1280px and 390px. No page errors.
 
 ## Not proven here
 
 - That Google lists a real folder for the service account. The first folder an admin adds proves it, because the add is refused if Drive cannot open the folder.
+- A live run of the payroll script. Its first run returns `stored`, `updated` and `skipped` counts.
 
 ## Open for the owner
 
-1. **Pay stubs:** from the payroll provider (recommended), or generated by the app.
+1. **Set `PAYROLL_INGEST_KEY`** on the deployment, and the same value in the Apps Script's properties.
 2. **Moving the caregiver app into My GFC.** For now it links across.
 3. **Which folders each role gets.** That is an admin setup task in the portal.

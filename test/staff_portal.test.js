@@ -10,8 +10,9 @@ const path = require('path');
 const express = require('express');
 const portal = require('../routes/staffPortal');
 
-const ADMIN = { id: 'a1', name: 'Office Admin', role: 'admin' };
-const NP = { id: 'n1', name: 'Bethel Godwins', role: 'user', accountType: 'provider', clinicalRole: 'provider', hasClinicalAccess: true };
+const ADMIN = { id: 'a1', name: 'Office Admin', role: 'admin', email: 'admin@gfc.test' };
+const COORD = { id: 'k1', name: 'Coco Ordinator', role: 'user', accountType: 'coordinator', email: 'coco@gfc.test' };
+const NP = { id: 'n1', name: 'Bethel Godwins', email: 'Bethel@GFC.test', role: 'user', accountType: 'provider', clinicalRole: 'provider', hasClinicalAccess: true };
 const RN = { id: 'r1', name: 'Rae Nurse', role: 'user', accountType: 'rn', clinicalRole: 'rn', hasClinicalAccess: true };
 const CG = { id: 'c1', name: 'Cara Giver', role: 'vendor', accountType: 'caregiver', licenseLevel: 'PCA' };
 const CLIENT = { id: 'p1', name: 'Pat Client', role: 'client', accountType: 'client' };
@@ -24,34 +25,37 @@ const TREE = {
   OTHER: [{ id: 'SECRET', name: 'Payroll.xlsx', isFolder: false, webViewLink: 'x' }]
 };
 
-async function mount(t) {
+async function mount(t, opts = {}) {
   const store = {};
   const db = { get: async (k) => (k in store ? JSON.parse(JSON.stringify(store[k])) : null), set: async (k, v) => { store[k] = JSON.parse(JSON.stringify(v)); } };
   let current = ADMIN;
   const logged = [];
+  const uploads = [];
   const drive = {
     listFolderChildren: async (id) => { if (!TREE[id]) throw new Error('File not found'); return TREE[id]; },
     getFileFingerprint: async (id) => ({ mimeType: TREE[id] ? 'application/vnd.google-apps.folder' : 'application/pdf' }),
     downloadFileBuffer: async () => Buffer.from('%PDF-1.4 test'),
+    uploadStaffDocumentFile: async (role, person, name) => { uploads.push({ role, person, name }); return { fileId: `DRV_${uploads.length}_xxxxxx` }; },
     describeDriveError: (e) => ({ reason: e.message })
   };
   const app = express();
   app.use(express.json());
   app.use(portal({
-    db, uuidv4: () => Math.random().toString(36).slice(2), drive,
+    db, uuidv4: () => Math.random().toString(36).slice(2), drive, payrollIngestKey: opts.key === undefined ? 'k3y-payroll' : opts.key,
+    detectFileType: (buf) => (buf.slice(0, 3).toString('hex') === 'ffd8ff' ? 'image/jpeg' : buf.slice(0, 4).toString() === '%PDF' ? 'application/pdf' : null),
     logActivity: async (...a) => { logged.push(a); },
-    getUsers: async () => [ADMIN, NP, RN, CG, CLIENT],
+    getUsers: async () => [ADMIN, COORD, NP, RN, CG, CLIENT],
     authenticateToken: (req, _res, next) => { req.user = current; next(); }
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
-  const call = async (method, p, body) => {
-    const res = await fetch(base + p, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const call = async (method, p, body, headers) => {
+    const res = await fetch(base + p, { method, headers: Object.assign(body ? { 'Content-Type': 'application/json' } : {}, headers || {}), body: body ? JSON.stringify(body) : undefined });
     let data = null; try { data = await res.json(); } catch (_) { /* binary */ }
     return { status: res.status, data };
   };
-  return { store, logged, call, as: (u) => { current = u; } };
+  return { store, logged, uploads, call, base, as: (u) => { current = u; } };
 }
 
 const addFolder = async (h, body) => {
@@ -149,29 +153,116 @@ test('my documents are mine: another person\'s reads as absent and no Drive id l
   assert.ok(h.logged.some(a => a[2] === 'staff_portal_document_read'));
 });
 
-test('policies follow the role: the Clinical P&P for clinicians, the Administrative P&P for the office', () => {
-  const ids = (t) => portal.policiesFor(t).map(p => p.id);
-  assert.ok(ids('provider').includes('CLINICAL_MANUAL'));
-  assert.ok(!ids('provider').includes('ADMIN_MANUAL'));
-  assert.ok(ids('admin').includes('ADMIN_MANUAL'));
-  assert.ok(!ids('admin').includes('CLINICAL_MANUAL'));
-  assert.ok(!ids('caregiver').includes('CLINICAL_MANUAL'));
-  assert.ok(ids('caregiver').includes('FIELD_ADDENDUM'));
-  assert.ok(!ids('admin').includes('FIELD_ADDENDUM'));
-  const clin = portal.policiesFor('provider').find(p => p.id === 'CLINICAL_MANUAL');
+test('what she signed at onboarding shows in My Documents, not only in onboarding', async (t) => {
+  const h = await mount(t);
+  h.store.onboarding_records = [{ userId: NP.id, items: { 'C.5.04': { acknowledgments: {
+    CLINICAL_MANUAL: { version: '2.2', at: '2026-11-05T15:00:00Z', byName: 'Bethel Godwins', filedBy: 'SELF' },
+    EMPLOYEE_HANDBOOK: { version: '1.0', at: '2026-11-04T15:00:00Z', byName: 'Office Admin', filedBy: 'OFFICE_ON_BEHALF' }
+  } } } }];
+  h.as(NP);
+  const d = (await h.call('GET', '/api/my/documents')).data;
+  const clin = d.signed.find(x => x.id === 'ack:CLINICAL_MANUAL');
   assert.strictEqual(clin.version, '2.2');
-  assert.ok(clin.links[0].includes('1LBCQ-OHx1x6be9TfiXOTg7-O0a3-rwN6'), 'the canonical copy in Policies / Current');
+  assert.strictEqual(clin.current, true);
+  assert.ok(clin.links[0].includes('1LBCQ-OHx1x6be9TfiXOTg7-O0a3-rwN6'), 'the canonical copy');
+  const hb = d.signed.find(x => x.id === 'ack:EMPLOYEE_HANDBOOK');
+  assert.strictEqual(hb.current, false, 'an older version reads as not current');
+  assert.strictEqual(hb.filedByOffice, true);
+  h.as(RN);
+  assert.deepStrictEqual((await h.call('GET', '/api/my/documents')).data.signed, [], 'never another person\'s');
+});
+
+test('a caregiver\'s signed welcome packet and attestations are in her documents', async (t) => {
+  const h = await mount(t);
+  h.store.welcome_packets = [{ caregiver_id: CG.id, signed_at: '2026-10-01T12:00:00Z' }];
+  h.store.caregiver_attestations = [{ caregiver_id: CG.id, kind: 'mandatory_reporter', version: '1', signed_at: '2026-10-01T12:05:00Z' }];
+  h.as(CG);
+  const d = (await h.call('GET', '/api/my/documents')).data;
+  assert.deepStrictEqual(d.signed.map(x => x.id).sort(), ['attestation:mandatory_reporter', 'packet']);
+  assert.ok(d.signed.find(x => x.pdf === 'attestation').title.length > 3);
+});
+
+const STUB = { email: 'bethel@gfc.test', payDate: '2026-11-14', periodStart: '2026-11-01', periodEnd: '2026-11-14', gross: 1520, net: 1268.42, hours: 76, reference: 'RUN-1' };
+const PAY = (h, body, key) => h.call('POST', '/api/payroll/paystubs', body, key === null ? {} : { 'X-GFC-Payroll-Key': key || 'k3y-payroll' });
+
+test('the payroll script\'s door is shut without the key, and with no key configured', async (t) => {
+  const h = await mount(t);
+  assert.strictEqual((await PAY(h, { stubs: [STUB] }, null)).data.code, 'PAYROLL_KEY_INVALID');
+  assert.strictEqual((await PAY(h, { stubs: [STUB] }, 'wrong-key-xx')).data.code, 'PAYROLL_KEY_INVALID');
+  assert.strictEqual(h.store.staff_paystubs, undefined);
+  const off = await mount(t, { key: '' });
+  const r = await PAY(off, { stubs: [STUB] });
+  assert.strictEqual(r.status, 503);
+  assert.strictEqual(r.data.code, 'PAYROLL_INGEST_NOT_CONFIGURED');
+});
+
+test('pay stubs land on the right person by email, a re-run replaces, and bad rows are reported', async (t) => {
+  const h = await mount(t);
+  const pdf = Buffer.from('%PDF-1.4 stub').toString('base64');
+  const r = await PAY(h, { stubs: [Object.assign({ pdfBase64: pdf }, STUB),
+    Object.assign({}, STUB, { email: 'nobody@gfc.test' }),
+    Object.assign({}, STUB, { payDate: '11/14/2026' }),
+    Object.assign({}, STUB, { email: 'pat@gfc.test', pdfBase64: Buffer.from('not a pdf').toString('base64') })] });
+  assert.strictEqual(r.data.stored, 1);
+  assert.deepStrictEqual(r.data.skipped.map(x => x.row), [1, 2, 3]);
+  assert.strictEqual(h.uploads[0].role, 'GFC Clinician Documents');
+  assert.strictEqual(h.store.staff_paystubs[0].userId, NP.id);
+  const again = await PAY(h, { stubs: [Object.assign({}, STUB, { net: 1300 })] });
+  assert.strictEqual(again.data.updated, 1);
+  assert.strictEqual(h.store.staff_paystubs.length, 1);
+  assert.strictEqual(h.store.staff_paystubs[0].net, 1300);
+  h.as(NP);
+  const mine = (await h.call('GET', '/api/my/paystubs')).data.paystubs;
+  assert.strictEqual(mine.length, 1);
+  assert.ok(!JSON.stringify(mine).includes('DRV_'), 'no Drive id to the browser');
+  h.as(RN);
+  assert.deepStrictEqual((await h.call('GET', '/api/my/paystubs')).data.paystubs, []);
+  assert.strictEqual((await h.call('GET', `/api/my/paystubs/${mine[0].id}/file`)).status, 404, 'another person\'s stub reads as absent');
+});
+
+test('her headshot and bio: she keeps her own, the admin team (coordinators included) reads them', async (t) => {
+  const h = await mount(t);
+  h.as(NP);
+  const long = await h.call('PUT', '/api/my/bio', { bio: 'x'.repeat(3001) });
+  assert.strictEqual(long.data.code, 'BIO_TOO_LONG');
+  await h.call('PUT', '/api/my/bio', { title: 'Family Nurse Practitioner', bio: 'Bethel has cared for families for twenty years.' });
+  const fd = new FormData();
+  fd.append('file', new Blob([Buffer.from('ffd8ffe000104a464946', 'hex')], { type: 'image/jpeg' }), 'me.jpg');
+  const up = await fetch(`${h.base}/api/my/bio/headshot`, { method: 'POST', body: fd });
+  assert.strictEqual(up.status, 200);
+  assert.strictEqual((await up.json()).hasHeadshot, true);
+  const bad = new FormData();
+  bad.append('file', new Blob([Buffer.from('%PDF-1.4')], { type: 'image/jpeg' }), 'x.jpg');
+  assert.strictEqual((await (await fetch(`${h.base}/api/my/bio/headshot`, { method: 'POST', body: bad })).json()).code, 'HEADSHOT_TYPE');
+  assert.strictEqual((await h.call('GET', '/api/my/admin/bios')).data.code, 'STAFF_PORTAL_ADMIN_ONLY');
+  h.as(COORD);
+  const team = (await h.call('GET', '/api/my/admin/bios')).data.team;
+  const her = team.find(p => p.id === NP.id);
+  assert.strictEqual(her.title, 'Family Nurse Practitioner');
+  assert.strictEqual(her.hasHeadshot, true);
+  assert.ok(!team.some(p => p.id === CLIENT.id), 'clients are not on the team');
+  assert.strictEqual((await h.call('GET', `/api/my/admin/bios/${NP.id}/headshot`)).status, 200);
+});
+
+test('the admin team manages shared folders: a care coordinator can, a clinician cannot', async (t) => {
+  const h = await mount(t);
+  TREE.ROOTROOTROOT = TREE.ROOT;
+  h.as(COORD);
+  const r = await h.call('POST', '/api/my/admin/folders', { link: 'ROOTROOTROOT', label: 'Office Forms', types: ['admin', 'manager', 'coordinator'] });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual((await h.call('GET', '/api/my/folders')).data.folders.map(f => f.label), ['Office Forms']);
 });
 
 test('a shared file is never streamed by the app: the folder route returns Drive links only', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'staffPortal.js'), 'utf8');
   const at = src.indexOf("router.get('/api/my/folders/:id/items'");
-  const body = src.slice(at, src.indexOf('router.get(\'/api/my/admin/folders\'', at));
+  const body = src.slice(at, src.indexOf('// ---- pay stubs', at));
   assert.ok(at > 0 && body.length > 200);
   assert.ok(!/downloadFileBuffer|res\.send\(/.test(body));
 });
 
 test('the portal page and the ways into it', () => {
+  assert.ok(!/id: 'policies'/.test(fs.readFileSync(path.join(__dirname, '..', 'public', 'my.html'), 'utf8')), 'signed documents live in My Documents, not a Policies tab');
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
   assert.match(read('clinical.html'), /href="\/my"[^>]*>.*My Portal/);
   assert.ok(!/href="\/onboarding"/.test(read('clinical.html')), 'clinicians reach onboarding through My GFC now');

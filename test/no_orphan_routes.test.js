@@ -35,6 +35,7 @@ const NOT_UI_CALLED = [
   // --- Machine-to-machine: another system posts to these -----------------
   { method: 'POST', path: '/api/webhooks/stripe', reason: 'Stripe posts here; signature-verified. Never a browser.' },
   { method: 'POST', path: '/api/webhooks/quo', reason: 'Quo posts here. Never a browser.' },
+  { method: 'POST', path: '/api/payroll/paystubs', reason: 'The payroll Google Apps Script posts here with PAYROLL_INGEST_KEY. Never a browser.', evidence: 'scripts/payroll_paystubs.gs' },
   { method: 'POST', path: '/api/webhooks/hubspot', reason: 'HubSpot posts here; validateHubSpotWebhook. Never a browser.' },
   { method: 'POST', path: '/api/webhook/hubspot/ticket-created', reason: 'HubSpot ticket webhook. Never a browser.' },
   { method: 'POST', path: '/api/webhook/hubspot/ticket-stage-change', reason: 'HubSpot ticket webhook. Never a browser.' },
