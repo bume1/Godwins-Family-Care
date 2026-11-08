@@ -12,8 +12,9 @@
 // MANUAL REFERENCES. The Library lists manual sections for TRN-008, 205, 206,
 // 207 and 208 only. For modules the SOP Set 1 table maps to a procedure, the
 // manual sections come from that table and are marked `derivedFromSop`. A
-// module with neither has NO manual references, and the version flag reports
-// it as "cannot be assessed" rather than quietly clearing it.
+// module with neither carries PROPOSED references (from SOP Set 2's planned
+// table, or drafted for the Clinical Director) and reads PENDING until they
+// are confirmed, rather than quietly clearing.
 //
 // SOURCE CLASS. Taken from the Library where the Library states one. Where it
 // does not, `sourceClass` is null; it is never assigned here.
@@ -48,6 +49,36 @@ const SOP_MANUAL_REFS = Object.freeze({
   'SOP-ORD-02': ['11.5-11.7'],
   'SOP-RX-01': ['2.5', '12'],      // table: 12; heading: 2.5, 12
   'SOP-EXM-01': ['14', '23.5']
+});
+
+// SOP Set 1 v1.2, "Set 2 · Planned": procedures scheduled but not yet
+// written, with the manual sections each will be built from. A module these
+// map to has a PROPOSED manual reference and a procedure still to write.
+const SOP_PLANNED = Object.freeze({
+  'SOP-PAT-01': { manual: ['6'], module: 'TRN-201' },
+  'SOP-TH-01': { manual: ['7.3'], module: 'TRN-218' },
+  'SOP-BH-01': { manual: ['15'], module: 'TRN-211' },
+  'SOP-BH-02': { manual: ['15', '8.5'], module: 'TRN-212' },
+  'SOP-CM-01': { manual: ['13'], module: 'TRN-213' },
+  'SOP-TOC-01': { manual: ['20.3'], module: 'TRN-214' },
+  'SOP-BIL-01': { manual: ['23'], module: 'TRN-215' },
+  'SOP-RPT-01': { manual: ['19'], module: 'TRN-216' },
+  'SOP-INC-01': { manual: ['24'], module: 'TRN-217' },
+  'SOP-EMR-01': { manual: ['18.1'], module: 'TRN-210' }
+});
+
+// DRAFT manual references for modules the Library and both SOP tables leave
+// unmapped (owner, 2026-11-08: draft them for the Clinical Director). These
+// are OUR reading of the manual's contents and do not drive the version flag
+// until confirmed; the module reads PENDING until then. An empty list means
+// the module is a review meeting that teaches no manual content, which the
+// Clinical Director confirms the same way.
+const DRAFT_MANUAL_REFS = Object.freeze({
+  'TRN-102': ['14'], 'TRN-103': ['14'], 'TRN-106': ['14.5'],
+  'TRN-001': ['1', '2.1-2.4'], 'TRN-002': ['2'], 'TRN-004': ['3'], 'TRN-007': ['8'],
+  'TRN-204': ['16.3-16.5'], 'TRN-219': ['8', '27.2'], 'TRN-220': ['11.3', '27.4'],
+  'TRN-301': ['2.5', '4'], 'TRN-302': ['27.2'], 'TRN-303': ['9', '24.4'], 'TRN-304': ['27.2'],
+  'TRN-401': [], 'TRN-402': [], 'TRN-403': [], 'TRN-404': [], 'TRN-405': []
 });
 
 const H = HOSTS;
@@ -146,7 +177,22 @@ function buildModule(m) {
     manualRefs = Array.from(new Set(sopRefs.flatMap(s => SOP_MANUAL_REFS[s])));
     manualRefsBasis = 'DERIVED_FROM_SOP';
   }
+  // TRN-006 teaches the whole manual. Owner decision 2026-11-08: it flags on
+  // EVERY manual reissue, whatever changed.
+  const flagsOnAnyManualChange = !!m.wholeManual;
   if (m.wholeManual) manualRefsBasis = 'WHOLE_MANUAL';
+  let proposedManualRefs = null; let proposedBasis = null; let plannedSop = null;
+  if (!manualRefs.length && !m.wholeManual) {
+    const planned = Object.entries(SOP_PLANNED).find(([, p]) => p.module === m.id);
+    if (planned) {
+      plannedSop = planned[0];
+      proposedManualRefs = planned[1].manual.slice();
+      proposedBasis = 'SOP_SET2_PLANNED';
+    } else if (DRAFT_MANUAL_REFS[m.id]) {
+      proposedManualRefs = DRAFT_MANUAL_REFS[m.id].slice();
+      proposedBasis = 'DRAFT_FOR_CLINICAL_DIRECTOR';
+    }
+  }
   return Object.freeze({
     id: m.id,
     title: m.title,
@@ -163,6 +209,10 @@ function buildModule(m) {
     sopRefs,
     manualRefs: Object.freeze(manualRefs),
     manualRefsBasis,
+    flagsOnAnyManualChange,
+    proposedManualRefs: proposedManualRefs && Object.freeze(proposedManualRefs),
+    proposedBasis,
+    plannedSop,
     sourceClass: m.sourceClass ? Object.freeze(m.sourceClass) : null,
     checksFrom: m.checksFrom || null,
     spacedRecheck: DEFAULT_SPACED_RECHECK,
@@ -181,4 +231,4 @@ function buildModule(m) {
 const MODULES = Object.freeze(MODULES_RAW.map(buildModule));
 const findModule = (id) => MODULES.find(m => m.id === id) || null;
 
-module.exports = { HOSTS, SOP_MANUAL_REFS, MODULES, DEFAULT_SPACED_RECHECK, findModule };
+module.exports = { HOSTS, SOP_MANUAL_REFS, SOP_PLANNED, DRAFT_MANUAL_REFS, MODULES, DEFAULT_SPACED_RECHECK, findModule };

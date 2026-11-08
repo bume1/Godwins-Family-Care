@@ -11,7 +11,7 @@ const path = require('path');
 const { SOURCES, ref, driveViewUrl } = require('../onboarding/sources');
 const V = require('../onboarding/vocabulary');
 const C = require('../onboarding/chapterC');
-const { MODULES, SOP_MANUAL_REFS } = require('../onboarding/modules');
+const { MODULES, SOP_MANUAL_REFS, SOP_PLANNED } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
 
 const DIR = path.join(__dirname, '..', 'onboarding');
@@ -161,13 +161,16 @@ test('manual references come from the Library, or from the SOP table and are mar
 });
 
 // ---- the acceptance test (GFC-WIZ-PROMPT §3) -------------------------------
-test('ACCEPTANCE: on first run against manual v2.2, exactly TRN-206, TRN-207 and TRN-208 flag', () => {
+test('ACCEPTANCE: on first run against manual v2.2, TRN-206, 207 and 208 flag on their sections, and TRN-006 on any change', () => {
   const results = VF.evaluateAll(MODULES, { currentVersion: '2.2' });
   const flagged = results.filter(r => r.status === VF.STATUS.FLAGGED);
-  assert.deepStrictEqual(flagged.map(r => r.moduleId).sort(), ['TRN-206', 'TRN-207', 'TRN-208']);
+  assert.deepStrictEqual(flagged.map(r => r.moduleId).sort(), ['TRN-006', 'TRN-206', 'TRN-207', 'TRN-208']);
   assert.deepStrictEqual(flagged.find(r => r.moduleId === 'TRN-206').hits, ['11.4']);
   assert.deepStrictEqual(flagged.find(r => r.moduleId === 'TRN-207').hits, ['12.4']);
   assert.deepStrictEqual(flagged.find(r => r.moduleId === 'TRN-208').hits, ['12.3']);
+  const six = flagged.find(r => r.moduleId === 'TRN-006');
+  assert.strictEqual(six.basis, 'OWNER_DECISION_ANY_CHANGE');
+  assert.deepStrictEqual(six.hits.slice().sort(), ['11.4', '12.3', '12.4']);
 });
 
 test('the seeded change list cites Training Library §2.2 as its source', () => {
@@ -177,12 +180,39 @@ test('the seeded change list cites Training Library §2.2 as its source', () => 
   assert.strictEqual(s.basis, 'STATED_IN_SOURCE');
 });
 
-test('a module with no manual references is never cleared by silence', () => {
+test('a module with no confirmed manual references reads PENDING, never cleared by silence', () => {
   const results = VF.evaluateAll(MODULES, { currentVersion: '2.2' });
   for (const r of results) {
     const m = MODULES.find(x => x.id === r.moduleId);
-    if (!m.manualRefs.length) assert.strictEqual(r.status, VF.STATUS.CANNOT_ASSESS, m.id);
+    if (!m.manualRefs.length && !m.flagsOnAnyManualChange) assert.strictEqual(r.status, VF.STATUS.PENDING, m.id);
   }
+});
+
+test('every pending module carries proposed sections: SOP Set 2\'s planned table first, else a draft for the Clinical Director', () => {
+  for (const m of MODULES.filter(x => !x.manualRefs.length && !x.flagsOnAnyManualChange)) {
+    assert.ok(Array.isArray(m.proposedManualRefs), `${m.id} has no proposed references`);
+    assert.ok(['SOP_SET2_PLANNED', 'DRAFT_FOR_CLINICAL_DIRECTOR'].includes(m.proposedBasis), m.id);
+  }
+  const t210 = MODULES.find(m => m.id === 'TRN-210');
+  assert.strictEqual(t210.plannedSop, 'SOP-EMR-01');
+  assert.strictEqual(t210.proposedBasis, 'SOP_SET2_PLANNED');
+  assert.strictEqual(MODULES.find(m => m.id === 'TRN-220').proposedBasis, 'DRAFT_FOR_CLINICAL_DIRECTOR');
+  assert.deepStrictEqual(t210.proposedManualRefs, ['18.1']);
+  for (const [sop, p] of Object.entries(SOP_PLANNED)) assert.strictEqual(MODULES.find(m => m.id === p.module).plannedSop, sop);
+});
+
+test('a proposed reference never drives the flag until confirmed; a confirmed one does', () => {
+  const m = MODULES.find(x => x.id === 'TRN-210');
+  const log = [{ document: 'CLINICAL_MANUAL', from: '2.2', to: '2.3', changedSections: ['18.1'] }];
+  assert.strictEqual(VF.evaluateModule(m, { currentVersion: '2.3', reviewedAgainst: '2.2', changeLog: log }).status, VF.STATUS.PENDING);
+  assert.strictEqual(VF.evaluateModule(m, { currentVersion: '2.3', reviewedAgainst: '2.2', changeLog: log, confirmedManualRefs: ['18.1'] }).status, VF.STATUS.FLAGGED);
+});
+
+test('TRN-006 flags on every manual reissue, whatever section changed (owner decision)', () => {
+  const m = MODULES.find(x => x.id === 'TRN-006');
+  assert.strictEqual(m.flagsOnAnyManualChange, true);
+  const log = [{ document: 'CLINICAL_MANUAL', from: '2.2', to: '2.3', changedSections: ['26.3'] }];
+  assert.strictEqual(VF.evaluateModule(m, { currentVersion: '2.3', reviewedAgainst: '2.2', changeLog: log }).status, VF.STATUS.FLAGGED);
 });
 
 test('a review recorded against the current version clears the flag; an unknown hop does not', () => {

@@ -17,8 +17,12 @@
 //      12.3, 12.4). That entry is seeded here and CITES §2.2 as its source, so
 //      the record says where the list came from.
 //
-// A module with no manual references cannot be judged. It is reported as
-// CANNOT_ASSESS, never cleared: silence would read as "nothing changed".
+// A module with no confirmed manual references cannot be judged. It reads
+// PENDING (owner, 2026-11-08: "pending" on the staff view), never cleared:
+// silence would read as "nothing changed". Its drafted sections are shown
+// for the Clinical Director to confirm, and only confirmed sections drive the
+// flag. A module that teaches the whole manual (TRN-006) flags on every
+// reissue, whatever changed (owner, 2026-11-08).
 // ============================================================================
 
 'use strict';
@@ -30,7 +34,7 @@ const STATUS = Object.freeze({
   CURRENT: 'CURRENT',                 // reviewed against the current version
   FLAGGED: 'FLAGGED',                 // a referenced section changed; review before the next learner
   CLEARED_NO_OVERLAP: 'CLEARED_NO_OVERLAP', // version moved, none of its sections changed
-  CANNOT_ASSESS: 'CANNOT_ASSESS',     // no manual references to judge against
+  PENDING: 'PENDING',                 // manual sections not yet confirmed; drafted ones shown
   CHANGES_UNKNOWN: 'CHANGES_UNKNOWN'  // no record of what changed between its version and now
 });
 
@@ -99,7 +103,10 @@ function changedSectionsBetween(fromVersion, toVersion, changeLog) {
 // ---- one module -------------------------------------------------------------
 // `reviewedAgainst` is the manual version somebody last recorded a review of
 // this module against (from the app's review records), or the baseline.
-function evaluateModule(module, { currentVersion, reviewedAgainst, changeLog } = {}) {
+// `confirmedManualRefs` is a Clinical Director's confirmation of a drafted
+// reference list, read from the app's records. It is used only for a module
+// the Library gives no references.
+function evaluateModule(module, { currentVersion, reviewedAgainst, changeLog, confirmedManualRefs } = {}) {
   const against = String(reviewedAgainst || REVIEW_BASELINE);
   const current = String(currentVersion);
   if (against === current) {
@@ -108,14 +115,15 @@ function evaluateModule(module, { currentVersion, reviewedAgainst, changeLog } =
   const changed = changedSectionsBetween(against, current, changeLog || SEEDED_CHANGES);
   const base = { moduleId: module.id, reviewedAgainst: against, currentVersion: current };
   if (changed === null) return Object.assign(base, { status: STATUS.CHANGES_UNKNOWN, hits: [] });
-  // A module that teaches the whole manual (TRN-006) lists no sections in the
-  // Library, and the Library's own §2.2 outcome does not flag it. Reading
-  // "the whole manual" as "every section" would be our inference, so it is
-  // reported as CANNOT_ASSESS like any other module without references.
-  if (!module.manualRefs || !module.manualRefs.length) {
-    return Object.assign(base, { status: STATUS.CANNOT_ASSESS, hits: [] });
+  if (module.flagsOnAnyManualChange) {
+    return Object.assign(base, { status: changed.length ? STATUS.FLAGGED : STATUS.CLEARED_NO_OVERLAP, hits: changed.slice(), basis: 'OWNER_DECISION_ANY_CHANGE' });
   }
-  const hits = changed.filter(sec => module.manualRefs.some(r => refCovers(r, sec)));
+  const refs = (module.manualRefs && module.manualRefs.length) ? module.manualRefs
+    : (Array.isArray(confirmedManualRefs) && confirmedManualRefs.length ? confirmedManualRefs : null);
+  if (!refs) {
+    return Object.assign(base, { status: STATUS.PENDING, hits: [], proposedManualRefs: module.proposedManualRefs || null });
+  }
+  const hits = changed.filter(sec => refs.some(r => refCovers(r, sec)));
   return Object.assign(base, { status: hits.length ? STATUS.FLAGGED : STATUS.CLEARED_NO_OVERLAP, hits });
 }
 
@@ -123,7 +131,8 @@ function evaluateAll(modules, { currentVersion, reviews, changeLog } = {}) {
   const r = reviews || {};
   return modules.map(m => evaluateModule(m, {
     currentVersion, changeLog,
-    reviewedAgainst: r[m.id] && r[m.id].reviewedAgainst
+    reviewedAgainst: r[m.id] && r[m.id].reviewedAgainst,
+    confirmedManualRefs: r[m.id] && r[m.id].confirmedManualRefs
   }));
 }
 
