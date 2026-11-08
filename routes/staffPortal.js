@@ -71,6 +71,12 @@ function policiesFor(type) {
     if (a.id === 'FIELD_ADDENDUM' && !field) continue;
     out.push({ id: a.id, title: a.title, version: a.version, fileId: a.driveFileIds[0] });
   }
+  // The private home care line works under the PHC P&P: its nurses and
+  // caregivers (Playbook B.5).
+  if (type === 'rn' || type === 'caregiver') {
+    const h = SOURCES.PHC_MANUAL;
+    out.push({ id: 'PHC_MANUAL', title: h.title, version: h.transcribedFromVersion, fileId: h.driveFileId });
+  }
   if (ADMIN_TEAM_TYPES.includes(type)) {
     const m = SOURCES.ADMIN_MANUAL;
     out.push({ id: 'ADMIN_MANUAL', title: m.title, version: m.transcribedFromVersion, fileId: m.driveFileId });

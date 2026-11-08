@@ -25,7 +25,7 @@ const V = require('./vocabulary');
 const C = require('./chapterC');
 // Every chapter built so far. A person's record names theirs in inputs.chapter
 // (owner, 2026-11-08: clinicians first, the admin team next, the rest after).
-const CHAPTERS = Object.freeze({ C, F: require('./chapterF') });
+const CHAPTERS = Object.freeze({ B: require('./chapterB'), C, F: require('./chapterF') });
 const chapterOf = (inputs) => CHAPTERS[(inputs && inputs.chapter) || 'C'] || C;
 // Item and acknowledgment ids are unique across chapters, so one lookup serves all.
 const ALL_ITEMS = Object.freeze([].concat(...Object.values(CHAPTERS).map(ch => ch.ITEMS)));
@@ -77,6 +77,9 @@ function normalizeInputs(raw) {
     federallyReimbursed: r.federallyReimbursed === true,
     entersResidence: r.entersResidence === true,
     variableComp: r.variableComp === true,
+    // Chapter B (registered nurse) inputs.
+    supervisoryDelegation: r.supervisoryDelegation === true,
+    directsTraining: r.directsTraining === true,
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -103,6 +106,8 @@ function matchesWhen(when, inputs) {
   if (when.federallyReimbursed === true && !inputs.federallyReimbursed) return false;
   if (when.entersResidence === true && !inputs.entersResidence) return false;
   if (when.variableComp === true && !inputs.variableComp) return false;
+  if (when.supervisoryDelegation === true && !inputs.supervisoryDelegation) return false;
+  if (when.directsTraining === true && !inputs.directsTraining) return false;
   return true;
 }
 

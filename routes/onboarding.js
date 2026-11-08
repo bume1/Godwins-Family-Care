@@ -26,8 +26,13 @@ const accountTypes = require('../accountTypes');
 // Who is onboarded on which chapter. Clinicians on C; the admin team and the
 // liaison on F (owner, 2026-11-08). The office can change it in Setup.
 const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
-const defaultChapterFor = (u) => (['provider', 'rn', 'lcsw', 'lmsw'].includes(accountTypes.accountTypeOf(u)) || (u && u.hasClinicalAccess && !u.isManager) ? 'C' : 'F');
+const defaultChapterFor = (u) => {
+  const t = accountTypes.accountTypeOf(u);
+  if (t === 'rn') return 'B';   // the registered nurse chapter (owner, 2026-11-08)
+  return (['provider', 'lcsw', 'lmsw'].includes(t) || (u && u.hasClinicalAccess && !u.isManager)) ? 'C' : 'F';
+};
 const CHAPTER_CHOICES = Object.freeze([
+  { id: 'B', label: 'Registered nurse, employed (private home care)' },
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
   { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
 ]);

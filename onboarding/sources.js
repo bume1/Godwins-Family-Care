@@ -63,6 +63,17 @@ const SOURCES = Object.freeze({
     folder: '06 People / Onboarding / Training',
     transcribedFromVersion: '1.2'
   }),
+  // The private home care line's manual. The canonical copy in Policies /
+  // Current is 3.1; the Playbook (B.10) names 3.0.
+  PHC_MANUAL: Object.freeze({
+    key: 'PHC_MANUAL',
+    title: 'Private Home Care Policies and Procedures',
+    docNumber: 'GFC-PHC',
+    driveFileId: '11tYIh4bWvwCCtQQ5skFANzGURJoBOg4g',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '3.1'
+  }),
   ADMIN_MANUAL: Object.freeze({
     key: 'ADMIN_MANUAL',
     title: 'Administrative and Business Operations Policies and Procedures',
