@@ -298,7 +298,13 @@ function determinationModules(detId, inputs) {
  * confirmed by that owner at signing, one by one.
  */
 function determinationStatus(det, inputs, record, flags) {
-  const opened = (record.determinations || {})[det.id] || null;
+  const stored = record.determinations || {};
+  // Insurance billing opens payer by payer: each payer's determination is its
+  // own record, keyed "INSURED:<payer>".
+  const openedPayers = det.perPayer
+    ? Object.entries(stored).filter(([k]) => k.startsWith(`${det.id}:`)).map(([, v]) => Object.assign({}, v))
+    : [];
+  const opened = det.perPayer ? (openedPayers[0] || null) : (stored[det.id] || null);
   const modules = determinationModules(det.id, inputs);
   const included = (det.includes || []).flatMap(id => determinationModules(id, inputs));
   const all = Array.from(new Map([...modules, ...included].map(m => [m.id, m])).values());
@@ -312,7 +318,8 @@ function determinationStatus(det, inputs, record, flags) {
     requiredModules: all.map(m => m.id),
     outstandingModules,
     eligible: outstandingModules.length === 0,
-    opened: opened ? Object.assign({}, opened) : null
+    opened: opened ? Object.assign({}, opened) : null,
+    openedPayers
   };
 }
 

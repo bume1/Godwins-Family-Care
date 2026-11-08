@@ -94,14 +94,25 @@ const PHASES = Object.freeze([
 // directed on 2026-11-08 that clinicians acknowledge 2.2. The Playbook's
 // figure is kept here so the disagreement stays visible until the Playbook is
 // corrected.
+// Each document links its CANONICAL copy in 01 Company / Policies &
+// Procedures / Current (Admin P&P §17.2). #260 linked copies in another
+// folder, one of them a superseded Clinical P&P v2.0; those are not used.
 const ACKNOWLEDGMENTS = Object.freeze([
-  { id: 'EMPLOYEE_HANDBOOK', title: 'Employee Handbook and its acknowledgment', version: '2.0', ref: P('R3.3') },
-  { id: 'CODE_OF_CONDUCT', title: 'Staff Code of Conduct', version: '2.0', ref: P('R3.3') },
-  { id: 'FIELD_ADDENDUM', title: 'Field Addendum to the Staff Code of Conduct', version: '1.0', ref: P('R3.3') },
-  { id: 'HIPAA_ACK', title: 'HIPAA and Confidentiality Acknowledgment', version: '2.0', ref: P('R3.3') },
+  { id: 'EMPLOYEE_HANDBOOK', title: 'Employee Handbook and its acknowledgment', version: '2.0', ref: P('R3.3'),
+    driveFileIds: ['1T0xnb9XKYnWw4cP4CHTcLk6j453SSskc', '1I3evN7Y6ymBnroMLWMpEV134RDM4KzBU'] },
+  { id: 'CODE_OF_CONDUCT', title: 'Staff Code of Conduct', version: '2.0', ref: P('R3.3'),
+    driveFileIds: ['1rbI6shvNo7zRpqh1nrw7-zrO2-Fsj1JO'] },
+  { id: 'FIELD_ADDENDUM', title: 'Field Addendum to the Staff Code of Conduct', version: '1.0', ref: P('R3.3'),
+    driveFileIds: ['1ju5IVJG50_EJUIqDTlCgQF6P3-f8HBCH'] },
+  { id: 'HIPAA_ACK', title: 'HIPAA and Confidentiality Acknowledgment', version: '2.0', ref: P('R3.3'),
+    driveFileIds: ['14EH51ldVGQZXWt_bSoSI8kYUWLLkJYAP'] },
   { id: 'CLINICAL_MANUAL', title: 'Clinical Policies and Procedures', version: '2.2', source: 'CLINICAL_MANUAL',
-    ref: P('R3.3'), playbookStates: '2.0', versionSetBy: 'Owner decision, 2026-11-08' },
-  { id: 'JOB_DESCRIPTION', title: 'Job description for the assigned role', version: 'Current', ref: P('R3.3') }
+    ref: P('R3.3'), playbookStates: '2.0', versionSetBy: 'Owner decision, 2026-11-08',
+    driveFileIds: ['1LBCQ-OHx1x6be9TfiXOTg7-O0a3-rwN6'] },
+  // No canonical job description is in Current; the office files the one for
+  // the role.
+  { id: 'JOB_DESCRIPTION', title: 'Job description for the assigned role', version: 'Current', ref: P('R3.3'),
+    driveFileIds: [] }
 ].map(Object.freeze));
 
 const ITEMS = Object.freeze([

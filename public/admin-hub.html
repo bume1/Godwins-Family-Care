@@ -711,8 +711,12 @@
 
       // Super Admin sees all. A manager or care coordinator sees User
       // Management only (owner, 2026-11-04).
+      // User Management moved to the Portal Hub's People block (owner,
+      // 2026-11-08), so it is not in the Super Admin's Admin Hub menu. It still
+      // shows while it is the page being viewed, so nobody is stranded on a
+      // page with no menu entry.
       const menuItems = isSuperAdmin
-        ? allMenuItems
+        ? allMenuItems.filter(item => item.id !== 'users' || activePage === 'users')
         : allMenuItems.filter(item => item.id === 'users');
 
       // Determine user role label
@@ -5686,7 +5690,13 @@
           return null;
         }
       });
-      const [activePage, setActivePage] = useState(() => (isHubOffice(user) ? 'users' : 'dashboard'));
+      // People → User Management opens /admin?view=users straight to that page
+      // (owner, 2026-11-08: User Management lives in the People block now).
+      const [activePage, setActivePage] = useState(() => {
+        if (isHubOffice(user)) return 'users';
+        try { return new URLSearchParams(window.location.search).get('view') === 'users' ? 'users' : 'dashboard'; }
+        catch (e) { return 'dashboard'; }
+      });
       const [isMobileOpen, setIsMobileOpen] = useState(false);
 
       // Super Admin only until these areas are revised (owner, 2026-10-15). A

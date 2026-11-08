@@ -281,3 +281,10 @@ test('readiness gates sit under GFC\'s three service lines, never presented as l
   const by = Object.fromEntries(C.DETERMINATIONS.map(d => [d.id, d.serviceLine]));
   assert.deepStrictEqual(by, { IME: 'VETERAN_EXAMS', PRIVATE_PAY: 'IN_HOME_PRIMARY_PSYCH', INSURED: 'IN_HOME_PRIMARY_PSYCH', BEHAVIORAL: 'IN_HOME_PRIMARY_PSYCH' });
 });
+
+test('acknowledged documents link their canonical copies in Policies / Current, never #260\'s duplicates', () => {
+  const ids = C.ACKNOWLEDGMENTS.flatMap(a => a.driveFileIds || []);
+  assert.ok(ids.includes('1LBCQ-OHx1x6be9TfiXOTg7-O0a3-rwN6'), 'Clinical P&P v2.2');
+  assert.ok(!ids.includes('1R9PhvBNaqmebOKKm_i6kPbGd5DK0OAVU'), 'the superseded Clinical P&P v2.0 copy');
+  assert.ok(!ids.includes('1ZOdrECrlD1C7k5byIyE77K5XFT7fypz3bEnBbvHV-eU'), 'the Employee Handbook duplicate');
+});

@@ -192,6 +192,22 @@ const PRIVATE_HOME_CARE = Object.freeze([
   Object.freeze({ id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling',
     description: 'Shifts, availability, time tracking, payroll and client locations' })
 ]);
+// ---- People (owner, 2026-11-08) ---------------------------------------------
+// User Management moved out of the Admin Hub into its own block, beside staff
+// onboarding: the same shape as Private Home Care. User Management still runs
+// on the Admin Hub page, opened straight to that view. Staff Onboarding's
+// office side is admin-or-manager (routes/onboarding.js), so the tile appears
+// for exactly those accounts.
+const PEOPLE_USERS = Object.freeze({ id: 'users', name: 'User Management', path: '/admin?view=users',
+  description: 'Add and edit staff, caregivers, clients and family contacts' });
+const PEOPLE_ONBOARDING = Object.freeze({ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding',
+  description: 'Who is onboarding, whose turn it is, credentialing and readiness' });
+function peopleTile(u) {
+  const children = [PEOPLE_USERS];
+  if (u && (u.role === 'admin' || u.isManager === true)) children.push(PEOPLE_ONBOARDING);
+  return { id: 'people', name: 'People', children };
+}
+
 function hubTilesFor(u) {
   const type = accountTypeOf(u);
   const tiles = [];
@@ -204,18 +220,18 @@ function hubTilesFor(u) {
   // Managers and coordinators read Support and Admin Broadcasts here; the
   // Super Admin's inbox is in the Admin Hub.
   const messages = { id: 'messages', name: 'Messages', path: '/messages' };
-  // A manager or care coordinator opens the Admin Hub for User Management only
-  // (owner, 2026-11-04): caregivers, clients and family contacts.
-  const users = { id: 'users', name: 'User Management', path: '/admin' };
+  // User Management now sits inside People (owner, 2026-11-08). A manager or
+  // care coordinator still reaches only User Management in the Admin Hub.
+  const people = peopleTile(u);
   if (type === TYPES.ADMIN) {
-    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, clinical, phc, enrollment, billingTile,
+    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile, messages, users);
+    tiles.push(clinical, phc, enrollment, billingTile, messages, people);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile, messages, users);
+    tiles.push(phc, enrollment, billingTile, messages, people);
   }
   return tiles;
 }
