@@ -183,11 +183,11 @@ test('the office opens a service line only with every condition and a scope, and
   assert.strictEqual(h.store.onboarding_records[0].determinations.IME.reviewedBy.name, 'Office Admin');
 });
 
-test('the overview counts whose turn it is and lists clinicians not yet set up', async (t) => {
+test('the overview counts whose turn it is and lists everyone not yet set up, with their chapter', async (t) => {
   const h = await mount(t);
   h.as(OFFICE);
   let o = await h.call('GET', '/api/onboarding/admin/overview');
-  assert.deepStrictEqual(o.data.notStarted.map(p => p.userId), ['n1']);
+  assert.deepStrictEqual(o.data.notStarted.map(p => [p.userId, p.chapter]), [['a1', 'F'], ['n1', 'C']], 'the admin team on F, clinicians on C');
   await startHer(h);
   o = await h.call('GET', '/api/onboarding/admin/overview');
   assert.strictEqual(o.data.counts.active, 1);
@@ -207,4 +207,44 @@ test('the Clinical Director confirms a pending module\'s sections, and they then
   const lib = await h.call('GET', '/api/onboarding/admin/library');
   assert.strictEqual(lib.data.modules.find(m => m.id === 'TRN-210').flag.status, 'CURRENT');
   assert.strictEqual(lib.data.modules.find(m => m.id === 'TRN-207').phaseNumber, 4);
+});
+
+test('the admin team is onboarded on Chapter F: no clinical training, and a Field Addendum only for a role that enters a home', async (t) => {
+  const h = await mount(t);
+  h.as(OFFICE);
+  const COORD = { id: 'k1', name: 'Coco Ordinator', role: 'user', isManager: true, clinicalRole: 'coordinator', accountType: 'coordinator' };
+  // start the office admin herself on F
+  await h.call('PUT', `/api/onboarding/admin/people/${OFFICE.id}/inputs`, { startDate: '2026-11-10' });
+  const p = await h.call('GET', `/api/onboarding/admin/people/${OFFICE.id}`);
+  const tr = p.data.track;
+  assert.strictEqual(tr.chapter.id, 'F');
+  assert.strictEqual(tr.modules.length, 0, 'the clinical Training Library is not hers');
+  assert.ok(!tr.items.some(i => i.id === 'F.5.06'), 'no Field Addendum unless the role enters a client residence');
+  assert.ok(!tr.items.some(i => i.id === 'F.6.01'), 'no out-of-state registration for a Georgia worker');
+  const ack = tr.items.find(i => i.id === 'F.5.05').acknowledgments.find(a => a.id === 'ADMIN_MANUAL');
+  assert.strictEqual(ack.required, '2.3');
+  assert.ok(ack.links[0].includes('1E-1J1l86cyC0sfdlcmOQDeHJExjwIBlr'), 'the canonical Administrative P&P');
+  await h.call('PUT', `/api/onboarding/admin/people/${OFFICE.id}/inputs`, { entersResidence: true, workState: 'TX' });
+  const q = (await h.call('GET', `/api/onboarding/admin/people/${OFFICE.id}`)).data.track;
+  assert.strictEqual(q.chapter.id, 'F', 'the chapter is kept when inputs change');
+  assert.ok(q.items.some(i => i.id === 'F.5.06') && q.items.some(i => i.id === 'F.6.01'));
+  void COORD;
+});
+
+test('a registered nurse is onboarded on Chapter B: PHC P&P 3.1, clearance before client contact, supervisory items only when delegated', async (t) => {
+  const T = require('../onboarding/track');
+  const b = T.buildTrack({ inputs: { chapter: 'B' }, record: {} });
+  assert.strictEqual(b.chapter.id, 'B');
+  assert.strictEqual(b.modules.length, 0);
+  assert.ok(!b.items.some(i => i.id === 'B.7.04') && !b.items.some(i => i.id === 'B.7.05'), 'no delegated duties unless set');
+  const ack = b.items.find(i => i.id === 'B.5.03').acknowledgments.find(a => a.id === 'PHC_MANUAL');
+  assert.strictEqual(ack.required, '3.1');
+  assert.strictEqual(T.ALL_ACKS.find(a => a.id === 'PHC_MANUAL').playbookStates, '3.0', 'the Playbook figure stays visible');
+  const d = T.buildTrack({ inputs: { chapter: 'B', supervisoryDelegation: true, directsTraining: true }, record: {} });
+  assert.ok(d.items.some(i => i.id === 'B.7.04') && d.items.some(i => i.id === 'B.7.05'));
+  assert.ok(d.recurring.some(r => r.id === 'B.8.R3'), 'supervisory visits recur when delegated');
+  assert.deepStrictEqual(d.renewals.items.map(x => x.id), ['B.6.01', 'B.6.04', 'B.6.05']);
+  // An RN account starts on Chapter B without anybody choosing it.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
+  assert.match(src, /if \(t === 'rn'\) return 'B';/);
 });

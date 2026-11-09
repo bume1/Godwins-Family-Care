@@ -22,6 +22,10 @@
 <body>
 <div id="root"></div>
 <script src="/session-guard.js"></script>
+<script src="/staff-nav.js"></script>
+<!-- The shared clock (the caregiver schedule component, staff mode). -->
+<script src="/components/caregiver-schedule.js"></script>
+<script type="text/babel" src="/account-cards.js"></script>
 <script type="text/babel" src="/my-pay.js"></script>
 <script type="text/babel" src="/my-gfc.js"></script>
 <script type="text/babel">
@@ -50,7 +54,7 @@ function App() {
   const home = profile.isLiaison ? null : profile.isClinician ? { href: '/clinical', label: 'Clinical Workspace' } : { href: '/login', label: 'Portal Hub' };
   const signOut = () => { try { localStorage.clear(); } catch (e) { /* private mode */ } window.location.replace('/login'); };
   // The phone menu fits five; everything else is a tile on Home.
-  const phoneTabs = sections.filter(s => !['account', 'onboarding', 'team'].includes(s.id)).slice(0, 5);
+  const phoneTabs = sections.filter(s => !['account', 'onboarding'].includes(s.id)).slice(0, 5);
 
   return (
     <Shell sections={sections} phoneTabs={phoneTabs} view={view} go={go} name={profile.name} typeLabel={profile.typeLabel}

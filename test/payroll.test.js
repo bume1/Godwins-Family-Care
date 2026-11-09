@@ -132,7 +132,7 @@ const log = (id, d, mins) => ({ id, caregiver_id: 'cg1', client_id: 'c1', shift_
 
 test('a run pays completed caregiver shifts at their rate, with overtime, and taxes each line', () => {
   const g = engine.gatherItems({ period, users: [cgUser], profilesById: new Map([['cg1', cgProfile]]), timeLogs: [log('a', '2026-11-02', 480), log('b', '2026-11-03', 480), log('c', '2026-11-04', 480), log('d', '2026-11-05', 480), log('e', '2026-11-06', 600)],
-    shifts: [], visitTimings: [], staffEntries: [], imeCases: [], paidRefs: new Set(), localDate: ld, resolvePayRate: (u) => ({ rate: u.payRate, source: 'base' }) });
+    shifts: [], visitTimings: [], imeCases: [], paidRefs: new Set(), localDate: ld, resolvePayRate: (u) => ({ rate: u.payRate, source: 'base' }) });
   const run = engine.buildRun({ period, settings: { frequency: 'biweekly', gaSutaRatePct: 2.7 }, people: [{ user: cgUser, profile: cgProfile }], gathered: g, ytdByUser: new Map(), tables: TABLES });
   const w = run.workers[0];
   assert.equal(w.earnings.find(e => e.code === 'regular').amountCents, 42 * 1800);
@@ -144,7 +144,7 @@ test('a run pays completed caregiver shifts at their rate, with overtime, and ta
 });
 
 test('hours already paid are never paid twice, and a shift with no rate is named, not paid at zero', () => {
-  const g = engine.gatherItems({ period, users: [cgUser], profilesById: new Map(), timeLogs: [log('a', '2026-11-02', 480), log('b', '2026-11-03', 480)], shifts: [], visitTimings: [], staffEntries: [], imeCases: [],
+  const g = engine.gatherItems({ period, users: [cgUser], profilesById: new Map(), timeLogs: [log('a', '2026-11-02', 480), log('b', '2026-11-03', 480)], shifts: [], visitTimings: [], imeCases: [],
     paidRefs: new Set(['log:a']), localDate: ld, resolvePayRate: () => ({ rate: null, source: 'unset' }) });
   assert.equal((g.byUser.get('cg1') || []).length, 0);
   assert.equal(g.skipped.length, 1);
@@ -251,7 +251,8 @@ function harness(user, store = new Map()) {
   const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); } };
   const acts = [];
   const users = [{ id: 'own', role: 'admin', name: 'Owner', email: 'o@x' }, { id: 'cg1', role: 'vendor', licenseLevel: 'pca', name: 'Pat Care', email: 'p@x', payRate: 18 },
-    { id: 'cg2', role: 'vendor', licenseLevel: 'pca', name: 'Sam Aide', email: 's@x', payRate: 20 }];
+    { id: 'cg2', role: 'vendor', licenseLevel: 'pca', name: 'Sam Aide', email: 's@x', payRate: 20 },
+    { id: 'st1', role: 'user', name: 'Dee Examiner', email: 'd@x', employmentType: '1099' }];
   const routes = require('../routes/payroll')({
     db, env: ENV, payrollKey: 'k'.repeat(40), logActivity: async (...a) => acts.push(a), getUsers: async () => users,
     authenticateToken: (req, res, next) => { req.user = users.find(u => u.id === user); next(); },
@@ -339,13 +340,43 @@ test('the automations take the Apps Script\'s key and only draft', async () => {
 test('a contractor invoice number is never reused, and a non-contractor cannot invoice', async () => {
   const store = new Map();
   const { app } = harness('cg1', store);
+  const st = harness('st1', store);
   const body = { invoiceNo: 'A-1', periodStart: '2026-11-01', periodEnd: '2026-11-14', lines: [{ serviceDate: '2026-11-02', description: 'Exam', unit: 'exam', qty: 1, rate: '300' }] };
   assert.equal((await req(app, 'POST', '/api/my/contractor-invoices', body)).body.code, 'CI_NOT_CONTRACTOR');
+  // A caregiver stays W-2 even if a stored profile says 1099.
   store.set('payroll_profiles', { cg1: { ...cgProfile, workerType: '1099' } });
-  assert.equal((await req(app, 'POST', '/api/my/contractor-invoices', body)).body.invoice.totalCents, 30000);
-  assert.equal((await req(app, 'POST', '/api/my/contractor-invoices', body)).body.code, 'CI_NUMBER_USED');
+  assert.equal((await req(app, 'POST', '/api/my/contractor-invoices', body)).body.code, 'CI_NOT_CONTRACTOR');
+  // 1099 comes from the user record (User Management), with no payroll profile saved.
+  assert.equal((await req(st.app, 'POST', '/api/my/contractor-invoices', body)).body.invoice.totalCents, 30000);
+  assert.equal((await req(st.app, 'POST', '/api/my/contractor-invoices', body)).body.code, 'CI_NUMBER_USED');
 });
 
 test('a paid time log is locked against edits', () => {
   assert.match(read('routes/scheduling.js'), /if \(log\.payroll_run_id\) \{\n\s+return \{ error: \{ status: 409,[^\n]*code: 'TIME_LOG_PAYROLL_LOCKED' \} \};/);
+});
+
+test('W-2 staff time on the shared clock is paid at their payroll rate; a salaried person\'s is not paid twice', () => {
+  const staffLog = (id, uid) => ({ id, caregiver_id: uid, client_id: null, shift_id: null, kind: 'staff', clock_in_at: '2026-11-03T13:00:00Z', clock_out_at: '2026-11-03T21:00:00Z', total_minutes: 480 });
+  const profilesById = new Map([['rn1', { userId: 'rn1', workerType: 'W2', payType: 'hourly', hourlyRateCents: 4000 }], ['ad1', { userId: 'ad1', workerType: 'W2', payType: 'salary', salaryAnnualCents: 5200000 }]]);
+  const g = engine.gatherItems({ period, users: [{ id: 'rn1' }, { id: 'ad1' }], profilesById, timeLogs: [staffLog('s1', 'rn1'), staffLog('s2', 'ad1')], shifts: [], visitTimings: [], imeCases: [],
+    paidRefs: new Set(), localDate: ld, resolvePayRate: () => { throw new Error('a staff row never uses the caregiver rate'); } });
+  assert.deepEqual(g.byUser.get('rn1').map(i => [i.ref, i.minutes, i.rateCents, i.source]), [['log:s1', 480, 4000, 'Staff time']]);
+  assert.equal(g.byUser.get('ad1'), undefined);
+});
+
+test('W-2 or 1099 has one home: the user record wins over the payroll profile, and the payroll page cannot contradict it', async () => {
+  assert.equal(pp.withEmploymentType({ workerType: 'W2' }, { employmentType: 'HYBRID' }).workerType, 'HYBRID');
+  assert.equal(pp.withEmploymentType({ workerType: '1099' }, {}).workerType, '1099', 'unset on the user: the profile is the fallback');
+  assert.equal(pp.withEmploymentType({ workerType: '1099', isCaregiver: true }, { employmentType: '1099' }).workerType, 'W2');
+  const { app } = harness('own');
+  let r = await req(app, 'PUT', '/api/payroll/admin/people/st1', { workerType: 'W2' });
+  assert.equal(r.body.code, 'EMPLOYMENT_TYPE_ON_USER');
+  r = await req(app, 'PUT', '/api/payroll/admin/people/st1', { hourlyRate: '50' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.profile.workerType, '1099');
+});
+
+test('there is one staff clock (main\'s): payroll adds no clock of its own', () => {
+  const src = read('routes/payroll.js') + read('public/my-pay.js') + read('payrollEngine.js');
+  assert.doesNotMatch(src, /staff_time_entries|\/api\/my\/clock|staffEntries/);
 });

@@ -290,7 +290,7 @@ test('a community care liaison lands in My GFC and sees only the enrollment summ
   assert.strictEqual(f.role, 'liaison');
   assert.strictEqual(f.hasClinicalAccess, false);
   assert.strictEqual(at.landingFor(f), '/my');
-  assert.deepStrictEqual(at.hubTilesFor(f), [], 'no hub, no clinical workspace');
+  assert.deepStrictEqual(at.hubTilesFor(f).map(x => x.id), ['myGfc'], 'the hub offers only My GFC, never the clinical workspace');
   assert.ok(require('../config').MFA_REQUIRED_ROLES.includes('liaison'), 'two-step sign-in: they read client names');
   const h = await mount(t);
   h.as(LIAISON);
@@ -329,4 +329,17 @@ test('the portal page and the ways into it', () => {
   const page = read('my.html');
   assert.match(page, /<script src="\/session-guard\.js"><\/script>/);
   for (const f of ['my.html', 'my-gfc.js']) assert.ok(!/drive_file_id|driveFileId/.test(read(f)), `${f} never handles a Drive id`);
+});
+
+test('the request user carries employmentType, or the W-2 clock refuses every W-2 person', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = src.indexOf('      req.user = {');
+  const body = src.slice(at, src.indexOf('};', at));
+  assert.ok(at > 0 && /employmentType: freshUser\.employmentType \|\| null/.test(body));
+});
+
+test('the private home care P&P is in the policies of RNs and caregivers, not clinicians or the office', () => {
+  const ids = (ty) => portal.policiesFor(ty).map(p => p.id);
+  assert.ok(ids('rn').includes('PHC_MANUAL') && ids('caregiver').includes('PHC_MANUAL'));
+  assert.ok(!ids('provider').includes('PHC_MANUAL') && !ids('admin').includes('PHC_MANUAL'));
 });

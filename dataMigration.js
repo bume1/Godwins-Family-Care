@@ -105,7 +105,6 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'payroll_settings', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_tax_tables', phi: false, owner: 'payroll 11/2026', note: 'staged until the owner approves' },
   { key: 'payroll_runs', phi: false, owner: 'payroll 11/2026', note: 'draft, approved (frozen), paid; liabilities and payment confirmations' },
-  { key: 'staff_time_entries', phi: false, owner: 'payroll 11/2026', note: 'the staff clock: admin, training, clinical, exam time' },
   { key: 'contractor_invoices', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_tax_payments', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_filing_confirmations', phi: false, owner: 'payroll 11/2026' },

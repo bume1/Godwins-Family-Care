@@ -82,6 +82,9 @@
     .item .dot{width:22px;height:22px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px}
     .item .t{flex:1;min-width:0} .item .t b{font-weight:500}
     .item .meta{font-size:12.5px;color:var(--mut)}
+    .tasks{margin-top:6px;font-size:13px;color:var(--mut);line-height:1.6;overflow-wrap:anywhere}
+    .tasks .th{font-size:11px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--navy);margin-top:6px}
+    .tasks .th:first-child{margin-top:0} .tasks i{font-size:14px;vertical-align:-2px}
     .grid2{display:grid;grid-template-columns:1.6fr 1fr;gap:16px}
     .drawer-bg{position:fixed;inset:0;background:rgba(2,42,56,.35);z-index:20}
     .drawer{position:fixed;top:0;right:0;bottom:0;width:min(520px,100vw);background:#fff;z-index:21;padding:22px;overflow:auto;box-shadow:-8px 0 30px rgba(0,0,0,.12)}
@@ -116,6 +119,7 @@
 <body>
 <div id="root"></div>
 <script src="/session-guard.js"></script>
+<script src="/staff-nav.js"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 
@@ -168,6 +172,12 @@ const STATUS = {
 const ACTION_WORD = { SUBMIT: 'Sends', SIGN: 'Signs', ACKNOWLEDGE: 'Acknowledges', COMPLETE: 'Completes', VERIFY: 'Verifies',
   RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off' };
 const done = (s) => s === 'COMPLETE' || s === 'NOT_APPLICABLE';
+// Who does a step, in one wording for the side panel and the list alike.
+const stepWho = (s, subjectName, viewerIsSubject) => (s.hers ? (viewerIsSubject ? 'You' : (subjectName || 'New hire')) : s.actorLabel);
+// "You sends" reads wrong: the second person takes the bare verb.
+const YOU_WORD = { SUBMIT: 'send', SIGN: 'sign', ACKNOWLEDGE: 'acknowledge', COMPLETE: 'complete', VERIFY: 'verify',
+  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off' };
+const stepVerb = (s, viewerIsSubject) => (s.hers && viewerIsSubject ? YOU_WORD[s.action] : ACTION_WORD[s.action].toLowerCase());
 
 const Pill = ({ status }) => <span className={`pill p-${status}`}>{STATUS[status] ? STATUS[status].label : status}</span>;
 
@@ -225,7 +235,65 @@ const PATHS = {
   expiry: (w, i) => w.office ? `/api/onboarding/admin/people/${w.userId}/items/${i}/expiry` : `/api/onboarding/me/items/${i}/expiry`,
   renew: (w, i) => w.office ? `/api/onboarding/admin/people/${w.userId}/items/${i}/renew` : `/api/onboarding/me/items/${i}/renew`,
   recheck: (w, m) => w.office ? `/api/onboarding/admin/people/${w.userId}/modules/${m}/recheck` : `/api/onboarding/me/modules/${m}/recheck`,
-  recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`
+  recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`,
+  courseCert: (w, col, c) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate` : `/api/onboarding/me/courses/${col}/${c}/certificate`,
+  courseCertFile: (w, col, c, f) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate/${f}` : `/api/onboarding/me/courses/${col}/${c}/certificate/${f}`,
+  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`
+};
+
+// ---- Care Courses training (caregivers, owner 2026-11-09) --------------------
+// Care Courses has no link to a single video, so each collection links its
+// page; each course is proven by its certificate, uploaded here.
+const CourseCollection = ({ col, base, office, onChanged }) => {
+  const [busy, setBusy] = useState(''); const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
+  const send = async (courseId, file) => {
+    if (!file) return;
+    setBusy(courseId); setErr(''); setMsg('');
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      await call(PATHS.courseCert(base, col.id, courseId), { method: 'POST', body: fd });
+      setMsg('Certificate received.'); await onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  const sendBack = async (courseId) => {
+    const reason = window.prompt('Why is this certificate being sent back?');
+    if (!reason) return;
+    try { await call(PATHS.courseReturn(base, col.id, courseId), { method: 'POST', body: { reason } }); await onChanged(); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card">
+      <div className="card-h"><h3 style={{ margin: 0 }}>{col.title}</h3><span>{col.totalHours ? `${col.hoursDone} of ${col.totalHours} hours · ` : ''}{col.coursesDone} of {col.coursesTotal} courses</span></div>
+      <div className="bar"><span style={{ width: `${Math.round((col.totalHours ? col.hoursDone / col.totalHours : col.coursesDone / col.coursesTotal) * 100)}%` }} /></div>
+      <p style={{ fontSize: 14, margin: '10px 0' }}>
+        Take each course on Care Courses, then upload its certificate of completion here.
+        {col.beforeClientHours ? ` The first ${col.beforeClientHours} hours are needed before you serve a client; the rest within ${col.withinMonths} months.` : col.cycle === 'initial' ? ' Required for every caregiver.' : ` This is your ${col.cycle} annual training.`}
+      </p>
+      {col.beforeClientHours && <div className={col.readyForClients ? 'ok' : 'note'}>{col.readyForClients ? `${col.beforeClientHours} hours done: ready to serve clients on this requirement.` : `${col.beforeClientHours - col.hoursDone > 0 ? (col.beforeClientHours - col.hoursDone) : 0} more hours before serving clients.`}</div>}
+      {col.url && <a className="btn gold sm" href={col.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />Open the Courses</a>}
+      {err && <div className="err">{err}</div>}{msg && <div className="ok">{msg}</div>}
+      <div style={{ marginTop: 10 }}>
+        {col.courses.map(c => (
+          <div key={c.id} className="item" style={{ cursor: 'default', alignItems: 'flex-start' }}>
+            <span className="dot" style={{ width: 22, height: 22, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: c.done ? 'var(--green)' : '#fff', color: '#fff', border: c.done ? 'none' : '1.5px solid #9AA5AB', flex: 'none' }}>{c.done && <i className="ti ti-check" />}</span>
+            <div className="t" style={{ flex: 1 }}>
+              <b>{c.title}</b>
+              <div className="meta">{c.hours ? `${c.hours} ${c.hours === 1 ? 'hour' : 'hours'}` : 'Care Courses module'}{c.done ? ` · certificate on file ${fmtDate(c.at)}` : ''}</div>
+              {c.url && <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13 }}><i className="ti ti-external-link" /> Open this course</a>}
+              {c.returned && <div className="err" style={{ marginTop: 4 }}>Sent back: {c.returned.reason}</div>}
+              {c.files.map(f => <div key={f.id} style={{ fontSize: 13 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.courseCertFile(base, col.id, c.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a></div>)}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <label className="btn ghost sm" style={{ cursor: 'pointer' }}>
+                {busy === c.id ? 'Uploading…' : (c.done ? 'Replace' : 'Upload Certificate')}
+                <input type="file" accept="application/pdf,image/jpeg,image/png" style={{ display: 'none' }} disabled={!!busy} onChange={e => send(c.id, e.target.files[0])} />
+              </label>
+              {office && c.done && <button className="btn ghost sm" onClick={() => sendBack(c.id)}>Send Back</button>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 };
 
 // ---- renewals and re-checks (both views) ------------------------------------
@@ -369,11 +437,11 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         ) : (
           <div>
-            <label className="f">Steps</label>
+            {item.steps.length > 0 && <label className="f">Steps</label>}
             <div className="steps">
               {item.steps.map(s => (
                 <div key={s.index} className={`step ${s.done ? 'done' : ''}`}>
-                  <div><b>{s.hers ? (viewerIsSubject ? 'You' : (subject || 'New hire')) : s.actorLabel}</b> {ACTION_WORD[s.action].toLowerCase()}</div>
+                  <div><b>{stepWho(s, subject, viewerIsSubject)}</b> {stepVerb(s, viewerIsSubject)}</div>
                   {s.done && <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>
                     {fmtDate(s.at)} · {s.filedBy === 'OFFICE_ON_BEHALF' ? (viewerIsSubject ? `Filed by ${s.byName} for you` : `Filed by ${s.byName} on her behalf`) : s.byName}
                     {s.source && ` · Checked: ${s.source} on ${fmtDate(s.verifiedOn)}`}
@@ -408,6 +476,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               ))}
             </div>
           </div>
+        )}
+
+        {item.link && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
+
+        {item.packet && item.packet.length > 0 && (
+          <div><label className="f">From the welcome packet</label>
+            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen.</div>
+            <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
+              <li key={r.kind}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b></li>
+            ))}</ul></div>
         )}
 
         {item.elements && item.elements.length > 0 && (
@@ -573,7 +651,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>Clinician, Employed (W-2){t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison', H: 'Student or Extern', R1: 'Supervising Physician (Georgia)' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ PLACEMENT: 'Educational placement, unpaid', '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -581,7 +659,10 @@ const Person = ({ userId, onBack }) => {
           </div>
         </div>
         <div className="tabs">
-          {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']].map(([k, l]) =>
+          {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']]
+            // Credentialing and readiness are the clinician chapters'. A contracted
+            // clinician (D) gets only the non-clinical modules her chapter names.
+            .filter(([k]) => k === 'training' ? (['C', 'D', 'E'].includes(t.chapter.id) || (t.trainingCourses || []).length > 0) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
             <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}
         </div>
       </div>
@@ -598,11 +679,12 @@ const Person = ({ userId, onBack }) => {
           </div>
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
             {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}</div>
-          {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.number === 5 ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
+          {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
-            <div key={i.id} className="item" onClick={() => setOpenItem(i.id)}>
+            <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
               <Dot status={i.status} />
-              <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div></div>
+              <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div>
+                <ItemTasks item={i} subjectName={String(t.person.name || '').split(' ')[0]} viewerIsSubject={false} office /></div>
               <Chips item={i} />
               <Turn item={i} subjectName={t.person.name} viewerIsSubject={false} />
               <Pill status={i.status} />
@@ -627,7 +709,8 @@ const Person = ({ userId, onBack }) => {
         </div>
       )}
       {tab === 'readiness' && <div className="card"><div className="card-h"><h2>Ready to See Patients</h2></div><Readiness track={t} base={base} office onChanged={load} /></div>}
-      {tab === 'training' && (
+      {tab === 'training' && (t.trainingCourses || []).map(col => <CourseCollection key={col.id} col={col} base={base} office onChanged={load} />)}
+      {tab === 'training' && t.modules.length > 0 && (
         <div className="card"><div className="card-h"><h2>Training</h2><span>{t.modules.filter(m => m.complete).length} of {t.modules.length} complete</span></div>
           {t.phases.filter(p => t.modules.some(m => m.phase === p.id)).map(p => (
             <div key={p.id}><h3 style={{ margin: '10px 0 6px' }}>Phase {p.number} · {p.label}</h3>
@@ -653,11 +736,13 @@ const LINE_CHOICES = [
   ['IME', 'Veteran Exams (IME)'], ['PRIVATE_PAY', 'In-Home Primary Care · Private Pay Patients'],
   ['INSURED', 'In-Home Primary Care · Insurance Billing'], ['BEHAVIORAL', 'Psych Care']
 ];
+// Which Playbook chapter a person is onboarded on.
+const CHAPTER_CHOICES = [['A', 'Caregiver, employed (companion, PCA or licensed nursing)'], ['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)'], ['H', 'Student or extern on an educational placement (unpaid)'], ['R1', 'Supervising (delegating) physician, Georgia']];
 const Setup = ({ userId, inputs, onSaved }) => {
-  const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '' }, inputs || {}));
+  const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '', chapter: 'C', workState: 'GA' }, inputs || {}));
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
   const toggle = (k, v) => setF(Object.assign({}, f, { [k]: f[k].includes(v) ? f[k].filter(x => x !== v) : f[k].concat([v]) }));
-  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license' })[k]}</label>;
+  const flag = (k) => <label style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!f[k]} onChange={e => setF(Object.assign({}, f, { [k]: e.target.checked }))} />{({ controlledSubstances: 'Prescribes controlled substances', prescribes: 'Prescribes', drives: 'Drives to patients', telehealth: 'Does telehealth visits', outsideEmployment: 'Holds another clinical job', residenceUnderPhc: 'Works in client homes under the private home care license', entersResidence: 'Role involves entering a client residence', federallyReimbursed: 'Role supports a Medicare or Medicaid service line', variableComp: 'Has a commission or bonus', supervisoryDelegation: 'Clinical Director delegates supervisory visits and caregiver competency checks', directsTraining: 'Directs the forty-hour PCA training program', baaRequired: 'Access or role requires a business associate agreement', fortyHourRoute: 'Qualifies as a PCA through the GFC forty-hour training program' })[k]}</label>;
   const save = async () => {
     setErr(''); setMsg('');
     try { await call(`/api/onboarding/admin/people/${userId}/inputs`, { method: 'PUT', body: f }); setMsg('Saved. Her checklist updates to match.'); await onSaved(); } catch (e) { setErr(e.message); }
@@ -665,12 +750,44 @@ const Setup = ({ userId, inputs, onSaved }) => {
   return (
     <div className="card"><div className="card-h"><h2>Setup</h2></div>
       {err && <div className="err">{err}</div>}{msg && <div className="ok">{msg}</div>}
-      <label className="f">What she will cover</label>
-      {LINE_CHOICES.map(([k, l]) => <label key={k} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.serviceLines.includes(k)} onChange={() => toggle('serviceLines', k)} />{l}</label>)}
-      <label className="f">Certifications</label>
-      {['FNP', 'PMHNP'].map(c => <label key={c} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.credentials.includes(c)} onChange={() => toggle('credentials', c)} />{c}</label>)}
-      <label className="f">Her situation</label>
-      {['prescribes', 'controlledSubstances', 'drives', 'telehealth', 'outsideEmployment', 'residenceUnderPhc'].map(k => <div key={k}>{flag(k)}</div>)}
+      <label className="f">Onboarding track</label>
+      <select value={f.chapter} onChange={e => setF(Object.assign({}, f, { chapter: e.target.value }))} style={{ maxWidth: 520 }}>
+        {CHAPTER_CHOICES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+      {f.chapter === 'A' ? <>
+        <label className="f">Classification</label>
+        <select value={f.caregiverClass || ''} onChange={e => setF(Object.assign({}, f, { caregiverClass: e.target.value || null }))} style={{ maxWidth: 360 }}>
+          <option value="">Not set yet</option>
+          <option value="COMPANION">Companion or sitter</option>
+          <option value="PCA">Personal care assistant</option>
+          <option value="NURSING">Licensed nursing (LPN or RN)</option>
+        </select>
+        <label className="f">Their situation</label>
+        {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+        {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
+      </> : f.chapter === 'H' ? <>
+        <label className="f">The placement</label>
+        {['entersResidence'].map(k => <div key={k}>{flag(k)}</div>)}
+        <div className="note">If the student's work mainly benefits GFC, covers service hours or contributes to billable visits, they are an employee: choose the caregiver track instead.</div>
+      </> : f.chapter === 'R1' ? <>
+        <div className="note">Georgia only. North Carolina and Alabama requirements are not verified and are not built.</div>
+      </> : f.chapter === 'B' ? <>
+        <label className="f">Her responsibilities</label>
+        {['supervisoryDelegation', 'directsTraining'].map(k => <div key={k}>{flag(k)}</div>)}
+      </> : ['C', 'D', 'E'].includes(f.chapter) ? <>
+        <label className="f">What she will cover</label>
+        {LINE_CHOICES.map(([k, l]) => <label key={k} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.serviceLines.includes(k)} onChange={() => toggle('serviceLines', k)} />{l}</label>)}
+        <label className="f">Certifications</label>
+        {['FNP', 'PMHNP'].map(c => <label key={c} style={{ display: 'flex', gap: 8, fontSize: 14, margin: '6px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={f.credentials.includes(c)} onChange={() => toggle('credentials', c)} />{c}</label>)}
+        <label className="f">Her situation</label>
+        {(f.chapter === 'D' ? ['prescribes', 'controlledSubstances', 'drives', 'telehealth', 'residenceUnderPhc', 'baaRequired'] : ['prescribes', 'controlledSubstances', 'drives', 'telehealth', 'outsideEmployment', 'residenceUnderPhc']).map(k => <div key={k}>{flag(k)}</div>)}
+      </> : <>
+        <label className="f">State they physically work from</label>
+        <input type="text" maxLength={2} value={f.workState || 'GA'} onChange={e => setF(Object.assign({}, f, { workState: e.target.value.toUpperCase() }))} style={{ maxWidth: 90 }} />
+        <div style={{ fontSize: 13, color: 'var(--mut)' }}>Outside Georgia adds work-state registration before their first paid hour.</div>
+        <label className="f">Their role</label>
+        {(f.chapter === 'G' ? ['entersResidence', 'federallyReimbursed'] : ['entersResidence', 'federallyReimbursed', 'variableComp']).map(k => <div key={k}>{flag(k)}</div>)}
+      </>}
       <label className="f">Start date</label>
       <input type="date" value={f.startDate || ''} onChange={e => setF(Object.assign({}, f, { startDate: e.target.value }))} style={{ maxWidth: 220 }} />
       <div style={{ marginTop: 12 }}><button className="btn" onClick={save}>Save Setup</button></div>
@@ -690,7 +807,7 @@ const Overview = ({ onOpen }) => {
   return (
     <div>
       <div className="stats">
-        <Stat icon="ti-users" bg="#E6EEF2" color="var(--navy)" n={d.counts.active} l="Onboarding Now" s="All clinicians" />
+        <Stat icon="ti-users" bg="#E6EEF2" color="var(--navy)" n={d.counts.active} l="Onboarding Now" s="Clinicians and the admin team" />
         <Stat icon="ti-building" bg="#FFF6E2" color="#A97E2B" n={d.counts.waitingOnOffice} l="Waiting on the Office" s="Items to verify or record" />
         <Stat icon="ti-user" bg="#E6EEF2" color="var(--navy)" n={d.counts.waitingOnStaff} l="Waiting on Staff" s="Items for the new hires" />
         <Stat icon="ti-arrow-back-up" bg="#FBE9E5" color="var(--red)" n={d.counts.returned} l="Returned" s="Sent back with a reason" />
@@ -718,7 +835,7 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.notStarted.length > 0 && (
         <div className="card"><div className="card-h"><h2>Clinicians Not Yet Set Up</h2></div>
-          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
+          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track', H: 'Student track', R1: 'Supervising physician track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>
@@ -772,9 +889,29 @@ const Library = () => {
 
 // One row of her checklist. At module scope: a component declared inside
 // another is a new identity every render and remounts.
-const ItemRow = ({ i, onOpen }) => (
-  <div className="item" onClick={() => onOpen(i.id)}>
-    <Dot status={i.status} /><div className="t"><b>{i.title}</b>{i.status === 'SUBMITTED' && <div className="meta">With the office</div>}{i.returned && <div className="meta" style={{ color: 'var(--red)' }}>{i.returned.reason}</div>}</div>
+// The item's tasks as sub-bullets under its title (owner, 2026-11-09): who
+// does each step, the documents to sign, what is checked, and the files on
+// record. Read-only; clicking the item still opens the panel to act.
+const Tick = ({ on }) => <i className={`ti ${on ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: on ? 'var(--green)' : '#9AA5AB' }} />;
+const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
+  const H = ({ children }) => (office ? <div className="th">{children}</div> : null);
+  const steps = item.acknowledgments ? [] : item.steps;
+  const files = item.files || [];
+  return (
+    <div className="tasks">
+      {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
+      {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
+      {(item.elements || []).length > 0 && <><H>What is checked</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
+      {item.courses && <div><Tick on={item.courses.hoursDone >= item.courses.totalHours} /> {item.courses.hoursDone} of {item.courses.totalHours} hours of courses</div>}
+      {files.length > 0 && <><H>On file</H>{files.map(f => <div key={f.id}><i className="ti ti-file-text" /> {f.name}{f.status === 'received' ? ' (with the office for review)' : ''}</div>)}</>}
+    </div>
+  );
+};
+
+const ItemRow = ({ i, onOpen, expanded }) => (
+  <div className="item" onClick={() => onOpen(i.id)} style={expanded ? { alignItems: 'flex-start' } : undefined}>
+    <Dot status={i.status} /><div className="t"><b>{i.title}</b>{i.status === 'SUBMITTED' && <div className="meta">With the office</div>}{i.returned && <div className="meta" style={{ color: 'var(--red)' }}>{i.returned.reason}</div>}
+      {expanded && <ItemTasks item={i} viewerIsSubject office={false} />}</div>
     <i className="ti ti-chevron-right" />
   </div>
 );
@@ -850,9 +987,9 @@ const Mine = ({ viewer, track, onChanged }) => {
                 <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'}`} />
               </div>
               {isOpen && <div className="acc-b">
-                {its.length === 0 && ph.number === 5 && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
-                {its.length === 0 && ph.number !== 5 && <div className="note">Nothing here for you to do.</div>}
-                {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} />)}
+                {its.length === 0 && ph.readiness && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
+                {its.length === 0 && !ph.readiness && <div className="note">Nothing here for you to do.</div>}
+                {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} expanded />)}
               </div>}
             </div>
           );
@@ -860,9 +997,10 @@ const Mine = ({ viewer, track, onChanged }) => {
       </>}
       {tab === 'training' && <>
         <h2 style={{ marginBottom: 10 }}>Your Training</h2>
+        {(t.trainingCourses || []).map(col => <CourseCollection key={col.id} col={col} base={base} office={false} onChanged={onChanged} />)}
         <Rechecks track={t} base={base} onChanged={onChanged} />
         {t.checks && !t.checks.ok && <div className="note">Some check questions could not be loaded just now.</div>}
-        {t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
+        {t.modules.length > 0 && t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
         {t.modules.filter(m => !m.complete).slice(0, 8).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
         {t.modules.filter(m => m.complete).length > 0 && <><h3 style={{ margin: '14px 0 6px' }}>Completed</h3>{t.modules.filter(m => m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</>}
       </>}
@@ -875,7 +1013,7 @@ const Mine = ({ viewer, track, onChanged }) => {
           </div>))}
       </>}
       <div className="bottom">
-        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].map(([k, l, ic]) =>
+        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0 || (t.trainingCourses || []).length > 0).map(([k, l, ic]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><i className={`ti ${ic}`} />{l}</button>)}
       </div>
       {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} />}
@@ -895,6 +1033,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>
           {mineTrack && <button className={view === 'mine' ? 'on' : ''} onClick={() => setView('mine')}><i className="ti ti-user" />My Onboarding</button>}
+          <button onClick={() => { window.location.href = '/login?hub=1'; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           <button onClick={() => { window.location.href = '/admin'; }}><i className="ti ti-arrow-left" />Admin Hub</button>
         </nav>
       </aside>

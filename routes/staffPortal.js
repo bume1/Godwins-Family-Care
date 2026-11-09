@@ -71,6 +71,12 @@ function policiesFor(type) {
     if (a.id === 'FIELD_ADDENDUM' && !field) continue;
     out.push({ id: a.id, title: a.title, version: a.version, fileId: a.driveFileIds[0] });
   }
+  // The private home care line works under the PHC P&P: its nurses and
+  // caregivers (Playbook B.5).
+  if (type === 'rn' || type === 'caregiver') {
+    const h = SOURCES.PHC_MANUAL;
+    out.push({ id: 'PHC_MANUAL', title: h.title, version: h.transcribedFromVersion, fileId: h.driveFileId });
+  }
   if (ADMIN_TEAM_TYPES.includes(type)) {
     const m = SOURCES.ADMIN_MANUAL;
     out.push({ id: 'ADMIN_MANUAL', title: m.title, version: m.transcribedFromVersion, fileId: m.driveFileId });
@@ -152,6 +158,7 @@ module.exports = function createStaffPortalRoutes(deps) {
       isAdmin: isAdminTeam(req.user),
       isCaregiver: type === 'caregiver',
       isLiaison: type === 'liaison',
+      employmentType: req.user.employmentType || null,
       isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess
     });
   });
@@ -412,6 +419,12 @@ module.exports = function createStaffPortalRoutes(deps) {
     const all = await profiles();
     const team = (await getUsers()).filter(u => audienceOf(u)).map(u => Object.assign({ id: u.id, name: u.name || u.email, type: audienceOf(u), typeLabel: TYPE_LABELS[audienceOf(u)] }, publicBio(all[u.id])));
     return res.json({ team });
+  });
+  // One person's headshot and bio, for their User Management form (admin team).
+  router.get('/api/my/admin/bios/:userId', authenticateToken, requireAdmin, async (req, res) => {
+    const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));
+    if (!u) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    return res.json(Object.assign({ id: u.id, name: u.name || u.email, typeLabel: TYPE_LABELS[audienceOf(u)] }, publicBio((await profiles())[u.id])));
   });
   router.get('/api/my/admin/bios/:userId/headshot', authenticateToken, requireAdmin, async (req, res) => {
     const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));

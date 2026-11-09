@@ -123,6 +123,10 @@ const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit l
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
 const staffPortalRoutes = require('./routes/staffPortal'); // My GFC, the staff portal (2026-11-08)
+// W-2 staff clock in through My GFC; 1099 staff come in from other platforms
+// later (owner, 2026-11-08).
+// HYBRID: employed (W-2) for clinical care and contracted (1099) for exams.
+const EMPLOYMENT_TYPES = Object.freeze(['W2', '1099', 'HYBRID']);
 const payrollRoutes = require('./routes/payroll'); // in-app payroll, wired into My GFC's Hours & Pay (2026-11-08)
 const payrollTaxTables = require('./payrollTaxTables');
 const quickbooks = require('./quickbooks');   // QuickBooks Online: private home care and payroll only (2026-11-08)
@@ -2486,6 +2490,9 @@ const authenticateToken = async (req, res, next) => {
         // Clinical (FNP/RN) access — gates the clinician workspace (Session 4.1)
         hasClinicalAccess: freshUser.hasClinicalAccess || false,
         licenseLevel: freshUser.licenseLevel || null,
+        // W-2 or 1099 (owner, 2026-11-08): W-2 staff without shifts clock in
+        // on the shared clock; read fresh so a change applies on the next request.
+        employmentType: freshUser.employmentType || null,
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
@@ -3344,7 +3351,7 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail
+      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail, employmentType
     } = req.body;
     let { email, password } = req.body;
 
@@ -3443,6 +3450,9 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       // gates nothing — so both of these are structured fields, admin-set, and
       // nothing infers either of them.
       prescriberCredential: controlled.PRESCRIBER_CREDENTIALS.includes(String(prescriberCredential || '')) ? String(prescriberCredential) : null,
+      // W-2 staff clock in through the app; 1099 staff do not (owner,
+      // 2026-11-08). Unset until an admin chooses.
+      employmentType: EMPLOYMENT_TYPES.includes(String(employmentType || '')) ? String(employmentType) : null,
       deaNumber: controlled.normalizeDea(deaNumber),
       deaSchedules: controlled.normalizeDeaSchedules(deaSchedules),
       deaExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(String(deaExpiresAt || '')) ? String(deaExpiresAt) : null,
@@ -3870,12 +3880,66 @@ app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
 // account; signatures, OpenEMR and account changes stay blocked. The new
 // session is tied to the admin's own session and capped at 60 minutes.
 // ============================================================
-const viewAsDestination = (u) => {
-  const home = appLinks.homeFor(u);
-  if (home !== appLinks.PATHS.LOGIN) return home;
-  // Managers and care coordinators land on the Portal Hub (accountTypes.js).
-  return appLinks.PATHS.LOGIN;
+// THE account profile a sign-in hands the browser: who they are, their account
+// type, where they land and which hub tiles they see. Shared by the real
+// sign-in and by "View as", so viewing as someone shows exactly what their
+// own sign-in would (owner, 2026-11-08: View as had been handing the page a
+// cut-down copy, so a manager's hub showed "No Portals Available").
+const loginProfileFor = (user) => {
+  const isManager = user.isManager || false;
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    // Manager flag - provides limited admin access
+    isManager: isManager,
+    hasImplementationsAccess: user.hasImplementationsAccess || false,
+    // Where this account lands and which hub tiles it sees, answered ONCE on
+    // the server (accountTypes.js) so the login page cannot drift from it.
+    accountType: accountTypes.accountTypeOf(user),
+    clinicalRole: clinicalRoles.resolveClinicalRole(user),
+    landing: accountTypes.landingFor(user),
+    hubTiles: accountTypes.hubTilesFor(user),
+    hubAreas: accountTypes.hubAreasFor(user),
+    assignedProjects: user.assignedProjects || [],
+    assignedClients: user.assignedClients || [],
+    // GFC role fields — the login page's directDestination() routes on
+    // these, so they MUST be in the login response (their absence sent
+    // clinicians to an empty Portal Hub).
+    hasClinicalAccess: user.hasClinicalAccess || false,
+    licenseLevel: user.licenseLevel || null,
+    openEmrProviderId: user.openEmrProviderId || null,
+    familyOfClientId: user.familyOfClientId || null,
+    familyIsPoa: user.familyIsPoa || false,
+    // A family account linked to several patients chooses one in the portal.
+    familyLinkCount: familyLinks.linksOf(user).length,
+    // Password reset flag
+    requirePasswordChange: user.requirePasswordChange || false
+  };
 };
+
+// The Portal Hub's areas for whoever is asking (owner, 2026-11-09), read from
+// the FRESH user record so a type changed this morning shows on the next load.
+// The hub (login.html) and the shared staff bar (staff-nav.js) both read this,
+// so neither page decides who sees what. An account with no hub areas (a
+// client, a family contact) gets an empty list, never a 403: the bar simply
+// does not draw.
+app.get('/api/staff/hub', authenticateToken, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const me = users.find(u => String(u.id) === String(req.user.id)) || req.user;
+    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me) });
+  } catch (err) {
+    console.error('Staff hub read failed:', err.message);
+    return res.status(500).json({ error: 'The Portal Hub could not be loaded.', code: 'STAFF_HUB_UNAVAILABLE' });
+  }
+});
+
+// Where their OWN sign-in would send them (accountTypes.landingFor), so a
+// manager lands on their Portal Hub, not the Clinical Workspace. `null` means
+// the hub, which lives at /login.
+const viewAsDestination = (u) => accountTypes.landingFor(u) || appLinks.PATHS.LOGIN;
 app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -3890,7 +3954,13 @@ app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, asyn
     const minutes = impersonation.IMPERSONATION_MINUTES;
     const token = jwt.sign({ id: target.id, email: target.email, name: target.name, role: target.role, sid: row.id }, JWT_SECRET, { expiresIn: `${minutes}m` });
     await logActivity(req.user.id, req.user.name || req.user.email, 'impersonation_started', 'user', target.id, { targetName: target.name || target.email, targetRole: target.role, sid: row.id, expiresAt: row.absoluteExpiresAt });
-    const user = { id: target.id, email: target.email, name: target.name, role: target.role, slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }), licenseLevel: target.licenseLevel || null };
+    // Their own profile, as their sign-in would hand it over, with two
+    // differences: a password-change prompt is skipped (changing their
+    // password is blocked while viewing as them), and a client's portal
+    // fields ride along as they do on a client sign-in.
+    const user = { ...loginProfileFor(target), requirePasswordChange: false,
+      ...(target.role === config.ROLES.CLIENT ? { practiceName: target.practiceName, isNewClient: target.isNewClient } : {}),
+      slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }) };
     res.json({ token, user, destination: viewAsDestination(target), actingAs: impersonation.describe(row, target) });
   } catch (error) {
     console.error('impersonation start failed:', error.message);
@@ -3934,36 +4004,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.accountStatus === 'inactive') {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
-    const isManager = user.isManager || false;
-    const userResponse = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      // Manager flag - provides limited admin access
-      isManager: isManager,
-      hasImplementationsAccess: user.hasImplementationsAccess || false,
-      // Where this account lands and which hub tiles it sees, answered ONCE on
-      // the server (accountTypes.js) so the login page cannot drift from it.
-      accountType: accountTypes.accountTypeOf(user),
-      clinicalRole: clinicalRoles.resolveClinicalRole(user),
-      landing: accountTypes.landingFor(user),
-      hubTiles: accountTypes.hubTilesFor(user),
-      assignedProjects: user.assignedProjects || [],
-      assignedClients: user.assignedClients || [],
-      // GFC role fields — the login page's directDestination() routes on
-      // these, so they MUST be in the login response (their absence sent
-      // clinicians to an empty Portal Hub).
-      hasClinicalAccess: user.hasClinicalAccess || false,
-      licenseLevel: user.licenseLevel || null,
-      openEmrProviderId: user.openEmrProviderId || null,
-      familyOfClientId: user.familyOfClientId || null,
-      familyIsPoa: user.familyIsPoa || false,
-      // A family account linked to several patients chooses one in the portal.
-      familyLinkCount: familyLinks.linksOf(user).length,
-      // Password reset flag
-      requirePasswordChange: user.requirePasswordChange || false
-    };
+    const userResponse = loginProfileFor(user);
     // Include client-specific fields
     if (user.role === config.ROLES.CLIENT) {
       userResponse.practiceName = user.practiceName;
@@ -4804,6 +4845,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // and for a DEA registration that is a prescriber who can no longer record
       // a controlled substance with nobody having decided that.
       prescriberCredential: u.prescriberCredential || null,
+      employmentType: u.employmentType || null,
       deaNumber: u.deaNumber || null,
       deaSchedules: Array.isArray(u.deaSchedules) ? u.deaSchedules : [],
       deaExpiresAt: u.deaExpiresAt || null,
@@ -4884,7 +4926,7 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa
+      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa, employmentType
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -5013,6 +5055,13 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
     // somebody else, and storing nothing while the form says saved leaves an
     // admin believing a prescriber is registered when the record says they are
     // not. Blank CLEARS, which is how a lapsed registration is removed.
+    if (employmentType !== undefined) {
+      const wantedType = employmentType === null || employmentType === '' ? null : String(employmentType);
+      if (wantedType !== null && !EMPLOYMENT_TYPES.includes(wantedType)) {
+        return res.status(400).json({ error: 'employmentType must be W2 or 1099 (or empty).', code: 'EMPLOYMENT_TYPE_INVALID' });
+      }
+      users[idx].employmentType = wantedType;
+    }
     if (prescriberCredential !== undefined) {
       const wanted = prescriberCredential === null || prescriberCredential === '' ? null : String(prescriberCredential);
       if (wanted !== null && !controlled.PRESCRIBER_CREDENTIALS.includes(wanted)) {
@@ -11723,6 +11772,36 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRea
 // POST /api/clinical/patients/:clientId/appointments — create on the
 // provider's OpenEMR calendar. Double-booking is rejected against the LIVE
 // OpenEMR list (the availability authority) with a specific 409.
+// CLINICIAN AVAILABILITY (owner, 2026-11-08). Clinicians submit availability
+// the same way caregivers do (the shared schedule component, same records). A
+// visit booked outside the availability in force is WARNED, never blocked:
+// home visits move, and a hard block would push bookings straight into
+// OpenEMR, where the day-before reminders never fire. Booking anyway needs a
+// reason, which is recorded. No availability on file is a warning only.
+async function clinicianAvailabilityCheck(providerId, body, minutes, req) {
+  const users = await getUsers();
+  const clinician = users.find(u => u && String(u.openEmrProviderId || '') === String(providerId || ''));
+  if (!clinician || !body.date || !body.startTime) return { ok: true };
+  const sch = require('./schedulingRepository');
+  const start = practiceTime.instantFromZoned(String(body.date), String(body.startTime).slice(0, 5));
+  if (!start) return { ok: true };
+  const end = new Date(Date.parse(start) + (Number(minutes) || 30) * 60000).toISOString();
+  const rows = (await db.get('caregiver_availability')) || [];
+  const v = sch.availabilityVerdict(rows, clinician.id, start, end);
+  const name = clinician.name || 'This clinician';
+  if (v.status === 'NONE') return { ok: true, warning: `${name} has no availability on file yet.` };
+  if (v.status === 'INSIDE') return { ok: true };
+  const reason = String(body.outsideAvailabilityReason || '').trim();
+  if (!reason) {
+    return { ok: false, status: 409, body: {
+      error: `That time is outside ${name}'s availability. To book it anyway, say why.`,
+      code: 'APPOINTMENT_OUTSIDE_AVAILABILITY', clinicianName: name } };
+  }
+  await logActivity(req.user.id, req.user.name, 'appointment_outside_availability', 'appointment', null,
+    { clinicianId: clinician.id, date: body.date, startTime: body.startTime, reason: reason.slice(0, 500) });
+  return { ok: true, warning: `Booked outside ${name}'s availability: ${reason.slice(0, 200)}` };
+}
+
 app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -11770,6 +11849,10 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     // clinician. Say what is actually wrong, in words that are not about POS.
     const apptSetupGap = appointmentSetupGap(built.fields);
     if (apptSetupGap) return res.status(409).json(apptSetupGap);
+
+    const avail = await clinicianAvailabilityCheck(providerId, body, built.minutes, req);
+    if (!avail.ok) return res.status(avail.status).json(avail.body);
+    if (avail.warning) apptWarnings.push(avail.warning);
 
     const rows = await emr.listAppointmentRows();
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
@@ -11996,6 +12079,8 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     }
     const rsSetupGap = appointmentSetupGap(built.fields);
     if (rsSetupGap) return res.status(409).json(rsSetupGap);
+    const rsAvail = await clinicianAvailabilityCheck(providerId, body, built.minutes, req);
+    if (!rsAvail.ok) return res.status(rsAvail.status).json(rsAvail.body);
 
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
       providerId, date: body.date, startTime: body.startTime,
@@ -12018,6 +12103,7 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     // migrateAppointmentLinkage exists, one layer along.
     await migrateVideoLink(row.pc_eid, newEid);
     const rsWarnings = [];
+    if (rsAvail.warning) rsWarnings.push(rsAvail.warning);
     let rsVideo = null;
     const rsClient = (await clinicalClientsByPuuid()).get(String(row.puuid)) || null;
     if (clinicalRepo.locationNeedsVideoRoom(rsLocation)) {

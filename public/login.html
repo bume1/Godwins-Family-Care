@@ -46,6 +46,10 @@
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
   </style>
   <script src="/mfa-step.js"></script>
+  <!-- The Portal Hub lives on this page once someone is signed in, so it
+       carries the session guard too: idle sign-out and the "View as" banner
+       with its Exit button (owner, 2026-11-08). It does nothing with no token. -->
+  <script src="/session-guard.js"></script>
   <!-- The office phone lives in ONE place: ORG in consent-text.js. -->
   <script src="/consent-text.js"></script>
 </head>
@@ -306,58 +310,38 @@
       const isVendor = user.role === 'vendor';
       const isClient = user.role === 'client';
 
-      // THE TILES COME FROM THE SERVER (accountTypes.hubTilesFor, owner
-      // 2026-10-15), on the login response, so this page never decides who
-      // sees what. Only a Super Admin sees the Admin Hub, the Service Portal
-      // and the Client Portal Admin. A manager and a care coordinator see the
-      // Clinical Workspace (a manager only if granted it) and Private Home
-      // Care, which opens to Caregiver Management and Caregiver Scheduling.
-      // A user object saved before this change carries no tiles; it falls
-      // back to the same rule so nobody signed in sees an empty hub.
-      const TILE_STYLE = {
-        admin: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Central administration, user management, and settings' },
-        clinical: { icon: Icons.clinical, color: 'from-teal-600 to-primary-700', description: 'Charts, visits, orders, billing and the clinical inbox' },
-        privateHomeCare: { icon: Icons.service, color: 'from-teal-500 to-teal-700', description: 'Caregiver management and caregiver scheduling' },
-        service: { icon: Icons.service, color: 'from-success-500 to-success-600', description: 'Submit and track service reports for field operations' },
-        clientPortalAdmin: { icon: Icons.clientPortal, color: 'from-warning-500 to-warning-600', description: 'Manage client portal content, settings, and communications' },
-        enrollment: { icon: Icons.clientPortal, color: 'from-primary-500 to-teal-600', description: 'Intake, consents, documents, approvals and patient accounts' },
-        messages: { icon: Icons.portal, color: 'from-primary-500 to-primary-700', description: 'Support conversations and admin broadcasts' },
-        billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600', description: 'Claims waiting on billing, patient statements, copays and home care hours' },
-        users: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Add and edit caregivers, clients and family contacts' },
-        myGfc: { icon: Icons.portal, color: 'from-primary-600 to-primary-800', description: 'Your onboarding, documents, policies and shared folders' },
-        people: { icon: Icons.admin, color: 'from-primary-600 to-teal-600', description: 'User management and staff onboarding' },
+      // THE AREAS COME FROM THE SERVER (accountTypes.hubAreasFor, owner
+      // 2026-11-09), so this page never decides who sees what. They arrive on
+      // the login response to paint at once, and are re-read from
+      // /api/staff/hub so a change to someone's account shows on the next
+      // visit. A saved login from before areas existed paints nothing until
+      // that read lands, rather than guessing.
+      const LINK_STYLE = {
+        myGfc: { icon: Icons.portal, color: 'from-primary-600 to-primary-800' },
+        messages: { icon: Icons.portal, color: 'from-primary-500 to-primary-700' },
+        users: { icon: Icons.admin, color: 'from-primary-500 to-primary-700' },
         onboarding: { icon: Icons.clientPortal, color: 'from-teal-600 to-primary-700' },
         caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
-        caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' }
+        caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' },
+        enrollment: { icon: Icons.clientPortal, color: 'from-primary-500 to-teal-600' },
+        clientAccounts: { icon: Icons.clientPortal, color: 'from-warning-500 to-warning-600' },
+        clinical: { icon: Icons.clinical, color: 'from-teal-600 to-primary-700' },
+        billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600' },
+        admin: { icon: Icons.admin, color: 'from-primary-500 to-primary-700' },
+        audit: { icon: Icons.admin, color: 'from-primary-700 to-primary-900' },
+        service: { icon: Icons.service, color: 'from-success-500 to-success-600' },
+        clientPortalAdmin: { icon: Icons.clientPortal, color: 'from-warning-500 to-warning-600' }
       };
-      const PHC_CHILDREN = [
-        { id: 'caregiverManagement', name: 'Caregiver Management', path: '/caregivers', description: 'Escalations, visit log review, incidents, documents and the caregiver feed' },
-        { id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling', description: 'Shifts, availability, time tracking, payroll and client locations' }
-      ];
-      const fallbackTiles = () => {
-        const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PHC_CHILDREN };
-        const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
-        const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
-        const billing = { id: 'billing', name: 'Billing', path: '/billing' };
-        const people = { id: 'people', name: 'People', children: [
-          { id: 'users', name: 'User Management', path: '/admin?view=users', description: 'Add and edit staff, caregivers, clients and family contacts' },
-          ...((isAdmin || user.isManager) ? [{ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding', description: 'Who is onboarding, whose turn it is, credentialing and readiness' }] : [])
-        ] };
-        const myGfc = { id: 'myGfc', name: 'My GFC', path: '/my' };
-        if (isAdmin) return [myGfc, { id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billing,
-          { id: 'service', name: 'Service Portal', path: '/service-portal' },
-          { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
-        if (user.isManager) return [myGfc, ...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' }, people];
-        return [];
-      };
-      const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();
-      const availablePortals = tiles.map(t => ({ ...(TILE_STYLE[t.id] || { icon: Icons.portal, color: 'from-teal-500 to-teal-600' }), ...t,
-        description: t.description || (TILE_STYLE[t.id] || {}).description || '' }));
-      const [openGroup, setOpenGroup] = useState(null);
-      const group = openGroup ? availablePortals.find(p => p.id === openGroup) : null;
-      const shown = group
-        ? (group.children || []).map(c => ({ ...(TILE_STYLE[c.id] || {}), ...c }))
-        : availablePortals;
+      const [areas, setAreas] = useState(() => (Array.isArray(user.hubAreas) ? user.hubAreas : null));
+      const [areasErr, setAreasErr] = useState('');
+      useEffect(() => {
+        fetch('/api/staff/hub', { headers: { Authorization: `Bearer ${token}` } })
+          .then(r => r.ok ? r.json() : Promise.reject(new Error('The Portal Hub could not be loaded. Refresh the page.')))
+          .then(d => { setAreas(Array.isArray(d.areas) ? d.areas : []); setAreasErr(''); })
+          .catch(e => { if (!Array.isArray(user.hubAreas)) setAreasErr(e.message); });
+      }, [token]);
+      const shownAreas = (areas || []).map(a => ({ ...a,
+        links: (a.links || []).map(l => ({ ...(LINK_STYLE[l.id] || { icon: Icons.portal, color: 'from-teal-500 to-teal-600' }), ...l })) }));
 
       const openPortal = (path) => {
         localStorage.setItem('portal_token', token);
@@ -403,42 +387,38 @@
 
           {/* Main Content */}
           <main className="max-w-6xl mx-auto px-4 py-8">
-            {/* Dynamic Banner Header */}
-            <div className="relative rounded-2xl overflow-hidden shadow-lg mb-10" style={{minHeight: '160px'}}>
-              <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-admin.webp)', backgroundPosition: 'center 18%'}}></div>
-              <div className="absolute inset-0 bg-gradient-to-r from-primary-700/90 via-primary-600/70 to-transparent"></div>
-              <div className="relative p-5 sm:p-8 flex items-center min-h-[130px] sm:min-h-[160px]">
-                <div className="text-white">
-                  <h2 className="text-2xl sm:text-3xl font-bold drop-shadow-sm">Your Portals</h2>
-                  <p className="mt-2 text-white/80 text-sm">Select a portal to access Godwins Family Care services</p>
-                </div>
-              </div>
-            </div>
+            {/* The hub banner is GFC's own brand graphic (owner, 2026-11-09),
+                shown whole: it carries its own words, so nothing is laid over
+                it and it is never cropped. */}
+            <img src="/banners/banner-hub.webp" className="block w-full h-auto rounded-2xl shadow-lg mb-10"
+              alt="Godwins Family Care. Care That Sees You. Physician and FNP-led care organization providing Private Home Care, Home-Based Primary Care, and Independent Medical Examinations to home-bound residents and veterans in Metro Atlanta." />
 
-            {group && (
-              <div className="mb-4 flex items-center gap-3">
-                <button onClick={() => setOpenGroup(null)} className="px-3 py-1.5 text-sm text-primary-600 hover:bg-primary-50 rounded-lg">&larr; All Portals</button>
-                <h2 className="text-lg font-bold text-accent">{group.name}</h2>
-              </div>
-            )}
-            {shown.length > 0 ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                {shown.map((portal, idx) => (
-                  <button
-                    key={portal.id}
-                    onClick={() => portal.children ? setOpenGroup(portal.id) : openPortal(portal.path)}
-                    className="portal-card bg-white rounded-2xl shadow-lg p-4 sm:p-6 text-left hover:shadow-xl animate-fade-in"
-                    style={{ animationDelay: `${idx * 0.1}s` }}
-                  >
-                    <div className={`w-16 h-16 rounded-xl bg-gradient-to-br ${portal.color} flex items-center justify-center text-white mb-4`}>
-                      {portal.icon}
+            {areasErr && <div className="mb-6 p-4 rounded-xl bg-red-50 text-red-700 text-sm">{areasErr}</div>}
+            {areas === null && !areasErr && <p className="text-gray-500 text-sm">Loading your areas…</p>}
+            {areas !== null && shownAreas.length > 0 && (
+              <div className="space-y-10">
+                {shownAreas.map(area => (
+                  <section key={area.id} aria-labelledby={`area-${area.id}`}>
+                    <h2 id={`area-${area.id}`} className="text-lg font-bold text-accent mb-4">{area.name}</h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+                      {area.links.map(portal => (
+                        <button key={portal.id} onClick={() => openPortal(portal.path)}
+                          className="portal-card bg-white rounded-2xl shadow-lg p-4 sm:p-5 text-left hover:shadow-xl flex gap-4 items-start">
+                          <div className={`w-12 h-12 flex-none rounded-xl bg-gradient-to-br ${portal.color} flex items-center justify-center text-white`}>
+                            {portal.icon}
+                          </div>
+                          <div>
+                            <h3 className="text-base font-bold text-accent">{portal.name}</h3>
+                            <p className="text-gray-600 text-sm mt-1">{portal.description}</p>
+                          </div>
+                        </button>
+                      ))}
                     </div>
-                    <h3 className="text-xl font-bold text-accent mb-2">{portal.name}</h3>
-                    <p className="text-gray-600 text-sm">{portal.description}</p>
-                  </button>
+                  </section>
                 ))}
               </div>
-            ) : (
+            )}
+            {areas !== null && shownAreas.length === 0 && (
               <div className="text-center bg-white rounded-2xl shadow-lg p-12">
                 <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                   <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -668,10 +648,13 @@
       // `landing`, so it falls back to the same rule.
       const directDestination = (u) => {
         if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
+        // The sidebar's "Portal Hub" button (owner, 2026-11-09) comes here on
+        // purpose, so it stays on the hub rather than bouncing straight back.
+        if (new URLSearchParams(window.location.search).get('hub') === '1') return null;
         if (Object.prototype.hasOwnProperty.call(u, 'landing')) return u.landing || null;
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
-        if (u.isManager) return null; // manager and care coordinator → the hub
-        if (u.hasClinicalAccess || u.role === 'caseManager') return '/clinical';
+        // Every internal staff member lands on the hub (owner, 2026-11-09).
+        if (u.isManager || u.hasClinicalAccess || u.role === 'caseManager') return null;
         if (u.role === 'vendor' && u.licenseLevel) return '/caregiver';
         if (u.role === 'liaison') return '/my'; // Community Care Liaison → My GFC
         return null; // no access anywhere → hub renders its empty state

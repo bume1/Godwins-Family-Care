@@ -709,9 +709,15 @@ test('the staff supervision page exists and is reachable from the admin hub', ()
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'caregivers.html')),
     'the caregiver supervision page exists');
   assert.match(routeSrc, /router\.get\('\/caregivers'/, 'the page is served');
+  // Since 2026-11-09 the way in is the Portal Hub's People area and the
+  // shared staff bar on every staff page, the Admin Hub included.
+  const accountTypes = require('../accountTypes');
+  for (const t of ['admin', 'manager', 'coordinator']) {
+    assert.ok(accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).some(l => l.path === '/caregivers'),
+      `${t}: an office account can reach it without knowing the URL — the gap this closes`);
+  }
   const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
-  assert.match(hub, /href="\/caregivers"/,
-    'an admin can reach it without knowing the URL — the gap this closes');
+  assert.match(hub, /<script src="\/staff-nav\.js"><\/script>/, 'the Admin Hub carries the staff bar that links to it');
 });
 
 test('the supervision page reads the staff queues and never posts a visit log', () => {

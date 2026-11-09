@@ -58,6 +58,12 @@ if (process.env.NODE_ENV === 'production') {
 // ---- Server ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_PARSER_LIMIT = process.env.BODY_PARSER_LIMIT || '50mb';
+// Staff onboarding documents (owner, 2026-11-08): 25 MB, larger than the
+// app-wide 10 MB, because a scanned license packet or a photographed welcome
+// packet runs large. Every onboarding door reads this one value: clinician,
+// nurse, admin and liaison onboarding, caregiver documents, and the welcome
+// packet import. Patient and client uploads keep MAX_FILE_SIZE.
+const STAFF_DOCUMENT_MAX_SIZE = parseInt(process.env.STAFF_DOCUMENT_MAX_SIZE || String(25 * 1024 * 1024), 10); // 25MB
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || String(10 * 1024 * 1024), 10); // 10MB
 const MAX_CONCURRENT_UPLOADS = parseInt(process.env.MAX_CONCURRENT_UPLOADS || '5', 10);
 
@@ -438,6 +444,7 @@ module.exports = {
   // Server
   PORT,
   BODY_PARSER_LIMIT,
+  STAFF_DOCUMENT_MAX_SIZE,
   MAX_FILE_SIZE,
   MAX_CONCURRENT_UPLOADS,
   // Cache

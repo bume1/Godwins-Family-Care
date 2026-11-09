@@ -38,7 +38,7 @@ const minutesBetween = (a, b) => {
  * Every payable hour item in the period, keyed to a person.
  * Returns Map<userId, items[]>, plus `skipped` with reasons.
  */
-function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimings, staffEntries, imeCases, paidRefs, localDate, resolvePayRate }) {
+function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimings, imeCases, paidRefs, localDate, resolvePayRate }) {
   const byUser = new Map();
   const skipped = [];
   const add = (uid, it) => {
@@ -55,6 +55,17 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     if (paidRefs && paidRefs.has(`log:${l.id}`)) continue;   // paid already: never looked at again
     const d = localDate(l.clock_in_at);
     if (!inPeriod(d)) continue;
+    // W-2 staff clock on the same clock as caregivers (main, 2026-11-08):
+    // a row with no shift and no client. They are paid at their payroll
+    // profile's hourly rate; a salaried person's clocked time is covered by
+    // the salary.
+    if (l.kind === 'staff' || (!l.shift_id && !l.client_id)) {
+      const p = profilesById.get(String(l.caregiver_id));
+      if (p && p.payType === 'salary') continue;
+      if (Number(l.total_minutes) > MAX_ITEM_MINUTES) { skipped.push({ userId: l.caregiver_id, ref: `log:${l.id}`, reason: 'Clocked time is too long to be one shift. Correct it in Time Logs.' }); continue; }
+      add(String(l.caregiver_id), { ref: `log:${l.id}`, kind: 'hours', source: 'Staff time', date: d, minutes: Number(l.total_minutes), rateCents: (p && p.hourlyRateCents) || 0, rateSource: 'profile' });
+      continue;
+    }
     const cg = userById.get(String(l.caregiver_id));
     const r = resolvePayRate(cg, l.client_id, shiftById.get(String(l.shift_id)) || null);
     if (r.rate === null) { skipped.push({ userId: l.caregiver_id, ref: `log:${l.id}`, reason: 'No pay rate set (shift, client or base).' }); continue; }
@@ -74,17 +85,6 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     else add(String(t.byId), { ref: `visit:${t.id}`, kind: 'hours', source: 'Clinical visit', date: d, minutes: mins, rateCents: (p && p.hourlyRateCents) || 0 });
   }
 
-  for (const e of staffEntries || []) {
-    if (!e || !e.clockOutAt || e.voided) continue;
-    if (paidRefs && paidRefs.has(`clock:${e.id}`)) continue;
-    const d = localDate(e.clockInAt);
-    if (!inPeriod(d)) continue;
-    const p = profilesById.get(String(e.userId));
-    if (p && p.payType === 'salary') continue;
-    const mins = minutesBetween(e.clockInAt, e.clockOutAt);
-    if (!mins || mins > MAX_ITEM_MINUTES) { skipped.push({ userId: e.userId, ref: `clock:${e.id}`, reason: 'Clock-in and clock-out do not make a usable length.' }); continue; }
-    add(String(e.userId), { ref: `clock:${e.id}`, kind: 'hours', source: `Staff time: ${e.workType}`, date: d, minutes: mins, rateCents: (p && p.hourlyRateCents) || 0 });
-  }
 
   // A completed exam pays its examiner once. W-2 examiners are paid here;
   // 1099 (and HYBRID, contractor for exams) are paid through contractor pay.

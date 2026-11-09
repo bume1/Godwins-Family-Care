@@ -202,6 +202,19 @@ function defaultProfile(user, { relationship } = {}) {
   };
 }
 
+// W-2 / 1099 / both has ONE home: the user record's employmentType, set in
+// User Management (main, 2026-11-08), which the staff clock also reads. The
+// payroll profile follows it; its own workerType is only the fallback for an
+// account nobody has set yet. A caregiver is always W-2.
+const EMPLOYMENT_TYPES = Object.freeze(Object.values(WORKER_TYPES));
+function withEmploymentType(profile, user) {
+  if (!profile) return profile;
+  if (profile.isCaregiver) return profile.workerType === WORKER_TYPES.W2 ? profile : { ...profile, workerType: WORKER_TYPES.W2 };
+  const et = user && user.employmentType;
+  if (!EMPLOYMENT_TYPES.includes(et) || profile.workerType === et) return profile;
+  return { ...profile, workerType: et };
+}
+
 const isEmployee = (p) => p && (p.workerType === WORKER_TYPES.W2 || p.workerType === WORKER_TYPES.HYBRID);
 const isContractor = (p) => p && (p.workerType === WORKER_TYPES.C1099 || p.workerType === WORKER_TYPES.HYBRID);
 
@@ -267,5 +280,5 @@ module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature,
   normalizeW4, normalizeG4, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
-  defaultProfile, isEmployee, isContractor, missingForPay, checklist, publicProfile
+  defaultProfile, withEmploymentType, isEmployee, isContractor, missingForPay, checklist, publicProfile
 };

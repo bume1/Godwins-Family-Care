@@ -240,8 +240,9 @@ module.exports = function createWelcomePacketRoutes(deps) {
         return res.status(400).json({ error: 'File data is not valid base64.', code: 'DOC_NOT_BASE64' });
       }
       if (!buffer.length) return res.status(400).json({ error: 'That file is empty.', code: 'DOC_EMPTY' });
-      if (buffer.length > config.MAX_FILE_SIZE) {
-        return res.status(400).json({ error: 'File exceeds 10 MB limit.', code: 'DOC_TOO_LARGE' });
+      const maxPacket = config.STAFF_DOCUMENT_MAX_SIZE || config.MAX_FILE_SIZE;
+      if (buffer.length > maxPacket) {
+        return res.status(400).json({ error: `File exceeds the ${Math.round(maxPacket / (1024 * 1024))} MB limit.`, code: 'DOC_TOO_LARGE' });
       }
       // Typed by its BYTES, never by what the caller declared.
       const sniffed = detectFileType(buffer);

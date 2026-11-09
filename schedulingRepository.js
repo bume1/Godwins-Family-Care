@@ -658,6 +658,11 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'clockInAt', header: 'Clock In' },
   { key: 'clockOutAt', header: 'Clock Out' },
   { key: 'hours', header: 'Hours' },
+  // The SCHEDULED length beside the paid length, and whether they agree.
+  // Hours are still the clock's answer; these two columns exist so a schedule
+  // corrected after the visit cannot disagree with the pay in silence.
+  { key: 'scheduledHours', header: 'Scheduled Hours' },
+  { key: 'hoursMatch', header: 'Hours vs Schedule' },
   { key: 'originalHours', header: 'Original Hours' },
   { key: 'adjustedBy', header: 'Adjusted By' },
   { key: 'approvedBy', header: 'Approved By' },
@@ -679,8 +684,17 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   // have to infer that difference from a flags column.
   { key: 'source', header: 'Source' },
   { key: 'enteredBy', header: 'Entered By' },
+  // A shift edited after it started or concluded stamps the time log. Payroll
+  // reads that stamp now, so "this row's schedule was changed on the 14th by
+  // the office" is on the sheet rather than only in the activity log.
+  { key: 'scheduleCorrected', header: 'Schedule Corrected' },
+  { key: 'scheduleCorrectedBy', header: 'Corrected By' },
   { key: 'payPeriodStart', header: 'Pay Period Start' },
-  { key: 'payPeriodEnd', header: 'Pay Period End' }
+  { key: 'payPeriodEnd', header: 'Pay Period End' },
+  // Owner, 2026-11-08: W-2 staff clock in on the same clock, so payroll says
+  // which kind of worker each row is. LAST, so a payroll import mapped by
+  // column position keeps working.
+  { key: 'workerType', header: 'Worker Type' }
 ]);
 
 // ---- Client billing CSV ----------------------------------------------------
@@ -699,11 +713,14 @@ const BILLING_CSV_COLUMNS = Object.freeze([
   { key: 'clockInAt', header: 'Actual In' },
   { key: 'clockOutAt', header: 'Actual Out' },
   { key: 'hours', header: 'Billable Hours' },
+  { key: 'scheduledHours', header: 'Scheduled Hours' },
+  { key: 'hoursMatch', header: 'Hours vs Schedule' },
   { key: 'originalHours', header: 'Original Hours' },
   { key: 'adjustedBy', header: 'Adjusted By' },
   { key: 'approvedBy', header: 'Approved By' },
   { key: 'adjustedAt', header: 'Adjusted At' },
   { key: 'adjustmentReason', header: 'Adjustment Reason' },
+  { key: 'scheduleCorrected', header: 'Schedule Corrected' },
   { key: 'verification', header: 'Visit Verification' },
   { key: 'documented', header: 'Visit Documented' }
 ]);
@@ -721,6 +738,11 @@ const CAREGIVER_HOURS_CSV_COLUMNS = Object.freeze([
   { key: 'clockInAt', header: 'Clock In' },
   { key: 'clockOutAt', header: 'Clock Out' },
   { key: 'hours', header: 'Hours' },
+  // The scheduled length, so a caregiver can see both figures on their own
+  // record. Deliberately NOT the 'Hours vs Schedule' column the payroll and
+  // billing sheets carry: "under by 0.50 h" on somebody's personal copy reads
+  // as an accusation, and this file exists for their files, not for a dispute.
+  { key: 'scheduledHours', header: 'Scheduled Hours' },
   { key: 'flags', header: 'Flags' },
   { key: 'edited', header: 'Adjusted by office' }
 ]);
@@ -759,6 +781,92 @@ function csvTime(value, onIsoDate) {
   const time = practiceTime.fmtTime(value);
   if (!onIsoDate || p.isoDate === onIsoDate) return time;
   return `${p.month}/${p.day} ${time}`;
+}
+
+// ---- WHAT THE EXPORTS MUST SAY ABOUT A CORRECTED SHIFT --------------------
+// Owner report, 2026-11-06: changes to shifts worked after they have started
+// or concluded must carry across to the payroll and billing exports, and they
+// were not matching.
+//
+// They were not, in three ways, and all three are the same shape: THE
+// CORRECTION IS RECORDED ON THE TIME LOG AND NEITHER EXPORT READ IT.
+//
+//  1. `applyShiftEdit` moves the log's `scheduled_start`/`scheduled_end` and
+//     stamps `schedule_corrected_at` + `schedule_corrected_by_name`. No
+//     export read either stamp, so a visit whose schedule had been corrected
+//     read exactly like one that never was.
+//  2. Hours come from the CLOCK, never the schedule. That rule is right — you
+//     pay for time worked, not time planned — but nothing said when the two
+//     disagreed, so a shift corrected on the board and not on the clock went
+//     on paying the old figure in silence. That is how somebody is overpaid.
+//  3. Re-deriving the flags REMOVES `late_clock_out`, so correcting the
+//     schedule deleted the one visible hint that the clock ran past the shift.
+//
+// The fix is to make the disagreement VISIBLE rather than to change what is
+// paid: the clock still decides the money. A reviewer can now see, per row,
+// the scheduled hours, whether they agree with the hours being paid, and when
+// and by whom the schedule was corrected.
+
+// Minutes in the SCHEDULED window, or null when there is no window.
+//
+// ⚠️ `new Date(null)` IS THE EPOCH, AND THE EPOCH IS FINITE, so `totalMinutes`
+// answers 0 — not null — for a log carrying no schedule at all. A scheduled
+// window read as "0 hours" would then report every such row as an overpayment
+// of its entire length. Empties are rejected before a Date is constructed.
+// Fourth occurrence of that trap in this repo (the availability matcher, the
+// shift-edit flag re-derivation, the stale-clock check, now here).
+function scheduledMinutes(log) {
+  const at = (v) => (v === null || v === undefined || v === '' ? NaN : new Date(v).getTime());
+  const a = at(log && log.scheduled_start);
+  const b = at(log && log.scheduled_end);
+  if (!isFinite(a) || !isFinite(b)) return null;
+  const mins = Math.round((b - a) / 60000);
+  return mins >= 0 ? mins : null;
+}
+
+// Does what is being paid agree with what was scheduled? Answers in words a
+// person running payroll can act on, never a bare number:
+//   ''                  there is no schedule to compare against
+//   'no hours recorded'  the visit has no clocked hours at all
+//   'match'              within the same grace the late/early flags use
+//   'over by 1.08 h'     paying MORE than the corrected schedule
+//   'under by 0.50 h'    paying LESS than it
+// The grace is the flags' own, so a row that reads 'match' here is a row that
+// earned no lateness flag either; two different answers to one question is how
+// a sheet stops being trusted.
+function hoursVsSchedule(log, graceMinutes = DEFAULT_GRACE_MINUTES) {
+  const planned = scheduledMinutes(log);
+  if (planned === null) return '';
+  const worked = log && log.total_minutes;
+  if (worked === null || worked === undefined) return 'no hours recorded';
+  const diff = Number(worked) - planned;
+  if (!isFinite(diff)) return '';
+  if (Math.abs(diff) <= graceMinutes) return 'match';
+  const h = Math.abs(Math.round((diff / 60) * 100) / 100).toFixed(2);
+  return diff > 0 ? `over by ${h} h` : `under by ${h} h`;
+}
+
+// A shift corrected onto a DIFFERENT Georgia day than it was clocked on.
+//
+// Both exports date a row by when the work was DONE — the clock — because
+// that is what a pay period and a service date mean, and re-bucketing a row
+// onto a day nobody worked would move real hours into the wrong pay period.
+// So the row is deliberately NOT moved. It is FLAGGED: either the date edit
+// was wrong or the clock was, and both of those want a person to look rather
+// than a silent re-file.
+function scheduleDateMoved(log) {
+  if (!log || !log.clock_in_at) return false;
+  const clocked = csvLocalDate(log.clock_in_at);
+  const planned = csvLocalDate(log.scheduled_start);
+  return !!(clocked && planned && clocked !== planned);
+}
+
+// The Georgia date a row belongs on: the clock when there is one, otherwise
+// the schedule. A visit nobody clocked into has only its scheduled date, and
+// before this it fell out of the date filter entirely — which is precisely how
+// a completed visit went missing from both sheets.
+function exportRowDate(log) {
+  return csvLocalDate(log && log.clock_in_at) || csvLocalDate(log && log.scheduled_start);
 }
 
 // RFC 4180 quoting. A field is quoted when it contains a comma, a quote, a
@@ -1539,9 +1647,27 @@ function buildBulkEditBody(shift, input) {
   return out;
 }
 
+// ---- Whether a person's availability covers a time -------------------------
+// Owner, 2026-11-08: clinicians submit availability the same way caregivers
+// do, and booking a clinical visit checks it. One answer for both:
+//   NONE     no availability on file
+//   INSIDE   the submission in force covers the whole visit
+//   OUTSIDE  it does not
+// The submission in force is the newest (availability is append-only).
+function availabilityVerdict(rows, personId, start, end) {
+  const mine = (rows || []).filter(r => r && String(r.caregiver_id) === String(personId))
+    .sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
+  const current = mine[0];
+  if (!current) return { status: 'NONE', submittedAt: null };
+  const covers = availabilityCoversShift({
+    effectiveFrom: current.effective_from, blackoutDates: current.blackout_dates || [], windows: current.windows || []
+  }, { start, end });
+  return { status: covers ? 'INSIDE' : 'OUTSIDE', submittedAt: current.submitted_at || null };
+}
+
 module.exports = {
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
-  validateAvailability, availabilityCoversShift, AVAILABILITY_CHANGE_LEAD_DAYS,
+  validateAvailability, availabilityCoversShift, availabilityVerdict, AVAILABILITY_CHANGE_LEAD_DAYS,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
@@ -1561,5 +1687,6 @@ module.exports = {
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
   PAYROLL_CSV_COLUMNS, BILLING_CSV_COLUMNS, CAREGIVER_HOURS_CSV_COLUMNS, csvCell, toPayrollCsv,
   csvLocalDate, csvDate, csvTime,
+  scheduledMinutes, hoursVsSchedule, scheduleDateMoved, exportRowDate,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest
 };

@@ -50,6 +50,8 @@ const { useState, useEffect, useCallback } = React;
 .mg-btn{width:auto;margin:0;border-radius:12px;padding:10px 16px;font-family:inherit;font-size:14.5px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;display:inline-flex;gap:7px;align-items:center;justify-content:center;text-decoration:none;box-shadow:0 6px 16px -8px rgba(3,61,80,.6);line-height:1.3}
 .mg-btn.mg-ghost{background:#fff;color:var(--navy);border:1.5px solid var(--edge2);box-shadow:none}
 .mg-btn.mg-warn{background:#fff;color:var(--red);border:1.5px solid rgba(181,70,46,.4);box-shadow:none}
+a.mg-btn,a.mg-btn:link,a.mg-btn:visited,a.mg-btn:hover{color:#fff;text-decoration:none}
+a.mg-btn.mg-ghost,a.mg-btn.mg-ghost:link,a.mg-btn.mg-ghost:visited,a.mg-btn.mg-ghost:hover{color:var(--navy)}
 .mg-btn.mg-sm{padding:7px 12px;font-size:13.5px;border-radius:10px} .mg-btn[disabled]{opacity:.5;cursor:not-allowed}
 .mg-pill{display:inline-flex;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600;white-space:nowrap;background:var(--wash);color:var(--navy)}
 .mg-pill.mg-ok{background:#e7f4ee;color:var(--green)} .mg-pill.mg-bad{background:#fdecea;color:var(--red)} .mg-pill.mg-wait{background:#FBF1DC;color:#6b5121}
@@ -221,7 +223,7 @@ function Documents({ docs, onError }) {
 // ---- Policies (live) --------------------------------------------------------------
 // Always the canonical copy in Drive, which the office updates in place. The
 // preview is Drive's own viewer, so it shows whatever version is current.
-function Policies({ policies }) {
+function Policies({ policies, isAdmin }) {
   const [open, setOpen] = useState(null);
   if (!policies) return <p className="mg-note">Loading…</p>;
   return (
@@ -244,7 +246,7 @@ function Policies({ policies }) {
           )}
         </div>
       ))}
-      <p className="mg-note" style={{ marginTop: 12 }}>These always open the current version in Google Drive. Sign in with your GFC Google account if Drive asks. Copies you signed are in My Documents.</p>
+      {isAdmin && <p className="mg-note" style={{ marginTop: 12 }}>These always open the current version in Google Drive. Sign in with your GFC Google account if Drive asks. Copies you signed are in My Documents.</p>}
     </div>
   );
 }
@@ -478,24 +480,22 @@ function BioEditor() {
   );
 }
 
-function TeamBios() {
-  const [team, setTeam] = useState(null); const [err, setErr] = useState('');
-  useEffect(() => { call('/api/my/admin/bios').then(d => setTeam(d.team)).catch(e => setErr(e.message)); }, []);
-  if (err) return <div className="mg-err">{err}</div>;
-  if (!team) return <p className="mg-note">Loading…</p>;
-  return team.map(p => (
-    <div className="mg-row" key={p.id} style={{ alignItems: 'flex-start' }}>
-      <AuthImage path={p.hasHeadshot ? `/api/my/admin/bios/${p.id}/headshot` : ''} version={p.updatedAt} alt={p.name} size={56} />
-      <div className="mg-grow">
-        <b>{p.name}</b>
-        <small>{p.title || p.typeLabel}</small>
-        <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginTop: 4, color: p.bio ? 'var(--ink)' : 'var(--mut)' }}>{p.bio || 'No bio yet.'}</div>
-      </div>
-      {p.hasHeadshot && <button className="mg-btn mg-ghost mg-sm" onClick={() => openFile(`/api/my/admin/bios/${p.id}/headshot`, `${p.name}.jpg`).catch(() => {})}>Download Photo</button>}
-    </div>
-  ));
-}
 
+
+// ---- The W-2 time clock -------------------------------------------------------
+// The SAME clock caregivers use (owner, 2026-11-08: "nothing should be
+// recreated"): the shared schedule component, mounted in staff mode, writing
+// the same time logs the admin corrects and exports on the scheduling board.
+function StaffClockMount() {
+  const id = 'mygfc-staff-clock';
+  useEffect(() => {
+    const lib = window.GFCCaregiverSchedule;
+    if (!lib) return undefined;
+    lib.mount(id, { authToken: getToken(), staffOnly: true });
+    return () => lib.unmount(id);
+  }, []);
+  return <div id={id} />;
+}
 
 // ---- A liaison's clients --------------------------------------------------------
 // The enrollment summary of each client assigned to this liaison: status, how
@@ -549,18 +549,24 @@ function LiaisonClients() {
 // look. A white sidebar on a computer, a white menu along the bottom of a
 // phone. `sections` fill the sidebar; `phoneTabs` fill the phone menu, which
 // only fits about five.
-function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra }) {
+// Back to the Portal Hub to reach other areas (owner, 2026-11-09). The query
+// keeps the hub from sending them straight back to their landing page.
+const PORTAL_HUB = '/login?hub=1';
+// `tag` names the area under the logo; the Admin Hub uses this same frame
+// (owner, 2026-11-09) and passes its own.
+function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra, tag = 'My GFC' }) {
   const isHome = view === 'home';
   return (
     <div className="mygfc">
       <div className="mg-shell">
         <aside className="mg-side">
           <img className="mg-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
-          <div className="mg-tag">My GFC</div>
+          <div className="mg-tag">{tag}</div>
           <nav>
             {sections.map(s => (
               <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
             ))}
+            <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           </nav>
           <div className="mg-foot">
             <b>{name}</b>{typeLabel}
@@ -597,9 +603,10 @@ const STAFF_SECTIONS = [
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text', short: 'Documents', subtitle: 'What you signed, and every file on record for you.' },
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders', short: 'Folders', subtitle: 'The Drive folders set up for your role.' },
-  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your pay stubs, pay setup and tax forms.' },
-  { id: 'account', label: 'Account', icon: 'ti-user-circle', subtitle: 'Your headshot, website bio and sign-in.' },
-  { id: 'team', label: 'Team Bios', icon: 'ti-users', adminTeam: true, subtitle: 'Headshots and bios for the website. Each person keeps their own up to date.' }
+  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your time clock, pay stubs, pay setup and tax forms.' },
+  // Headshots and bios are read by the admin team on each person's User
+  // Management form, not on a page here (owner, 2026-11-09).
+  { id: 'account', label: 'My Profile', icon: 'ti-user-circle', short: 'Profile', subtitle: 'Your headshot, website bio and sign-in.' }
 ];
 const staffSectionsFor = (profile) => STAFF_SECTIONS.filter(s => !s.adminTeam || (profile && profile.isAdmin));
 
@@ -644,7 +651,7 @@ function StaffTiles({ data, go, only, extra }) {
     { id: 'policies', el: <Tile key="policies" icon="ti-book" title="Policies" sub={policies && policies.some(p => p.signed && !p.signed.current) ? 'A policy was updated' : 'The current version of each policy'} onClick={() => go('policies')} /> },
     { id: 'folders', el: <Tile key="folders" icon="ti-folders" title="Shared Folders" sub={folders ? `${folders.length} assigned to you` : 'Drive folders for your role'} onClick={() => go('folders')} /> },
     { id: 'hours', el: <Tile key="hours" icon="ti-clock" title="Hours & Pay" sub={stubs && stubs.length ? `Last paid ${fmtDay(stubs[0].payDate)}` : 'Pay stubs'} onClick={() => go('hours')} /> },
-    { id: 'account', el: <Tile key="account" icon="ti-user-circle" title="Account" sub="Headshot, bio and sign-in" onClick={() => go('account')} /> }
+    { id: 'account', el: <Tile key="account" icon="ti-user-circle" title="My Profile" sub="Headshot, bio and sign-in" onClick={() => go('account')} /> }
   ];
   return <div className="mg-tiles">{extra}{all.filter(t => !only || only.includes(t.id)).map(t => t.el)}</div>;
 }
@@ -661,7 +668,7 @@ function StaffView({ view, data }) {
       </div>
     );
   }
-  if (view === 'policies') return <Section><Policies policies={policies} /></Section>;
+  if (view === 'policies') return <Section><Policies policies={policies} isAdmin={!!profile.isAdmin} /></Section>;
   if (view === 'folders') {
     return (
       <div>
@@ -673,11 +680,14 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
+        {!profile.isCaregiver && profile.employmentType === 'W2' && <Section title="Time Clock" sub="Clock in when you start work and out when you stop."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
+        {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected and exported for payroll in Caregiver Scheduling → Time Logs.</p><a className="mg-btn mg-ghost" href="/scheduling">Open Caregiver Scheduling</a></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
         {window.MyPay && <Section title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
-        {window.MyPay && !profile.isCaregiver && <Section title="Time Clock" sub="Clock admin, training and other time that is not a scheduled visit."><window.MyPay.StaffClock /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
         {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>
@@ -687,14 +697,14 @@ function StaffView({ view, data }) {
     return (
       <div>
         <Section title="Headshot and Bio" sub="Used for your profile on the GFC website."><BioEditor /></Section>
-        <Section title="Sign-in and Security">
-          <p style={{ marginTop: 0 }}>Change your password, set up two-step sign-in and see the devices you're signed in on.</p>
-          <a className="mg-btn" href="/account"><i className="ti ti-shield-lock" />Account & Security</a>
+        {/* The one account area (owner, 2026-11-09): the same cards /account
+            shows clients and family, from /account-cards.js. */}
+        <Section title="Sign-in and Security" sub="Your password, two-step sign-in, backup codes and the devices you're signed in on.">
+          {window.GFCAccount ? <window.GFCAccount.AccountCards /> : <p className="mg-note">Loading…</p>}
         </Section>
       </div>
     );
   }
-  if (view === 'team' && profile.isAdmin) return <Section><TeamBios /></Section>;
   return null;
 }
 

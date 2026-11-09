@@ -102,6 +102,9 @@ const SESSIONS = [
         return json({ message: 'Password changed successfully' });
       }
       if (p === '/api/emr/disconnect') return json({ ok: true, disconnected: true });
+      // Staff have one account area, My GFC → My Profile (owner, 2026-11-09);
+      // /account renders the cards for anyone /api/my/profile refuses.
+      if (p === '/api/my/profile') return who.staff ? json({ name: who.name }) : json({ error: 'My GFC is for GFC staff.', code: 'STAFF_PORTAL_STAFF_ONLY' }, 403);
       return json({});
     });
     await page.goto(base + '/account', { waitUntil: 'domcontentloaded' });
@@ -211,6 +214,19 @@ const SESSIONS = [
     !/Stop reminders|Turn (on|off) email/i.test(t));
   ok('no page errors (coordinator)', v.errs.length === 0, v.errs.join(' | '));
   await v.page.close();
+
+  // ---- a staff member is sent to the one account area -----------------------
+  {
+    const page = await browser.newPage();
+    await page.route('**/api/**', (route) => {
+      const p = new URL(route.request().url()).pathname;
+      return route.fulfill({ status: p === '/api/my/profile' ? 200 : 404, contentType: 'application/json', body: '{}' });
+    });
+    await page.goto(base + '/account', { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(/\/my#account$/, { timeout: 20000 }).catch(() => {});
+    ok('a staff member opening /account lands in My GFC → My Profile', /\/my#account$/.test(page.url()), page.url());
+    await page.close();
+  }
 
   await browser.close(); srv.close();
   console.log(`\n${pass}/${pass + fails.length} checks passed`);

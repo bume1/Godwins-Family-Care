@@ -230,12 +230,14 @@ const Person = ({ p, data, reload }) => {
   const [f, setF] = useState({ workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
   const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
-  const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
+  const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
   return (
     <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
       <Err e={err} /><Ok m={msg} />
       <div className="grid sm:grid-cols-3 gap-2">
-        <label>W-2 or 1099<select className="inp" value={f.workerType} onChange={e => setF({ ...f, workerType: e.target.value })}>{Object.values(data.workerTypes).map(v => <option key={v} value={v}>{v === 'HYBRID' ? 'Both' : v}</option>)}</select></label>
+        {p.employmentTypeOnUser
+          ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
+          : <label>W-2 or 1099<select className="inp" value={f.workerType} onChange={e => setF({ ...f, workerType: e.target.value })}>{Object.values(data.workerTypes).map(v => <option key={v} value={v}>{v === 'HYBRID' ? 'Both' : v}</option>)}</select></label>}
         <label>Pay type<select className="inp" value={f.payType} onChange={e => setF({ ...f, payType: e.target.value })}>{data.payTypes.map(v => <option key={v} value={v}>{v.replace('_', ' ')}</option>)}</select></label>
         <label>Wages account<select className="inp" value={f.wageAccount} onChange={e => setF({ ...f, wageAccount: e.target.value })}><option value="home_care">Home care</option><option value="clinical">Clinical</option></select></label>
         {pr.isCaregiver ? <div className="text-[12.5px] text-stone-500">Caregiver pay rates stay on the user form and shifts (shift → client → base).</div>

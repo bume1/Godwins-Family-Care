@@ -6,7 +6,8 @@ README: photography full-bleed sparingly, navy gradient overlay for legibility.
 
 | Filename | Source asset | Used In |
 |----------|--------------|---------|
-| `banner-admin.webp` | `team-bethel.webp` (founder portrait) | Admin Hub Dashboard, Portal Hub |
+| `banner-hub.webp` | `LinkedInGFC_Banner.pdf` (owner, 2026-11-09), rendered at 2400px | Portal Hub (shown whole, never cropped) |
+| `banner-admin.webp` | `team-bethel.webp` (founder portrait) | (no longer used by the hub or Admin Hub) |
 | `banner-client.jpg` | `photo-couple-walking.jpg` | Client Portal admin dashboard |
 | `banner-service.jpg` | `photo-couple-walking.jpg` | Service Portal Dashboard |
 | `banner-caregiver.jpg` | `photo-couple-walking.jpg` **(placeholder)** | Caregiver welcome packet hero |

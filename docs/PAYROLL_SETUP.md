@@ -53,10 +53,14 @@ A run refuses anyone missing a W-4, G-4, SSN, I-9 or pay method, and names what 
 
 **This is the piece that keeps payroll current without anyone remembering.**
 
-1. Open the Apps Script project that already has `payroll_paystubs.gs`.
-2. Add a new file and paste in `scripts/payroll_automations.gs`.
-3. **Project Settings:** set the time zone to **America/New_York**. The script properties `GFC_APP_URL` and `GFC_PAYROLL_KEY` are already there from the pay stub script.
+1. Go to script.google.com, signed in as the admin account, and create a new project named **GFC Payroll**.
+2. Replace the starter code with `scripts/payroll_automations.gs`.
+3. **Project Settings:** set the time zone to **America/New_York**, then add two script properties:
+   - `GFC_APP_URL` = `https://app.godwinsfamilycarellc.com`
+   - `GFC_PAYROLL_KEY` = the same value as `PAYROLL_INGEST_KEY` in the app's environment
 4. In the editor, pick **installPayrollTriggers** and press Run. Approve the permissions Google asks for. Running it again is safe.
+
+**`scripts/payroll_paystubs.gs` is optional.** Pay stubs from an in-app run are made by the app and need no script. That file is only for stubs from a payroll run done somewhere else (for example, a period you ran before switching). If you need it, add it as a second file in the same project; it uses the same two properties.
 
 What it does on its own:
 

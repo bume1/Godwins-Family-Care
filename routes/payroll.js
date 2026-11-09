@@ -30,7 +30,6 @@ const PROFILES = 'payroll_profiles';          // { [userId]: profile }
 const SETTINGS = 'payroll_settings';
 const TAX_TABLES = 'payroll_tax_tables';
 const RUNS = 'payroll_runs';
-const CLOCK = 'staff_time_entries';
 const CONTRACTOR_INVOICES = 'contractor_invoices';
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
@@ -61,7 +60,14 @@ module.exports = function createPayrollRoutes(deps) {
 
   // ---- storage helpers --------------------------------------------------------------
   const rows = async (k) => (await db.get(k)) || [];
-  const readProfiles = async () => (await db.get(PROFILES)) || {};
+  // Every profile read carries the user record's employmentType (one source).
+  const readProfiles = async () => {
+    const raw = (await db.get(PROFILES)) || {};
+    const users = new Map(((await getUsers()) || []).filter(Boolean).map(u => [String(u.id), u]));
+    const out = {};
+    for (const [id, p] of Object.entries(raw)) out[id] = pp.withEmploymentType(p, users.get(id));
+    return out;
+  };
   const readSettings = async () => ({ ...tax.DEFAULT_SETTINGS, ...((await db.get(SETTINGS)) || {}) });
   const isStaff = (u) => !!u && STAFF_TYPES.includes(accountTypeOf(u));
   const requireStaff = (req, res, next) => (isStaff(req.user) ? next()
@@ -72,7 +78,7 @@ module.exports = function createPayrollRoutes(deps) {
   };
   const profileFor = async (user) => {
     const all = await readProfiles();
-    return all[String(user.id)] || pp.defaultProfile(user, { relationship: await relationshipFor(user.id) });
+    return all[String(user.id)] || pp.withEmploymentType(pp.defaultProfile(user, { relationship: await relationshipFor(user.id) }), user);
   };
   // Saves one profile. The history records WHAT changed and who, never a value.
   const saveProfile = async (userId, next, change, by) => {
@@ -154,33 +160,6 @@ module.exports = function createPayrollRoutes(deps) {
     }
   });
 
-  // ---- the staff clock (admin, training, clinical, exam time) -----------------------
-  // Caregivers clock client visits on their shifts; this is everyone's other time.
-  router.get('/api/my/clock', authenticateToken, requireStaff, async (req, res) => {
-    const mine = (await rows(CLOCK)).filter(e => String(e.userId) === String(req.user.id) && !e.voided)
-      .sort((a, b) => String(b.clockInAt).localeCompare(String(a.clockInAt))).slice(0, 60);
-    res.json({ entries: mine, open: mine.find(e => !e.clockOutAt) || null, workTypes: WORK_TYPES });
-  });
-  router.post('/api/my/clock/in', authenticateToken, requireStaff, async (req, res) => {
-    const all = await rows(CLOCK);
-    if (all.some(e => String(e.userId) === String(req.user.id) && !e.clockOutAt && !e.voided)) return res.status(409).json({ error: 'You are already clocked in.', code: 'CLOCK_ALREADY_IN' });
-    const wt = String((req.body || {}).workType || '');
-    if (!WORK_TYPES[wt]) return res.status(400).json({ error: 'Say what the time is for.', code: 'CLOCK_WORK_TYPE' });
-    const e = { id: uuidv4(), userId: String(req.user.id), workType: wt, clockInAt: nowIso(), clockOutAt: null, note: str((req.body || {}).note, 300) };
-    all.push(e);
-    await db.set(CLOCK, all);
-    await logActivity(req.user.id, req.user.name, 'staff_clock_in', 'staff_time', e.id, { workType: wt });
-    res.json({ entry: e });
-  });
-  router.post('/api/my/clock/out', authenticateToken, requireStaff, async (req, res) => {
-    const all = await rows(CLOCK);
-    const i = all.findIndex(e => String(e.userId) === String(req.user.id) && !e.clockOutAt && !e.voided);
-    if (i === -1) return res.status(409).json({ error: 'You are not clocked in.', code: 'CLOCK_NOT_IN' });
-    all[i] = { ...all[i], clockOutAt: nowIso() };
-    await db.set(CLOCK, all);
-    await logActivity(req.user.id, req.user.name, 'staff_clock_out', 'staff_time', all[i].id, {});
-    res.json({ entry: all[i] });
-  });
 
   // ---- contractor invoices (step 8) -------------------------------------------------
   const normalizeContractorInvoice = (b, existingNumbers) => {
@@ -238,7 +217,7 @@ module.exports = function createPayrollRoutes(deps) {
     const all = await readProfiles();
     const out = [];
     for (const u of users) {
-      const p = all[String(u.id)] || pp.defaultProfile(u, { relationship: await relationshipFor(u.id) });
+      const p = all[String(u.id)] || pp.withEmploymentType(pp.defaultProfile(u, { relationship: await relationshipFor(u.id) }), u);
       out.push({ user: u, profile: p });
     }
     return out;
@@ -259,7 +238,9 @@ module.exports = function createPayrollRoutes(deps) {
         people: people.map(({ user, profile }) => ({
           userId: String(user.id), name: user.name || user.email, accountType: accountTypeOf(user), email: user.email,
           profile: pp.publicProfile(profile), missing: pp.missingForPay(profile), missingContractor: pp.isContractor(profile) ? pp.missingForPay(profile, { asContractor: true }) : [],
-          caregiverPayRate: profile.isCaregiver ? (user.payRate || null) : null
+          caregiverPayRate: profile.isCaregiver ? (user.payRate || null) : null,
+          // Set in User Management: the page shows it and does not edit it.
+          employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
         runs: runs.map(r => ({ id: r.id, status: r.status, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
@@ -297,6 +278,11 @@ module.exports = function createPayrollRoutes(deps) {
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
     const n = pp.normalizePaySetup(req.body);
     if (n.error) return res.status(400).json(n);
+    // W-2 or 1099 is set on the user record once it is set there, so the
+    // clock and payroll cannot disagree.
+    if (n.value.workerType !== undefined && ['W2', '1099', 'HYBRID'].includes(user.employmentType) && n.value.workerType !== user.employmentType) {
+      return res.status(409).json({ error: 'W-2 or 1099 is set in User Management for this person. Change it there.', code: 'EMPLOYMENT_TYPE_ON_USER' });
+    }
     const p = await profileFor(user);
     Object.assign(p, n.value);
     const saved = await saveProfile(user.id, p, `Pay setup: ${Object.keys(n.value).join(', ')}`, req.user);
@@ -377,7 +363,7 @@ module.exports = function createPayrollRoutes(deps) {
     return engine.gatherItems({
       period, users, profilesById,
       timeLogs: await rows('time_logs'), shifts: await rows('shifts'), visitTimings: await rows('visit_timings'),
-      staffEntries: await rows(CLOCK), imeCases: await rows('ime_cases'),
+      imeCases: await rows('ime_cases'),
       paidRefs: engine.paidRefsFrom(runs), localDate, resolvePayRate
     });
   };
@@ -716,10 +702,11 @@ module.exports = function createPayrollRoutes(deps) {
     },
     // Open clock-ins and missing clock-outs.
     'missing-time': async () => {
-      const open = (await rows(CLOCK)).filter(e => !e.clockOutAt && !e.voided && Date.now() - Date.parse(e.clockInAt) > 12 * 3600000);
+      // Main's one clock (time_logs): a shift or staff clock-in left open 12+ hours.
+      const open = (await rows('time_logs')).filter(e => e && e.clock_in_at && !e.clock_out_at && Date.now() - Date.parse(e.clock_in_at) > 12 * 3600000);
       const users = await getUsers();
       for (const e of open) {
-        const u = users.find(x => String(x.id) === e.userId);
+        const u = users.find(x => String(x.id) === String(e.caregiver_id));
         if (u && u.email) await queueNotification('staff_clock_open', u.id, u.email, u.name, { subject: 'You are still clocked in', body: 'You clocked in more than 12 hours ago and have not clocked out. Clock out, or tell the office the right time.', ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC' }, { relatedEntityId: e.id });
       }
       return { summary: `${open.length} open` };

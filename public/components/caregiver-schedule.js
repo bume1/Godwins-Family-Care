@@ -20,6 +20,11 @@
  *           });
  *   Unmount: window.GFCCaregiverSchedule.unmount('gfc-mount-schedule');
  *
+ *   Staff mode (2026-11-08): `staffOnly: true` shows only the time clock and
+ *   My hours, for W-2 staff without shifts. My GFC mounts it that way.
+ *   `onlyTabs: ['availability']` shows just the availability form; the
+ *   clinical Schedule view mounts it that way for clinicians.
+ *
  * `caregiverId` is passed for display and for the host page's own bookkeeping.
  * It is NOT what authorizes anything: every route below resolves the caregiver
  * from the token server-side, so a caller who passes someone else's id still
@@ -193,7 +198,17 @@
     var root = document.getElementById(state.elementId);
     if (!root) return;
 
-    var tabs = [
+    // STAFF MODE (owner, 2026-11-08): W-2 staff without shifts use this same
+    // clock. They have no shifts, offers or availability, so they get the
+    // clock and their hours, and nothing else.
+    // `onlyTabs` (2026-11-08): a host that needs only part of this screen,
+    // such as the clinical Schedule view's Availability, names the tabs.
+    var tabs = state.onlyTabs ? state.onlyTabs.map(function (id) {
+      return { id: id, label: ({ clock: 'Time clock', time: 'My hours', availability: 'Availability' })[id] || id };
+    }) : state.staffOnly ? [
+      { id: 'clock', label: 'Time clock' },
+      { id: 'time', label: 'My hours' }
+    ] : [
       { id: 'schedule', label: 'My schedule' },
       { id: 'offers', label: 'Offers' + (state.offers.length ? ' (' + state.offers.length + ')' : '') },
       { id: 'open', label: 'Open shifts' + (state.open.length ? ' (' + state.open.length + ')' : '') },
@@ -212,6 +227,7 @@
     html += '</div>';
 
     if (state.loading) html += '<div class="gempty">Loading…</div>';
+    else if (state.tab === 'clock') html += renderStaffClock(state);
     else if (state.tab === 'schedule') html += renderSchedule(state);
     else if (state.tab === 'offers') html += renderOffers(state);
     else if (state.tab === 'open') html += renderOpen(state);
@@ -452,8 +468,11 @@
         // thing they came to do.
         ? 'You can change this at short notice — the earliest it can start is ' + esc(earliest) + '. ' +
           'Your new answer replaces the one before it; the office works from your most recent one. ' +
-          '<strong>Shifts you have already accepted do not change.</strong> To move or hand back one of those, ' +
-          'use Request a change on the shift itself.'
+          // A clinician (availability-only mount) has visits, not shifts.
+          (state.onlyTabs
+            ? '<strong>Visits already booked do not change.</strong> Reschedule those from the calendar.'
+            : '<strong>Shifts you have already accepted do not change.</strong> To move or hand back one of those, ' +
+              'use Request a change on the shift itself.')
         : 'Availability is submitted at least ' + lead +
           ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '. ' +
           'Submitting again replaces what you have now — the office works from your most recent one.') +
@@ -507,6 +526,24 @@
       }).join('') + '</div>';
     }
     return html;
+  }
+
+  // A W-2 staff member's clock: in or out, no shift. The open row is the one
+  // with no shift and no clock-out.
+  function renderStaffClock(state) {
+    var open = null;
+    for (var i = 0; i < state.timeLogs.length; i++) {
+      var l = state.timeLogs[i];
+      if (l && !l.shiftId && !l.clockOutAt) { open = l; break; }
+    }
+    return '<div class="gcard"><h3>Time clock</h3>' +
+      (open
+        ? '<p class="gmu" style="margin-bottom:10px">Clocked in since ' + esc(fmtWhen(open.clockInAt)) + '.</p>' +
+          '<div class="gbtns"><button class="gbtn danger" data-act="staff-clock-out" data-id="staff">Clock out</button></div>'
+        : '<p class="gmu" style="margin-bottom:10px">You are clocked out.</p>' +
+          '<div class="gbtns"><button class="gbtn gold" data-act="staff-clock-in" data-id="staff">Clock in</button></div>') +
+      '<p class="gmu" style="margin-top:10px">Forgot to clock in or out? Tell the office. They correct it with a reason.</p>' +
+      '</div>';
   }
 
   function renderTime(state) {
@@ -602,6 +639,7 @@
             .catch(function (err) { state.error = err.message; render(state); });
         }
         btn.disabled = true;
+        if (act === 'staff-clock-in' || act === 'staff-clock-out') return staffClock(state, act === 'staff-clock-in' ? 'clock-in' : 'clock-out');
         act === 'clock-in' || act === 'clock-out'
           ? clock(state, id, act)
           : shiftAction(state, id, act);
@@ -717,8 +755,32 @@
     });
   }
 
+  function staffClock(state, act) {
+    state.error = ''; state.notice = '';
+    var path = act === 'clock-in' ? '/api/scheduling/staff-clock/clock-in' : '/api/scheduling/staff-clock/clock-out';
+    return api(state, path, { method: 'POST', body: {} })
+      .then(function (res) { state.notice = (res && res.message) || 'Done.'; return refresh(state); })
+      .catch(function (err) { state.error = err.message; render(state); });
+  }
+
   // ---- Data ---------------------------------------------------------------
   function refresh(state) {
+    if (state.onlyTabs && state.onlyTabs.indexOf('availability') !== -1 && state.onlyTabs.length === 1) {
+      return api(state, '/api/scheduling/availability').catch(function () { return { availability: [] }; }).then(function (r) {
+        state.availability = r.availability || [];
+        state.availabilityRules = r.rules || null;
+        state.loading = false;
+        render(state);
+      });
+    }
+    if (state.staffOnly) {
+      return api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; }).then(function (r) {
+        state.timeLogs = r.timeLogs || [];
+        state.totalHours = r.totalHours;
+        state.loading = false;
+        render(state);
+      });
+    }
     return Promise.all([
       api(state, '/api/scheduling/shifts').catch(function () { return { shifts: [] }; }),
       api(state, '/api/scheduling/shifts/open').catch(function () { return { shifts: [] }; }),
@@ -765,7 +827,9 @@
       // yet. The log form belongs to the host page, so the shift is handed back
       // rather than this component trying to render a form it does not own.
       onVisitLogRequired: options.onVisitLogRequired || null,
-      tab: options.initialTab || 'schedule',
+      staffOnly: !!options.staffOnly,
+      onlyTabs: Array.isArray(options.onlyTabs) && options.onlyTabs.length ? options.onlyTabs.slice() : null,
+      tab: options.initialTab || (Array.isArray(options.onlyTabs) && options.onlyTabs.length ? options.onlyTabs[0] : options.staffOnly ? 'clock' : 'schedule'),
       loading: true,
       error: '', notice: '',
       mine: [], offers: [], open: [], availability: [], availabilityRules: null, timeLogs: [], totalHours: null,

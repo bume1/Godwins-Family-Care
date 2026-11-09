@@ -23,7 +23,8 @@ const ROLE_FOLDERS = Object.freeze({
   E: 'GFC Clinician Documents',
   F: 'GFC Non-Clinical Staff Documents',
   G: 'GFC Community Care Liaison Documents',
-  H: 'GFC Student and Extern Documents'
+  H: 'GFC Student and Extern Documents',
+  R1: 'GFC Supervising Physician Documents'
 });
 
 function folderForChapter(chapter) {

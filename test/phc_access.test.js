@@ -548,7 +548,7 @@ test('hub: managers and coordinators sign in to User Management and nothing else
   // isSuperAdmin={false} is the rule; the prop list grows, so do not pin the
   // whole tag.
   assert.match(hub, /if \(officeOnly\) return <UsersPage token=\{token\}[^>]*isSuperAdmin=\{false\}[^>]*\/>;/, 'they get the user page whatever was asked');
-  assert.match(hub, /: allMenuItems\.filter\(item => item\.id === 'users'\);/, 'the menu shows User Management only');
+  assert.match(hub, /const sections = officeOnly\s*\? \[\{ id: 'users', label: 'User Management', icon: 'ti-users' \}\]/, 'the menu shows User Management only');
   // The list shows only the accounts they manage, and the staff-only parts stay hidden.
   assert.match(hub, /isSuperAdmin \|\| OFFICE_MANAGED_TYPES\.includes\(user\.accountType\)\)\.filter\(user =>/);
   assert.match(hub, /\{isSuperAdmin && <button onClick=\{\(\) => handleDelete/);
@@ -569,11 +569,12 @@ test('hub: the rest of the Admin Hub API stays Super Admin only', () => {
 });
 
 test('hub: managers and coordinators reach User Management through People; nobody else new does', () => {
-  // User Management moved into the People block (owner, 2026-11-08).
-  const usersTile = (t) => ((accountTypes.hubTilesFor(accountTypes.fieldsFor(t)).find(x => x.id === 'people') || {}).children || []).find(x => x.id === 'users');
+  // User Management moved into the People block (owner, 2026-11-08), opened
+  // on the staff side of the People / Clients split (owner, 2026-11-09).
+  const usersTile = (t) => ((accountTypes.hubAreasFor(accountTypes.fieldsFor(t)).find(x => x.id === 'people') || {}).links || []).find(x => x.id === 'users');
   for (const t of ['manager', 'coordinator']) {
     const tile = usersTile(t);
-    assert.ok(tile && tile.path === '/admin?view=users', t);
+    assert.ok(tile && tile.path === '/admin?view=users&group=staff', t);
   }
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!usersTile(t), t);

@@ -32,7 +32,16 @@ const EXPIRING_ITEMS = Object.freeze({
   'C.6.06': 'Malpractice policy',
   'C.6.10': 'TB screening',
   'C.6.12': "Driver's license or auto insurance",
-  'C.6.13': 'License in another state'
+  'C.6.13': 'License in another state',
+  // Chapter B (registered nurse)
+  'B.6.01': 'RN license',
+  'B.6.04': 'TB screening',
+  'B.6.05': 'BLS certification',
+  // Chapter D (contracted clinician)
+  'D.5.05': 'DEA registration',
+  'D.5.06': 'Certificate of insurance',
+  // Chapter H (student): H.4 records the BLS expiration
+  'H.4.03': 'BLS certification'
 });
 const EXPIRING_BASIS = 'Chosen as the documents that carry an expiration date (owner direction, 2026-11-08); the Playbook does not list them item by item.';
 
@@ -101,7 +110,7 @@ function recurringFor(applicable, rec, startDate, today) {
 }
 
 function recordRecurring(rid, rec, doneOn, actor, now) {
-  if (!C.RECURRING.some(r => r.id === rid)) { const e = new Error('Unknown recurring duty.'); e.code = 'RECURRING_UNKNOWN'; throw e; }
+  if (![C, require('./chapterF'), require('./chapterB'), require('./chapterD'), require('./chapterG'), require('./chapterR1')].some(ch => ch.RECURRING.some(r => r.id === rid))) { const e = new Error('Unknown recurring duty.'); e.code = 'RECURRING_UNKNOWN'; throw e; }
   if (!isYmd(doneOn)) { const e = new Error('Give the date it was done.'); e.code = 'RECURRING_DATE_REQUIRED'; throw e; }
   const out = JSON.parse(JSON.stringify(rec || {}));
   out.recurring = out.recurring || {};

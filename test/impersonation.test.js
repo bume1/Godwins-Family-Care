@@ -132,7 +132,7 @@ test('a View-as session row names the admin behind it; a normal one does not', a
   const back = (await sessions.check(row.id)).row;
   assert.equal(back.impersonatorId, 'a1'); assert.equal(back.impersonatorSid, 's1');
   assert.equal(imp.isActingAs(back), true);
-  assert.deepEqual(imp.describe(back, { id: 'u1', name: 'Clara', role: 'client' }), { impersonatorId: 'a1', impersonatorName: 'Bianca', userId: 'u1', userName: 'Clara', role: 'client', roleLabel: 'client', expiresAt: null });
+  assert.deepEqual(imp.describe(back, { id: 'u1', name: 'Clara', role: 'client' }), { impersonatorId: 'a1', impersonatorName: 'Bianca', userId: 'u1', userName: 'Clara', role: 'client', roleLabel: 'Client', expiresAt: null });
   assert.equal(imp.roleLabel('vendor'), 'caregiver');
   assert.equal(imp.roleLabel('user'), 'clinician');
 });
@@ -225,4 +225,30 @@ test('the hub offers View as only to a Super Admin, never on an admin row', () =
   assert.match(hub, /isSuperAdmin && editingUser\.role !== 'admin' && editingUser\.accountStatus !== 'inactive' && \(/,
     'the Edit-form View as must be Super-Admin-only and never on an admin row');
   assert.match(hub, /localStorage\.setItem\('gfc_view_as_return'/);
+});
+
+
+// ---- View as shows what their own sign-in shows (owner, 2026-11-08) --------
+// Viewing as a manager opened the Clinical Workspace, the hub read "No Portals
+// Available", and User Management sent them to the login page. The page had
+// been handed a cut-down profile (no account type, no hub tiles) and a
+// destination from an older rule. Found by driving it in a browser.
+test('View as hands the page the same profile a real sign-in does, and lands where they would', () => {
+  const src = read('server.js');
+  const login = src.slice(src.indexOf("app.post('/api/auth/login'"));
+  assert.match(login.slice(0, 6000), /const userResponse = loginProfileFor\(user\);/, 'the sign-in uses the shared profile');
+  const start = src.slice(src.indexOf("app.post('/api/admin/impersonate/:userId'"));
+  const block = start.slice(0, start.indexOf('\n});'));
+  assert.match(block, /\.\.\.loginProfileFor\(target\)/, 'View as uses the same profile');
+  assert.match(block, /requirePasswordChange: false/, 'no password-change prompt while viewing as them');
+  assert.match(src, /const viewAsDestination = \(u\) => accountTypes\.landingFor\(u\) \|\| appLinks\.PATHS\.LOGIN;/);
+  const prof = src.slice(src.indexOf('const loginProfileFor'), src.indexOf('const viewAsDestination'));
+  for (const f of ['accountType:', 'hubTiles:', 'landing:', 'isManager:', 'clinicalRole:']) assert.ok(prof.includes(f), f);
+});
+
+test('the banner names the account type, so a manager is not called a clinician', () => {
+  const d = imp.describe({ impersonatorId: 'a1', userId: 'm1' }, { id: 'm1', name: 'Mary', role: 'user', isManager: true, clinicalRole: 'readOnly' });
+  assert.equal(d.roleLabel, 'Manager');
+  const c = imp.describe({ impersonatorId: 'a1', userId: 'c1' }, { id: 'c1', name: 'Cora', role: 'user', isManager: true, clinicalRole: 'coordinator' });
+  assert.equal(c.roleLabel, 'Care Coordinator');
 });

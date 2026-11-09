@@ -5,8 +5,6 @@
 // my-gfc.js draws inside Hours & Pay beside the pay stubs it already lists:
 //   PaySetup            W-4, G-4, I-9, SSN, W-9, how you are paid, offer
 //                       letter, handbook, electronic tax forms
-//   StaffClock          clock in and out for non-visit time (not caregivers:
-//                       their visits are clocked on shifts)
 //   ContractorInvoices  submit an invoice; see its status and 1099 total
 //   TaxForms            W-2 / 1099-NEC once the office releases them
 // Every value the server decides (which forms apply, what is missing) comes
@@ -199,35 +197,6 @@ function PaySetup() {
   );
 }
 
-function StaffClock() {
-  const [d, setD] = useState(null); const [wt, setWt] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
-  const load = () => call('/api/my/clock').then(setD).catch(e => setErr(e.message));
-  useEffect(() => { load(); }, []);
-  if (!d) return err ? <div className="mg-err">{err}</div> : <p className="mg-note">Loading…</p>;
-  const go = async (path, body) => { setBusy(true); setErr(''); try { await call(path, { method: 'POST', body }); await load(); } catch (e) { setErr(e.message); } setBusy(false); };
-  const fmt = (iso) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
-  return (
-    <div className="mp-form">
-      {err && <div className="mg-err">{err}</div>}
-      {d.open ? (
-        <div className="mp-item"><div><b>Clocked in: {d.workTypes[d.open.workType]}</b><small>Since {fmt(d.open.clockInAt)}</small></div>
-          <button className="mg-btn" disabled={busy} onClick={() => go('/api/my/clock/out')}>Clock Out</button></div>
-      ) : (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div style={{ flex: 1, minWidth: 200 }}><label>What the time is for</label>
-            <select value={wt} onChange={e => setWt(e.target.value)}><option value="">Choose…</option>{Object.entries(d.workTypes).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
-          <button className="mg-btn" disabled={busy || !wt} onClick={() => go('/api/my/clock/in', { workType: wt })}>Clock In</button>
-        </div>
-      )}
-      <div className="mp-items" style={{ marginTop: 10 }}>
-        {d.entries.filter(e => e.clockOutAt).slice(0, 10).map(e => (
-          <div key={e.id} className="mp-item"><div><b>{d.workTypes[e.workType]}</b><small>{fmt(e.clockInAt)} to {fmt(e.clockOutAt)}</small></div>
-            <span>{((Date.parse(e.clockOutAt) - Date.parse(e.clockInAt)) / 3600000).toFixed(2)} hrs</span></div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 const EMPTY_LINE = { serviceDate: '', description: '', unit: 'hour', qty: '', rate: '' };
 function ContractorInvoices({ Section }) {
@@ -295,5 +264,5 @@ function TaxForms() {
   return <div className="mp-items">{d.forms.map(f => <div key={f.year} className="mp-item"><div><b>{f.year}</b><small>{f.forms.join(', ')} ready. Ask the office for your copy.</small></div></div>)}</div>;
 }
 
-window.MyPay = { PaySetup, StaffClock, ContractorInvoices, TaxForms };
+window.MyPay = { PaySetup, ContractorInvoices, TaxForms };
 })();
