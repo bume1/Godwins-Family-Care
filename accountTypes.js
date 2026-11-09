@@ -200,20 +200,31 @@ const PRIVATE_HOME_CARE = Object.freeze([
   Object.freeze({ id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling',
     description: 'Shifts, availability, time tracking, payroll and client locations' })
 ]);
-// ---- People (owner, 2026-11-08) ---------------------------------------------
+// ---- People (owner, 2026-11-08; Enrollment moved in, owner, 2026-11-09) ----
 // User Management moved out of the Admin Hub into its own block, beside staff
 // onboarding: the same shape as Private Home Care. User Management still runs
 // on the Admin Hub page, opened straight to that view. Staff Onboarding's
 // office side is admin-or-manager (routes/onboarding.js), so the tile appears
 // for exactly those accounts.
+//
+// Enrollment used to sit beside People as its own top-level tile (owner,
+// 2026-10-15, "Enrollment and Billing are modules of their own"). The owner
+// reversed that on 2026-11-09: enrollment is how a CLIENT becomes a person in
+// this system, the same job User Management and Staff Onboarding do for
+// everyone else, so it belongs where those live. Billing is untouched — it is
+// a money module, not a people one, and stays its own top-level tile.
 const PEOPLE_USERS = Object.freeze({ id: 'users', name: 'User Management', path: '/admin?view=users',
   description: 'Add and edit staff, caregivers, clients and family contacts' });
+const PEOPLE_ENROLLMENT = Object.freeze({ id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment',
+  description: 'Client enrollment, consents and documents' });
 const PEOPLE_ONBOARDING = Object.freeze({ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding',
   description: 'Who is onboarding, whose turn it is, credentialing and readiness' });
 const MY_GFC = Object.freeze({ id: 'myGfc', name: 'My GFC', path: '/my',
   description: 'Your onboarding, documents, policies and shared folders' });
 function peopleTile(u) {
-  const children = [PEOPLE_USERS];
+  // Enrollment keeps the same visibility it had as a standalone tile: every
+  // account type that reaches this function (admin, manager, coordinator).
+  const children = [PEOPLE_USERS, PEOPLE_ENROLLMENT];
   if (u && (u.role === 'admin' || u.isManager === true)) children.push(PEOPLE_ONBOARDING);
   return { id: 'people', name: 'People', children };
 }
@@ -223,28 +234,28 @@ function hubTilesFor(u) {
   const tiles = [];
   const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
   const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PRIVATE_HOME_CARE };
-  // Enrollment and Billing are modules of their own (owner, 2026-10-15),
-  // because both cover home care as well as medical visits.
-  const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
+  // Billing stays its own module (owner, 2026-10-15); Enrollment moved into
+  // People (owner, 2026-11-09) — see the People section above.
   const billingTile = { id: 'billing', name: 'Billing', path: '/billing' };
   // Managers and coordinators read Support and Admin Broadcasts here; the
   // Super Admin's inbox is in the Admin Hub.
   const messages = { id: 'messages', name: 'Messages', path: '/messages' };
-  // User Management now sits inside People (owner, 2026-11-08). A manager or
-  // care coordinator still reaches only User Management in the Admin Hub.
+  // User Management and Enrollment now sit inside People (owner, 2026-11-08
+  // and 2026-11-09). A manager or care coordinator still reaches only User
+  // Management in the Admin Hub.
   const people = peopleTile(u);
   // My GFC, the staff portal (owner, 2026-11-08): everyone's own onboarding,
   // documents, policies and shared Drive folders. First, because it is theirs.
   if ([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR].includes(type)) tiles.push(MY_GFC);
   if (type === TYPES.ADMIN) {
-    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billingTile,
+    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, billingTile,
       { id: 'service', name: 'Service Portal', path: '/service-portal' },
       { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
   } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile, messages, people);
+    tiles.push(clinical, phc, billingTile, messages, people);
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile, messages, people);
+    tiles.push(phc, billingTile, messages, people);
   }
   return tiles;
 }

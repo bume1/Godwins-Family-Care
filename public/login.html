@@ -329,7 +329,7 @@
         billing: { icon: Icons.portal, color: 'from-warning-500 to-warning-600', description: 'Claims waiting on billing, patient statements, copays and home care hours' },
         users: { icon: Icons.admin, color: 'from-primary-500 to-primary-700', description: 'Add and edit caregivers, clients and family contacts' },
         myGfc: { icon: Icons.portal, color: 'from-primary-600 to-primary-800', description: 'Your onboarding, documents, policies and shared folders' },
-        people: { icon: Icons.admin, color: 'from-primary-600 to-teal-600', description: 'User management and staff onboarding' },
+        people: { icon: Icons.admin, color: 'from-primary-600 to-teal-600', description: 'User management, client enrollment and staff onboarding' },
         onboarding: { icon: Icons.clientPortal, color: 'from-teal-600 to-primary-700' },
         caregiverManagement: { icon: Icons.admin, color: 'from-teal-500 to-teal-700' },
         caregiverScheduling: { icon: Icons.service, color: 'from-teal-600 to-primary-700' }
@@ -341,17 +341,19 @@
       const fallbackTiles = () => {
         const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PHC_CHILDREN };
         const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
-        const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
         const billing = { id: 'billing', name: 'Billing', path: '/billing' };
+        // Enrollment moved into People (owner, 2026-11-09) — it manages client
+        // accounts, the same job User Management and Staff Onboarding do.
         const people = { id: 'people', name: 'People', children: [
           { id: 'users', name: 'User Management', path: '/admin?view=users', description: 'Add and edit staff, caregivers, clients and family contacts' },
+          { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment', description: 'Client enrollment, consents and documents' },
           ...((isAdmin || user.isManager) ? [{ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding', description: 'Who is onboarding, whose turn it is, credentialing and readiness' }] : [])
         ] };
         const myGfc = { id: 'myGfc', name: 'My GFC', path: '/my' };
-        if (isAdmin) return [myGfc, { id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billing,
+        if (isAdmin) return [myGfc, { id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, billing,
           { id: 'service', name: 'Service Portal', path: '/service-portal' },
           { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' }];
-        if (user.isManager) return [myGfc, ...(user.clinicalRole ? [clinical] : []), phc, enrollment, billing, { id: 'messages', name: 'Messages', path: '/messages' }, people];
+        if (user.isManager) return [myGfc, ...(user.clinicalRole ? [clinical] : []), phc, billing, { id: 'messages', name: 'Messages', path: '/messages' }, people];
         return [];
       };
       const tiles = Array.isArray(user.hubTiles) ? user.hubTiles : fallbackTiles();

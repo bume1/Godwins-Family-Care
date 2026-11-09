@@ -89,25 +89,28 @@ test('the Super Admin, a manager and a care coordinator land on the hub', () => 
 const ids = (u) => at.hubTilesFor(u).map(t => t.id);
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
-  assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'admin', 'people', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'service', 'clientPortalAdmin']);
+  assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'admin', 'people', 'clinical', 'privateHomeCare', 'billing', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
 });
 
-test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
+test('a coordinator sees Clinical, Private Home Care, Billing and Messages; a manager sees Clinical only when granted; Enrollment lives in People', () => {
   // 'people' holds User Management, the one part of the Admin Hub open to
-  // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['myGfc', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'],
-    'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
+  // them (owner, 2026-11-04), Enrollment (owner, 2026-11-09, moved out of its
+  // own top-level tile) and Staff Onboarding (owner, 2026-11-08).
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['myGfc', 'clinical', 'privateHomeCare', 'billing', 'messages', 'people']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), ['myGfc', 'clinical', 'privateHomeCare', 'billing', 'messages', 'people'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['myGfc', 'privateHomeCare', 'billing', 'messages', 'people'],
+    'Billing is its own module, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
   }
   const tile = (id) => at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === id);
-  assert.equal(tile('enrollment').path, '/admin/enrollment');
   assert.equal(tile('billing').path, '/billing');
+  assert.ok(!tile('enrollment'), 'Enrollment is no longer a top-level tile');
+  const peopleChild = (id) => tile('people').children.find(c => c.id === id);
+  assert.equal(peopleChild('enrollment').path, '/admin/enrollment');
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
@@ -303,10 +306,11 @@ test('document approval is the care coordinator\'s or the admin\'s alone', () =>
   assert.equal(roles.canApproveChartDocuments({ ...at.fieldsFor('coordinator'), accountStatus: 'inactive' }), false);
 });
 
-test('People holds User Management and Staff Onboarding, like the Private Home Care block (owner, 2026-11-08)', () => {
+test('People holds User Management, Enrollment and Staff Onboarding, like the Private Home Care block (owner, 2026-11-08; Enrollment moved in 2026-11-09)', () => {
   for (const t of ['admin', 'manager', 'coordinator']) {
     const people = at.hubTilesFor(at.fieldsFor(t)).find(x => x.id === 'people');
-    assert.deepEqual(people.children.map(c => [c.id, c.path]), [['users', '/admin?view=users'], ['onboarding', '/onboarding']], t);
+    assert.deepEqual(people.children.map(c => [c.id, c.path]),
+      [['users', '/admin?view=users'], ['enrollment', '/admin/enrollment'], ['onboarding', '/onboarding']], t);
   }
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('people'), t);
