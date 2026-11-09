@@ -511,7 +511,11 @@ test('screens: the pay views carry no download, and the time boxes read Eastern'
   const pv = page.slice(page.indexOf('const PayView'), page.indexOf('// ====', page.indexOf('const PayView')));
   assert.ok(pv.length > 200, 'the read-only view exists');
   assert.ok(!/\.csv|download|clipboard|window\.print/i.test(pv), 'no download, copy or print control in the view');
-  assert.match(page, /access\.managePay && <button className="btn gold" onClick=\{exportCsv\}>/, 'the export stays the Super Admin\'s');
+  // The exports moved to the money pages (owner, 2026-11-09): Scheduling
+  // shows hours and exports none; Payroll and Billing (both Super Admin) do.
+  assert.ok(!/payroll\.csv|billing\.csv/.test(page.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")), 'scheduling exports no money file');
+  assert.match(read('public/payroll.html'), /download\(`\/api\/scheduling\/payroll\.csv\?from=/);
+  assert.match(read('public/billing.html'), /\{isAdmin && <HoursExport \/>\}/, 'the billing export stays the Super Admin\'s');
   assert.match(page, /onRequest=\{!access\.managePay && access\.manageSchedule \? requestAdjustment : null\}/);
   // The correction box used to hold the raw UTC instant, so saving it moved a visit four hours.
   const row = page.slice(page.indexOf('const TimeLogRow'), page.indexOf('const AdjustmentQueue'));
@@ -556,9 +560,13 @@ test('hub: managers and coordinators sign in to User Management and nothing else
   for (const b of ['pendingTypeReview', 'pendingRoleReview', 'missingPatientFacingCredential']) {
     assert.match(hub, new RegExp(`\\{isSuperAdmin && ${b}\\.length > 0 &&`), b);
   }
-  // The list of types they manage matches the server's.
+  // What they see here is the staff part of what they manage: caregivers.
+  // The client and family accounts they also manage are on /clients
+  // (owner, 2026-11-09: User Management is internal staff only).
   const m = /const OFFICE_MANAGED_TYPES = (\[[^\]]+\])/.exec(hub);
-  assert.deepStrictEqual(JSON.parse(m[1].replace(/'/g, '"')).sort(), [...accountTypes.OFFICE_MANAGEABLE_TYPES].sort());
+  const shown = JSON.parse(m[1].replace(/'/g, '"'));
+  assert.deepStrictEqual(shown, ['caregiver']);
+  assert.deepStrictEqual([...accountTypes.OFFICE_MANAGEABLE_TYPES].filter(t => !['client', 'family'].includes(t)), shown);
 });
 
 test('hub: the rest of the Admin Hub API stays Super Admin only', () => {

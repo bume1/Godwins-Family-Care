@@ -51,7 +51,7 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <style>
     /* 2026-10-12 redesign (owner mockups): the patient portal's v2 look on the
        clinician side. Tokens are the portal's (portal.html .gfc.v2), restated
@@ -88,15 +88,15 @@
     .text-\[10px\], .text-\[10\.5px\] { font-size:11px !important; }
     .text-\[11px\] { font-size:11.5px !important; }
 
-    /* ── Shell: navy sidebar, cream page, phone bottom bar ── */
-    .cw-side { background:linear-gradient(180deg,var(--navy) 0%,var(--navyd) 100%); color:#fff; }
+    /* ── Shell: white sidebar (the My GFC look, owner 2026-11-09), cream page, phone bottom bar ── */
+    .cw-side { background:#fff; color:var(--navy); border-right:1px solid var(--edge); }
     .cw-side .brand img { height:44px; }
-    .cw-nav button { display:flex; align-items:center; gap:12px; width:100%; background:none; border:none; border-radius:12px; padding:10px 14px; font-size:14px; font-weight:500; color:rgba(255,255,255,.88); cursor:pointer; text-align:left; margin-bottom:2px; }
-    .cw-nav button i { font-size:20px; color:rgba(255,255,255,.75); }
-    .cw-nav button:hover { background:rgba(255,255,255,.07); }
-    .cw-nav button.on { background:linear-gradient(90deg,#A9853A,#C2A060); color:#fff; font-weight:600; box-shadow:0 6px 16px -10px rgba(0,0,0,.6); }
+    .cw-nav button { display:flex; align-items:center; gap:12px; width:100%; background:none; border:none; border-radius:12px; padding:10px 14px; font-size:14px; font-weight:600; color:var(--navy); cursor:pointer; text-align:left; margin-bottom:2px; }
+    .cw-nav button i { font-size:20px; color:var(--navy); }
+    .cw-nav button:hover { background:var(--wash); }
+    .cw-nav button.on { background:#C9A44A; color:#fff; font-weight:600; }
     .cw-nav button.on i { color:#fff; }
-    .cw-nav .grp { font-size:10px; letter-spacing:1.6px; text-transform:uppercase; color:rgba(245,205,133,.7); font-weight:700; padding:14px 14px 6px; }
+    .cw-nav .grp { font-size:10px; letter-spacing:1.6px; text-transform:uppercase; color:#9A7430; font-weight:700; padding:14px 14px 6px; }
     .cw-badge { margin-left:auto; min-width:22px; height:22px; border-radius:11px; background:var(--danger); color:#fff; font-size:11.5px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; padding:0 6px; }
     .cw-top { background:rgba(250,247,242,.94); backdrop-filter:blur(6px); border-bottom:1px solid var(--edge); }
     .cw-search { background:#fff; border:1px solid var(--edge); border-radius:12px; }
@@ -996,7 +996,7 @@
       return (
         <div className="min-h-screen flex items-center justify-center p-6">
           <form onSubmit={submit} className="card p-8 w-full max-w-sm">
-            <img src="/brand/logo-mark-transparent.png" alt="" className="h-12 mb-3" />
+            <img src="/brand/logo-mark-color-transparent.png" alt="" className="h-12 mb-3" />
             <h1 className="serif text-2xl text-primary font-semibold mb-1">Clinical Workspace</h1>
             <p className="text-xs text-stone-500 mb-5">Authorized clinical staff only. All access is logged.</p>
             <Field label="Email"><input className="inp" type="email" value={email} onChange={e => setEmail(e.target.value)} required /></Field>
@@ -2390,6 +2390,7 @@
                     <span className="text-stone-400 font-normal">{TYPE_LABEL[o.orderType] || o.orderType} · </span>{orderTitle(o)}
                   </span>
                   <span className="flex items-center gap-1.5">
+                    {o.afterSigning && <span className="chip bg-amber-50 text-amber-800">Added After Signing</span>}
                     {o.orderType === 'referral' && o.referral && o.referral.agencyPending && !o.referral.receivingFax && <span className="chip bg-amber-50 text-amber-800">NEEDS AGENCY</span>}
                     <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
                   </span>
@@ -2572,15 +2573,116 @@
       );
     };
 
+    // ── New Order from the chart (owner, 2026-11-09) ─────────────────────
+    // "We need to be able to create orders like a standard practice": the
+    // Orders tab places an order without opening a visit first. An order still
+    // belongs to a visit, so this picks one: an open draft, or the most recent
+    // signed visit, where the order uses only the diagnoses it was signed with
+    // and is recorded on the note as an addendum. The SERVER lists the visits
+    // and says whether this viewer may place anything (placement), so the
+    // page never offers a button the route refuses. Module scope
+    // (react_input_focus).
+    const NewOrderPanel = ({ patient, placement, presetType, onPlaced }) => {
+      const canOrderStandingCap = useCan('orderStanding');
+      const ceiling = useContext(AccessContext).credentialCeiling || [];
+      const canOrderStanding = canOrderStandingCap && ceiling.some(t => t !== 'screening');
+      const [open, setOpen] = useState(false);
+      const [euuid, setEuuid] = useState('');
+      const [formKey, setFormKey] = useState(0);
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState(null);
+      const [enrollmentWarning, setEnrollmentWarning] = useState(null);
+      const [standingOrders, setStandingOrders] = useState([]);
+      useEffect(() => {
+        if (!open || !canOrderStanding) return;
+        api.myStandingOrders().then(r => setStandingOrders((r && r.standingOrders) || [])).catch(() => setStandingOrders([]));
+      }, [open, canOrderStanding]);
+      if (!placement || !placement.canPlace) return null;
+      const targets = placement.targets || [];
+      const chosen = targets.find(t => t.encounterUuid === (euuid || placement.defaultEncounterUuid)) || null;
+      const label = presetType === 'referral' ? 'New Referral' : 'New Order';
+      const save = (f) => {
+        if (!chosen) return Promise.resolve(null);
+        setBusy(true); setMsg(null);
+        return api.addOrder(patient.id, chosen.encounterUuid, { ...f, ...(chosen.afterSigning ? { afterSigning: true } : {}) })
+          .then(r => {
+            setEnrollmentWarning(null);
+            setMsg({ ok: true, text: r.duplicate ? 'Already recorded. This is the order you placed a moment ago.' : r.message, warnings: r.warnings || [] });
+            setOpen(false); setFormKey(k => k + 1);
+            if (onPlaced) onPlaced();
+            return r;
+          })
+          .catch(e => {
+            if (e && e.data && e.data.needsReason) setEnrollmentWarning(e.data);
+            setMsg({ ok: false, text: (e && e.message) || 'The order did not save.' });
+            return null;
+          })
+          .finally(() => setBusy(false));
+      };
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2>{label}</h2>
+            <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => { setOpen(v => !v); setMsg(null); }}>{open ? 'Close' : `+ ${label}`}</button>
+          </div>
+          {(open || msg) && (
+            <div className="p-4 text-sm grid gap-2">
+              {msg && (
+                <div className={`rounded border p-2.5 text-[12.5px] ${msg.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                  {msg.text}
+                  {(msg.warnings || []).map((w, i) => <div key={i} className="text-amber-800 mt-1">{w}</div>)}
+                </div>
+              )}
+              {open && !targets.length && (
+                <p className="text-[12.5px] text-stone-600">
+                  {placement.emptyReason === 'NOT_LINKED'
+                    ? 'Link this patient to OpenEMR first. An order is filed on a visit in their chart.'
+                    : 'No visit on this chart yet. An order belongs to a visit: use Start Visit at the top of the chart, then place it here.'}
+                </p>
+              )}
+              {open && targets.length > 0 && (
+                <>
+                  <Field label="Add To Visit">
+                    <select className="inp" value={chosen ? chosen.encounterUuid : ''} onChange={e => { setEuuid(e.target.value); setEnrollmentWarning(null); }}>
+                      {targets.map(t => (
+                        <option key={t.encounterUuid} value={t.encounterUuid}>
+                          {[t.date ? fmtDate(t.date) : 'Undated', t.visitLabel || t.reason || 'Visit', t.signed ? 'Signed' : 'Draft'].join(' · ')}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {chosen && chosen.afterSigning && (
+                    <p className="text-[12px] text-amber-800">This visit is signed. The order is added to the note as an addendum and can use only the diagnoses the visit was signed with.</p>
+                  )}
+                  {chosen && (
+                    <OrderForm key={`${chosen.encounterUuid}|${formKey}`} clientId={patient.id}
+                      diagnoses={chosen.diagnoses || []} diagnosesLocked={!!chosen.afterSigning}
+                      types={placement.orderTypes} priorities={placement.orderPriorities} docTypes={placement.documentOrderTypes}
+                      standingOrders={standingOrders} requireStandingOrder={!!placement.requireStandingOrder}
+                      enrollmentWarning={enrollmentWarning} initialType={presetType} busy={busy} onSave={save} />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // The list and the opened order for one tab. The opened order is read from
     // the freshly loaded list, so a note or file added a moment ago shows at once.
-    const OrderBrowser = ({ patient, keep, empty }) => {
+    const OrderBrowser = ({ patient, keep, empty, presetType }) => {
       const { data, err, reload } = useChartOrders(patient && patient.id);
       const [openId, setOpenId] = useState(null);
       const rows = data ? (data.orders || []).filter(keep) : null;
       const open = data && openId ? (data.orders || []).find(o => o.id === openId) : null;
       if (open) return <OrderDetail order={open} data={data} onBack={() => setOpenId(null)} onChanged={reload} />;
-      return <OrderList rows={rows} err={err} empty={empty} onOpen={setOpenId} />;
+      return (
+        <div>
+          <NewOrderPanel patient={patient} placement={data && data.placement} presetType={presetType} onPlaced={reload} />
+          <OrderList rows={rows} err={err} empty={empty} onOpen={setOpenId} />
+        </div>
+      );
     };
 
     // Every order the patient has, whatever kind. Referrals and DME used to be
@@ -2588,7 +2690,7 @@
     // be found on another one.
     const OrdersTab = ({ patient }) => (
       <OrderBrowser patient={patient} keep={() => true}
-        empty="No orders on this chart yet. Orders are placed from inside an encounter." />
+        empty="No orders on this chart yet." />
     );
 
     // ONE Orders place on the chart (owner, 2026-11-04). Imaging and Referrals
@@ -2605,20 +2707,20 @@
         {filter === 'imaging' ? <ImagingTab patient={patient} />
           : filter === 'referral' ? <ReferralsTab patient={patient} />
           : filter === 'all' ? <OrdersTab patient={patient} />
-          : <OrderBrowser key={filter} patient={patient} keep={o => o.orderType === filter}
-              empty={`No ${filter === 'dme' ? 'equipment' : 'lab'} orders on this chart yet. Orders are placed from inside an encounter.`} />}
+          : <OrderBrowser key={filter} patient={patient} keep={o => o.orderType === filter} presetType={filter}
+              empty={`No ${filter === 'dme' ? 'equipment' : 'lab'} orders on this chart yet.`} />}
       </div>
     );
 
     const ReferralsTab = ({ patient }) => (
-      <OrderBrowser patient={patient} keep={o => o.orderType === 'referral'}
-        empty="No referrals on this chart yet. A referral is placed from inside an encounter." />
+      <OrderBrowser patient={patient} keep={o => o.orderType === 'referral'} presetType="referral"
+        empty="No referrals on this chart yet." />
     );
 
     // D3: IMAGING lists imaging orders AND the result documents attached to
     // them, so a study and its report are read in one place rather than two.
     const ImagingTab = ({ patient }) => {
-      const { data, err } = useChartOrders(patient && patient.id);
+      const { data, err, reload } = useChartOrders(patient && patient.id);
       const [results, setResults] = useState(null);
       useEffect(() => {
         if (!patient || !patient.id) return;
@@ -2629,8 +2731,10 @@
       const rows = data ? (data.orders || []).filter(o => o.orderType === 'imaging') : null;
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
-      if (!rows.length) return <EmptyPlace>No imaging on this chart yet.</EmptyPlace>;
+      const placeNew = <NewOrderPanel patient={patient} placement={data && data.placement} presetType="imaging" onPlaced={reload} />;
+      if (!rows.length) return <div>{placeNew}<EmptyPlace>No imaging on this chart yet.</EmptyPlace></div>;
       return (
+        <div>{placeNew}
         <div className="card"><div className="p-4">
           {rows.map(o => {
             const attached = (results || []).filter(r => String(r.orderId) === String(o.id));
@@ -2653,6 +2757,7 @@
             );
           })}
         </div></div>
+        </div>
       );
     };
 
@@ -7557,7 +7662,14 @@
     // for a credential that has no direct authority — the protocol picker then
     // has no blank option, and the TESTS come from the protocol's list rather
     // than a free-text box, because a test typed in is refused server-side.
-    const OrderForm = ({ clientId, diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning }) => {
+    // One key per form, made when it opens and sent with every save from it,
+    // so a double click or a retry returns the order already placed rather
+    // than recording a second one.
+    const newSubmitKey = () => {
+      try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) { /* fall through */ }
+      return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    };
+    const OrderForm = ({ clientId, diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning, initialType, diagnosesLocked, dxNotice }) => {
       // A REFERRAL is decided by where it goes (owner, 2026-10-12): any licensed
       // role refers within the team, a provider or an LCSW refers out. Someone
       // with no direct ordering authority still refers, with no protocol.
@@ -7566,7 +7678,19 @@
       const canOrderOwn = useCan('orderDirect');
       const canReferExternal = canReferOut || canOrderOwn;
       const canRefer = canReferInternal || canReferExternal;
-      const [f, setF] = useState({ orderType: requireStandingOrder && canRefer ? 'referral' : 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+      const startType = initialType && (initialType === 'referral' ? canRefer : !requireStandingOrder && (types || []).includes(initialType))
+        ? initialType : (requireStandingOrder && canRefer ? 'referral' : 'lab');
+      const [f, setF] = useState({ orderType: startType, tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+      const submitKeyRef = useRef(newSubmitKey());
+      // The linked diagnoses follow the list they are picked from: a code that
+      // left the list is dropped, and an empty pick takes them all again.
+      const dxKey = diagnoses.map(d => d.code).join('|');
+      useEffect(() => {
+        setF(p => {
+          const keep = p.diagnosisCodes.filter(c => diagnoses.some(d => d.code === c));
+          return { ...p, diagnosisCodes: keep.length ? keep : diagnoses.map(d => d.code) };
+        });
+      }, [dxKey]);
       const [targets, setTargets] = useState(null);
       const [targetsErr, setTargetsErr] = useState('');
       const loadTargets = useCallback(() => {
@@ -7647,11 +7771,12 @@
             )
             : <Field label="Tests / studies (one per line)"><textarea className="inp" rows={2} value={f.tests} onChange={e => setF({ ...f, tests: e.target.value })} /></Field>}
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">Linked dx:
-            {diagnoses.length === 0 && <span className="text-amber-700">add an encounter diagnosis first</span>}
+            {diagnoses.length === 0 && <span className="text-amber-700">{diagnosesLocked ? 'this visit was signed with no diagnoses, so no order can be added to it' : 'add a diagnosis to the visit and save the coding first'}</span>}
             {diagnoses.map(d => (
               <button key={d.code} type="button" className={`chip border ${f.diagnosisCodes.includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => toggleDx(d.code)}>{d.code}</button>
             ))}
           </div>
+          {dxNotice && <p className="text-[11px] text-amber-700">{dxNotice}</p>}
           <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
           {enrollmentWarning && (
             <div className="rounded border border-amber-300 bg-amber-50 p-2.5 grid gap-2">
@@ -7673,7 +7798,8 @@
                     : (!f.itemDescription || !f.quantity || !f.supplierName || !f.lengthOfNeed || !faxOk(f.supplierFax) || (f.requiresF2F && !f.faceToFaceDate)))
                   : !f.tests.trim())}
               onClick={() => {
-                const body = isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) };
+                const base = isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) };
+                const body = { ...base, idempotencyKey: submitKeyRef.current };
                 onSave(enrollmentWarning ? { ...body, enrollmentAcknowledgment: { acknowledged: ack.acknowledged, reason: ack.reason.trim() } } : body);
               }}>
               {busy ? 'Recording…' : f.orderType === 'referral' ? (f.destination === 'internal' ? 'Send Referral' : 'Record Referral') : f.orderType === 'dme' ? 'Record Written Order' : 'Record Order'}
@@ -9632,7 +9758,7 @@
                   return (
                   <div key={o.id} className="py-1.5 border-b border-stone-100 last:border-0">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-semibold text-[13px]">{headline}</div>
+                      <div className="font-semibold text-[13px]">{headline}{o.afterSigning && <span className="chip bg-amber-50 text-amber-800 ml-2">Added After Signing</span>}</div>
                       <span className={`chip ${['resulted', 'completed'].includes(o.status) ? 'bg-emerald-50 text-emerald-700' : o.status === 'cancelled' ? 'bg-stone-100 text-stone-500' : 'bg-primary-50 text-primary'}`}>{ORDER_LABEL[o.status] || o.status}</span>
                     </div>
                     <div className="text-xs text-stone-500">
@@ -9667,7 +9793,8 @@
                   );
                 })}
                 {showOrder && !locked && (canOrderDirect || canOrderStanding || canRefer) &&
-                  <OrderForm clientId={patient.id} diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                  <OrderForm clientId={patient.id} diagnoses={d.record.diagnoses || []} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                    dxNotice={diagnoses.some(x => !(d.record.diagnoses || []).some(y => y.code === x.code)) ? 'Save the coding first. Diagnoses added since the last save can\'t be linked to an order yet.' : ''}
                     docTypes={d.documentOrderTypes}
                     standingOrders={standingOrders} requireStandingOrder={!canOrderDirect} enrollmentWarning={orderEnrollmentWarning}
                     onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f).catch(e => {
@@ -10454,8 +10581,8 @@
         <div className="min-h-screen lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
           <aside className="cw-side hidden lg:flex flex-col sticky top-0 h-screen overflow-y-auto px-3 py-5">
             <div className="brand flex flex-col items-center text-center px-2 mb-6">
-              <img src="/brand/logo-full-white-trimmed.png" alt="Godwins Family Care" className="!h-auto w-[150px]" />
-              <div className="text-[9.5px] tracking-[2px] uppercase text-accent font-bold mt-2">Clinical Workspace</div>
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="!h-auto w-[150px]" />
+              <div className="text-[9.5px] tracking-[2px] uppercase font-bold mt-2" style={{ color: '#9A7430' }}>Clinical Workspace</div>
             </div>
             <nav className="cw-nav">
               {NAV_VIEWS.filter(v => v.group === 'main' && navShown(v, access)).map(navButton)}
@@ -10464,11 +10591,11 @@
             </nav>
             <div className="mt-auto pt-4">
               <nav className="cw-nav">{NAV_VIEWS.filter(v => v.group === 'foot').map(navButton)}</nav>
-              <div className="flex items-center gap-3 px-3 pt-4 mt-3 border-t border-white/10">
+              <div className="flex items-center gap-3 px-3 pt-4 mt-3 border-t" style={{ borderColor: 'var(--edge)' }}>
                 <div className="w-10 h-10 rounded-full bg-accent text-primary flex items-center justify-center font-bold text-[13px] shrink-0">{initials(user.name)}</div>
                 <div className="min-w-0">
                   <div className="text-[13.5px] font-semibold truncate">{user.name}</div>
-                  <div className="text-[11.5px] text-white/60 truncate">{access.clinicalRoleLabel || user.role}{!canWrite && !access.canDocument ? ' · Read-only' : ''}</div>
+                  <div className="text-[11.5px] truncate" style={{ color: 'var(--mut)' }}>{access.clinicalRoleLabel || user.role}{!canWrite && !access.canDocument ? ' · Read-only' : ''}</div>
                 </div>
               </div>
             </div>

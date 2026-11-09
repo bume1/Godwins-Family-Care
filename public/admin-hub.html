@@ -49,7 +49,7 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     /* The Admin Hub wears the My GFC frame (owner, 2026-11-09): the same
@@ -99,6 +99,9 @@
   <div id="root"></div>
   <!-- The My GFC frame (Shell, Tile, Section), shared with /my and the caregiver app. -->
   <script type="text/babel" src="/my-gfc.js"></script>
+  <!-- Client and family accounts live on the Clients page; the pieces both
+       screens need are one shared copy (owner, 2026-11-09). -->
+  <script type="text/babel" src="/client-account-ui.js"></script>
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
@@ -147,8 +150,14 @@
     // Admin's; the server still refuses what they may not do.
     const HUB_OFFICE_TYPES = ['manager', 'coordinator'];
     const isHubOffice = (u) => !!u && u.role !== 'admin' && HUB_OFFICE_TYPES.includes(u.accountType);
-    // The account types a manager or coordinator manages (accountTypes.js E1).
-    const OFFICE_MANAGED_TYPES = ['caregiver', 'client', 'family'];
+    // USER MANAGEMENT IS INTERNAL STAFF ONLY (owner, 2026-11-09). Client and
+    // family accounts live in the Clients area (/clients) and never appear
+    // here. The full user list is still loaded, because the caregiver and
+    // liaison client pickers read it; only what this page SHOWS is staff.
+    const isStaffAccount = (u) => !!u && !['client', 'family'].includes(u.role);
+    // What a manager or coordinator sees here: caregivers (accountTypes.js E1;
+    // the client and family accounts they also manage are on /clients).
+    const OFFICE_MANAGED_TYPES = ['caregiver'];
 
     const api = {
       adminLogin: (email, password) =>
@@ -1076,7 +1085,7 @@
               <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
                 <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <span className="w-8 h-8 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center">{Icons.clipboard}</span>
-                  Caregiver Scheduling
+                  Staff Scheduling
                 </h2>
                 <a href="/scheduling" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open scheduling →</a>
               </div>
@@ -2127,200 +2136,9 @@
       }
     }
 
-    // ── Moving a patient's login to their POA (owner, 2026-10-20) ───────────
-    // POAs had been signing in with the patient's own account, so what they
-    // signed reads as the patient. The server moves the login (email, password,
-    // MFA) onto a family account with a POA link and gives the patient a
-    // placeholder login; the POA signs in exactly as before. Module scope, so
-    // its inputs keep focus as the admin types.
-    const PoaCutoverDialog = ({ token, client, users, onClose, onDone, initial }) => {
-      const familyUsers = users.filter(u => u.role === 'family');
-      const start = initial || {};
-      const [mode, setMode] = useState('move');
-      const [targetId, setTargetId] = useState('');
-      const [name, setName] = useState(start.name || '');
-      const [phone, setPhone] = useState(start.phone || '');
-      const [relationship, setRelationship] = useState(start.relationship || '');
-      const [note, setNote] = useState('');
-      const [confirmName, setConfirmName] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [error, setError] = useState('');
-      // A placeholder family account (no login of its own) can take the login;
-      // one with its own login can only be linked, never merged.
-      const noLoginFamily = familyUsers.filter(u => u.noLogin);
-      const withLoginFamily = familyUsers.filter(u => !u.noLogin);
-      const submit = async () => {
-        setBusy(true); setError('');
-        const body = { mode, confirmName, note, relationship };
-        if (targetId) body.targetFamilyId = targetId;
-        else { body.name = name; body.phone = phone; }
-        const r = await api.poaCutover(token, client.id, body);
-        setBusy(false);
-        if (r.error) { setError(r.error); return; }
-        onDone(r);
-      };
-      return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-lg font-bold text-accent mb-2">Move {client.name}'s login to their POA</h2>
-            <p className="text-sm text-gray-600 mb-4">
-              The POA keeps signing in with the same email and password. From now on, what they sign or send reads as them, acting as POA for {client.name}.
-              {' '}{client.name}'s own sign-in stops working. Nothing already signed is changed.
-            </p>
-            <div className="space-y-2 mb-4">
-              <label className="flex items-start gap-2 text-sm">
-                <input type="radio" className="mt-1" checked={mode === 'move'} onChange={() => { setMode('move'); setTargetId(''); }} />
-                <span><span className="font-medium">Move the login to the POA.</span> Use this when the POA has no account of their own yet.</span>
-              </label>
-              <label className="flex items-start gap-2 text-sm">
-                <input type="radio" className="mt-1" checked={mode === 'link_existing'} onChange={() => { setMode('link_existing'); setTargetId(''); }} />
-                <span><span className="font-medium">The POA already has their own login.</span> Link {client.name} to it and retire this one. They then sign in with their own login only.</span>
-              </label>
-            </div>
-            {mode === 'move' ? (
-              <div className="space-y-3 mb-4">
-                {noLoginFamily.length > 0 && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">POA account</label>
-                    <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
-                      <option value="">Create a new POA account</option>
-                      {noLoginFamily.map(u => <option key={u.id} value={u.id}>{u.name} (no login yet)</option>)}
-                    </select>
-                  </div>
-                )}
-                {!targetId && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">POA's name *</label>
-                      <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">POA's phone</label>
-                      <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">The POA's existing account *</label>
-                <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
-                  <option value="">Choose…</option>
-                  {withLoginFamily.map(u => <option key={u.id} value={u.id}>{u.name} ({u.email})</option>)}
-                </select>
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship</label>
-                <input type="text" value={relationship} placeholder="e.g. Husband" onChange={(e) => setRelationship(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-                <input type="text" value={note} onChange={(e) => setNote(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-            </div>
-            <p className="text-xs text-gray-500 mb-3">Only do this once the POA document is verified on file. The POA will be signed out once and signs back in as usual.</p>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Type the patient's name to confirm</label>
-            <input type="text" value={confirmName} placeholder={client.name} onChange={(e) => setConfirmName(e.target.value)} className="w-full px-3 py-2 border rounded-lg mb-3" />
-            {error && <p className="text-sm text-red-700 mb-3">{error}</p>}
-            <div className="flex gap-3">
-              <button type="button" disabled={busy} onClick={submit} className="flex-1 px-4 py-2.5 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 font-medium">
-                {busy ? 'Moving…' : 'Move Login'}
-              </button>
-              <button type="button" onClick={onClose} className="px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium">Cancel</button>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    // The app cannot tell for sure which patient logins are really the POA's,
-    // so this only suggests, and says why. Nothing is ever moved on its own.
-    // Pay and rate changes a manager or care coordinator asked for (owner,
-    // 2026-11-03). The Super Admin approves or declines; everyone else sees
-    // what is waiting so nobody asks twice.
-    const fmtFinancial = (field, v) => {
-      if (v === null || v === undefined) return 'not set';
-      if (field === 'payRate') return `$${Number(v).toFixed(2)}/hr`;
-      if (field === 'rateAgreement') return `$${Number(v.hourlyRate).toFixed(2)}/hr, ${v.dailyMinimumHours} hr daily minimum`;
-      if (field === 'billingSettings') return v.copayCents == null ? 'no copay' : `$${(v.copayCents / 100).toFixed(2)} copay`;
-      if (field === 'clientPayRates') return `${Object.keys(v).length} per-client rate${Object.keys(v).length === 1 ? '' : 's'}`;
-      return String(v);
-    };
-    const FinancialChangeQueue = ({ token, requests, canDecide, onChanged }) => {
-      const [notes, setNotes] = React.useState({});
-      const [msg, setMsg] = React.useState('');
-      if (!requests.length) return null;
-      const decide = async (id, decision) => {
-        setMsg('');
-        const r = await fetch(`/api/users/financial-change-requests/${encodeURIComponent(id)}/decide`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ decision, note: notes[id] || '' })
-        }).then(x => x.json()).catch(() => ({ error: 'Could not reach the server.' }));
-        if (r.error) setMsg(`Error: ${r.error}`); else { setMsg(decision === 'approved' ? 'Approved and saved on the record.' : 'Declined. Nothing changed.'); onChanged(); }
-      };
-      return (
-        <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
-          <p className="font-semibold text-amber-900">{requests.length} pay or rate change{requests.length === 1 ? '' : 's'} waiting on the Super Admin</p>
-          {msg && <p className="text-sm mt-1">{msg}</p>}
-          <div className="mt-2 space-y-3">
-            {requests.map(r => (
-              <div key={r.id} className="text-sm text-amber-900">
-                <div><b>{r.userName}</b>: {r.label} from {fmtFinancial(r.field, r.currentValue)} to {fmtFinancial(r.field, r.requestedValue)}. Asked by {r.requestedByName}{r.reason ? `: ${r.reason}` : '.'}</div>
-                {canDecide && (
-                  <div className="flex flex-wrap gap-2 mt-1 items-center">
-                    <input className="px-3 py-1.5 border border-amber-300 rounded-lg" placeholder="Note (optional)"
-                      value={notes[r.id] || ''} onChange={e => setNotes({ ...notes, [r.id]: e.target.value })} />
-                    <button type="button" className="px-3 py-1.5 bg-primary-600 text-white rounded-lg" onClick={() => decide(r.id, 'approved')}>Approve</button>
-                    <button type="button" className="px-3 py-1.5 border border-amber-400 rounded-lg" onClick={() => decide(r.id, 'declined')}>Decline</button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    };
-
-    const PossiblePoaLogins = ({ token, users, onOpen }) => {
-      const [rows, setRows] = useState(null);
-      const [open, setOpen] = useState(false);
-      useEffect(() => {
-        let live = true;
-        api.getPossiblePoaLogins(token).then(r => {
-          if (!live) return;
-          const list = r && Array.isArray(r.clients) ? r.clients : [];
-          setRows(list.filter(x => x && x.id).map(x => ({ id: String(x.id), name: typeof x.name === 'string' ? x.name : 'Patient', flagged: !!x.flagged, reasons: Array.isArray(x.reasons) ? x.reasons.map(String) : [] })));
-        }).catch(() => { if (live) setRows([]); });
-        return () => { live = false; };
-      }, [token, users.length]);
-      if (!rows || !rows.length) return null;
-      const flagged = rows.filter(r => r.flagged).length;
-      return (
-        <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl">
-          <button type="button" onClick={() => setOpen(!open)} className="w-full text-left">
-            <p className="font-semibold text-blue-900">
-              {rows.length} patient login{rows.length === 1 ? '' : 's'} may be used by a POA{flagged ? ` (${flagged} flagged)` : ''} {open ? '▴' : '▾'}
-            </p>
-            <p className="text-sm text-blue-800 mt-1">When a POA signs in as the patient, what they sign reads as the patient. Open each one to check and, if so, move the login to the POA.</p>
-          </button>
-          {open && (
-            <div className="mt-3 space-y-2">
-              {rows.map(r => (
-                <div key={r.id} className="flex items-start justify-between gap-3 bg-white border border-blue-200 rounded-lg p-3">
-                  <div>
-                    <p className="text-sm font-medium text-gray-800">{r.name}{r.flagged ? ' · flagged' : ''}</p>
-                    <ul className="text-xs text-gray-600 mt-1 list-disc ml-4">{r.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>
-                  </div>
-                  <button type="button" onClick={() => onOpen(r.id)} className="px-3 py-1.5 text-sm bg-white border border-blue-300 text-blue-900 rounded-lg hover:bg-blue-100 whitespace-nowrap">Open</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    };
+    // Shared with the Clients page (public/client-account-ui.js): the POA
+    // login move and the pay and rate queue, one copy for both screens.
+    const { PoaCutoverDialog, FinancialChangeQueue } = window.GFCClientAccount;
 
     // ── Veterans (IME) (owner, 2026-10-30) ───────────────────────────────────
     // The vendor's list of veterans for each exam day, assigned to a provider.
@@ -2339,7 +2157,12 @@
       // split (owner, 2026-11-09): ?group=staff is our team, ?group=clients is
       // client and family accounts.
       const [roleFilter, setRoleFilter] = useState(() => {
-        try { const g = new URLSearchParams(window.location.search).get('group'); return g === 'staff' || g === 'clients' ? g : 'all'; }
+        try {
+          const g = new URLSearchParams(window.location.search).get('group');
+          // Clients and family have their own area now (owner, 2026-11-09).
+          if (g === 'clients') { window.location.replace('/clients'); return 'all'; }
+          return g === 'staff' ? g : 'all';
+        }
         catch (e) { return 'all'; }
       });
       const [message, setMessage] = useState('');
@@ -2355,7 +2178,7 @@
       const [activeTab, setActiveTab] = useState('list');
       const [saving, setSaving] = useState(false);
       const [showBulkReset, setShowBulkReset] = useState(false);
-      const [bulkResetType, setBulkResetType] = useState('all');
+      const [bulkResetType, setBulkResetType] = useState('users');
       const [bulkResetResults, setBulkResetResults] = useState(null);
       const [bulkResetLoading, setBulkResetLoading] = useState(false);
       const logoInputRef = useRef(null);
@@ -2591,6 +2414,10 @@
       };
 
       const handleEdit = (user) => {
+        // A client or family account opens on the Clients page, the one place
+        // they are edited (owner, 2026-11-09).
+        if (user && user.role === 'client') { window.location.href = `/clients?client=${encodeURIComponent(user.id)}`; return; }
+        if (user && user.role === 'family') { window.location.href = `/clients?family=${encodeURIComponent(user.id)}`; return; }
         setChangePassword(false);
         if (user && !['client', 'family'].includes(user.role)) { setRecordUrl(user.id); window.scrollTo(0, 0); }
         setEditingUser(user);
@@ -2808,7 +2635,7 @@
       };
 
       const handleBulkReset = async () => {
-        if (!confirm(`Are you sure you want to reset passwords for ${bulkResetType === 'all' ? 'ALL non-admin users' : bulkResetType === 'clients' ? 'all CLIENT users' : 'all TEAM MEMBER users'}? They will be required to change their password on next login.`)) return;
+        if (!confirm(`Are you sure you want to reset passwords for ${'all staff (not admins, clients or family)'}? They will be required to change their password on next login.`)) return;
         setBulkResetLoading(true);
         setBulkResetResults(null);
         try {
@@ -2841,7 +2668,7 @@
         const getRoleDisplay = (user) => accountTypeLabel(user);
 
         const clientNameById = new Map(users.filter(u => u.role === 'client').map(u => [u.id, u.name]));
-        const exportData = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).map(user => ({
+        const exportData = users.filter(isStaffAccount).filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).map(user => ({
           'Name': user.name || '',
           'Email': user.email || '',
           'Account Type': getRoleDisplay(user),
@@ -2899,12 +2726,13 @@
         XLSX.writeFile(wb, filename);
       };
 
-      const filteredUsers = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).filter(user => {
+      // Reset requests from staff only; client and family ones are on /clients.
+      const staffResets = passwordResets.filter(r => isStaffAccount(users.find(u => u.id === r.userId)));
+      const filteredUsers = users.filter(isStaffAccount).filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).filter(user => {
         // String(): one record with a malformed name must not blank the whole list.
         const q = String(searchTerm || '').toLowerCase();
         const matchesSearch = String(user.name || '').toLowerCase().includes(q) || String(user.email || '').toLowerCase().includes(q);
-        const isClientSide = user.role === 'client' || user.role === 'family';
-        const matchesRole = roleFilter === 'all' || (roleFilter === 'staff' ? !isClientSide : roleFilter === 'clients' ? isClientSide : user.role === roleFilter);
+        const matchesRole = roleFilter === 'all' || roleFilter === 'staff' || user.role === roleFilter;
         return matchesSearch && matchesRole;
       });
 
@@ -2917,11 +2745,6 @@
       return (
         <div className={recordUser ? 'space-y-6 sr-open' : 'space-y-6'}>
           <FinancialChangeQueue token={token} requests={financialPending} canDecide={isSuperAdmin} onChanged={loadData} />
-          {isSuperAdmin && (
-            <PageErrorBoundary quiet>
-              <PossiblePoaLogins token={token} users={users} onOpen={(id) => { const u = users.find(x => x.id === id); if (u) handleEdit(u); }} />
-            </PageErrorBoundary>
-          )}
           {cutoverFor && (
             <PoaCutoverDialog token={token} client={cutoverFor} users={users} initial={cutoverInitial}
               onClose={() => { setCutoverFor(null); setCutoverInitial(null); }}
@@ -3024,10 +2847,10 @@
             {/* Tabs */}
             <div className="mt-4 flex gap-2 border-b">
               <button onClick={() => setActiveTab('list')} className={`px-4 py-2 font-medium ${activeTab === 'list' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
-                Users ({isSuperAdmin ? users.length : users.filter(u => OFFICE_MANAGED_TYPES.includes(u.accountType)).length})
+                Users ({users.filter(isStaffAccount).filter(u => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(u.accountType)).length})
               </button>
               {isSuperAdmin && <button onClick={() => setActiveTab('resets')} className={`px-4 py-2 font-medium ${activeTab === 'resets' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
-                Password Resets {passwordResets.length > 0 && <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{passwordResets.length}</span>}
+                Password Resets {staffResets.length > 0 && <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{staffResets.length}</span>}
               </button>}
             </div>
 
@@ -3040,11 +2863,9 @@
                 <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
                   <option value="all">All Roles</option>
                   <option value="staff">People (our team)</option>
-                  <option value="clients">Clients and family</option>
                   <option value="admin">Admins</option>
                   <option value="user">Team Members</option>
                   <option value="vendor">Vendors</option>
-                  <option value="client">Clients</option>
                   <option value="service">Service Portal Access</option>
                 </select>
               </div>
@@ -3055,9 +2876,9 @@
           {activeTab === 'resets' && (
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-lg font-bold text-accent mb-4 flex items-center gap-2">{Icons.key} Password Reset Requests</h2>
-              {passwordResets.length > 0 ? (
+              {staffResets.length > 0 ? (
                 <div className="space-y-3">
-                  {passwordResets.map(req => {
+                  {staffResets.map(req => {
                     const user = users.find(u => u.id === req.userId);
                     return (
                       <div key={req.id} className="flex justify-between items-center p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -3087,7 +2908,7 @@
                 <h2 className="text-lg font-bold text-accent mb-2">Client created</h2>
                 <p className="text-sm text-gray-600 mb-5">Start their enrollment now — intake, consents, and documents live there, for home care or clinical care alike.</p>
                 <div className="flex gap-3">
-                  <a href={`/admin/enrollment?client=${justCreatedClientId}`}
+                  <a href={`/clients?client=${justCreatedClientId}`}
                     className="flex-1 text-center px-4 py-2.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 font-medium">
                     Go to enrollment
                   </a>
@@ -3189,7 +3010,7 @@
                         disabled={!!(editingUser && editingUser.role === 'client')}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary disabled:bg-gray-50">
                         <option value="">-- Choose an account type --</option>
-                        {accountTypeCatalog.map(t => (
+                        {accountTypeCatalog.filter(t => !['client', 'family'].includes(t.value)).map(t => (
                           <option key={t.value} value={t.value}>{t.label}</option>
                         ))}
                       </select>
@@ -3553,61 +3374,6 @@
                     </div>
                   )}
 
-                  {/* Family / authorized contact: the patients this person is linked
-                      to, each with its own POA tick (owner, 2026-10-20). One login
-                      covers all of them; the portal asks whose to open. */}
-                  {formData.role === 'family' && (
-                    <div className="border-t pt-4">
-                      <h3 className="font-medium text-gray-800 mb-3">Family / Authorized Contact Settings</h3>
-                      <p className="text-sm text-gray-500 mb-3">Link this person to every patient they help with. Each patient's portal stays locked until that patient's ROI — Family consent is signed (no override).</p>
-                      {(formData.familyLinks || []).map((link, i) => (
-                        <div key={i} className="mb-3 p-3 border rounded-lg">
-                          <div className="flex gap-2 items-start">
-                            <div className="flex-1">
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Linked patient {i === 0 ? '*' : ''}</label>
-                              <select value={link.clientId} required
-                                onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, clientId: e.target.value } : l) })}
-                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                                <option value="">Select a patient…</option>
-                                {users.filter(u => u.role === 'client' && (u.id === link.clientId || !(formData.familyLinks || []).some(l => l.clientId === u.id))).map(u => (
-                                  <option key={u.id} value={u.id}>{u.name || u.practiceName || u.email}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="w-40">
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Relationship</label>
-                              <input type="text" value={link.relationship || ''} placeholder="e.g. Daughter"
-                                onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, relationship: e.target.value } : l) })}
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
-                            </div>
-                            <button type="button" className="mt-7 px-3 py-2 text-sm text-red-700 hover:bg-red-50 rounded-lg"
-                              onClick={() => setFormData({ ...formData, familyLinks: formData.familyLinks.filter((_, j) => j !== i) })}>Remove</button>
-                          </div>
-                          <div className="mt-3 flex items-start gap-3 p-3 bg-amber-50 rounded-lg">
-                            <input type="checkbox" id={`familyIsPoa-${i}`} checked={!!link.isPoa}
-                              onChange={(e) => setFormData({ ...formData, familyLinks: formData.familyLinks.map((l, j) => j === i ? { ...l, isPoa: e.target.checked } : l) })}
-                              className="w-5 h-5 mt-0.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500" />
-                            <div>
-                              <label htmlFor={`familyIsPoa-${i}`} className="text-sm font-medium text-gray-700">Designated Power of Attorney for this patient</label>
-                              <p className="text-xs text-gray-500 mt-0.5">Only check after verifying the POA document on file. Grants patient-level portal access for this patient — care plan and clinical details, and acting on their behalf. All POA activity is logged under this person's own name.</p>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                      {!(formData.familyLinks || []).length && (
-                        <p className="text-sm text-amber-700 mb-2">Not linked to any patient yet. Add at least one.</p>
-                      )}
-                      {!users.some(u => u.role === 'client') && (
-                        <p className="text-sm text-amber-700 mb-2">There are no patient accounts to choose from.</p>
-                      )}
-                      <p className="text-xs text-gray-500 mb-2">Only patient accounts are listed. A patient missing here may have had their account type changed; open them and set it back to Client.</p>
-                      <button type="button" className="px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
-                        onClick={() => setFormData({ ...formData, familyLinks: [...(formData.familyLinks || []), { clientId: '', isPoa: false, relationship: '' }] })}>
-                        Add a patient
-                      </button>
-                    </div>
-                  )}
-
                   {/* Community Care Liaison (owner, 2026-11-08): the clients this
                       liaison follows. They see only these clients, and only the
                       enrollment summary (status and what is still needed) in
@@ -3762,247 +3528,6 @@
                       caregiverName={formData.name} />
                   )}
 
-                  {/* Client-specific fields */}
-                  {formData.role === 'client' && (
-                    <div className="border-t pt-4">
-                      <h3 className="font-medium text-gray-800 mb-3">Client Settings</h3>
-
-                      {/* A login the patient's POA has been using (owner,
-                          2026-10-20). What they signed reads as the patient, so
-                          the office moves the login onto the POA's own account. */}
-                      {editingUser && !editingUser.noLogin && (
-                        <div className="mb-4 p-4 bg-blue-50 rounded-xl">
-                          <label className="flex items-start gap-2 text-sm text-gray-700">
-                            <input type="checkbox" className="mt-0.5" checked={!!formData.loginHeldByPoa}
-                              onChange={(e) => setFormData({ ...formData, loginHeldByPoa: e.target.checked })} />
-                            <span><span className="font-medium">This login is used by the patient's POA</span>, not the patient. Anything signed or sent with it reads as the patient.</span>
-                          </label>
-                          {(formData.loginHeldByPoa || editingUser.loginHeldByPoa) && (
-                            <button type="button" onClick={() => setCutoverFor(editingUser)}
-                              className="mt-3 px-3 py-2 text-sm bg-primary text-white rounded-lg hover:opacity-90">
-                              Move this login to the POA…
-                            </button>
-                          )}
-                        </div>
-                      )}
-                      {editingUser && editingUser.poaCutover && (
-                        <p className="mb-4 text-xs text-gray-600 p-3 bg-gray-50 rounded-lg">
-                          This patient's login was moved to their POA on {new Date(editingUser.poaCutover.at).toLocaleDateString()} by {(editingUser.poaCutover.by && editingUser.poaCutover.by.name) || 'an admin'}. Before then, entries made with it read as the patient.
-                        </p>
-                      )}
-
-                      {/* The agreed BILLED rate (owner request, 2026-09-13).
-                          The financial agreement and the home care service agreement
-                          both PRINT this table, so neither is presentable until it is
-                          set — a client added without one hits a hard gate the moment
-                          they try to sign. The rate is agreed at the point of sale, so
-                          it belongs here, not only on the enrollment screen.
-                          On EDIT it is read-only: changing a rate someone already
-                          signed against flags them to re-sign, and that logic lives on
-                          the enrollment rate screen. */}
-                      {!editingUser ? (
-                        <div className="mb-4 p-4 bg-amber-50 rounded-xl">
-                          <h4 className="font-medium text-gray-800 mb-1">Agreed rate (private home care)</h4>
-                          <p className="text-xs text-gray-500 mb-3">
-                            Needed before this client can sign the Financial Agreement or the Service Agreement — both print it.
-                            Skip it for a clinical-only patient, who signs neither.
-                          </p>
-                          <div className="grid grid-cols-2 gap-3 max-w-md">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Billed rate ($/hour)</label>
-                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
-                                placeholder="e.g. 32.00"
-                                value={formData.rateAgreement?.hourlyRate || ''}
-                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), hourlyRate: e.target.value } })} />
-                            </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Daily minimum (hours)</label>
-                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.5"
-                                placeholder="e.g. 4"
-                                value={formData.rateAgreement?.dailyMinimumHours || ''}
-                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), dailyMinimumHours: e.target.value } })} />
-                            </div>
-                          </div>
-                          <p className="text-xs text-gray-500 mt-2">The rest of the terms — holidays, errands, invoicing, cancellation window — are set under Enrollment.</p>
-                        </div>
-                      ) : (
-                        <div className="mb-4 p-3 bg-gray-50 rounded-xl text-sm">
-                          <span className="text-gray-500">Agreed rate: </span>
-                          {formData.rateAgreement?.hourlyRate
-                            ? <span className="font-medium">${formData.rateAgreement.hourlyRate}/hr, {formData.rateAgreement.dailyMinimumHours} hr daily minimum</span>
-                            : <span className="text-amber-700 font-medium">not set — this client cannot sign the Financial or Service Agreement</span>}
-                          <a href="/admin/enrollment" className="ml-2 text-primary-600 hover:underline">Change under Enrollment →</a>
-                        </div>
-                      )}
-
-                      {/* Add to existing portal option - only for new users */}
-                      {!editingUser && clientPortals.length > 0 && (
-                        <div className="mb-4">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Add to Existing Portal</label>
-                          <select
-                            value={formData.existingPortalSlug}
-                            onChange={(e) => {
-                              const slug = e.target.value;
-                              if (slug) {
-                                const portal = clientPortals.find(p => p.slug === slug);
-                                if (portal) {
-                                  setFormData({
-                                    ...formData,
-                                    existingPortalSlug: slug,
-                                    practiceName: portal.practiceName,
-                                    logo: portal.logo || formData.logo,
-                                    hubspotCompanyId: portal.hubspotCompanyId || formData.hubspotCompanyId,
-                                  });
-                                }
-                              } else {
-                                setFormData({ ...formData, existingPortalSlug: '', practiceName: '' });
-                              }
-                            }}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary"
-                          >
-                            <option value="">-- Create New Portal --</option>
-                            {clientPortals.map(p => (
-                              <option key={p.slug} value={p.slug}>
-                                {p.practiceName} ({p.memberCount} {p.memberCount === 1 ? 'user' : 'users'})
-                              </option>
-                            ))}
-                          </select>
-                          {formData.existingPortalSlug && (
-                            <div className="mt-2 p-3 bg-blue-50 rounded-lg">
-                              <p className="text-sm text-gray-700">
-                                <span className="font-medium">Adding user to portal:</span> {window.location.origin}/portal/{formData.existingPortalSlug}
-                              </p>
-                              {(() => {
-                                const portal = clientPortals.find(p => p.slug === formData.existingPortalSlug);
-                                return portal ? (
-                                  <p className="text-xs text-gray-500 mt-1">
-                                    Current members: {portal.members.map(m => m.name).join(', ')}
-                                  </p>
-                                ) : null;
-                              })()}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <div className="md:col-span-2">
-                          {/* Labelled "Name" because a client is a person now.
-                              The field is still practiceName underneath: it is
-                              what generates their portal slug, and renaming the
-                              key would break the URL of every portal on file. */}
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Name {!formData.existingPortalSlug && '*'}</label>
-                          <input type="text" value={formData.practiceName} onChange={(e) => setFormData({ ...formData, practiceName: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required={!formData.existingPortalSlug}
-                            disabled={!!formData.existingPortalSlug} />
-                          {formData.existingPortalSlug && <p className="text-xs text-gray-500 mt-1">Inherited from existing portal</p>}
-                        </div>
-                        <div className="md:col-span-2">
-                          {/* A headshot, not a logo. Clients were practices in
-                              the lab app so this asked for their branding; the
-                              storage key is still `logo` for the same reason
-                              practiceName is. Shown round here because that is
-                              how it renders in the portal. */}
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Client Photo</label>
-                          <div className="flex items-center gap-4">
-                            {formData.logo && <img src={formData.logo} alt="" className="h-16 w-16 object-cover border rounded-full" />}
-                            <input type="file" ref={logoInputRef} accept="image/png,image/jpeg" onChange={handleLogoUpload} className="hidden" />
-                            <button type="button" onClick={() => logoInputRef.current?.click()}
-                              className="px-4 py-2 border border-primary text-primary rounded-lg hover:bg-primary hover:text-white flex items-center gap-2">
-                              {Icons.upload} Upload Photo
-                            </button>
-                            {formData.logo && <button type="button" onClick={() => setFormData({ ...formData, logo: '' })} className="text-red-600 text-sm">Remove</button>}
-                          </div>
-                          <p className="text-xs text-gray-500 mt-1">A headshot helps caregivers recognise who they are visiting. Max 2MB, PNG or JPEG.</p>
-                        </div>
-                        {editingUser?.slug && (
-                          <div className="md:col-span-2 p-3 bg-blue-50 rounded-lg">
-                            <p className="text-sm text-gray-700"><span className="font-medium">Client Portal URL:</span> {window.location.origin}/portal/{editingUser.slug}</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* The HubSpot ID boxes used to sit here. They belong to
-                          the dormant lab CRM connector, which is retained but
-                          inactive and must not be deleted — so the three values
-                          still round-trip on the record and through the API, and
-                          only the inputs are gone. Nobody enrolling a home care
-                          client has a HubSpot deal id to type. */}
-
-                      {/* Enrollment Status */}
-                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
-                      <select value={formData.enrollmentStatus} onChange={(e) => setFormData({ ...formData, enrollmentStatus: e.target.value })}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                        <option value="intake_pending">Intake Pending</option>
-                        <option value="intake_complete">Intake Complete</option>
-                        <option value="enrolled">Enrolled</option>
-                      </select>
-
-                      {/* Care Team */}
-                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Care Team</h4>
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Primary Caregiver</label>
-                          <select value={formData.careTeam.primaryCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, primaryCaregiver: e.target.value } })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                            <option value="">-- None --</option>
-                            {users.filter(u => u.role === 'vendor').map(u => (
-                              <option key={u.id} value={u.id}>{u.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Backup Caregiver</label>
-                          <select value={formData.careTeam.backupCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, backupCaregiver: e.target.value } })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                            <option value="">-- None --</option>
-                            {users.filter(u => u.role === 'vendor').map(u => (
-                              <option key={u.id} value={u.id}>{u.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned Case Manager</label>
-                          <select value={formData.careTeam.assignedCaseManager} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedCaseManager: e.target.value } })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                            <option value="">-- None --</option>
-                            {/* Case managers, plus licensed social workers set up as
-                                clinician accounts (LMSW/LCSW), who can hold this role. */}
-                            {users.filter(u => (u.role === 'caseManager' && u.clinicalRole !== 'coordinator') || (u.role === 'user' && ['lmsw', 'lcsw'].includes(u.clinicalRole))).map(u => (
-                              <option key={u.id} value={u.id}>{u.name}{u.role === 'user' ? ` (${String(u.clinicalRole).toUpperCase()})` : ''}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned FNPs</label>
-                          <select multiple value={formData.careTeam.assignedFNPs} onChange={(e) => {
-                              const selected = Array.from(e.target.selectedOptions).map(o => o.value);
-                              setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedFNPs: selected } });
-                            }}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" size="4">
-                            {users.filter(u => u.role === 'user' && u.hasClinicalAccess).map(u => (
-                              <option key={u.id} value={u.id}>{u.name}</option>
-                            ))}
-                          </select>
-                          <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple</p>
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Care Coordinators</label>
-                          <select multiple value={formData.careTeam.careCoordinators || []} onChange={(e) => {
-                              const selected = Array.from(e.target.selectedOptions).map(o => o.value);
-                              setFormData({ ...formData, careTeam: { ...formData.careTeam, careCoordinators: selected } });
-                            }}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" size="4">
-                            {users.filter(u => u.clinicalRole === 'coordinator' && u.accountStatus !== 'inactive').map(u => (
-                              <option key={u.id} value={u.id}>{u.name}</option>
-                            ))}
-                          </select>
-                          <p className="text-xs text-gray-500 mt-1">They support this client's case manager and prepare notes for the clinician to sign.</p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
                   {/* Project Assignment (for non-admin users) */}
                   {formData.role !== 'admin' && projects.length > 0 && (
                     <div className="border-t pt-4">
@@ -4147,9 +3672,7 @@
                         <label className="block text-sm font-medium text-gray-700 mb-2">Select User Type</label>
                         <select value={bulkResetType} onChange={(e) => setBulkResetType(e.target.value)}
                           className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary">
-                          <option value="all">All Users (excludes admins)</option>
-                          <option value="clients">Clients Only</option>
-                          <option value="users">Team Members Only (non-clients)</option>
+                          <option value="users">All staff (excludes admins; clients and family are reset from Clients)</option>
                         </select>
                       </div>
 

@@ -544,7 +544,7 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
     // carries one — the set of guards did.
     // `requireW2Staff` joined 2026-11-08: W-2 staff without shifts clock in on
     // the same clock (staff-clock), and only they may.
-    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable|requireAvailabilityWriter|requireAvailabilityOffice|requireW2Staff/.test(middleware);
+    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable|requireShiftWorker|requireAvailabilityWriter|requireAvailabilityOffice|requireW2Staff/.test(middleware);
     // Three reads serve two audiences (admin sees all, a caregiver sees their
     // own) and branch inline. They must still branch, never return everything.
     const inlineGuarded = [

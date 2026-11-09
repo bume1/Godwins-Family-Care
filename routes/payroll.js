@@ -170,11 +170,6 @@ module.exports = function createPayrollRoutes(deps) {
             : { ...n.value, at: ctx.at };
           change = `Pay method set: ${n.value.method}`; break;
         }
-        case 'offer': case 'handbook': {
-          const sig = pp.signature(b, ctx); if (sig.error) return res.status(400).json(sig);
-          p[req.params.form === 'offer' ? 'offerLetter' : 'handbook'] = sig.value;
-          change = req.params.form === 'offer' ? 'Offer letter acknowledged' : 'Handbook acknowledged'; break;
-        }
         case 'tax-address': {
           const n = ye.normalizeTaxAddress(b); if (n.error) return res.status(400).json(n);
           p.taxAddress = { ...n.value, at: ctx.at }; change = 'Legal name and mailing address for tax forms saved'; break;
@@ -335,9 +330,15 @@ module.exports = function createPayrollRoutes(deps) {
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
-        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
+        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
+        // Both schedules, each with the period running today.
+        schedules: Object.entries(tax.PAY_SCHEDULES).map(([key, v]) => ({
+          key, label: v.label, ...tax.scheduleSettings(settings, key),
+          current: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings, key),
+          people: people.filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === key).length
+        })),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
         workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS,
         stateNames: tables.STATE_NAMES,
@@ -354,10 +355,23 @@ module.exports = function createPayrollRoutes(deps) {
     // A frequency change takes effect from the next period that has not
     // started: the anchor moves to that period's Monday, so a run already
     // drafted is never re-cut.
-    if (n.value.frequency !== cur.frequency && (req.body || {}).anchor === undefined) {
-      const today = localDate(nowIso()) || nowIso().slice(0, 10);
+    const today = localDate(nowIso()) || nowIso().slice(0, 10);
+    if (n.value.frequency !== cur.frequency && (req.body || {}).anchor === undefined && (req.body || {}).schedules === undefined) {
       const curPeriod = tax.periodFor(today, cur);
       n.value.anchor = tax.addDays(curPeriod.end, 1);
+    }
+    // Same rule for each schedule: a frequency change starts at that
+    // schedule's next period, never re-cutting one already running.
+    if ((req.body || {}).schedules !== undefined) {
+      for (const key of Object.keys(tax.PAY_SCHEDULES)) {
+        const was = tax.scheduleSettings(cur, key);
+        const now = n.value.schedules[key];
+        const asked = (req.body.schedules || {})[key] || {};
+        if (now.frequency !== was.frequency && asked.anchor === undefined) {
+          now.anchor = tax.addDays(tax.periodFor(today, cur, key).end, 1);
+        }
+      }
+      n.value.frequency = n.value.schedules.staff.frequency; n.value.anchor = n.value.schedules.staff.anchor;
     }
     if ((req.body || {}).states !== undefined) {
       const next = { ...(cur.states || {}) };
@@ -381,7 +395,7 @@ module.exports = function createPayrollRoutes(deps) {
       n.value.employerEin = e ? `${e.slice(0, 2)}-${e.slice(2)}` : null;
     }
     await db.set(SETTINGS, n.value);
-    await logActivity(req.user.id, req.user.name, 'payroll_settings_updated', 'payroll_settings', null, { frequency: n.value.frequency, anchor: n.value.anchor });
+    await logActivity(req.user.id, req.user.name, 'payroll_settings_updated', 'payroll_settings', null, { frequency: n.value.frequency, anchor: n.value.anchor, schedules: n.value.schedules || null });
     res.json({ settings: n.value });
   });
 
@@ -479,12 +493,18 @@ module.exports = function createPayrollRoutes(deps) {
       paidRefs: engine.paidRefsFrom(runs), localDate, resolvePayRate
     });
   };
+  // A run belongs to one pay schedule; only the people on it are paid in it.
+  // A run saved before the two schedules existed has none, and is read as
+  // "staff" (the single schedule it was cut from).
+  const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
+  const sameRun = (r, period) => r && r.period && r.period.start === period.start && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
   const draftFor = async (period, settings, adjustments) => {
     const runs = await rows(RUNS);
     const tbl = await activeTables(Number(period.payDate.slice(0, 4)));
     if (!tbl) return { error: `No approved ${period.payDate.slice(0, 4)} tax tables. Approve the federal and Georgia tables under Taxes first.`, code: 'PAYROLL_NO_TABLES' };
     const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
-    const people = (await staffPeople()).filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive');
+    const schedule = period.schedule || 'staff';
+    const people = (await staffPeople()).filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === schedule);
     const run = engine.buildRun({
       period, settings, people, gathered, tables: tbl,
       ytdByUser: engine.ytdFrom(runs, { year: period.payDate.slice(0, 4), beforePayDate: period.payDate }),
@@ -500,9 +520,11 @@ module.exports = function createPayrollRoutes(deps) {
       const settings = await readSettings();
       const start = String((req.body || {}).periodStart || '');
       if (!tax.isYmd(start)) return res.status(400).json({ error: 'Give a date in the pay period.', code: 'RUN_PERIOD' });
-      const period = tax.periodFor(start, settings);
+      const schedule = String((req.body || {}).schedule || '');
+      if (!tax.PAY_SCHEDULES[schedule]) return res.status(400).json({ error: 'Choose the caregivers (weekly) or everyone-else schedule.', code: 'RUN_SCHEDULE' });
+      const period = tax.periodFor(start, settings, schedule);
       const runs = await rows(RUNS);
-      const existing = runs.find(r => r.period.start === period.start && r.status !== 'void');
+      const existing = runs.find(r => sameRun(r, period) && r.status !== 'void');
       if (existing && existing.status !== 'draft') return res.status(409).json({ error: 'That period is already approved.', code: 'RUN_ALREADY_APPROVED', runId: existing.id });
       const d = await draftFor(period, settings, existing ? existing.adjustments : []);
       if (d.error) return res.status(409).json(d);
@@ -518,6 +540,39 @@ module.exports = function createPayrollRoutes(deps) {
     const run = (await rows(RUNS)).find(r => r.id === req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found.' });
     res.json({ run });
+  });
+
+  // The run's register (owner, 2026-11-09: "ensure all exports match the
+  // data recorded in app"). Built from the run itself, never recomputed, so
+  // every figure is exactly what the run, the pay stubs and QuickBooks carry,
+  // and the TOTAL row is the run's own totals. No SSN or bank number.
+  router.get('/api/payroll/admin/runs/:id/register.csv', authenticateToken, requireAdmin, async (req, res) => {
+    const run = (await rows(RUNS)).find(r => r.id === req.params.id);
+    if (!run) return res.status(404).json({ error: 'Run not found.' });
+    const d = (c) => (Number(c || 0) / 100).toFixed(2);
+    const h = (m) => (Number(m || 0) / 60).toFixed(2);
+    const q = (v) => { const t = String(v === null || v === undefined ? '' : v); return /^[=+\-@]/.test(t) ? `"'${t.replace(/"/g, '""')}"` : `"${t.replace(/"/g, '""')}"`; };
+    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Missing Paperwork'];
+    const lines = [head.map(q).join(',')];
+    for (const w of run.workers || []) {
+      const reg = (w.earnings || []).find(e => e.code === 'regular'), ot = (w.earnings || []).find(e => e.code === 'overtime');
+      const p = w.pay;
+      const pay = (run.payments || {})[w.userId];
+      lines.push([q(w.name), q((p && p.workState) || w.workState || 'GA'), h(reg && reg.minutes), h(ot && ot.minutes),
+        p ? d(p.grossCents) : '', p ? d(p.taxes.federal) : '', p ? d(p.taxes.socialSecurity) : '', p ? d(p.taxes.medicare) : '',
+        p ? d((p.taxes.georgia || 0) + (p.taxes.state || 0)) : '', p ? d(p.netCents) : '', p ? d(p.reimbursementsCents) : '',
+        p ? d(p.employer.socialSecurity) : '', p ? d(p.employer.medicare) : '', p ? d(p.employer.futa) : '',
+        p ? d((p.employer.gaSuta || 0) + (p.employer.stateSuta || 0)) : '',
+        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q((w.missing || []).join('; '))].join(','));
+    }
+    const t = run.totals || {};
+    lines.push([q('TOTAL'), q(''), '', '', d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
+      d((t.georgiaCents || 0) + (t.stateWithholdingCents || 0)), d(t.netCents), d(t.reimbursementsCents),
+      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q('')].join(','));
+    await logActivity(req.user.id, req.user.name, 'payroll_register_exported', 'payroll_run', run.id, { period: run.period && run.period.start });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `payroll_register_${(run.period && run.period.payDate) || run.id}.csv`));
+    res.send(lines.join('\r\n') + '\r\n');
   });
 
   router.post('/api/payroll/admin/runs/:id/adjustments', authenticateToken, requireAdmin, async (req, res) => {
@@ -1070,20 +1125,29 @@ module.exports = function createPayrollRoutes(deps) {
   };
   const automationJobs = {
     // The day after a period ends: draft its run and tell the owner.
+    // One draft per schedule: the weekly caregiver run and the every-two-weeks
+    // run for everyone else close on their own dates.
     'period-close': async () => {
       const settings = await readSettings();
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
-      const period = tax.periodFor(tax.addDays(tax.periodFor(today, settings).start, -1), settings);
-      const runs = await rows(RUNS);
-      const existing = runs.find(r => r.period.start === period.start);
-      if (existing && existing.status !== 'draft') return { summary: 'already approved', period };
-      const d = await draftFor(period, settings, existing ? existing.adjustments || [] : []);
-      if (d.error) { await tellOwner('payroll_period_close', 'Payroll could not be drafted', d.error, `close:${period.start}`); return { summary: d.code, period }; }
-      const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: 'Payroll automation' };
-      await db.set(RUNS, existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run]);
-      await tellOwner('payroll_period_close', `Payroll for ${period.start} to ${period.end} is ready to review`,
-        `The draft is ready. ${run.workers.length} people, ${run.blocked.length} missing paperwork. Review and approve it in the app.`, `close:${period.start}`);
-      return { summary: 'drafted', period, workers: run.workers.length, blocked: run.blocked.length };
+      const out = [];
+      for (const schedule of Object.keys(tax.PAY_SCHEDULES)) {
+        const label = tax.PAY_SCHEDULES[schedule].label;
+        const period = tax.periodFor(tax.addDays(tax.periodFor(today, settings, schedule).start, -1), settings, schedule);
+        const runs = await rows(RUNS);
+        const existing = runs.find(r => sameRun(r, period));
+        if (existing && existing.status !== 'draft') { out.push({ schedule, summary: 'already approved', period }); continue; }
+        const d = await draftFor(period, settings, existing ? existing.adjustments || [] : []);
+        if (d.error) { await tellOwner('payroll_period_close', `${label} payroll could not be drafted`, d.error, `close:${schedule}:${period.start}`); out.push({ schedule, summary: d.code, period }); continue; }
+        // Nobody on this schedule had pay: no empty run to review.
+        if (!existing && !d.run.workers.length) { out.push({ schedule, summary: 'nobody to pay', period }); continue; }
+        const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: 'Payroll automation' };
+        await db.set(RUNS, existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run]);
+        await tellOwner('payroll_period_close', `${label} payroll for ${period.start} to ${period.end} is ready to review`,
+          `The draft is ready. ${run.workers.length} people, ${run.blocked.length} missing paperwork. Review and approve it in the app.`, `close:${schedule}:${period.start}`);
+        out.push({ schedule, summary: 'drafted', period, workers: run.workers.length, blocked: run.blocked.length });
+      }
+      return { summary: out.map(o => `${o.schedule}: ${o.summary}`).join('; '), runs: out };
     },
     // Open clock-ins and missing clock-outs.
     'missing-time': async () => {

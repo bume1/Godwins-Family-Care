@@ -55,18 +55,20 @@ test('but the HubSpot FIELDS still round-trip — the connector is dormant, not 
 });
 
 test('the client name field is labelled Name, and still writes practiceName', () => {
-  const src = read('public/admin-hub.html');
-  assert.match(src, /className="block text-sm font-medium text-gray-700 mb-1">Name \{!formData\.existingPortalSlug/);
-  assert.ok(!/>Practice Name /.test(src), 'the old label is still on screen');
+  // Clients are added and edited on the Clients page now (owner, 2026-11-09).
+  const src = read('public/client-account-ui.js');
+  assert.match(src, /<Field label=\{`Name on their portal\$\{f\.existingPortalSlug \? '' : ' \*'\}`\}/);
+  assert.ok(!/>Practice Name /.test(src) && !/>Practice Name /.test(read('public/admin-hub.html')), 'the old label is still on screen');
   // The key is what generates the portal slug. Renaming it would change the
   // URL of every portal already issued.
-  assert.match(src, /setFormData\(\{ \.\.\.formData, practiceName: e\.target\.value \}\)/);
+  assert.match(src, /onChange=\{e => set\('practiceName', e\.target\.value\)\}/);
+  assert.match(src, /save\(\{ practiceName: portalName \}/);
   assert.match(read('server.js'), /newUser\.slug = await generateClientUserSlug\(practiceName\)/);
 });
 
 test('the image upload asks for a headshot, not a logo', () => {
-  const src = read('public/admin-hub.html');
-  assert.match(src, />Client Photo</);
+  const src = read('public/client-account-ui.js');
+  assert.match(src, /label="Client Photo"/);
   assert.ok(!/>Practice Logo</.test(src));
   assert.match(src, /Upload Photo/);
   assert.ok(!/\{Icons\.upload\} Upload Logo/.test(src));

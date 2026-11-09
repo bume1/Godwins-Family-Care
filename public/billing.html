@@ -33,7 +33,7 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <style>
     /* The Billing module (owner, 2026-10-15; the claims workspace 2026-11-04).
        Its own page, because billing covers both medical visits and home care
@@ -59,9 +59,12 @@
     .btn.ghost { background:#fff; color:var(--navy); border-color:var(--edge2); }
     .btn.ghost:hover:not(:disabled) { background:var(--wash); }
     .chip { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:2px 10px; font-size:11px; font-weight:600; white-space:nowrap; }
-    .tabbtn { padding:10px 14px; font-size:14px; font-weight:600; color:rgba(255,255,255,.75); border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; background:none; border-top:0; border-left:0; border-right:0; }
-    .tabbtn:hover { color:#fff; }
-    .tabbtn.on { color:var(--gold); border-color:var(--gold); }
+    /* The My GFC look (owner, 2026-11-09): a title on the cream, white pill
+       tabs, the selected one gold. The navy bar at the very top is the shared
+       staff bar. */
+    .tabbtn { padding:8px 16px; font-size:14px; font-weight:600; color:var(--navy); border:1px solid var(--edge2); border-radius:999px; cursor:pointer; white-space:nowrap; background:#fff; }
+    .tabbtn:hover { border-color:var(--goldd); }
+    .tabbtn.on { color:#fff; background:var(--goldd); border-color:var(--goldd); }
     .cw-row { transition:background .12s; }
     .cw-row:hover { background:#FCFAF6; }
     .cw-row.on { background:var(--wash); box-shadow:inset 3px 0 0 var(--goldd); }
@@ -994,6 +997,32 @@ const Statements = ({ data, reload }) => {
 // The hours are the app's completed shifts (the payroll export's rows) or a
 // file in that export's format. LTC carriers get one invoice per client per
 // service date; families one per period. The server decides every number.
+// What gets INVOICED, as opposed to what gets paid: completed visits only,
+// grouped by client. Moved here from Scheduling (owner, 2026-11-09).
+const HoursExport = () => {
+  const [from, setFrom] = useState(''); const [to, setTo] = useState(''); const [err, setErr] = useState('');
+  const go = async () => {
+    setErr('');
+    const r = await fetch(`${API}/api/scheduling/billing.csv?from=${from}&to=${to}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); setErr(b.error || 'The file could not be built.'); return; }
+    const href = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a'); a.href = href; a.download = `client-hours-${from}-to-${to}.csv`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 60000);
+  };
+  return (
+    <div className="card p-5">
+      <h3 className="font-semibold text-primary mb-1">Client Hours Export</h3>
+      <p className="text-[13px] text-stone-500 mb-3">Completed home care visits by client, with billable hours and whether the visit was verified. Nothing clinical.</p>
+      {err && <div className="text-red-700 text-[13px] mb-2">{err}</div>}
+      <div className="flex flex-wrap gap-2 items-end">
+        <label className="text-[13px]">From<input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} /></label>
+        <label className="text-[13px]">To<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></label>
+        <button className="btn ghost" disabled={!from || !to} onClick={go}>Export Client Hours CSV</button>
+      </div>
+    </div>
+  );
+};
+
 const GenerateInvoices = ({ data, reload }) => {
   const [source, setSource] = useState('app');
   const [range, setRange] = useState(() => (data.lastPeriod ? { ...data.lastPeriod } : { from: '', to: '' }));
@@ -1330,15 +1359,15 @@ const App = () => {
   const names = new Map(((data && data.clients) || []).map(c => [c.id, c.name]));
   return (
     <>
-      <div className="bg-primary text-white sticky top-0 z-30">
-        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 pt-3 flex items-center justify-between gap-3">
-          <span className="font-serif text-[24px] font-semibold">Billing</span>
+      <div>
+        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 pt-6 pb-1 flex items-end justify-between gap-3 flex-wrap">
+          <h1 className="font-serif text-[36px] font-semibold leading-tight" style={{ color: 'var(--navy)' }}>Billing</h1>
           <span className="flex items-center gap-4 text-[13.5px] font-semibold">
-            <a className="text-[#F5CD85]" href="/clinical">Clinical Workspace</a>
-            <a className="text-[#F5CD85]" href="/login">Portal Hub</a>
+            <a style={{ color: 'var(--navy)' }} href="/clinical">Clinical Workspace</a>
+            <a style={{ color: 'var(--navy)' }} href="/login?hub=1">Portal Hub</a>
           </span>
         </div>
-        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">
+        <div className="max-w-[1500px] mx-auto px-4 lg:px-8 pt-3 flex gap-2 overflow-x-auto">
           {TABS.map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}
         </div>
       </div>
@@ -1353,7 +1382,7 @@ const App = () => {
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && tab === 'claims' && <ClaimsView names={names} initialClaim={initialClaim} isAdmin={isAdmin} />}
         {data && tab === 'statements' && <Statements data={data} reload={load} />}
-        {data && tab === 'new' && <div className="grid gap-4"><GenerateInvoices data={data} reload={load} /><ClientBilling data={data} reload={load} /></div>}
+        {data && tab === 'new' && <div className="grid gap-4"><GenerateInvoices data={data} reload={load} />{isAdmin && <HoursExport />}<ClientBilling data={data} reload={load} /></div>}
         {data && tab === 'ime' && <ImeBilling />}
         {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /><PayersCard payers={data.payers} reload={load} /></div>}
       </div>

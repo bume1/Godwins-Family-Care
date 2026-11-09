@@ -633,7 +633,7 @@ test('the admin form does not restate the role enum', () => {
   const start = hub.indexOf('Account Type *');
   assert.ok(start > 0, 'the account type picker is on the form');
   const form = hub.slice(start, hub.indexOf('{selectedClinicalRole && (', start));
-  assert.match(form, /accountTypeCatalog\.map/, 'types come from GET /api/admin/clinical-roles');
+  assert.match(form, /accountTypeCatalog\.filter\(t => !\['client', 'family'\]\.includes\(t\.value\)\)\.map/, 'types come from GET /api/admin/clinical-roles (clients and family are added in Clients)');
   assert.match(form, /managerAccessCatalog\.map/, "a manager's clinical access levels are served too");
   for (const v of ['lcsw', 'lmsw', 'provider', 'coordinator', 'readOnly']) {
     assert.ok(!new RegExp(`value="${v}"`).test(form), `${v} must not be hardcoded as an option`);

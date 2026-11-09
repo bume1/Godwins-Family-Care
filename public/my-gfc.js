@@ -705,13 +705,13 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
-        {!profile.isCaregiver && profile.employmentType === 'W2' && <Section title="Time Clock" sub="Clock in when you start work and out when you stop."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
         {!profile.isCaregiver && <Section title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
-        {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected and exported for payroll in Caregiver Scheduling → Time Logs.</p><a className="mg-btn mg-ghost" href="/scheduling">Open Caregiver Scheduling</a></Section>}
+        {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected in Staff Scheduling → Time Logs. Payroll is run, and the hours file exported, in Payroll.</p><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="mg-btn mg-ghost" href="/scheduling">Open Staff Scheduling</a><a className="mg-btn mg-ghost" href="/payroll">Open Payroll</a></div></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
         {window.MyPay && <Section title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}

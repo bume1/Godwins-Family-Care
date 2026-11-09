@@ -210,13 +210,12 @@ const STAFF_ONBOARDING = link('onboarding', 'Staff Onboarding', '/onboarding', '
 // what is waiting on the office, each row opening the record it belongs to.
 const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Home Care Oversight', '/caregivers',
   'What is waiting on the office: concerns, visit logs to review, incidents, documents and clearance');
-const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
-  'Shifts, availability, time tracking, payroll and client locations');
-// Renamed from Enrollment (owner, 2026-11-09): it is the client's whole
-// record now, care history included. Enrollment status is a section inside.
-const ENROLLMENT = link('enrollment', 'Clients & Patients', '/admin/enrollment', 'Each client\'s record: intake, consents, documents, care plan and care history');
-const CLIENT_ACCOUNTS = link('clientAccounts', 'Client & Family Accounts', '/admin?view=users&group=clients',
-  'Add and edit client logins and family contacts');
+const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Staff Scheduling', '/scheduling',
+  'Shifts for caregivers and staff (providers are on the EHR calendar), availability, time logs and client locations');
+// ONE CLIENTS AREA (owner, 2026-11-09): the enrollment view and the client
+// half of User Management became one standalone page, named Clients &
+// Patients: each client's whole record, account and care history included.
+const CLIENTS = link('clients', 'Clients & Patients', '/clients', 'Each client\'s record: account, care team, family, intake, consents, documents, care plan and care history');
 const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, visits, orders and the clinical inbox');
 // Owner, 2026-11-09: Independent Medical Examinations get their own place
 // under Clinical: the exam-day list (moved out of the Admin Hub) and the AI
@@ -254,7 +253,7 @@ function hubAreasFor(u) {
       (isAdmin || u.isManager === true) && STAFF_ONBOARDING,
       CAREGIVER_MANAGEMENT, CAREGIVER_SCHEDULING
     ]);
-    add('clients', 'Clients', [ENROLLMENT, CLIENT_ACCOUNTS]);
+    add('clients', 'Clients', [CLIENTS]);
   }
   const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
     (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);

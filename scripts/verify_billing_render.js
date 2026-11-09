@@ -212,7 +212,7 @@ const posted = [];
   await cp.waitForTimeout(500);
   const ib = await cp.locator('main').innerText();
   ok('D2 the Inbox carries Results and Overdue Orders as tabs', /To Do/.test(ib) && /Results/.test(ib) && /Overdue Orders/.test(ib));
-  await cp.locator('aside button:has-text("Patients")').click();
+  await cp.locator('aside button[title="Patients"]').click();
   await cp.waitForTimeout(300);
   await cp.locator('text=Juanita Guess').first().click();
   await cp.waitForTimeout(500);

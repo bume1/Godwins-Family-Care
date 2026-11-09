@@ -62,8 +62,21 @@ const CERTIFIED_LEVELS = Object.freeze(['cna', 'lpn']);
 const classOf = (r) => (['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass
   : (r.chapter === 'A' && LEVEL_CLASS[r.licenseLevel]) || null);
 
+function fortyHourReason(r) {
+  if (r.chapter !== 'A') return null;
+  const cls = classOf(r);
+  if (r.holdsCareCertificate === true) return 'Off: her welcome packet says she holds a PCA, CNA, HHA or nursing certificate.';
+  if (CERTIFIED_LEVELS.includes(r.licenseLevel)) return `Off: her account's license level is ${r.licenseLevel.toUpperCase()}, which is already certified.`;
+  if (cls === 'NURSING') return 'Off: she is classed as licensed nursing.';
+  if (r.fortyHourRoute === true) return 'On: ticked below.';
+  if (cls === 'PCA') return r.caregiverClass ? 'On: classed as a PCA with no certificate on file.' : 'On: her account\'s license level is PCA and no certificate is on file.';
+  if (cls === 'COMPANION') return 'Off: she is classed as a companion. Choose PCA above, or tick the box below, if she will qualify as a PCA here.';
+  return 'Off: no license level on her account and no class chosen. Set her license level to PCA in User Management, choose PCA above, or tick the box below.';
+}
+
 function normalizeInputs(raw) {
-  const r = raw || {};
+  // A license level typed or stored as "PCA" reads the same as "pca".
+  const r = Object.assign({}, raw || {}, raw && raw.licenseLevel ? { licenseLevel: String(raw.licenseLevel).trim().toLowerCase() } : {});
   const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
   const serviceLines = Array.from(new Set(arr(r.serviceLines).filter(s => SERVICE_LINES.includes(s))));
   const workState = String(r.workState || 'GA').trim().toUpperCase().slice(0, 2) || 'GA';
@@ -103,6 +116,9 @@ function normalizeInputs(raw) {
     // ticked). The office can still tick it for anyone else it applies to.
     fortyHourRoute: (r.fortyHourRoute === true || (r.chapter === 'A' && classOf(r) === 'PCA'))
       && !(r.holdsCareCertificate === true || CERTIFIED_LEVELS.includes(r.licenseLevel)) && classOf(r) !== 'NURSING',
+    // Why the forty-hour program is on or off, in words, so the office never
+    // has to guess (owner report, 2026-11-09: it did not show and nothing said why).
+    fortyHourReason: fortyHourReason(r),
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -145,6 +161,34 @@ function composeChecklist(inputs) {
 }
 
 const findItem = (id) => ALL_ITEMS.find(it => it.id === String(id || '')) || null;
+
+
+// ---- tasks the office added (owner, 2026-11-09) ----------------------------
+// An admin or manager adds a task to one person, or to everyone onboarding
+// under a chapter, now and later. It is shaped like a Playbook item so every
+// door (steps, files, notes, not applicable) treats it the same, and it is
+// never a Playbook item: no classification is claimed for it. She marks it
+// done; if the office asked to review it, it is complete only once reviewed.
+const CUSTOM_PHASE = Object.freeze({ id: 'GFC', label: 'Added by GFC', plainWhen: 'Tasks added by the office',
+  title: 'Added by GFC', when: 'Added by the office', ref: null });
+function customItem(row) {
+  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: ACTIONS.COMPLETE, actorBasis: 'STATED' })];
+  if (row.review) steps.push(Object.freeze({ actor: ACTORS.OFFICE, action: ACTIONS.REVIEW, actorBasis: 'STATED' }));
+  return Object.freeze({
+    id: String(row.id), chapter: 'GFC', phase: CUSTOM_PHASE.id, title: String(row.title || 'Task'), ref: null,
+    elements: row.details ? [String(row.details)] : undefined,
+    steps: Object.freeze(steps), classifications: [], classificationNote: 'Added by the office; not a Playbook item.',
+    custom: true, askForFile: !!row.askForFile,
+    scope: row.scope && row.scope.userId ? { userId: String(row.scope.userId) } : { chapter: row.scope && row.scope.chapter }
+  });
+}
+/** The office-added tasks that apply to this person: theirs, or their chapter's. Removed ones never. */
+function customItemsFor(rows, inputs, userId) {
+  const ch = normalizeInputs(inputs).chapter || 'C';
+  return (rows || []).filter(r => r && !r.removedAt && r.scope
+    && ((r.scope.userId && String(r.scope.userId) === String(userId)) || (!r.scope.userId && r.scope.chapter === ch)))
+    .map(customItem);
+}
 
 // ---- one item's state ------------------------------------------------------
 // Stored shape, per item id:
@@ -488,7 +532,7 @@ const staffWelcomeItem = (ch) => Object.freeze({
   link: { url: '/my#welcome', label: 'Open Welcome Packet' }
 });
 
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows } = {}) {
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
   const rec = record || {};
@@ -500,7 +544,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 
   const checklist = composeChecklist(i);
   if (ch.CHAPTER.id !== 'A' && Array.isArray(packetRows) && ch.PHASES.length) checklist.unshift(staffWelcomeItem(ch));
-  const items = checklist.map(it => {
+  const custom = customItemsFor(customTasks, i, rec.userId);
+  const items = checklist.concat(custom).map(it => {
     const st = (rec.items || {})[it.id] || null;
     const ns = nextStep(it, st);
     // A completed item whose document has expired reads Renewal Due.
@@ -550,7 +595,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       expiry,
       renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
-      carriedOver: carried.byItem[it.id] || []
+      carriedOver: carried.byItem[it.id] || [],
+      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined
     };
   });
 
@@ -578,7 +624,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     return out;
   });
 
-  const phases = ch.PHASES.map(p => {
+  const phases = ch.PHASES.concat(custom.length ? [Object.assign({ number: ch.PHASES.length + 1 }, CUSTOM_PHASE)] : []).map(p => {
     const its = items.filter(x => x.phase === p.id);
     const mods = phaseModules(p.id, i).map(m => m.id);
     const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
@@ -647,5 +693,5 @@ module.exports = {
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
-  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID
+  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID, customItem, customItemsFor, CUSTOM_PHASE
 };

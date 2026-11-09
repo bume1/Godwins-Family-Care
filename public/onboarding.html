@@ -13,7 +13,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <style>
     :root{--navy:#033D50;--navy-deep:#022A38;--navy-soft:#0A4F66;--gold:#C9A44A;--gold-light:#F5CD85;--gold-pale:#F1E2BE;
       --cream:#FAF7F2;--cream-warm:#F2EBDD;--ink:#1B2A33;--mut:#4F6470;--line:#E1D9C9;--green:#3F7A5C;--red:#B5462E;--amber:#C98A1A;--grey:#9AA5AB}
@@ -23,15 +23,16 @@
     h1{font-size:34px} h2{font-size:24px} h3{font-size:20px}
     a{color:var(--navy)}
     button{font-family:inherit}
-    /* The sidebar navy is painted on the whole row, so it runs the full height of a long page. */
-    .shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh;background:linear-gradient(90deg,var(--navy) 230px,transparent 230px)}
-    .side{background:var(--navy);color:#fff;padding:18px 12px;position:sticky;top:0;height:100vh}
+    /* The white sidebar (the My GFC look, owner 2026-11-09) is painted on the
+       whole row, edge included, so it runs the full height of a long page. */
+    .shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh;background:linear-gradient(90deg,#fff 229px,#ECE4D6 229px,#ECE4D6 230px,transparent 230px)}
+    .side{background:#fff;color:var(--navy);padding:18px 12px;position:sticky;top:0;height:100vh}
     .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 18px}
-    .brand img{width:38px;height:38px}
-    .brand b{font-family:'Cormorant Garamond',serif;font-size:19px;line-height:1.05;color:#fff}
-    .nav button{display:flex;gap:12px;align-items:center;width:100%;background:none;border:0;color:#fff;padding:11px 12px;border-radius:10px;font-size:15px;cursor:pointer;text-align:left}
-    .nav button.on{background:#9A7A33}
-    .nav button:hover:not(.on){background:var(--navy-soft)}
+    .brand img{height:46px;width:auto}
+    .brand b{font-family:'Cormorant Garamond',serif;font-size:19px;line-height:1.05;color:var(--navy)}
+    .nav button{display:flex;gap:12px;align-items:center;width:100%;background:none;border:0;color:var(--navy);font-weight:600;padding:11px 12px;border-radius:12px;font-size:15px;cursor:pointer;text-align:left}
+    .nav button.on{background:#C9A44A;color:#fff}
+    .nav button:hover:not(.on){background:#F6EFE2}
     .nav i{font-size:20px}
     .main{padding:22px 28px 60px;max-width:1400px}
     .top{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:18px;flex-wrap:wrap}
@@ -113,7 +114,7 @@
     .bottom button{background:none;border:0;display:flex;flex-direction:column;align-items:center;font-size:12px;color:var(--mut);cursor:pointer;min-width:64px;min-height:44px}
     .bottom button.on{color:#A97E2B} .bottom i{font-size:22px}
     @media (max-width:1100px){.grid2{grid-template-columns:1fr}.phases{grid-template-columns:repeat(3,1fr)}}
-    @media (max-width:820px){.shell{grid-template-columns:1fr;background:none}.side{position:static;height:auto;display:flex;align-items:center;gap:6px;overflow-x:auto;padding:10px}.brand{padding:0 6px 0 0}.brand b{display:none}.nav{display:flex;gap:4px}.nav button{white-space:nowrap;padding:8px 10px}.main{padding:16px}.phases{grid-template-columns:repeat(2,1fr)}.hide-sm{display:none}}
+    @media (max-width:820px){.shell{grid-template-columns:1fr;background:none}.side{position:static;height:auto;border-bottom:1px solid #ECE4D6;display:flex;align-items:center;gap:6px;overflow-x:auto;padding:10px}.brand{padding:0 6px 0 0}.brand img{height:30px}.nav{display:flex;gap:4px}.nav button{white-space:nowrap;padding:8px 10px}.main{padding:16px}.phases{grid-template-columns:repeat(2,1fr)}.hide-sm{display:none}}
   </style>
 </head>
 <body>
@@ -170,13 +171,13 @@ const STATUS = {
   NOT_APPLICABLE: { label: 'Not Applicable', sw: '#C9CED1', icon: 'ti-minus' }
 };
 const ACTION_WORD = { SUBMIT: 'Sends', SIGN: 'Signs', ACKNOWLEDGE: 'Acknowledges', COMPLETE: 'Completes', VERIFY: 'Verifies',
-  RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off' };
+  RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off', REVIEW: 'Reviews' };
 const done = (s) => s === 'COMPLETE' || s === 'NOT_APPLICABLE';
 // Who does a step, in one wording for the side panel and the list alike.
 const stepWho = (s, subjectName, viewerIsSubject) => (s.hers ? (viewerIsSubject ? 'You' : (subjectName || 'New hire')) : s.actorLabel);
 // "You sends" reads wrong: the second person takes the bare verb.
 const YOU_WORD = { SUBMIT: 'send', SIGN: 'sign', ACKNOWLEDGE: 'acknowledge', COMPLETE: 'complete', VERIFY: 'verify',
-  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off' };
+  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off', REVIEW: 'review' };
 const stepVerb = (s, viewerIsSubject) => (s.hers && viewerIsSubject ? YOU_WORD[s.action] : ACTION_WORD[s.action].toLowerCase());
 
 const Pill = ({ status }) => <span className={`pill p-${status}`}>{STATUS[status] ? STATUS[status].label : status}</span>;
@@ -238,7 +239,88 @@ const PATHS = {
   recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`,
   courseCert: (w, col, c) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate` : `/api/onboarding/me/courses/${col}/${c}/certificate`,
   courseCertFile: (w, col, c, f) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate/${f}` : `/api/onboarding/me/courses/${col}/${c}/certificate/${f}`,
-  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`
+  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`,
+  material: (w, m) => w.office ? `/api/onboarding/admin/library/${m}/material` : `/api/onboarding/me/modules/${m}/material`,
+  materialFile: (w, m, f) => w.office ? `/api/onboarding/admin/library/${m}/material/files/${f}` : `/api/onboarding/me/modules/${m}/material/files/${f}`,
+  materialLinks: (m) => `/api/onboarding/admin/library/${m}/material/links`,
+  materialLink: (m, l) => `/api/onboarding/admin/library/${m}/material/links/${l}`,
+  materialFiles: (m) => `/api/onboarding/admin/library/${m}/material/files`,
+  materialFileRemove: (m, f) => `/api/onboarding/admin/library/${m}/material/files/${f}`,
+  materialNote: (m) => `/api/onboarding/admin/library/${m}/material/note`
+};
+
+// ---- training material (owner, 2026-11-09) ------------------------------------
+// What a module teaches from. The office sees which of four states a module is
+// in; staff see only whether it is ready, and a module with no material is
+// greyed out for them.
+const MATERIAL_LABEL = {
+  SOP_WRITTEN: { label: 'SOP Written', cls: 'p-COMPLETE' },
+  MATERIAL_ADDED: { label: 'Material Added', cls: 'p-COMPLETE' },
+  SOP_NOT_WRITTEN: { label: 'SOP Not Written', cls: 'p-RETURNED' },
+  SOP_MISSING_FROM_DRIVE: { label: 'SOP Missing From Drive', cls: 'p-RETURNED' },
+  NO_MATERIAL: { label: 'No Material', cls: 'p-NOT_STARTED' }
+};
+const materialDetail = (mat) => {
+  if (!mat) return '';
+  if (mat.status === 'SOP_WRITTEN') return `Teaches ${mat.sops.join(', ')}${mat.links.length + mat.files.length ? `, plus ${mat.links.length + mat.files.length} added item${mat.links.length + mat.files.length === 1 ? '' : 's'}` : ''}.`;
+  if (mat.status === 'MATERIAL_ADDED') return `${mat.links.length + mat.files.length} item${mat.links.length + mat.files.length === 1 ? '' : 's'} added by the office.`;
+  if (mat.status === 'SOP_NOT_WRITTEN') return `${mat.plannedSop} is planned but not written. Staff see this module greyed out until the SOP is written or material is added.`;
+  if (mat.status === 'SOP_MISSING_FROM_DRIVE') return `${mat.missingSops.join(', ')} is named here but was not found in the SOP document in Drive.`;
+  return 'No SOP covers this module and no material has been added. Staff see it greyed out.';
+};
+
+// The material itself: the SOP text read from Drive, then links and files.
+const MaterialView = ({ moduleId, base }) => {
+  const [d, setD] = useState(null); const [err, setErr] = useState('');
+  useEffect(() => { call(PATHS.material(base, moduleId)).then(setD).catch(e => setErr(e.message)); }, [moduleId, base.office]);
+  if (err) return <div className="err">{err}</div>;
+  if (!d) return <div className="note">Loading training…</div>;
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+      {d.note && <div className="note" style={{ whiteSpace: 'pre-wrap' }}>{d.note}</div>}
+      {d.sopDocument.readError && d.sops.length > 0 && <div className="err">The SOP could not be read from Drive right now ({d.sopDocument.readError}). <a href={d.sopDocument.url} target="_blank" rel="noopener">Open the SOP document</a>.</div>}
+      {d.sops.map(sec => (
+        <div key={sec.id} style={{ marginBottom: 14 }}>
+          <h3 style={{ fontSize: 17 }}>{sec.id}{sec.title ? ` · ${sec.title}` : ''}</h3>
+          {sec.lines ? <div style={{ fontSize: 14, lineHeight: 1.55 }}>{sec.lines.map((l, i) => l === '' ? <div key={i} style={{ height: 8 }} />
+            : l.startsWith('|') ? <div key={i} style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12.5, overflowWrap: 'anywhere' }}>{l}</div>
+            : <div key={i}>{l}</div>)}</div>
+            : <div className="note">This procedure could not be read. <a href={d.sopDocument.url} target="_blank" rel="noopener">Open the SOP document</a>.</div>}
+        </div>
+      ))}
+      {d.links.map(l => <div key={l.id} style={{ fontSize: 14, marginTop: 4 }}><i className={`ti ${l.kind === 'video' ? 'ti-player-play' : l.kind === 'document' ? 'ti-file-text' : 'ti-link'}`} /> <a href={l.url} target="_blank" rel="noopener">{l.label}</a></div>)}
+      {d.files.map(f => <div key={f.id} style={{ fontSize: 14, marginTop: 4 }}><i className="ti ti-paperclip" /> <a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.materialFile(base, moduleId, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a></div>)}
+      {d.sopDocument.version && d.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)', marginTop: 8 }}>Read from Clinical SOPs Set 1, v{d.sopDocument.version}.</div>}
+    </div>
+  );
+};
+
+// The office adds a module's material: links, files, and a short note.
+const MaterialEditor = ({ m, onChanged }) => {
+  const [label, setLabel] = useState(''); const [url, setUrl] = useState(''); const [kind, setKind] = useState('video');
+  const [note, setNote] = useState(m.material.note || ''); const [err, setErr] = useState(''); const [ok, setOk] = useState(''); const [busy, setBusy] = useState(false);
+  const run = async (fn, done) => { setErr(''); setOk(''); setBusy(true); try { await fn(); setOk(done); await onChanged(); } catch (e) { setErr(e.message); } setBusy(false); };
+  const mat = m.material;
+  return (
+    <div style={{ background: 'var(--cream)', borderRadius: 10, padding: 12 }}>
+      <div style={{ fontSize: 13.5, marginBottom: 8 }}>{materialDetail(mat)}</div>
+      {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
+      {mat.links.map(l => <div key={l.id} style={{ fontSize: 13.5, marginTop: 4 }}><a href={l.url} target="_blank" rel="noopener">{l.label}</a> <span style={{ color: 'var(--mut)' }}>({l.kind}) · {l.addedByName}</span> <button className="btn sm warn" disabled={busy} onClick={() => run(() => call(PATHS.materialLink(m.id, l.id), { method: 'DELETE' }), 'Link removed.')}>Remove</button></div>)}
+      {mat.files.map(f => <div key={f.id} style={{ fontSize: 13.5, marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.materialFile({ office: true }, m.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a> <span style={{ color: 'var(--mut)' }}>· {f.addedByName}</span> <button className="btn sm warn" disabled={busy} onClick={() => run(() => call(PATHS.materialFileRemove(m.id, f.id), { method: 'DELETE' }), 'File removed.')}>Remove</button></div>)}
+      <label className="f">Add a link (video, Drive document, or page)</label>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <select value={kind} onChange={e => setKind(e.target.value)}><option value="video">Video</option><option value="document">Document</option><option value="link">Link</option></select>
+        <input style={{ flex: 1, minWidth: 140 }} value={label} onChange={e => setLabel(e.target.value)} placeholder="Name staff will see" />
+        <input style={{ flex: 2, minWidth: 180 }} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://" />
+        <button className="btn sm" disabled={busy || !label || !url} onClick={() => run(async () => { await call(PATHS.materialLinks(m.id), { method: 'POST', body: { label, url, kind } }); setLabel(''); setUrl(''); }, 'Link added.')}>Add Link</button>
+      </div>
+      <label className="f">Upload a file</label>
+      <input type="file" disabled={busy} onChange={e => { const file = e.target.files && e.target.files[0]; if (!file) return; const fd = new FormData(); fd.append('file', file); run(() => call(PATHS.materialFiles(m.id), { method: 'POST', body: fd }), 'File added.'); e.target.value = ''; }} />
+      <label className="f">Note for staff (optional)</label>
+      <textarea rows={2} style={{ width: '100%' }} value={note} onChange={e => setNote(e.target.value)} placeholder="For example: watch the video, then read pages 3 to 5." />
+      <button className="btn sm ghost" disabled={busy} onClick={() => run(() => call(PATHS.materialNote(m.id), { method: 'PUT', body: { note } }), 'Note saved.')}>Save Note</button>
+    </div>
+  );
 };
 
 // ---- Care Courses training (caregivers, owner 2026-11-09) --------------------
@@ -455,7 +537,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                     </div>
                   )}
                   {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && (
-                    <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
+                    <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.action === 'REVIEW' ? 'Mark Reviewed' : s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
                   )}
                   {canAct(s) && s.action === 'SUBMIT' && (
                     <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -478,6 +560,14 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
 
+        {item.custom && item.askForFile && !done(item.status) && (office || viewerIsSubject) && (
+          <div style={{ margin: '6px 0 10px' }}>
+            <label className="btn sm gold" style={{ cursor: 'pointer' }}>
+              <i className="ti ti-upload" />{office ? 'Attach a File For Her' : 'Attach a File'}
+              <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+            </label>
+          </div>
+        )}
         {item.link && !(item.id === 'WELCOME' && office) && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
@@ -491,7 +581,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         )}
 
         {item.elements && item.elements.length > 0 && (
-          <div><label className="f">What is checked</label>
+          <div><label className="f">{item.custom ? 'Details' : 'What is checked'}</label>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.elements.map(e => <li key={e.row}>{e.row}</li>)}</ul></div>
         )}
 
@@ -531,6 +621,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
         </>}
+        {office && item.custom && (
+          <div style={{ marginTop: 16 }}>
+            <label className="f">Added by GFC</label>
+            <button className="btn sm warn" disabled={busy} onClick={() => {
+              const everyone = !(item.scope && item.scope.userId);
+              if (!window.confirm(everyone ? 'Remove this task from everyone it was added to? It comes off every checklist.' : 'Remove this task from her checklist?')) return;
+              run(() => call(`/api/onboarding/admin/custom-tasks/${encodeURIComponent(item.id)}`, { method: 'DELETE' }).then(onClose), 'Task removed.');
+            }}>Remove Task</button>
+          </div>
+        )}
         {item.sourceUrl && <div style={{ marginTop: 14, fontSize: 12.5 }}><a href={item.sourceUrl} target="_blank" rel="noopener">Source: Onboarding Playbook</a></div>}
       </div>
     </>
@@ -601,7 +701,21 @@ const HOST = { EXECUTIVE_DIRECTOR: 'Executive Director', CLINICAL_DIRECTOR: 'Cli
 
 const ModuleCard = ({ m, checks, base, office, onChanged }) => {
   const [openQs, setOpenQs] = useState(false); const [shown, setShown] = useState({}); const [err, setErr] = useState('');
+  const [openMat, setOpenMat] = useState(false);
   const qs = (checks && checks[m.id]) || [];
+  const ready = !!(m.material && m.material.ready);
+  // Staff: a module with no material is greyed out with nothing to press.
+  if (!office && !ready && !m.complete) {
+    return (
+      <div className="line-card" style={{ opacity: 0.55, background: '#F3F1EC' }} aria-disabled="true">
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+          <b style={{ flex: 1 }}>{m.title}</b>
+          <span className="pill p-NOT_STARTED">Coming Soon</span>
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--mut)' }}>The training material for this module has not been added yet.</div>
+      </div>
+    );
+  }
   const selfAttest = m.signoff === 'ATTEST' || m.signoff === 'NONE';
   const complete = async () => {
     setErr('');
@@ -614,6 +728,9 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
+      {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}</span></div>}
+      {ready && <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => setOpenMat(!openMat)}>{openMat ? 'Hide Training' : 'Open Training'}</button>}
+      {openMat && <MaterialView moduleId={m.id} base={base} />}
       {office && m.versionFlag && m.versionFlag.status === 'FLAGGED' && <div className="err">Flagged: manual section {m.versionFlag.hits.join(', ')} changed. Review before the next new hire starts it.</div>}
       {office && m.versionFlag && m.versionFlag.status === 'PENDING' && <div className="note">Pending: manual sections not yet confirmed{m.proposedManualRefs && m.proposedManualRefs.length ? ` (drafted: ${m.proposedManualRefs.join(', ')})` : ''}{m.plannedSop ? ` · SOP still to write` : ''}.</div>}
       {err && <div className="err">{err}</div>}
@@ -634,9 +751,76 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
 };
 
 // ---- OFFICE: one person ----------------------------------------------------
+// ---- tasks the office adds (owner, 2026-11-09) ----------------------------------
+// One person, or everyone onboarding under a chapter, now and later. She marks
+// it done; if the office ticks "reviews it", it is complete once reviewed.
+const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
+  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', review: false, askForFile: false });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
+  const chapterLabel = (id) => ((chapters || []).find(c => c[0] === id) || [id, id])[1];
+  const save = async () => {
+    setBusy(true); setErr('');
+    try {
+      await call('/api/onboarding/admin/custom-tasks', { method: 'POST', body: { title: f.title, details: f.details, review: f.review, askForFile: f.askForFile,
+        scope: f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter } } });
+      await onAdded();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="line-card" style={{ marginBottom: 12 }}>
+      <label className="f">Task name</label>
+      <input value={f.title} maxLength={200} onChange={e => set('title', e.target.value)} placeholder="e.g. Shadow Bethel on two home visits" />
+      <label className="f">Details (optional)</label>
+      <textarea rows={2} value={f.details} onChange={e => set('details', e.target.value)} placeholder="What to do, and anything that helps" />
+      <label className="f">Who gets it</label>
+      {person && <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={f.who === 'person'} onChange={() => set('who', 'person')} /> Only {person.name}</label>}
+      <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={f.who === 'chapter'} onChange={() => set('who', 'chapter')} /> Everyone onboarding as{person ? ` ${chapterLabel(person.chapter)}` : ':'}, now and later</label>
+      {f.who === 'chapter' && !person && (
+        <select value={f.chapter} onChange={e => set('chapter', e.target.value)} style={{ marginTop: 6 }}>
+          <option value="">Choose a type</option>
+          {(chapters || []).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      )}
+      <label style={{ display: 'block', fontSize: 14, marginTop: 10 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.review} onChange={e => set('review', e.target.checked)} /> Office reviews it after it is marked done</label>
+      <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.askForFile} onChange={e => set('askForFile', e.target.checked)} /> Ask them to attach a file</label>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button className="btn sm" disabled={busy || !f.title.trim() || (f.who === 'chapter' && !f.chapter)} onClick={save}>{busy ? 'Adding…' : 'Add Task'}</button>
+        <button className="btn sm ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
+const CustomTaskList = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [adding, setAdding] = useState(false);
+  const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/custom-tasks')); setErr(''); } catch (e) { setErr(e.message); } }, []);
+  useEffect(() => { load(); }, [load]);
+  const remove = async (t) => {
+    if (!window.confirm(`Remove "${t.title}"? It comes off every checklist it was added to.`)) return;
+    try { await call(`/api/onboarding/admin/custom-tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); await load(); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card">
+      <div className="card-h"><h2>Tasks Added by GFC</h2>{!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
+      {err && <div className="err">{err}</div>}
+      {adding && <AddTaskForm chapters={CHAPTER_CHOICES} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
+      {d && d.tasks.length === 0 && !adding && <div className="note">No tasks added yet. Add one here for everyone of a type, or from a person's checklist for just them.</div>}
+      {d && d.tasks.map(t => (
+        <div key={t.id} className="item" style={{ cursor: 'default' }}>
+          <div className="t"><b>{t.title}</b><div className="meta">{t.scopeLabel}{t.review ? ' · Office reviews' : ''}{t.askForFile ? ' · File requested' : ''} · Added by {t.createdByName}</div></div>
+          <button className="btn sm ghost" onClick={() => remove(t)}>Remove</button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const Person = ({ userId, onBack }) => {
   const [data, setData] = useState(null); const [err, setErr] = useState('');
   const [phase, setPhase] = useState(null); const [openItem, setOpenItem] = useState(null); const [tab, setTab] = useState('checklist');
+  const [adding, setAdding] = useState(false);
   const base = { office: true, userId };
   const personPath = `/api/onboarding/admin/people/${userId}`;
   const load = useCallback(async () => {
@@ -684,7 +868,10 @@ const Person = ({ userId, onBack }) => {
             ))}
           </div>
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
-            {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}</div>
+            {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}
+            {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
+          {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES}
+            onAdded={async () => { setAdding(false); await load(); setPhase('GFC'); }} onCancel={() => setAdding(false)} />}
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
@@ -729,7 +916,7 @@ const Person = ({ userId, onBack }) => {
       {tab === 'activity' && (
         <div className="card"><div className="card-h"><h2>Activity</h2></div>
           {data.events.length === 0 && <div className="note">Nothing recorded yet.</div>}
-          {data.events.map(e => <div key={e.id} style={{ fontSize: 14, padding: '6px 0', borderBottom: '1px solid #F1ECE1' }}>{fmtDate(e.at)} · {e.byName || 'Someone'} · {({ step: 'recorded a step', file: 'uploaded a file', acknowledgment: 'recorded an acknowledgment', returned: 'returned a submission', not_applicable: 'marked an item not applicable', module_complete: 'completed a module', module_signoff: 'signed off a module', determination: 'opened a service line', inputs: 'changed her setup', expiry_set: 'recorded an expiration date', renewal_started: 'started a renewal', recurring_done: 'recorded a recurring duty', recheck: 'recorded a refresher' })[e.type] || e.type}{e.onBehalf ? ' (on her behalf)' : ''}</div>)}
+          {data.events.map(e => <div key={e.id} style={{ fontSize: 14, padding: '6px 0', borderBottom: '1px solid #F1ECE1' }}>{fmtDate(e.at)} · {e.byName || 'Someone'} · {({ step: 'recorded a step', file: 'uploaded a file', acknowledgment: 'recorded an acknowledgment', returned: 'returned a submission', not_applicable: 'marked an item not applicable', module_complete: 'completed a module', module_signoff: 'signed off a module', determination: 'opened a service line', inputs: 'changed her setup', expiry_set: 'recorded an expiration date', renewal_started: 'started a renewal', recurring_done: 'recorded a recurring duty', recheck: 'recorded a refresher', custom_task_added: 'added a task', custom_task_removed: 'removed a task' })[e.type] || e.type}{e.onBehalf ? ' (on her behalf)' : ''}</div>)}
         </div>
       )}
       {tab === 'setup' && <Setup userId={userId} inputs={t.inputs} onSaved={load} />}
@@ -770,6 +957,7 @@ const Setup = ({ userId, inputs, onSaved }) => {
         </select>
         <label className="f">Their situation</label>
         {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+        {f.fortyHourReason && <div className="note"><b>Forty-hour PCA program:</b> {f.fortyHourReason}</div>}
         {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
       </> : f.chapter === 'H' ? <>
         <label className="f">The placement</label>
@@ -844,6 +1032,7 @@ const Overview = ({ onOpen }) => {
           {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track', H: 'Student track', R1: 'Supervising physician track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
+      <CustomTaskList />
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>
     </div>
   );
@@ -852,6 +1041,7 @@ const Overview = ({ onOpen }) => {
 // ---- OFFICE: training library -------------------------------------------------
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
+  const [openMat, setOpenMat] = useState(null);
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/library')); } catch (e) { setErr(e.message); } }, []);
   useEffect(() => { load(); }, [load]);
   const review = async (m, confirm) => {
@@ -872,10 +1062,22 @@ const Library = () => {
           onChange={async (e) => { try { await call('/api/onboarding/admin/settings', { method: 'PUT', body: { checkQuestionsForStaff: e.target.checked } }); await load(); } catch (x) { setErr(x.message); } }} />
         Show training check questions to staff {d.settings && d.settings.checkQuestionsForStaff ? '(on)' : '(off until the SOPs are written)'}
       </label>
-      <table><thead><tr><th>Module</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
-        {mods.map(m => (
-          <tr key={m.id}>
-            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>Phase {m.phaseNumber} · {m.phaseLabel}</div></td>
+      {(() => {
+        const n = (st) => d.modules.filter(x => x.material && x.material.status === st).length;
+        return <div className="note">
+          {n('SOP_WRITTEN')} modules teach a written SOP · {n('MATERIAL_ADDED')} have material you added · {n('SOP_NOT_WRITTEN')} wait on an SOP not yet written · {n('NO_MATERIAL') + n('SOP_MISSING_FROM_DRIVE')} have nothing yet.
+          {' '}Staff see a module greyed out until it has an SOP or material. <a href={d.sopDocument.url} target="_blank" rel="noopener">SOP document</a>{d.sopDocument.version ? ` v${d.sopDocument.version}` : ''}.
+          {!d.sopDocument.ok && <div className="err">The SOP document could not be read from Drive ({d.sopDocument.reason}). Modules that teach an SOP stay open to staff meanwhile.</div>}
+        </div>;
+      })()}
+      <table><thead><tr><th>Module</th><th>Material</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
+        {mods.map(m => (<React.Fragment key={m.id}>
+          <tr>
+            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.id} · Phase {m.phaseNumber} · {m.phaseLabel}</div></td>
+            <td style={{ minWidth: 150 }}>{m.material && <span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span>}
+              {m.material && m.material.status === 'SOP_NOT_WRITTEN' && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.plannedSop}</div>}
+              {m.material && m.material.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.sops.join(', ')}</div>}
+              <div><button className="btn sm ghost" style={{ marginTop: 4 }} onClick={() => setOpenMat(openMat === m.id ? null : m.id)}>{openMat === m.id ? 'Close' : 'Manage Material'}</button></div></td>
             <td>{m.flag.status === 'FLAGGED' ? <span className="pill p-RETURNED">Flagged · {m.flag.hits.join(', ')}</span>
               : m.flag.status === 'PENDING' ? <span className="pill p-SUBMITTED">Pending</span>
               : m.flag.status === 'CHANGES_UNKNOWN' ? <span className="pill p-EXPIRED">Check Needed</span>
@@ -887,7 +1089,10 @@ const Library = () => {
               {m.flag.status === 'FLAGGED' && <button className="btn sm" onClick={() => review(m, false)}>Mark Reviewed</button>}
               {m.flag.status === 'PENDING' && <button className="btn sm" onClick={() => review(m, true)}>Confirm Sections</button>}
             </td>
-          </tr>))}
+          </tr>
+          {openMat === m.id && <tr><td colSpan={5}><MaterialEditor m={m} onChanged={load} />
+            {m.material.ready && <MaterialView moduleId={m.id} base={{ office: true }} />}</td></tr>}
+        </React.Fragment>))}
       </tbody></table>
     </div>
   );
@@ -907,7 +1112,7 @@ const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
     <div className="tasks">
       {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
       {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
-      {(item.elements || []).length > 0 && <><H>What is checked</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
+      {(item.elements || []).length > 0 && <><H>{item.custom ? 'Details' : 'What is checked'}</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
       {item.courses && <div><Tick on={item.courses.hoursDone >= item.courses.totalHours} /> {item.courses.hoursDone} of {item.courses.totalHours} hours of courses</div>}
       {files.length > 0 && <><H>On file</H>{files.map(f => <div key={f.id}><i className="ti ti-file-text" /> {f.name}{f.status === 'received' ? ' (with the office for review)' : ''}</div>)}</>}
     </div>
@@ -952,7 +1157,7 @@ const Mine = ({ viewer, track, onChanged }) => {
   return (
     <div className="me">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-        <img src="/brand/logo-mark-transparent.png" alt="" style={{ width: 34, height: 34 }} />
+        <img src="/brand/logo-mark-color-transparent.png" alt="" style={{ width: 34, height: 34 }} />
         <b style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 20, color: 'var(--navy)' }}>Godwins Family Care</b>
       </div>
       {tab === 'home' && <>
@@ -1037,7 +1242,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand"><img src="/brand/logo-mark-white-transparent.png" alt="" /><b>Godwins<br />Family Care</b></div>
+        <div className="brand"><img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" /></div>
         <nav className="nav">
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>

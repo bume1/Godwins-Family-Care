@@ -22,7 +22,11 @@
 body{background:#FAF7F2;color:#1a2a32}
 
 /* The page title: a heading on the cream, not a second navy bar. */
-.hdr{background:transparent;color:#033D50;position:static;padding:26px 22px 6px;max-width:1180px;margin:0 auto;flex-wrap:wrap}
+/* The title and the content share one width, so the title lines up with the
+   cards under it. A page that needs more room (the audit table) sets
+   --page-w in its own :root. */
+.hdr{background:transparent;color:#033D50;position:static;padding:26px 18px 6px;max-width:var(--page-w,1180px);margin:0 auto;flex-wrap:wrap}
+.wrap{max-width:var(--page-w,1180px);padding-left:18px;padding-right:18px}
 .hdr .t{font-family:'Cormorant Garamond',Georgia,serif;font-size:36px;font-weight:600;color:#033D50;line-height:1.15}
 .hdr a,.hdr button{color:#033D50}
 .hdr a:hover,.hdr button:hover{color:#9A7430}
@@ -32,6 +36,10 @@ body{background:#FAF7F2;color:#1a2a32}
 .tab:hover{border-color:#C9A44A}
 .tab.on{background:#C9A44A;border-color:#C9A44A;color:#fff}
 .tab .n{background:#B5462E}
+/* The same pills under the names other pages gave them. */
+.areatabs a,.tabs button{border:1px solid #E1D7C5;background:#fff;color:#033D50;border-radius:999px}
+.areatabs a:hover,.tabs button:hover{border-color:#C9A44A}
+.areatabs a.on,.tabs button.on{background:#C9A44A;border-color:#C9A44A;color:#fff}
 .tab.on .n{background:#fff;color:#9A7430}
 
 /* Cards: white, warm edge, 16px corners, a soft shadow. */
