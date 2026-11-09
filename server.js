@@ -3020,6 +3020,10 @@ const buildConsentSignature = (args) =>
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
 app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify, getAppBaseUrl,
   drive: googledrive,
   // Wrapped, not passed by reference: `detectFileType` is a `const` declared
   // ~7000 lines below this mount, so naming it here reads it in its temporal
@@ -3035,7 +3039,11 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
 // Caregiver welcome packet — the onboarding wizard, the document checklist and
 // the gate that opens the caregiver app. Mounted after the caregiver routes so
 // the two share one document store and one checklist builder.
-app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+app.use(welcomePacketRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify, getAppBaseUrl,
   drive: googledrive,
   detectFileType: (buf) => detectFileType(buf),
   // The signer's own address, hashed — the chain is not the signer, the same
@@ -3072,6 +3080,10 @@ const qbo = quickbooks.createQbo({ db, uuid: uuidv4, logActivity, getUsers: () =
   getRuns: async () => (await db.get('payroll_runs')) || [] });
 app.use(payrollRoutes({
   db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify,
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
@@ -4539,6 +4551,14 @@ app.post('/api/auth/self-signup/verify', async (req, res) => {
       rows[f.idx] = { ...f.row, status: 'verified', verifiedAt: new Date().toISOString() };
       await db.set('signup_requests', rows);
       await logActivity('self_signup', 'Self sign-up', 'signup_email_verified', 'signup', f.row.id, { who: f.row.who });
+      // They are told the office will review it and email them. Nothing told
+      // the office (2026-11-09 audit), so nothing happened next.
+      await notify.selfSignupVerified({
+        name: f.row.name, email: f.row.email, signupId: f.row.id,
+        accountTypeLabel: f.row.who === 'loved_one' ? 'care for a loved one' : 'care for themselves',
+        ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+        actorId: 'self_signup'
+      });
     }
     res.json({ message: 'Your email is confirmed. Our office will review your account and email you when it is ready.' });
   } catch (error) {
@@ -4578,8 +4598,16 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       status: 'pending'
     });
     await db.set('password_reset_requests', resetRequests);
-    
-    console.log('Password reset requested - admin action required');
+
+    // The person is told an administrator will reach out. Until the
+    // 2026-11-09 audit nothing told an administrator, so a console line was
+    // the only signal and self-service reset was a dead end.
+    await notify.passwordResetRequested({
+      requesterName: user.name, requesterEmail: user.email,
+      requestId: resetRequests[resetRequests.length - 1].id,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+      actorId: user.id
+    });
     res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -4756,6 +4784,16 @@ app.post('/api/feedback', authenticateToken, async (req, res) => {
 
     feedbackRequests.unshift(newFeedback);
     await db.set('feedback_requests', feedbackRequests);
+
+    // A report landed in a collection with an admin-only screen in front of
+    // it and nothing to say it had arrived (2026-11-09 audit).
+    await notify.feedbackSubmitted({
+      fromName: newFeedback.userName, fromEmail: newFeedback.userEmail,
+      category: newFeedback.type, message: newFeedback.description,
+      feedbackId: newFeedback.id,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+      actorId: req.user.id
+    });
 
     res.json({ message: 'Feedback submitted successfully', id: newFeedback.id });
   } catch (error) {
@@ -9755,6 +9793,16 @@ app.post('/api/gfc/family/invites', authenticateToken, requireEnrolledClient, as
     // The audit row says an invite was made, never who it names.
     await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_requested', 'client', client.id,
       { role: req.user.role, actingFor: acting.actingFor, inviteId: row.id, saysPoa: row.saysPoa });
+    // The reply promises we will confirm it and email them. The approval leg
+    // does email; nothing told the office there was anything to approve
+    // (2026-11-09 audit).
+    await notify.familyInviteRequested({
+      client, inviteId: row.id,
+      inviteeName: n.value.name, inviteeEmail: n.value.email, relationship: n.value.relationship,
+      requestedByName: req.user.name || req.user.email,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ENROLLMENT}?client=${encodeURIComponent(client.id)}`,
+      actorId: req.user.id
+    });
     res.json({ invite: familyInvites.publicInvite(row), message: 'Invite sent to the office. We will confirm it and email them their sign-in details.' });
   } catch (error) {
     console.error('GFC family invite error:', error);
@@ -24473,6 +24521,18 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/remove', authe
 
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId);
+    // Removal REQUIRES a reason and the client was never told any of it
+    // (2026-11-09 audit). Only for a document they could actually see: a
+    // notice about an office-filed document nobody shared with them would be
+    // news of a file they never knew existed.
+    if (client && docRules.patientCanSee(row)) {
+      await notify.clientDocumentRemoved({
+        client, uploadId: row.id,
+        label: row.label || row.fileName || row.kind,
+        reason: check.reason, removedByName: req.user.name || req.user.email,
+        actorId: req.user.id
+      });
+    }
     const requests = (await db.get('client_document_requests')) || [];
     res.json({
       removed: { id: row.id, fileName: row.fileName, ...uploads[i].removed },

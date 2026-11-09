@@ -1057,8 +1057,7 @@ function createNotifier(deps) {
   async function enrollmentChangeRequested({ client, request, actorId }) {
     try {
       const detail = transportAllowsDetail();
-      const users = await getUsers();
-      const owners = users.filter(u => u && u.email && u.role === 'admin' && u.accountStatus !== 'inactive');
+      const owners = await adminRecipients();
       if (!owners.length) return { notified: 0, reason: 'no admin with an email address' };
       const base = await getAppBaseUrl();
       const url = `${base}/admin/enrollment?client=${encodeURIComponent(client.id)}`;
@@ -1200,7 +1199,7 @@ function createNotifier(deps) {
         ctaUrl, ctaLabel: 'Open my onboarding',
         // Keyed on the item AND the time, so a second return of the same item
         // after she resubmits is its own email rather than a swallowed one.
-        relatedEntityId: `onbreturn:${user.id}:${itemTitle}:${Date.now()}`, relatedEntityType: 'onboarding',
+        relatedEntityId: `onbreturn:${user.id}:${itemTitle}:${distinctMoment()}`, relatedEntityType: 'onboarding',
         actorId, phi: false
       }) ? 1 : 0 };
     } catch (e) {
@@ -1339,6 +1338,342 @@ function createNotifier(deps) {
     }
   }
 
+  // ==========================================================================
+  // GAPS CLOSED BY THE 2026-11-09 NOTIFICATION AUDIT
+  //
+  // Every notice below is a state change the app already recorded and told
+  // nobody about. Five of them are the SAME DEFECT this file describes twice
+  // already (lines 23-27 and the onboarding return above): a route refuses to
+  // let somebody proceed without typing an explanation, stores it, and then
+  // shows it to nobody. It was fixed for client documents and for onboarding
+  // returns and left unfixed in five other places.
+  //
+  // Nothing here invents a recipient rule. Office notices resolve through
+  // staffRecipients/adminRecipients, client notices through sendToClientSide,
+  // and a notice aimed at one person is handed that person by the caller.
+  // ==========================================================================
+
+  // Admins only, active, with an inbox. For a request or a report that only
+  // the Super Admin can action. Was inlined in enrollmentChangeRequested;
+  // three more notices need it, and two copies of "who is an admin" is how
+  // the two start disagreeing.
+  // A monotonic tick for the dedupe keys that must never collide: two returns
+  // of the same item inside one millisecond share a Date.now() and the second
+  // email is swallowed as a duplicate. Found by a test, not by reading.
+  let uniqueTick = 0;
+  const distinctMoment = () => `${Date.now()}-${++uniqueTick}`;
+
+  const adminRecipients = async () => {
+    const users = await getUsers();
+    return users.filter(u => u && u.email && u.role === 'admin' && u.accountStatus !== 'inactive');
+  };
+
+  // ---- A1. A caregiver finished their welcome packet -----------------------
+  // THIS NOTICE HAS NEVER SENT. routes/welcomePacket.js called
+  // queueNotification with a single OBJECT where the signature is positional,
+  // so the recipient address was never set, the eligibility gate refused it,
+  // and the refusal was logged as a skip rather than an error. The comment
+  // above that call promised the house template and an unsubscribe honour;
+  // this is the first time either is true.
+  async function caregiverPacketSubmitted({ caregiverName, packetId, outstandingCount, ctaUrl, actorId }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const name = caregiverName || 'A caregiver';
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'caregiver_packet_submitted', user: u,
+          subject: `Welcome packet submitted — ${name}`,
+          headline: 'A caregiver finished their welcome packet',
+          paragraphs: [
+            `${name} has completed and signed their caregiver welcome packet.`,
+            Number.isFinite(outstandingCount) && outstandingCount > 0
+              ? `${plural(outstandingCount, 'document is', 'documents are')} still outstanding on their checklist.`
+              : 'Their document checklist has nothing outstanding.',
+            'Their packet and checklist are in the admin hub.'
+          ],
+          ctaUrl, ctaLabel: 'Open the caregiver queue',
+          relatedEntityId: `packet:${packetId || name}`, relatedEntityType: 'welcome_packet',
+          // Employment and credentialing data about staff, not a patient's.
+          actorId, phi: false
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n };
+    } catch (e) {
+      console.error('[PACKET] submitted notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A2. A caregiver document was sent back ------------------------------
+  // The route's own comment says "the caregiver is told what it was". It was
+  // not: the reason was stored on the row and shown on a screen. A caregiver
+  // told only "not accepted" re-sends the same blurry photo, which is the
+  // exact failure the client-side version of this notice was written for.
+  async function caregiverDocumentReturned({ user, documentLabel, reason, reviewedByName, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const label = documentLabel || 'A document';
+      return { notified: await send({
+        type: 'caregiver_document_returned', user,
+        subject: `Needs another look — ${label}`,
+        headline: 'One of your documents came back',
+        paragraphs: [
+          `${reviewedByName || 'The office'} sent back "${label}".`,
+          'Open the app to send a clearer copy.'
+        ],
+        callout: reason || null,
+        calloutLabel: reason ? 'Why we need it again' : null,
+        ctaUrl, ctaLabel: 'Open my documents',
+        // Keyed on the document AND the moment, so a second return after they
+        // re-send is its own email rather than one the dedupe swallows.
+        relatedEntityId: `cgdoc:${(user && user.id) || 'unknown'}:${label}:${distinctMoment()}`,
+        relatedEntityType: 'caregiver_document',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[CAREGIVER] document return notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A3. An incident the caregiver reported has been closed --------------
+  // Closing REQUIRES a follow-up note saying what was done. The person who
+  // raised the concern is the one who most needs to know it was dealt with,
+  // and was the only person not told.
+  async function incidentClosed({ user, incidentId, kindLabel, occurredAt, note, closedByName, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const detail = transportAllowsDetail();
+      // The process clock is pinned to Georgia (server.js line 23), so a
+      // bare toLocaleDateString is Eastern. Formatting here rather than at the
+      // call site keeps the wording in one place.
+      const occurredOn = occurredAt && !Number.isNaN(new Date(occurredAt).getTime())
+        ? new Date(occurredAt).toLocaleDateString('en-US', { dateStyle: 'long' })
+        : null;
+      return { notified: await send({
+        type: 'incident_closed', user,
+        // The client is never named in a subject line, covered transport or
+        // not: a subject shows in places the body does not.
+        subject: 'An incident you reported has been closed',
+        headline: 'Thank you — that has been dealt with',
+        paragraphs: detail
+          ? [`${closedByName || 'The office'} has closed the ${kindLabel || 'incident'} you reported${occurredOn ? ` on ${occurredOn}` : ''}.`,
+             'What was done is below. Nothing further is needed from you.']
+          : ['The office has closed an incident you reported. What was done is recorded in the app.',
+             'For privacy we do not put the detail in email.'],
+        callout: detail ? (note || null) : null,
+        calloutLabel: detail && note ? 'What was done' : null,
+        ctaUrl, ctaLabel: 'Open the app',
+        relatedEntityId: `incident:${incidentId}:closed`, relatedEntityType: 'incident_report',
+        // An incident is about a patient, so the follow-up note is PHI even
+        // though the caregiver is staff.
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[CAREGIVER] incident close notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A4. A document was removed from a client's file ---------------------
+  // Removal requires a reason. The client could suddenly no longer see a
+  // document they had sent us, with no explanation anywhere.
+  async function clientDocumentRemoved({ client, label, reason, removedByName, uploadId, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'client_document_removed',
+        subject: 'A document has been removed from your file',
+        headline: 'A document has been removed from your file',
+        paragraphs: detail
+          ? [`${removedByName || 'Our office'} removed "${label || 'a document'}" from your file.`,
+             'If you still need it on file, send it again from your portal and we will file it.']
+          : ['A document has been removed from your file. Sign in to your portal to see which one and why.',
+             'For privacy we do not name documents in email.'],
+        callout: detail ? (reason || null) : null,
+        calloutLabel: detail && reason ? 'Why it was removed' : null,
+        actorId, entityId: `upload:${uploadId}:removed`, entityType: 'client_document'
+      });
+    } catch (e) {
+      console.error('[PHC] document removal notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A5. A contractor invoice was answered ------------------------------
+  // One builder, two types, the way documentReviewed does it: a rejection
+  // carries the note the route already REQUIRES "so they can resubmit", and
+  // being paid is the other thing a contractor is waiting to hear.
+  async function contractorInvoiceDecided({ user, decision, invoiceId, periodLabel, note, decidedByName, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const paid = decision === 'paid';
+      const rejected = decision === 'rejected';
+      if (!paid && !rejected) return { notified: 0, reason: `no notice for decision "${decision}"` };
+      const forPeriod = periodLabel ? ` for ${periodLabel}` : '';
+      return { notified: await send({
+        type: paid ? 'contractor_invoice_paid' : 'contractor_invoice_rejected', user,
+        subject: paid ? `Your invoice${forPeriod} has been paid` : `Your invoice${forPeriod} needs another look`,
+        headline: paid ? 'Your invoice has been paid' : 'Your invoice came back',
+        paragraphs: paid
+          ? [`Your invoice${forPeriod} has been paid.`,
+             // Never an amount or a bank reference in email. The portal holds both.
+             'The payment details are on your pay screen.']
+          : [`${decidedByName || 'The office'} sent your invoice${forPeriod} back so it can be corrected.`,
+             'Put it right and submit it again.'],
+        callout: note || null,
+        calloutLabel: note ? (paid ? 'Note from the office' : 'What needs changing') : null,
+        ctaUrl, ctaLabel: 'Open my pay',
+        relatedEntityId: `cinv:${invoiceId}:${decision}`, relatedEntityType: 'contractor_invoice',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[PAYROLL] contractor invoice notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A6. Somebody asked for a password reset ----------------------------
+  // The person is told "an administrator will reach out to you shortly" and
+  // no administrator was told anything. A console line was the only signal,
+  // which made self-service reset a dead end.
+  async function passwordResetRequested({ requesterName, requesterEmail, requestId, ctaUrl, actorId }) {
+    try {
+      const admins = await adminRecipients();
+      if (!admins.length) return { notified: 0, reason: 'no admin with an email address' };
+      const detail = transportAllowsDetail();
+      let n = 0;
+      for (const u of admins) {
+        const ok = await send({
+          type: 'password_reset_requested', user: u,
+          subject: 'Someone is locked out and waiting',
+          headline: 'A password reset is waiting',
+          paragraphs: detail
+            ? [`${requesterName || 'Someone'} (${requesterEmail || 'no address recorded'}) has asked for a password reset.`,
+               'They have been told an administrator will reach out, so this one is on the clock.']
+            : ['Somebody has asked for a password reset and is waiting to be let back in.',
+               'Open the admin hub to see who.'],
+          ctaUrl, ctaLabel: 'Open the reset requests',
+          relatedEntityId: `pwreset:${requestId || requesterEmail || 'unknown'}`, relatedEntityType: 'password_reset_request',
+          // The requester may be a patient, so their name and address are
+          // treated as PHI rather than assumed to be a staff address.
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[AUTH] reset-request notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A7. A self sign-up confirmed their email ---------------------------
+  // The signer is told "our office will review your account and email you
+  // when it is ready". Nothing told the office, so nothing happened next.
+  async function selfSignupVerified({ name, email, accountTypeLabel, signupId, ctaUrl, actorId }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const detail = transportAllowsDetail();
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'self_signup_verified', user: u,
+          subject: 'A new sign-up is waiting for review',
+          headline: 'A new sign-up is waiting for review',
+          paragraphs: detail
+            ? [`${name || 'Someone'} (${email || 'no address recorded'}) has confirmed their email address${accountTypeLabel ? ` and asked for ${accountTypeLabel} access` : ''}.`,
+               'They have been told the office will review it and email them when the account is ready, so nothing reaches them until somebody does.']
+            : ['Somebody has confirmed their email address and is waiting for their account to be approved.',
+               'Open the admin hub to review it.'],
+          ctaUrl, ctaLabel: 'Review the sign-up',
+          relatedEntityId: `signup:${signupId || email || 'unknown'}`, relatedEntityType: 'signup',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[AUTH] signup notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A8. A family member has been asked for ----------------------------
+  // The response says "We will confirm it and email them their sign-in
+  // details". The approval leg does email. Nothing told the office there was
+  // anything to approve.
+  async function familyInviteRequested({ client, inviteeName, inviteeEmail, relationship, requestedByName, inviteId, ctaUrl, actorId }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const detail = transportAllowsDetail();
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'family_invite_requested', user: u,
+          subject: 'A family invite is waiting for approval',
+          headline: 'A family invite is waiting for approval',
+          paragraphs: detail
+            ? [`${requestedByName || 'A client'} asked us to give ${inviteeName || 'a family member'}${relationship ? ` (${relationship})` : ''} access to ${client && client.name ? `${client.name}'s` : 'their'} portal.`,
+               inviteeEmail ? `Their address is ${inviteeEmail}.` : 'No address was given, so one is needed before they can be set up.',
+               'They have been told we will confirm it and email their sign-in details, so nobody hears anything until this is approved.']
+            : ['A client has asked for a family member to be given portal access.',
+               'Open the admin hub to review it. For privacy we do not put names in email.'],
+          ctaUrl, ctaLabel: 'Review the request',
+          relatedEntityId: `familyinvite:${inviteId || inviteeEmail || 'unknown'}`, relatedEntityType: 'family_invite',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[PHC] family invite notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A9. Somebody reported a problem -----------------------------------
+  // Feedback and bug reports landed in a collection with an admin-only screen
+  // in front of it and nothing to say a report had arrived.
+  async function feedbackSubmitted({ fromName, fromEmail, category, message, feedbackId, ctaUrl, actorId }) {
+    try {
+      const admins = await adminRecipients();
+      if (!admins.length) return { notified: 0, reason: 'no admin with an email address' };
+      const detail = transportAllowsDetail();
+      const kind = category === 'bug' ? 'a problem' : 'feedback';
+      let n = 0;
+      for (const u of admins) {
+        const ok = await send({
+          type: 'feedback_submitted', user: u,
+          subject: category === 'bug' ? 'Somebody reported a problem' : 'New feedback has come in',
+          headline: category === 'bug' ? 'Somebody reported a problem' : 'New feedback has come in',
+          paragraphs: detail
+            ? [`${fromName || 'Someone'}${fromEmail ? ` (${fromEmail})` : ''} reported ${kind}.`]
+            : [`Somebody reported ${kind}. Open the admin hub to read it.`,
+               'For privacy we do not put the report in email.'],
+          // Free text somebody typed. It can name a patient, so it rides only
+          // where the transport can carry it.
+          callout: detail ? (message || null) : null,
+          calloutLabel: detail && message ? 'What they said' : null,
+          ctaUrl, ctaLabel: 'Open the inbox',
+          relatedEntityId: `feedback:${feedbackId || Date.now()}`, relatedEntityType: 'feedback',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[FEEDBACK] notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
     // who hears about a client: the client and the POA of THAT client
     clientSideRecipients, ctaForRecipient,
@@ -1359,7 +1694,11 @@ function createNotifier(deps) {
     taskAssigned, taskDueToday, taskOverdue, taskCompleted,
     // staff onboarding and credentialing (2026-11-09)
     staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
-    staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly
+    staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly,
+    // gaps closed by the 2026-11-09 notification audit
+    caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,
+    clientDocumentRemoved, contractorInvoiceDecided,
+    passwordResetRequested, selfSignupVerified, familyInviteRequested, feedbackSubmitted
   };
 }
 

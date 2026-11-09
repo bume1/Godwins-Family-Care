@@ -943,6 +943,10 @@ module.exports = function createOnboardingRoutes(deps) {
     row.returned = { at: nowIso(), byName: req.user.name || req.user.email, reason };
     await save(rec);
     await event({ userId: rec.userId, type: 'course_certificate_returned', collection: c.col.id, courseId: c.course.id, cycle: c.cycle, byId: req.user.id, byName: req.user.name, reason });
+    // The reason is required here too, and until the 2026-11-09 audit only the
+    // ITEM return branch told anybody. Same notice, one branch wired and one
+    // not — so this reuses notifyReturned rather than growing a second one.
+    await notifyReturned(rec, { title: `${c.course.title} certificate` }, reason, req.user.name || req.user.email);
     return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/notes', authenticateToken, requireOffice, async (req, res) => {

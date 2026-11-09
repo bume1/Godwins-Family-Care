@@ -58,6 +58,13 @@ function keyOk(req, key) {
 module.exports = function createPayrollRoutes(deps) {
   const { db, logActivity, getUsers, authenticateToken, requireAdmin, uuidv4, accountTypeOf, localDate, resolvePayRate,
     pdf, drive, roleFolderFor, personFolderName, queueNotification, hashIp, getAppBaseUrl } = deps;
+  // A getter: the notifier is built far below this router's mount in
+  // server.js. A missing one is LOUD and never throws.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : deps.notify;
+    if (!n) console.error('[PAYROLL] no notifier injected — the contractor was NOT emailed');
+    return n;
+  };
   const env = deps.env || process.env;
   const payrollKey = () => (deps.payrollKey !== undefined ? deps.payrollKey : env.PAYROLL_INGEST_KEY);
   const router = express.Router();
@@ -802,6 +809,24 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(CONTRACTOR_INVOICES, all);
     await logActivity(req.user.id, req.user.name, `contractor_invoice_${act === 'pay' ? 'paid' : act + 'd'}`, 'contractor_invoice', inv.id, { totalCents: inv.totalCents });
     if (act === 'pay' && deps.onContractorPaid) await deps.onContractorPaid(inv).catch(e => console.error('QuickBooks contractor sync (non-fatal):', e.message));
+    // A rejection REQUIRES a note "so they can resubmit" and the contractor
+    // was never sent it; being paid is the other thing they are waiting to
+    // hear (2026-11-09 audit). Approve is deliberately silent: it is an
+    // internal step on the way to being paid, and the payment is the news.
+    if (act === 'reject' || act === 'pay') {
+      const n = notifier();
+      const who = (await getUsers()).find(u => u && String(u.id) === String(inv.userId));
+      if (n && who) {
+        await n.contractorInvoiceDecided({
+          user: who, decision: act === 'pay' ? 'paid' : 'rejected', invoiceId: inv.id,
+          periodLabel: inv.invoiceNo || (inv.periodStart && inv.periodEnd ? `${inv.periodStart} to ${inv.periodEnd}` : null),
+          note: act === 'reject' ? inv.reviewNote : null,
+          decidedByName: req.user.name,
+          ctaUrl: `${await getAppBaseUrl()}${links.payFor(who)}`,
+          actorId: req.user.id
+        });
+      }
+    }
     res.json({ invoice: inv });
   });
 

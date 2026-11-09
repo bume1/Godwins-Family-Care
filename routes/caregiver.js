@@ -49,8 +49,18 @@ module.exports = function createCaregiverRoutes(deps) {
     // module keeps no I/O of its own and the tests can drive a fake Drive.
     drive, detectFileType,
     // The visit-log PDF download (2026-10-03), injected for the same reason.
-    pdfGenerator
+    pdfGenerator,
+    getAppBaseUrl
   } = deps;
+  // A getter: the notifier is built far below this router's mount in
+  // server.js. A missing one is LOUD and never throws, because a notice must
+  // not undo a review or a closure that has already been recorded.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : deps.notify;
+    if (!n) console.error('[CAREGIVER] no notifier injected — the caregiver was NOT emailed');
+    return n;
+  };
+  const caregiverById = async (id) => (await getUsers()).find(u => u && u.id === id) || null;
   const router = express.Router();
 
   const ROLES = config.ROLES;
@@ -1006,6 +1016,21 @@ module.exports = function createCaregiverRoutes(deps) {
       // never the note: an audit trail is not a second copy of the incident.
       await logActivity(req.user.id, req.user.name || req.user.email, 'incident_closed', 'incident_report', rows[i].id,
         { clientId: rows[i].client_id, stateReported: !!report });
+      // Closing REQUIRES a follow-up note saying what was done. The caregiver
+      // who raised the concern is the person who most needs to know it was
+      // dealt with, and was the only one not told (2026-11-09 audit).
+      const n = notifier();
+      const reporter = await caregiverById(rows[i].caregiver_id);
+      if (n && reporter) {
+        await n.incidentClosed({
+          user: reporter, incidentId: rows[i].id,
+          kindLabel: rows[i].label || rows[i].kind,
+          occurredAt: rows[i].reported_at,
+          note: text, closedByName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${links.PATHS.CAREGIVER_APP}`,
+          actorId: req.user.id
+        });
+      }
       const names = await clientNames([rows[i].client_id]);
       res.json({ incident: publicIncident(rows[i], names, events) });
     } catch (error) {
@@ -1478,6 +1503,30 @@ module.exports = function createCaregiverRoutes(deps) {
       await db.set('caregiver_documents', rows);
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_reviewed', 'caregiver_document', rows[i].id,
         { decision, caregiverId: rows[i].caregiver_id, role: accountTypes.accountTypeOf(req.user) });
+
+      // ⚠️ The comment above this route has always said "the caregiver is told
+      // what it was". Until the 2026-11-09 audit they were not: the reason was
+      // stored on the row and shown on a screen. A caregiver told only "not
+      // accepted" re-sends the same blurry photo, which is the exact failure
+      // the client-side version of this notice was written to prevent.
+      if (decision === 'rejected') {
+        const n = notifier();
+        const owner = await caregiverById(rows[i].caregiver_id);
+        if (n && owner) {
+          await n.caregiverDocumentReturned({
+            user: owner,
+            // The human label from the served catalog, so the email says
+            // "TB test result" rather than `tb_test`.
+            documentLabel: rows[i].label
+              || (CAREGIVER_DOC_KINDS.find(k => k.kind === rows[i].kind) || {}).label
+              || rows[i].kind || rows[i].file_name,
+            reason: rows[i].review_note,
+            reviewedByName: req.user.name || req.user.email,
+            ctaUrl: `${await getAppBaseUrl()}${links.PATHS.CAREGIVER_MORE}`,
+            actorId: req.user.id
+          });
+        }
+      }
 
       res.json({ message: `Document ${decision}`, document: publicCaregiverDoc(rows[i]) });
     } catch (error) {
