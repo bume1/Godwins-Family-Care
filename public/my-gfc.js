@@ -486,6 +486,18 @@ function BioEditor() {
 // The SAME clock caregivers use (owner, 2026-11-08: "nothing should be
 // recreated"): the shared schedule component, mounted in staff mode, writing
 // the same time logs the admin corrects and exports on the scheduling board.
+// The shared availability form for any staff member (owner, 2026-11-09).
+function StaffAvailabilityMount() {
+  const id = 'mygfc-staff-availability';
+  useEffect(() => {
+    const lib = window.GFCCaregiverSchedule;
+    if (!lib) return undefined;
+    lib.mount(id, { authToken: getToken(), onlyTabs: ['availability'] });
+    return () => lib.unmount(id);
+  }, []);
+  return <div id={id} />;
+}
+
 function StaffClockMount() {
   const id = 'mygfc-staff-clock';
   useEffect(() => {
@@ -599,6 +611,9 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
 
 // ---- What every staff member has ---------------------------------------------------
 const STAFF_SECTIONS = [
+  // The staff welcome packet (owner, 2026-11-09): not for caregivers, whose
+  // welcome packet is in the caregiver app.
+  { id: 'welcome', label: 'Welcome Packet', icon: 'ti-confetti', short: 'Welcome', notCaregiver: true, subtitle: 'How to reach you, your emergency contact, your availability, and how you like to learn.' },
   { id: 'onboarding', label: 'Onboarding', icon: 'ti-route', subtitle: 'Your checklist, uploads and training.' },
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text', short: 'Documents', subtitle: 'What you signed, and every file on record for you.' },
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
@@ -608,7 +623,12 @@ const STAFF_SECTIONS = [
   // Management form, not on a page here (owner, 2026-11-09).
   { id: 'account', label: 'My Profile', icon: 'ti-user-circle', short: 'Profile', subtitle: 'Your headshot, website bio and sign-in.' }
 ];
-const staffSectionsFor = (profile) => STAFF_SECTIONS.filter(s => !s.adminTeam || (profile && profile.isAdmin));
+const staffSectionsFor = (profile) => {
+  const list = STAFF_SECTIONS.filter(s => (!s.adminTeam || (profile && profile.isAdmin)) && !(s.notCaregiver && profile && profile.isCaregiver));
+  // First until it is signed; after that it sits at the end, beside My Profile.
+  if (profile && profile.welcomeDone) return list.filter(s => s.id !== 'welcome').concat(list.filter(s => s.id === 'welcome'));
+  return list;
+};
 
 // Loads everything the staff sections read. One hook, so both pages read the
 // same data the same way.
@@ -639,7 +659,8 @@ function useStaffData() {
       }
     }).catch(e => setFatal(e.code === 'STAFF_PORTAL_STAFF_ONLY' ? 'My GFC is for GFC staff.' : e.message));
   }, [loadFolders]);
-  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, err, setErr, loadFolders };
+  const reloadProfile = useCallback(() => call('/api/my/profile').then(setProfile).catch(() => {}), []);
+  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, err, setErr, loadFolders, reloadProfile };
 }
 
 // The tiles on Home that lead to the staff sections.
@@ -660,6 +681,10 @@ function StaffTiles({ data, go, only, extra }) {
 function StaffView({ view, data }) {
   const { profile, onboarding, docs, signed, policies, stubs, folders, hours, setErr, loadFolders } = data;
   if (view === 'onboarding') return <Section><OnboardingSummary onboarding={onboarding} /></Section>;
+  if (view === 'welcome' && !profile.isCaregiver) {
+    const UI = window.GFCWelcomePacketUI;
+    return <Section>{UI ? <UI.StaffWelcomePacket onDone={() => { if (data.reloadProfile) data.reloadProfile(); }} /> : <p className="mg-note">Loading…</p>}</Section>;
+  }
   if (view === 'documents') {
     return (
       <div>
@@ -683,6 +708,7 @@ function StaffView({ view, data }) {
         {!profile.isCaregiver && profile.employmentType === 'W2' && <Section title="Time Clock" sub="Clock in when you start work and out when you stop."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
+        {!profile.isCaregiver && <Section title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected and exported for payroll in Caregiver Scheduling → Time Logs.</p><a className="mg-btn mg-ghost" href="/scheduling">Open Caregiver Scheduling</a></Section>}

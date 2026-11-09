@@ -168,6 +168,28 @@ module.exports = function createSchedulingRoutes(deps) {
     });
   };
 
+  // Every staff member submits availability (owner, 2026-11-09: the staff
+  // welcome form asks for it, and it lives in their scheduling area after).
+  // A non-caregiver row never makes anyone eligible for a shift.
+  const AVAILABILITY_STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
+  const mayHaveAvailability = (u) => isSchedulable(u) || AVAILABILITY_STAFF_TYPES.includes(accountTypes.accountTypeOf(u));
+  async function tickLiaisonAvailability(subject, actor) {
+    const T = require('../onboarding/track');
+    const recs = (await db.get('onboarding_records')) || [];
+    const rec = recs.find(r => r && String(r.userId) === String(subject.id));
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'G') return;
+    const item = T.findItem('G.3.01');
+    const st = (rec.items || {})['G.3.01'] || {};
+    const idx = item.steps.findIndex(x => x.actor === 'NEW_HIRE' && x.action === 'SUBMIT');
+    if (idx === -1 || (st.steps || {})[idx]) return;
+    try {
+      rec.items = rec.items || {};
+      rec.items['G.3.01'] = Object.assign({}, st, T.recordStep(item, st, idx, actor, {}, nowIso()));
+      rec.updatedAt = nowIso();
+      await db.set('onboarding_records', recs);
+    } catch (e) { /* the availability is saved either way */ }
+  }
+
   const requireAvailabilityWriter = (req, res, next) => {
     const asked = String((req.body || {}).caregiverId || '').trim();
     if (asked && asked !== req.user.id) {
@@ -177,6 +199,7 @@ module.exports = function createSchedulingRoutes(deps) {
         code: 'AVAILABILITY_RECORDER_ONLY'
       });
     }
+    if (mayHaveAvailability(req.user)) return next();
     return requireSchedulable(req, res, next);
   };
 
@@ -296,7 +319,7 @@ module.exports = function createSchedulingRoutes(deps) {
         if (!subject) {
           return res.status(404).json({ error: 'That caregiver is not on file.', code: 'CAREGIVER_NOT_FOUND' });
         }
-        if (!isSchedulable(subject)) {
+        if (!mayHaveAvailability(subject)) {
           return res.status(400).json({
             error: 'That person is not set up to work shifts, so they have no availability to record.',
             code: 'CAREGIVER_NOT_SCHEDULABLE'
@@ -356,6 +379,12 @@ module.exports = function createSchedulingRoutes(deps) {
           windows: row.windows.length, isChange, onBehalf,
           caregiverId: onBehalf ? subject.id : undefined
         });
+
+      // A liaison's Playbook G.3 asks for availability submitted at least two
+      // weeks ahead: submitting it here is doing her step on that item.
+      await tickLiaisonAvailability(subject, onBehalf
+        ? { id: req.user.id, name: req.user.name || req.user.email, isOffice: true }
+        : { id: req.user.id, name: req.user.name || req.user.email, isOffice: false });
 
       res.json({ availability: publicAvailability(row) });
     } catch (error) {
