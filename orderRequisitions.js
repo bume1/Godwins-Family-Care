@@ -1073,12 +1073,92 @@ const publicOrderFile = (f) => {
   return rest;
 };
 
-// An order as a browser sees it: attached files without their storage ids.
-const publicOrder = (o) => (o && Array.isArray(o.orderFiles)
-  ? { ...o, orderFiles: o.orderFiles.map(publicOrderFile) } : o);
+// An order as a browser sees it: attached files without their storage ids,
+// and never the submit key (it is only the server's duplicate check).
+const publicOrder = (o) => {
+  if (!o) return o;
+  const { idempotencyKey, ...rest } = o;
+  return Array.isArray(rest.orderFiles) ? { ...rest, orderFiles: rest.orderFiles.map(publicOrderFile) } : rest;
+};
+
+// ── New Order from the chart (owner, 2026-11-09) ───────────────────────────
+// An order is still anchored to a visit; the chart's Orders tab picks the visit
+// for the clinician. Open drafts first (newest first), then the single most
+// recent SIGNED visit. Owner rule: an order on a signed visit uses only the
+// diagnoses that visit was signed with, and is recorded on the note as an
+// addendum. An older signed visit is never offered.
+const isVoidedRecord = (r) => !!r && String(r.noteStatus || '') === 'voided';
+const signedDiagnoses = (record, attestation) => {
+  const dx = (record && Array.isArray(record.diagnoses)) ? record.diagnoses : [];
+  const signed = attestation && Array.isArray(attestation.diagnosisCodes) ? attestation.diagnosisCodes : null;
+  return signed ? dx.filter(d => d && signed.includes(d.code)) : dx;
+};
+const recordDate = (r) => String((r && (r.date || r.createdAt)) || '');
+const orderPlacementTargets = ({ records, attestations, clientId, labelFor }) => {
+  const mine = (records || []).filter(r => r && r.clientId === clientId && r.encounterUuid && !isVoidedRecord(r));
+  const attOf = (r) => (attestations || []).find(a => a && a.encounterUuid === r.encounterUuid && a.signedAt) || null;
+  const byNewest = (a, b) => recordDate(b).localeCompare(recordDate(a));
+  const shape = (r, att) => ({
+    encounterUuid: r.encounterUuid,
+    date: String(recordDate(r)).slice(0, 10) || null,
+    reason: r.reason || null,
+    visitLabel: (labelFor && labelFor(r)) || null,
+    signed: !!att,
+    signedAt: att ? att.signedAt : null,
+    signedByName: att && att.signedBy ? att.signedBy.name || null : null,
+    afterSigning: !!att,
+    diagnoses: (att ? signedDiagnoses(r, att) : (r.diagnoses || []))
+      .filter(d => d && d.code).map(d => ({ code: d.code, description: d.description || '' }))
+  });
+  const drafts = mine.filter(r => !attOf(r)).sort(byNewest).map(r => shape(r, null));
+  const signed = mine.filter(r => attOf(r)).sort((a, b) => String(attOf(b).signedAt).localeCompare(String(attOf(a).signedAt)));
+  const latestSigned = signed.length ? shape(signed[0], attOf(signed[0])) : null;
+  const targets = latestSigned ? [...drafts, latestSigned] : drafts;
+  return {
+    targets,
+    defaultEncounterUuid: targets.length ? targets[0].encounterUuid : null,
+    emptyReason: targets.length ? null : 'NO_VISITS'
+  };
+};
+const afterSigningGate = ({ targets, encounterUuid }) => {
+  const t = (targets || []).find(x => x && x.encounterUuid === String(encounterUuid) && x.afterSigning);
+  if (t) return { ok: true };
+  return { ok: false, status: 409, code: 'ORDER_AFTER_SIGNING_NOT_LATEST',
+    error: 'An order can be added after signing only to the most recent signed visit. Start a visit for this order instead.' };
+};
+// The addendum says WHAT was ordered and under which diagnoses, never the
+// clinical summary, reason or notes: addenda republish to the patient portal.
+const buildOrderAddendumText = (order, { standingOrderRef } = {}) => {
+  const o = order || {};
+  const dx = (o.diagnosisCodes || []).join(', ');
+  let what;
+  if (o.orderType === REFERRAL) {
+    const r = o.referral || {};
+    what = `Referral added after signing: ${r.specialty || 'referral'}${r.destination === INTERNAL ? ', to the care team' : ''}.`;
+  } else if (o.orderType === DME) {
+    const d = o.dme || {};
+    what = `Written order added after signing: ${d.itemDescription || 'equipment'}${d.quantity ? ` ×${d.quantity}` : ''}.`;
+  } else {
+    const type = String(o.orderType || 'order');
+    what = `Order added after signing: ${type.charAt(0).toUpperCase()}${type.slice(1)} (${o.priority || 'routine'}) — ${(o.tests || []).join(', ')}.`;
+  }
+  const parts = [what];
+  if (dx) parts.push(`Linked dx: ${dx}.`);
+  if (o.orderReference) parts.push(`Reference ${o.orderReference}.`);
+  if (standingOrderRef) parts.push(`Placed under standing order "${standingOrderRef.title}" v${standingOrderRef.version}.`);
+  return parts.join(' ');
+};
+// One submit key per form, scoped to the person and the visit, so a double
+// click or a retry returns the order already placed instead of a second one.
+const orderIdempotencyKey = (userId, encounterUuid, key) => {
+  const raw = String(key || '').trim().slice(0, 120);
+  if (!raw || !userId || !encounterUuid) return null;
+  return `${userId}:${encounterUuid}:${raw}`;
+};
 
 module.exports = {
-  publicOrder, ORDER_NOTE_MAX, ORDER_FILE_LABEL_MAX, buildOrderNote, buildOrderFile, publicOrderFile,
+  publicOrder, orderPlacementTargets, afterSigningGate, signedDiagnoses, buildOrderAddendumText, orderIdempotencyKey,
+  ORDER_NOTE_MAX, ORDER_FILE_LABEL_MAX, buildOrderNote, buildOrderFile, publicOrderFile,
   REFERRAL, DME, DOCUMENT_ORDER_TYPES,
   REFERRAL_STATUSES, REFERRAL_TRANSITIONS, URGENCIES,
   INTERNAL, EXTERNAL, INTERNAL_REFERRAL_TRANSITIONS, isInternalReferral, transitionsForReferral,
