@@ -109,6 +109,10 @@ const Ok = ({ m }) => (m ? <div className="rounded-lg border border-emerald-200 
 const Warn = ({ children }) => <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3 mb-3 text-[13px]">{children}</div>;
 
 // ---- Runs --------------------------------------------------------------------
+// State names from the server (one list). Georgia first, then the rest A to Z.
+let STATE_NAMES = {};
+const stName = (c) => STATE_NAMES[c] || c;
+const statesGaFirst = () => ['GA', ...Object.keys(STATE_NAMES).filter(c => c !== 'GA').sort((a, b) => stName(a).localeCompare(stName(b)))];
 const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700' };
 const RunDetail = ({ id, onBack, reload }) => {
   const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
@@ -130,28 +134,29 @@ const RunDetail = ({ id, onBack, reload }) => {
         <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
         {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
+        {(run.stateRatesMissing || []).length > 0 && <Warn>Set GFC's unemployment rate for {run.stateRatesMissing.map(stName).join(', ')} under Settings before approving.</Warn>}
         <div className="grid sm:grid-cols-4 gap-3 mb-4">
-          {[['Gross pay', t.grossCents], ['Net pay', t.netCents], ['Taxes withheld', t.federalCents + t.socialSecurityCents + t.medicareCents + t.georgiaCents], ['Cash needed', t.cashNeededCents]].map(([k, v]) => (
+          {[['Gross pay', t.grossCents], ['Net pay', t.netCents], ['Taxes withheld', t.federalCents + t.socialSecurityCents + t.medicareCents + t.georgiaCents + (t.stateWithholdingCents || 0)], ['Cash needed', t.cashNeededCents]].map(([k, v]) => (
             <div key={k} className="rounded-xl border border-stone-200 p-3"><div className="lblu">{k}</div><div className="text-[20px] font-semibold text-primary">{usd(v)}</div></div>
           ))}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[13px]">
-            <thead><tr className="text-left text-stone-500"><th className="py-1">Person</th><th>Hours</th><th>OT hrs</th><th className="text-right">Gross</th><th className="text-right">Federal</th><th className="text-right">SS</th><th className="text-right">Medicare</th><th className="text-right">Georgia</th><th className="text-right">Net</th></tr></thead>
+            <thead><tr className="text-left text-stone-500"><th className="py-1">Person</th><th>Hours</th><th>OT hrs</th><th className="text-right">Gross</th><th className="text-right">Federal</th><th className="text-right">SS</th><th className="text-right">Medicare</th><th className="text-right">State</th><th className="text-right">Net</th></tr></thead>
             <tbody>{run.workers.map(w => {
               const reg = w.earnings.find(e => e.code === 'regular'), ot = w.earnings.find(e => e.code === 'overtime');
               return (
                 <tr key={w.userId} className="border-t border-stone-100">
                   <td className="py-1.5"><b>{w.name}</b>{w.missing.length > 0 && <div className="text-red-700 text-[12px]">Missing: {w.missing.join(', ')}</div>}</td>
                   <td>{reg ? hrs(reg.minutes) : '—'}</td><td>{ot ? hrs(ot.minutes) : ''}</td>
-                  {w.pay ? <><td className="text-right">{usd(w.pay.grossCents)}</td><td className="text-right">{usd(w.pay.taxes.federal)}</td><td className="text-right">{usd(w.pay.taxes.socialSecurity)}</td><td className="text-right">{usd(w.pay.taxes.medicare)}</td><td className="text-right">{usd(w.pay.taxes.georgia)}</td><td className="text-right"><b>{usd(w.pay.netCents)}</b></td></>
-                    : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and G-4 are on file.</td>}
+                  {w.pay ? <><td className="text-right">{usd(w.pay.grossCents)}</td><td className="text-right">{usd(w.pay.taxes.federal)}</td><td className="text-right">{usd(w.pay.taxes.socialSecurity)}</td><td className="text-right">{usd(w.pay.taxes.medicare)}</td><td className="text-right">{usd((w.pay.taxes.georgia || 0) + (w.pay.taxes.state || 0))} <span className="text-stone-400">{w.pay.workState || w.workState || 'GA'}</span></td><td className="text-right"><b>{usd(w.pay.netCents)}</b></td></>
+                    : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and their state form are on file.</td>}
                 </tr>
               );
             })}</tbody>
           </table>
         </div>
-        <p className="text-[12.5px] text-stone-500 mt-3">Employer taxes: Social Security {usd(t.employerSocialSecurityCents)}, Medicare {usd(t.employerMedicareCents)}, FUTA {usd(t.futaCents)}, Georgia unemployment {usd(t.gaSutaCents)}.</p>
+        <p className="text-[12.5px] text-stone-500 mt-3">Employer taxes: Social Security {usd(t.employerSocialSecurityCents)}, Medicare {usd(t.employerMedicareCents)}, FUTA {usd(t.futaCents)}, Georgia unemployment {usd(t.gaSutaCents)}{Object.entries(t.byState || {}).map(([st, b]) => `, ${stName(st)} unemployment ${usd(b.sutaCents)}`).join('')}.</p>
         {run.skippedItems && run.skippedItems.length > 0 && <Warn><b>Not paid, needs fixing:</b><ul className="list-disc pl-5">{run.skippedItems.map((s, i) => <li key={i}>{s.reason} ({s.ref})</li>)}</ul></Warn>}
         {run.status === 'draft' && (
           <div className="mt-4 grid gap-3">
@@ -201,11 +206,54 @@ const PaymentRow = ({ runId, s, onDone }) => {
     </div>
   );
 };
+// Past pay dates from Gusto: the Payroll Journal CSV becomes paid runs and
+// pay stubs in each person's My GFC. Preview first; nothing is kept of the file.
+const GustoImport = ({ reload }) => {
+  const [csv, setCsv] = useState(''); const [name, setName] = useState('');
+  const [prev, setPrev] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const pick = (e) => {
+    const f = e.target.files && e.target.files[0];
+    setPrev(null); setMsg(''); setErr('');
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => { setCsv(String(rd.result || '')); setName(f.name); };
+    rd.onerror = () => setErr('That file could not be read.');
+    rd.readAsText(f);
+  };
+  const go = (commit) => {
+    setBusy(true); setErr('');
+    post('/api/payroll/admin/import/gusto', { csv, commit })
+      .then(r => { if (commit) { setMsg(`Imported ${r.stubs} pay stub(s) across ${r.payDates} pay date(s).${r.pdfFailed ? ` ${r.pdfFailed} PDF(s) could not be filed in Drive; the stubs still show.` : ''}`); setPrev(null); setCsv(''); reload(); } else setPrev(r); })
+      .catch(e => setErr(e.message)).finally(() => setBusy(false));
+  };
+  return (
+    <Card title="Import Past Pay From Gusto">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">In Gusto: Reports → Payroll Journal → this year → export CSV. Each matched person gets their past pay stubs in My GFC, and their year-to-date counts toward this year's limits and W-2. No one is emailed.</p>
+      <input type="file" accept=".csv,text/csv" onChange={pick} />
+      {csv && !prev && <button className="btn ml-2" disabled={busy} onClick={() => go(false)}>Preview {name}</button>}
+      {prev && (
+        <div className="mt-3">
+          <div><b>{prev.stubs}</b> pay stub(s) across <b>{prev.payDates}</b> pay date(s), {usd(prev.grossCents)} gross.{prev.replacing ? ` Replaces ${prev.replacing} pay date(s) imported before.` : ''}</div>
+          {prev.matched.map(m => <div key={m.userId} className="text-[13px]">· {m.name}: {m.payDates} pay date(s), {usd(m.grossCents)}</div>)}
+          {prev.unmatched.length > 0 && <Warn>Not imported (no matching account): {prev.unmatched.map(u => `${u.name} (${u.reason})`).join('; ')}</Warn>}
+          {prev.nonGeorgia.length > 0 && <Warn>{prev.nonGeorgia.map(n => `${n.name} works in ${n.states.join(', ')}`).join('; ')}. Their state is recorded; they are paid in the app once that state's tax table is approved and GFC's unemployment rate there is set in Settings.</Warn>}
+          {prev.warnings.length > 0 && <Warn>{prev.warnings.map((w, i) => <div key={i}>{w}</div>)}</Warn>}
+          <button className="btn mt-2" disabled={busy || !prev.stubs} onClick={() => go(true)}>Import</button>
+          <button className="btn ghost mt-2 ml-2" onClick={() => { setPrev(null); setCsv(''); }}>Cancel</button>
+        </div>
+      )}
+    </Card>
+  );
+};
+
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
   const [start, setStart] = useState(data.nextPeriod ? data.nextPeriod.start : '');
   if (open) return <RunDetail id={open} onBack={() => setOpen(null)} reload={reload} />;
   return (
+    <>
+    <GustoImport reload={reload} />
     <Card title="Payroll Runs">
       <Err e={err} />
       {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}
@@ -217,17 +265,18 @@ const Runs = ({ data, reload }) => {
       {data.runs.map(r => (
         <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
           <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
-          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span></span>
+          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>{r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}</span>
         </button>
       ))}
     </Card>
+    </>
   );
 };
 
 // ---- People --------------------------------------------------------------------
 const Person = ({ p, data, reload }) => {
   const pr = p.profile;
-  const [f, setF] = useState({ workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
+  const [f, setF] = useState({ workState: pr.workState || 'GA', workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
   const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
@@ -239,6 +288,8 @@ const Person = ({ p, data, reload }) => {
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
           : <label>W-2 or 1099<select className="inp" value={f.workerType} onChange={e => setF({ ...f, workerType: e.target.value })}>{Object.values(data.workerTypes).map(v => <option key={v} value={v}>{v === 'HYBRID' ? 'Both' : v}</option>)}</select></label>}
         <label>Pay type<select className="inp" value={f.payType} onChange={e => setF({ ...f, payType: e.target.value })}>{data.payTypes.map(v => <option key={v} value={v}>{v.replace('_', ' ')}</option>)}</select></label>
+        <label>Works in<select className="inp" value={f.workState} onChange={e => setF({ ...f, workState: e.target.value })}>{statesGaFirst().map(c => <option key={c} value={c}>{stName(c)}</option>)}</select>
+          {f.workState !== 'GA' && <span className="text-[12px] text-stone-500">Paid once a {stName(f.workState)} tax table is approved and GFC's {stName(f.workState)} unemployment rate is set.</span>}</label>
         <label>Wages account<select className="inp" value={f.wageAccount} onChange={e => setF({ ...f, wageAccount: e.target.value })}><option value="home_care">Home care</option><option value="clinical">Clinical</option></select></label>
         {pr.isCaregiver ? <div className="text-[12.5px] text-stone-500">Caregiver pay rates stay on the user form and shifts (shift → client → base).</div>
           : <label>Hourly rate $<input className="inp" value={f.hourlyRate} onChange={e => setF({ ...f, hourlyRate: e.target.value })} /></label>}
@@ -249,7 +300,7 @@ const Person = ({ p, data, reload }) => {
         <label>Status<select className="inp" value={f.status} onChange={e => setF({ ...f, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
       </div>
       <div><button className="btn" onClick={save}>Save Pay Setup</button>
-        {!pr.newHireReportedAt && pr.workerType !== '1099' && <button className="btn ghost ml-2" onClick={() => post(`/api/payroll/admin/people/${enc(p.userId)}/new-hire-reported`).then(() => { setMsg('Recorded.'); reload(); }).catch(e => setErr(e.message))}>Mark GA New Hire Reported</button>}</div>
+        {!pr.newHireReportedAt && pr.workerType !== '1099' && <button className="btn ghost ml-2" onClick={() => post(`/api/payroll/admin/people/${enc(p.userId)}/new-hire-reported`).then(() => { setMsg('Recorded.'); reload(); }).catch(e => setErr(e.message))}>Mark {stName(pr.workState || 'GA')} New Hire Reported</button>}</div>
       {pr.i9 && pr.i9.section1 && !pr.i9.section2 && (
         <div className="border-t border-stone-100 pt-3">
           <div className="lblu mb-1">I-9 Section 2: documents you examined</div>
@@ -380,6 +431,11 @@ const Taxes = () => {
               <div>By month: {q.formG7.monthlyWithheldCents.map(usd).join(' · ')}</div><div><b>Total: {usd(q.formG7.totalWithheldCents)}</b></div></div>
             <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Georgia DOL-4N</div>
               <div>Total wages: {usd(q.formDOL4N.totalWagesCents)}</div><div>Over the wage base: {usd(q.formDOL4N.excessWagesCents)}</div><div><b>Taxable wages: {usd(q.formDOL4N.taxableWagesCents)}</b></div></div>
+            {(q.otherStates || []).map(o => (
+              <div key={o.state} className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">{o.name} unemployment{o.state === 'TX' ? ' (TWC C-3)' : ''}</div>
+                <div>Employees: {o.employees}</div><div>Total wages: {usd(o.totalWagesCents)}</div><div>Over the wage base: {usd(o.excessWagesCents)}</div><div><b>Taxable wages: {usd(o.taxableWagesCents)}</b></div>
+                {o.withheldCents > 0 && <div>{o.name} income tax withheld: {usd(o.withheldCents)}</div>}</div>
+            ))}
           </div>
         )}
       </Card>
@@ -454,6 +510,7 @@ const YearEnd = () => {
         {ye && (
           <>
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
+            {ye.gustoGrossCents > 0 && !rel && <Warn>These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. Release here only if the app is filing {yr}'s W-2s for the whole year. If Gusto is filing them, do not release here, or the wages are reported twice.</Warn>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
             <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>
@@ -507,7 +564,7 @@ const StageTable = ({ reload }) => {
     <div className="border border-stone-200 rounded-xl p-3 mb-3 grid gap-2">
       <Err e={err} />
       <div className="flex flex-wrap gap-2"><input className="inp !w-24" placeholder="Year" value={f.year} onChange={e => setF({ ...f, year: e.target.value })} />
-        <select className="inp !w-36" value={f.jurisdiction} onChange={e => setF({ ...f, jurisdiction: e.target.value })}><option value="federal">Federal</option><option value="GA">Georgia</option></select>
+        <select className="inp !w-44" value={f.jurisdiction} onChange={e => setF({ ...f, jurisdiction: e.target.value })}><option value="federal">Federal</option>{statesGaFirst().map(c => <option key={c} value={c}>{stName(c)}</option>)}</select>
         <input className="inp" placeholder="Source (publication and date)" value={f.source} onChange={e => setF({ ...f, source: e.target.value })} /></div>
       <textarea className="inp font-mono !text-[12px]" rows={8} placeholder="Paste the figures, in the shape Show Figures displays" value={f.json} onChange={e => setF({ ...f, json: e.target.value })} />
       <div className="flex gap-2"><button className="btn" onClick={save}>Stage Table</button><button className="btn ghost" onClick={() => setOpen(false)}>Cancel</button></div>
@@ -521,10 +578,10 @@ const TaxTables = ({ data, reload }) => {
       <Err e={err} />
       <p className="text-stone-500 mb-3">Payroll uses only approved tables. Check each staged table against its source document, then approve it. Approving replaces the active table for that year.</p>
       <StageTable reload={reload} />
-      {data.taxTables.sort((a, b) => b.year - a.year).map(t => (
+      {data.taxTables.sort((a, b) => b.year - a.year || (a.jurisdiction === 'federal' ? -1 : b.jurisdiction === 'federal' ? 1 : a.jurisdiction === 'GA' ? -1 : b.jurisdiction === 'GA' ? 1 : stName(a.jurisdiction).localeCompare(stName(b.jurisdiction)))).map(t => (
         <div key={t.id} className="py-2 border-b border-stone-100">
           <div className="flex flex-wrap justify-between gap-2">
-            <span><b className="text-primary">{t.jurisdiction === 'GA' ? 'Georgia' : 'Federal'} {t.year}</b> <span className={`chip ${t.status === 'active' ? 'bg-emerald-50 text-emerald-700' : t.status === 'staged' ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>{t.status.toUpperCase()}</span>
+            <span><b className="text-primary">{t.jurisdiction === 'federal' ? 'Federal' : stName(t.jurisdiction)} {t.year}</b> <span className={`chip ${t.status === 'active' ? 'bg-emerald-50 text-emerald-700' : t.status === 'staged' ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>{t.status.toUpperCase()}</span>
               <div className="text-[12.5px] text-stone-500">{t.source}{t.approvedBy ? ` · approved by ${t.approvedBy}` : ''}</div></span>
             <span className="flex gap-2"><button className="btn ghost !py-1" onClick={() => setShow(show === t.id ? null : t.id)}>{show === t.id ? 'Hide' : 'Show Figures'}</button>
               {t.status === 'staged' && <button className="btn gold !py-1" onClick={() => window.confirm('Approve this table? Payroll will use it.') && post(`/api/payroll/admin/tax-tables/${enc(t.id)}/approve`).then(reload).catch(e => setErr(e.message))}>Approve</button>}</span>
@@ -559,6 +616,34 @@ const QuickBooks = () => {
 };
 
 // ---- Settings -------------------------------------------------------------------------
+// Every state after Georgia where someone works (or that has settings):
+// GFC's unemployment rate and account there, and its withholding ID and
+// schedule if that state taxes wages.
+const OtherStates = ({ data, reload }) => {
+  const s = data.settings.states || {};
+  const codes = [...new Set([...data.people.map(p => p.profile.workState).filter(c => c && c !== 'GA'), ...Object.keys(s)])].sort((a, b) => stName(a).localeCompare(stName(b)));
+  const [f, setF] = useState(() => Object.fromEntries(codes.map(c => [c, { sutaRatePct: s[c] && s[c].sutaRatePct !== null && s[c].sutaRatePct !== undefined ? s[c].sutaRatePct : '', accountNumber: (s[c] || {}).accountNumber || '', withholdingId: (s[c] || {}).withholdingId || '', withholdingFrequency: (s[c] || {}).withholdingFrequency || '' }])));
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  if (!codes.length) return <p className="text-[12.5px] text-stone-500 mt-4">Everyone works in Georgia. Another state appears here once someone is set to work there (People → Works in).</p>;
+  const set = (c, k, v) => setF({ ...f, [c]: { ...f[c], [k]: v } });
+  return (
+    <div className="mt-5 border-t border-stone-100 pt-4">
+      <div className="lblu mb-2">Other states (after Georgia)</div>
+      <Err e={err} /><Ok m={msg} />
+      {codes.map(c => (
+        <div key={c} className="grid sm:grid-cols-4 gap-2 mb-3 max-w-4xl">
+          <div className="font-semibold text-primary sm:col-span-4">{stName(c)}</div>
+          {((data.statePrograms || {})[c] || []).length > 0 && <div className="sm:col-span-4"><Warn>{stName(c)} also has: {data.statePrograms[c].map(p => `${p.program} (${p.who === 'employer' ? 'paid by GFC' : 'withheld from pay'})`).join('; ')}. {data.statePrograms[c].some(p => p.who !== 'employer') ? 'The app does not withhold these yet, so people here are paid outside the app for now.' : 'GFC owes these directly; they are not in the app yet.'}</Warn></div>}
+          <label>Unemployment rate (%)<input className="inp" value={f[c].sutaRatePct} onChange={e => set(c, 'sutaRatePct', e.target.value)} placeholder="from the state notice" /></label>
+          <label>Unemployment account no.<input className="inp" value={f[c].accountNumber} onChange={e => set(c, 'accountNumber', e.target.value)} /></label>
+          <label>Withholding ID (if the state taxes wages)<input className="inp" value={f[c].withholdingId} onChange={e => set(c, 'withholdingId', e.target.value)} /></label>
+          <label>Withholding filing<select className="inp" value={f[c].withholdingFrequency} onChange={e => set(c, 'withholdingFrequency', e.target.value)}><option value="">Not set / no income tax</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="semiweekly">Semiweekly</option></select></label>
+        </div>
+      ))}
+      <button className="btn ghost" onClick={() => put('/api/payroll/admin/settings', { states: f }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Other States</button>
+    </div>
+  );
+};
 const Settings = ({ data, reload }) => {
   const s = data.settings;
   const [f, setF] = useState({ frequency: s.frequency, payDateOffsetDays: s.payDateOffsetDays, federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
@@ -576,6 +661,7 @@ const Settings = ({ data, reload }) => {
         <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
       </div>
+      <OtherStates data={data} reload={reload} />
       <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, payDateOffsetDays: Number(f.payDateOffsetDays), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
       <p className="text-[12.5px] text-stone-500 mt-4">Automations (Apps Script): {data.automationKeySet ? 'switched on' : 'off until PAYROLL_INGEST_KEY is set'}. See docs/PAYROLL_SETUP.md.</p>
     </Card>
@@ -586,7 +672,7 @@ const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contracto
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
-  const load = useCallback(() => call('/api/payroll/admin/overview').then(setData).catch(e => {
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; setData(d); }).catch(e => {
     if (e.status === 401) { window.location.replace('/login'); return; }
     setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
   }), []);

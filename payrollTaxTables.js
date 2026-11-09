@@ -52,18 +52,70 @@ const GA_2026 = {
   newEmployerSutaRatePct: 2.70            // 2.64% + 0.06% administrative assessment (SB 160), through 2026-12-31
 };
 
+// ---- other states (Georgia is first and keeps its own G-4 formula above) ----
+const { STATE_SOURCES } = require('./payrollStateSources');
+// Every state an employee may work in. A person in a state is paid in the app
+// only once that state has a table the owner approved, like Georgia's.
+const STATE_NAMES = Object.freeze({
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware',
+  DC: 'District of Columbia', FL: 'Florida', GA: 'Georgia', HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+  KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland', MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota',
+  MS: 'Mississippi', MO: 'Missouri', MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio', OK: 'Oklahoma', OR: 'Oregon',
+  PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina', SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah',
+  VT: 'Vermont', VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming'
+});
+const stateName = (code) => STATE_NAMES[code] || code;
+
+// A state table other than Georgia's. method:
+//   'none'      no state income tax on wages (Texas, Florida, ...)
+//   'flat'      ratePct of annualized wages less exemptionCents per allowance
+//   'brackets'  annualized wages less standardDeductionCents[status] and
+//               allowanceCents per allowance, then annual brackets[status]
+//               ([atLeastCents, lessThanCents|null, baseCents, ratePct])
+// Each state also has its unemployment wage base. The rate itself is GFC's
+// own, from that state's notice, and lives in Payroll → Settings.
+// Texas: no income tax on wages. Texas Workforce Commission unemployment tax
+// on the first $9,000 per employee per year (Texas Labor Code 201.082). A
+// new employer pays 2.7% or its industry average, whichever is higher; GFC's
+// actual rate is on the TWC notice and is set in Settings.
+const TX_2026 = { incomeTax: false, method: 'none', sutaWageBaseCents: 900000, newEmployerSutaRatePct: 2.7 };
+
 const SEEDS = Object.freeze([
   { key: 'federal-2026', year: 2026, jurisdiction: 'federal', data: FED_2026,
     source: 'IRS Pub 15-T (2026) percentage method tables + Worksheet 1A; IRS Pub 15 (2026) Social Security wage base $184,500, Medicare, FUTA. 1099-NEC $2,000 threshold confirmed (Instructions for Forms 1099-MISC and 1099-NEC, Rev. December 2026).' },
   { key: 'GA-2026', year: 2026, jurisdiction: 'GA', data: GA_2026,
-    source: 'Georgia DOR Employer\'s Withholding Tax Guide 2026 (revised Sept 2026), Tables E and F: 4.99% from May 11, 2026. Form G-4 rev. 06/03/26. GA DOL wage base $9,500.' }
+    source: 'Georgia DOR Employer\'s Withholding Tax Guide 2026 (revised Sept 2026), Tables E and F: 4.99% from May 11, 2026. Form G-4 rev. 06/03/26. GA DOL wage base $9,500.' },
+  { key: 'TX-2026', year: 2026, jurisdiction: 'TX', data: TX_2026,
+    source: 'Texas: no state income tax on wages (Texas Comptroller; Tex. Const. art. 8 sec. 24-a). TWC "Your 2026 Tax Rates": tax on the first $9,000 per employee, 2026 rates 0.32% to 6.32%; TWC New Texas Employer Information: 2026 entry-level rate 2.70% (or the industry average if higher). Set GFC\'s own rate from the TWC notice in Settings.' }
 ]);
 
 // A table the owner stages by hand is checked for shape before it is stored.
+function validateStateTable(d) {
+  if (!(typeof d.sutaWageBaseCents === 'number' && d.sutaWageBaseCents >= 0)) return 'sutaWageBaseCents is needed.';
+  if (typeof d.incomeTax !== 'boolean') return 'incomeTax is true or false.';
+  if (!d.incomeTax) return d.method === 'none' ? null : 'A state with no income tax uses method "none".';
+  if (d.method === 'flat') {
+    if (!(d.ratePct > 0 && d.ratePct < 20)) return 'ratePct is needed for a flat state.';
+    if (!(d.exemptionCents >= 0)) return 'exemptionCents (per allowance, per year) is needed; 0 if none.';
+    return null;
+  }
+  if (d.method === 'brackets') {
+    for (const st of ['single', 'married']) {
+      const rows = d.brackets && d.brackets[st];
+      if (!(Array.isArray(rows) && rows.length && rows.every(r => Array.isArray(r) && r.length === 4) && rows[rows.length - 1][1] === null)) return `brackets.${st} is not in the right shape.`;
+      if (!(d.standardDeductionCents && d.standardDeductionCents[st] >= 0)) return `standardDeductionCents.${st} is needed.`;
+    }
+    if (!(d.allowanceCents >= 0)) return 'allowanceCents is needed; 0 if none.';
+    return null;
+  }
+  return 'method is none, flat or brackets.';
+}
+
 function validateTable(b) {
   const year = Number(b.year);
   if (!Number.isInteger(year) || year < 2025 || year > 2100) return { error: 'Give the tax year.', code: 'TABLE_YEAR' };
-  if (!['federal', 'GA'].includes(b.jurisdiction)) return { error: 'Jurisdiction is federal or GA.', code: 'TABLE_JURISDICTION' };
+  if (b.jurisdiction !== 'federal' && !STATE_NAMES[b.jurisdiction]) return { error: 'Jurisdiction is federal or a state code such as GA or TX.', code: 'TABLE_JURISDICTION' };
   const d = b.data;
   if (!d || typeof d !== 'object') return { error: 'Give the table figures.', code: 'TABLE_DATA' };
   const rowsOk = (rows) => Array.isArray(rows) && rows.length > 1 && rows.every(r => Array.isArray(r) && r.length === 4 && r.slice(0, 1).concat(r.slice(2)).every(n => typeof n === 'number' && n >= 0))
@@ -76,6 +128,9 @@ function validateTable(b) {
       if (!(typeof d[k] === 'number' && d[k] >= 0)) return { error: `${k} is missing.`, code: 'TABLE_FIELD' };
     }
     if (!d.worksheet1g || !(d.worksheet1g.mfj >= 0) || !(d.worksheet1g.other >= 0)) return { error: 'worksheet1g is missing.', code: 'TABLE_FIELD' };
+  } else if (b.jurisdiction !== 'GA') {
+    const bad = validateStateTable(d);
+    if (bad) return { error: bad, code: 'TABLE_FIELD' };
   } else {
     if (!(d.ratePct > 0 && d.ratePct < 15)) return { error: 'ratePct is missing.', code: 'TABLE_FIELD' };
     for (const k of ['standardDeduction', 'personalAllowance']) if (!d[k] || !['A', 'B', 'C', 'D'].every(l => typeof d[k][l] === 'number')) return { error: `${k} needs A, B, C and D.`, code: 'TABLE_FIELD' };
@@ -113,4 +168,37 @@ function seedRows(existing, { uuid, at }) {
   return add;
 }
 
-module.exports = { FED_2026, GA_2026, SEEDS, validateTable, seedRows, refreshStagedSeeds };
+// The pages the Apps Script watches for rate changes, one set per
+// jurisdiction. Served at GET /api/payroll/automation/tax-sources, with every
+// state someone on payroll works in, so a new state is watched (or reported
+// as unwatched) without editing the script.
+const SOURCE_PAGES = Object.freeze({
+  federal: [
+    { name: 'IRS Publication 15-T', url: 'https://www.irs.gov/pub/irs-pdf/p15t.pdf' },
+    { name: 'IRS Publication 15', url: 'https://www.irs.gov/pub/irs-pdf/p15.pdf' }
+  ],
+  GA: [
+    { name: "Georgia Employer's Tax Guide", url: 'https://dor.georgia.gov/withholding-tax' },
+    { name: 'Georgia Form G-4', url: 'https://dor.georgia.gov/document/form/tsdemployeeswithholdingallowancecertificateg-4pdf/download' },
+    { name: 'Georgia DOL employer tax', url: 'https://dol.georgia.gov/employers' }
+  ]
+});
+// Programs a state withholds from pay besides income tax (paid leave,
+// disability, local income tax). The app does not withhold these yet.
+const employeePrograms = (code) => ((STATE_SOURCES[code] || {}).otherPrograms || []).filter(p => p.who !== 'employer');
+
+function sourcesFor(states) {
+  // Federal, then Georgia, then every other state in alphabetical order.
+  const want = ['federal', 'GA', ...[...new Set(states || [])].filter(s => s && s !== 'GA').sort()];
+  const sources = [], unwatched = [];
+  for (const j of want) {
+    // Federal and Georgia from the curated lists above; every other state from
+    // its official pages in payrollStateSources.js.
+    const pages = SOURCE_PAGES[j] || ((STATE_SOURCES[j] || {}).pages || []).map(p => ({ name: `${stateName(j)}: ${p.name}`, url: p.url }));
+    if (!pages.length) { unwatched.push(j); continue; }
+    for (const p of pages) sources.push({ ...p, jurisdiction: j });
+  }
+  return { sources, unwatched };
+}
+
+module.exports = { FED_2026, GA_2026, TX_2026, STATE_NAMES, STATE_SOURCES, stateName, employeePrograms, SEEDS, SOURCE_PAGES, validateTable, validateStateTable, seedRows, refreshStagedSeeds, sourcesFor };

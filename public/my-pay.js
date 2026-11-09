@@ -89,6 +89,21 @@ function FormBody({ which, data, form, set }) {
       <Sign statement={PERJURY} form={form} set={set} />
     </div>
   );
+  if (which === 'statecert') return (
+    <div>
+      <p className="mg-note">For {data.workStateName}, where you work.</p>
+      <label>Filing status</label>
+      <select value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
+        <option value="">Choose…</option><option value="single">Single</option><option value="married">Married</option>
+      </select>
+      <div className="mp-grid">
+        <div><label>Allowances</label><input type="number" min="0" value={form.allowances || ''} onChange={e => set({ ...form, allowances: e.target.value })} /></div>
+        <div><label>Extra withholding ($ each paycheck)</label><input type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
+      </div>
+      <label className="mp-check"><input type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt from {data.workStateName} withholding.</span></label>
+      <Sign statement={PERJURY} form={form} set={set} />
+    </div>
+  );
   if (which === 'i9') return (
     <div>
       <label>Section 1: I attest that I am</label>
@@ -171,7 +186,7 @@ function FormBody({ which, data, form, set }) {
   return null;
 }
 
-const ROUTE = { w4: 'w4', g4: 'g4', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', offer: 'offer', handbook: 'handbook', edelivery: 'e-delivery' };
+const ROUTE = { w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', offer: 'offer', handbook: 'handbook', edelivery: 'e-delivery' };
 
 function PaySetup() {
   const [data, setData] = useState(null);
@@ -211,7 +226,7 @@ function PaySetup() {
         <div className="mg-card" style={{ boxShadow: 'none' }}>
           <FormBody which={open} data={data} form={form} set={setForm} />
           <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-            <button className="mg-btn" disabled={busy} onClick={save}>{['offer', 'handbook', 'w4', 'g4', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
+            <button className="mg-btn" disabled={busy} onClick={save}>{['offer', 'handbook', 'w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
             <button className="mg-btn mg-ghost" onClick={() => { setOpen(null); setForm({}); }}>Cancel</button>
           </div>
         </div>

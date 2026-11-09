@@ -25,6 +25,7 @@ const cal = require('../payrollCalendar');
 const tables = require('../payrollTaxTables');
 const links = require('../appLinks');
 const ye = require('../payrollYearEnd');
+const gusto = require('../payrollGustoImport');
 const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
 
@@ -99,17 +100,34 @@ module.exports = function createPayrollRoutes(deps) {
     const pick = (j) => all.filter(t => t.jurisdiction === j && t.status === 'active' && Number(t.year) === Number(year))
       .sort((a, b) => String(b.approvedAt).localeCompare(String(a.approvedAt)))[0] || null;
     const fed = pick('federal'), ga = pick('GA');
-    return fed && ga ? { federal: fed.data, GA: ga.data, ids: [fed.id, ga.id] } : null;
+    if (!(fed && ga)) return null;
+    // Every other state approved for the year (Texas, then any later one).
+    const states = {}, ids = [fed.id, ga.id];
+    for (const j of [...new Set(all.filter(t => t.jurisdiction !== 'federal' && t.jurisdiction !== 'GA').map(t => t.jurisdiction))].sort()) {
+      const t = pick(j);
+      if (t) { states[j] = t.data; ids.push(t.id); }
+    }
+    return { federal: fed.data, GA: ga.data, states, ids };
   };
   const ctxFor = (req) => ({ at: nowIso(), ipHash: hashIp ? hashIp(req) : null });
 
   // ===================================================================================
   // EACH PERSON'S OWN: pay setup (My GFC → Hours & Pay)
   // ===================================================================================
+  // Whether this person's work state (not Georgia) taxes wages, from that
+  // state's approved table for this year. Unknown reads as false: no form is
+  // asked for until the state is set up.
+  const stateTaxesWages = async (p) => {
+    const st = (p && p.workState) || 'GA';
+    if (st === 'GA') return false;
+    const t = (await rows(TAX_TABLES)).filter(x => x.jurisdiction === st && x.status === 'active').sort((a, b) => Number(b.year) - Number(a.year))[0];
+    return !!(t && t.data && t.data.incomeTax);
+  };
   router.get('/api/my/pay-setup', authenticateToken, requireStaff, async (req, res) => {
     const p = await profileFor(req.user);
+    const stateIncomeTax = await stateTaxesWages(p);
     res.json({
-      profile: pp.publicProfile(p),
+      profile: pp.publicProfile(p, { stateIncomeTax }), workState: p.workState || 'GA', workStateName: tables.stateName(p.workState || 'GA'),
       employee: pp.isEmployee(p), contractor: pp.isContractor(p), caregiver: !!p.isCaregiver,
       secretsStorable: pc.configured(env),
       options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, i9Status: pp.I9_STATUS, w9Class: pp.W9_CLASS, workTypes: WORK_TYPES, units: CI_UNITS,
@@ -129,6 +147,12 @@ module.exports = function createPayrollRoutes(deps) {
       switch (req.params.form) {
         case 'w4': { const n = pp.normalizeW4(b, ctx); if (n.error) return res.status(400).json(n); p.w4 = n.value; change = 'W-4 signed'; break; }
         case 'g4': { const n = pp.normalizeG4(b, ctx); if (n.error) return res.status(400).json(n); p.g4 = n.value; change = 'G-4 signed'; break; }
+        case 'state-cert': {
+          const st = p.workState || 'GA';
+          if (st === 'GA') return res.status(409).json({ error: 'You work in Georgia: sign the G-4.', code: 'STATE_CERT_GEORGIA' });
+          const n = pp.normalizeStateCert(b, ctx, st); if (n.error) return res.status(400).json(n);
+          p.stateCert = n.value; change = `${tables.stateName(st)} withholding certificate signed`; break;
+        }
         case 'i9': { const n = pp.normalizeI9Section1(b, ctx); if (n.error) return res.status(400).json(n); p.i9 = { ...(p.i9 || {}), section1: n.value }; change = 'I-9 Section 1 signed'; break; }
         case 'ssn': {
           const bad = pp.checkSsn(b.ssn); if (bad) return res.status(400).json({ error: bad, code: 'SSN_INVALID' });
@@ -173,7 +197,7 @@ module.exports = function createPayrollRoutes(deps) {
         default: return res.status(404).json({ error: 'Unknown form.' });
       }
       const saved = await saveProfile(req.user.id, p, change, req.user);
-      res.json({ profile: pp.publicProfile(saved) });
+      res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved) }) });
     } catch (e) {
       if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
       console.error('Pay setup error:', e);
@@ -311,11 +335,14 @@ module.exports = function createPayrollRoutes(deps) {
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
-        runs: runs.map(r => ({ id: r.id, status: r.status, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
+        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
-        workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS
+        workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS,
+        stateNames: tables.STATE_NAMES,
+        // Each state's other payroll programs, for the Settings card.
+        statePrograms: Object.fromEntries(Object.entries(tables.STATE_SOURCES).map(([k, v]) => [k, v.otherPrograms || []]))
       });
     } catch (e) { console.error('Payroll overview error:', e); res.status(500).json({ error: 'Server error' }); }
   });
@@ -331,6 +358,17 @@ module.exports = function createPayrollRoutes(deps) {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
       const curPeriod = tax.periodFor(today, cur);
       n.value.anchor = tax.addDays(curPeriod.end, 1);
+    }
+    if ((req.body || {}).states !== undefined) {
+      const next = { ...(cur.states || {}) };
+      for (const [st, v] of Object.entries(req.body.states || {})) {
+        if (st === 'GA' || !tables.STATE_NAMES[st]) return res.status(400).json({ error: `${st} is not a state code (Georgia's settings are above).`, code: 'STATE_SETTINGS' });
+        const rate = v.sutaRatePct === '' || v.sutaRatePct === null || v.sutaRatePct === undefined ? null : Number(v.sutaRatePct);
+        if (rate !== null && !(rate >= 0 && rate <= 15)) return res.status(400).json({ error: `${tables.stateName(st)} unemployment rate is a percent between 0 and 15.`, code: 'STATE_SUTA_RATE' });
+        if (v.withholdingFrequency && !['monthly', 'quarterly', 'semiweekly'].includes(v.withholdingFrequency)) return res.status(400).json({ error: 'Withholding is filed monthly, quarterly or semiweekly.', code: 'STATE_FREQUENCY' });
+        next[st] = { sutaRatePct: rate, accountNumber: str(v.accountNumber, 40) || null, withholdingId: str(v.withholdingId, 40) || null, withholdingFrequency: v.withholdingFrequency || null };
+      }
+      n.value.states = next;
     }
     if ((req.body || {}).yearEnd !== undefined) {
       const y = ye.normalizeYearEnd(req.body.yearEnd, cur.yearEnd);
@@ -538,7 +576,9 @@ module.exports = function createPayrollRoutes(deps) {
 
   // Each worker's stub: a PDF filed in their role folder, a row in
   // staff_paystubs (the store My GFC already lists), and a link-only email.
-  const writeStubs = async (run, settings) => {
+  // opts.notify false: past pay dates imported from Gusto get stubs without
+  // an email per pay date.
+  const writeStubs = async (run, settings, opts = {}) => {
     const users = await getUsers();
     const all = await readProfiles();
     const ytd = engine.ytdFrom((await rows(RUNS)), { year: run.period.payDate.slice(0, 4) });   // includes this run
@@ -550,17 +590,20 @@ module.exports = function createPayrollRoutes(deps) {
       let driveFileId = null;
       try {
         const buf = await pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
-          ssnLast4: p.ssn ? p.ssn.last4 : null, accountLast4: p.payMethod ? p.payMethod.accountLast4 : null, payMethod: p.payMethod ? p.payMethod.method : null });
+          ssnLast4: p.ssn ? p.ssn.last4 : null,
+          accountLast4: w.imported ? null : p.payMethod ? p.payMethod.accountLast4 : null,
+          payMethod: w.imported ? w.payMethod : p.payMethod ? p.payMethod.method : null,
+          workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
         const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
         driveFileId = stored.fileId || stored.id || null;
       } catch (e) { report.pdfFailed++; console.error('Pay stub PDF error (non-fatal):', e.message); }
       const hours = Math.round(((w.earnings.find(e => e.code === 'regular') || {}).minutes || 0) / 60 * 100) / 100;
       const row = { id: uuidv4(), userId: w.userId, payDate: run.period.payDate, periodStart: run.period.start, periodEnd: run.period.end,
-        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: 'app', runId: run.id, importedAt: nowIso() };
+        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso() };
       const at = stubs.findIndex(x => String(x.userId) === row.userId && x.payDate === row.payDate && x.reference === row.reference);
       if (at === -1) stubs.push(row); else { row.id = stubs[at].id; stubs[at] = row; }
       report.written++;
-      if (user && user.email && queueNotification) {
+      if (opts.notify !== false && user && user.email && queueNotification) {
         // Link-only: says a stub is ready, never an amount (spec v2 item 16).
         const base = getAppBaseUrl ? await getAppBaseUrl() : '';
         await queueNotification('paystub_ready', user.id, user.email, user.name, {
@@ -573,6 +616,73 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(PAYSTUBS, stubs);
     return report;
   };
+
+  // ---- import past pay dates from Gusto ------------------------------------------------
+  // The owner pastes Gusto's Payroll Journal CSV. preview: what would be
+  // imported and who could not be matched. commit: the paid runs, their pay
+  // stubs in My GFC (no emails), and the app's own hours in those periods
+  // locked so a later app run never pays them again. The file is not stored.
+  router.post('/api/payroll/admin/import/gusto', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const parsed = gusto.parseJournal(b.csv);
+      if (parsed.error) return res.status(400).json(parsed);
+      const entries = gusto.netEntries(parsed.lines);
+      const users = await getUsers();
+      const profiles = await readProfiles();
+      const logs = await rows('time_logs');
+      const visits = await rows('visit_timings');
+      const inP = (iso, p) => { const d = localDate(iso); return d && d >= p.start && d <= p.end; };
+      const refsFor = (uid, p) => [
+        ...logs.filter(l => l && String(l.caregiver_id) === uid && l.clock_out_at && inP(l.clock_in_at, p)).map(l => `log:${l.id}`),
+        ...visits.filter(t => t && String(t.byId) === uid && t.endedAt && inP(t.startedAt, p)).map(t => `visit:${t.id}`)
+      ];
+      const built = gusto.buildImport({ entries, users: users.filter(u => isStaff(u)), profiles, refsFor, at: nowIso(), by: req.user.name || req.user.email });
+      for (const r of built.runs) r.totals = engine.runTotals(r.workers);
+      const existing = await rows(RUNS);
+      // An app run already covering the same person and pay date would mean
+      // paying twice; that pay date is left out and named.
+      const appPaid = new Set(existing.filter(r => r.source !== 'gusto' && r.status !== 'draft').flatMap(r => (r.workers || []).filter(w => w.pay).map(w => `${w.userId}|${r.period.payDate}`)));
+      const clashes = [];
+      for (const r of built.runs) {
+        r.workers = r.workers.filter(w => { const clash = appPaid.has(`${w.userId}|${r.period.payDate}`); if (clash) clashes.push(`${w.name}, pay date ${r.period.payDate}`); return !clash; });
+        r.totals = engine.runTotals(r.workers);
+      }
+      const runs = built.runs.filter(r => r.workers.length);
+      const replacing = runs.filter(r => existing.some(x => x.id === r.id)).length;
+      const nonGeorgia = built.matched.filter(m => m.workStates.some(st => st !== 'GA')).map(m => ({ userId: m.userId, name: m.name, states: m.workStates }));
+      const summary = {
+        payDates: [...new Set(runs.map(r => r.period.payDate))].length, stubs: runs.reduce((a, r) => a + r.workers.length, 0),
+        grossCents: runs.reduce((a, r) => a + r.totals.grossCents, 0), matched: built.matched, unmatched: built.unmatched,
+        warnings: [...parsed.warnings, ...built.warnings, ...clashes.map(c => `${c}: already paid by a payroll run in the app; not imported.`)],
+        replacing, nonGeorgia
+      };
+      if (b.commit !== true) return res.json({ preview: true, ...summary });
+
+      // Commit. Re-importing the same file replaces the same pay dates.
+      const ids = new Set(runs.map(r => r.id));
+      await db.set(RUNS, [...existing.filter(r => !ids.has(r.id)), ...runs]);
+      // Lock the app's hours inside imported periods, as an approval does.
+      const locked = new Map();
+      for (const r of runs) for (const w of r.workers) for (const ref of w.refs) if (ref.startsWith('log:')) locked.set(ref.slice(4), r.id);
+      if (locked.size) await db.set('time_logs', logs.map(l => (l && locked.has(String(l.id)) && !l.payroll_run_id ? { ...l, payroll_run_id: locked.get(String(l.id)) } : l)));
+      // Record the work state Gusto paid them in; a non-Georgia worker is
+      // then blocked from app runs by name.
+      const all = await db.get(PROFILES) || {};
+      for (const m of nonGeorgia) {
+        const p = all[m.userId] || pp.defaultProfile(users.find(u => String(u.id) === m.userId) || { id: m.userId });
+        const st = m.states[m.states.length - 1];
+        if (p.workState === st) continue;
+        all[m.userId] = { ...p, workState: st, history: [...(p.history || []), { at: nowIso(), change: `Work state set to ${st} from the Gusto import`, byId: req.user.id, byName: req.user.name || null }].slice(-200) };
+      }
+      if (nonGeorgia.length) await db.set(PROFILES, all);
+      const settings = await readSettings();
+      const stubReport = { written: 0, pdfFailed: 0 };
+      for (const r of runs) { const x = await writeStubs(r, settings, { notify: false }); stubReport.written += x.written; stubReport.pdfFailed += x.pdfFailed; }
+      await logActivity(req.user.id, req.user.name, 'payroll_gusto_imported', 'payroll', null, { payDates: summary.payDates, stubs: summary.stubs, unmatched: built.unmatched.length });
+      res.json({ committed: true, ...summary, stubsWritten: stubReport.written, pdfFailed: stubReport.pdfFailed });
+    } catch (e) { console.error('Gusto import error:', e); res.status(500).json({ error: 'The import could not be completed.' }); }
+  });
 
   // ---- PNC payment sheet (step 5) ------------------------------------------------------
   router.get('/api/payroll/admin/runs/:id/payment-sheet', authenticateToken, requireAdmin, async (req, res) => {
@@ -711,7 +821,8 @@ module.exports = function createPayrollRoutes(deps) {
   router.get('/api/payroll/admin/quarter/:year/:q', authenticateToken, requireAdmin, async (req, res) => {
     const tbl = await activeTables(Number(req.params.year));
     if (!tbl) return res.status(409).json({ error: 'No approved tables for that year.', code: 'PAYROLL_NO_TABLES' });
-    const s = cal.quarterSummary(await rows(RUNS), { year: req.params.year, quarter: req.params.q, fed: tbl.federal, sutaWageBaseCents: tbl.GA.sutaWageBaseCents });
+    const s = cal.quarterSummary(await rows(RUNS), { year: req.params.year, quarter: req.params.q, fed: tbl.federal, sutaWageBaseCents: tbl.GA.sutaWageBaseCents,
+      stateWageBases: Object.fromEntries(Object.entries(tbl.states || {}).map(([k, d]) => [k, d.sutaWageBaseCents])) });
     await logActivity(req.user.id, req.user.name, 'quarter_summary_opened', 'payroll', null, { year: req.params.year, quarter: req.params.q });
     res.json(s);
   });
@@ -722,7 +833,7 @@ module.exports = function createPayrollRoutes(deps) {
     const settings = await readSettings();
     const runs = await rows(RUNS);
     const paid = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'paid').map(x => ({ userId: x.userId, name: x.name, amountCents: x.totalCents, paidAt: x.paidAt }));
-    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal });
+    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal, incomeTaxStates: Object.entries(tbl.states || {}).filter(([, d]) => d.incomeTax).map(([k]) => k) });
     const profiles = await readProfiles();
     const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
     const employer = employerFor(settings);
@@ -731,7 +842,9 @@ module.exports = function createPayrollRoutes(deps) {
       const missing = [];
       if (!p.taxAddress) missing.push('Legal name and mailing address');
       if (!p.ssn) missing.push('SSN');
-      return { userId: String(e.userId), name: e.name, boxes: e, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented), email: (users.get(String(e.userId)) || {}).email || null };
+      // Box 15: Georgia's withholding number, or that state's own.
+      const stateId = e.stateCode === 'GA' ? employer.gaWithholdingId : (((settings.states || {})[e.stateCode] || {}).withholdingId || null);
+      return { userId: String(e.userId), name: e.name, boxes: { ...e, stateId }, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented), email: (users.get(String(e.userId)) || {}).email || null };
     });
     const nec = figures.nec.map(e => {
       const p = profiles[String(e.userId)] || {};
@@ -743,6 +856,9 @@ module.exports = function createPayrollRoutes(deps) {
     return {
       year: Number(year), employer, employerMissing: ye.employerMissing(employer), fileMissing: ye.fileMissing(employer),
       draftRuns: ye.openRunsIn(runs, year).length, unpaidRuns: ye.unpaidRunsIn(runs, year).length,
+      // Wages paid through Gusto this year are in these figures. If Gusto also
+      // files this year's W-2s, releasing here would report them twice.
+      gustoGrossCents: runs.filter(r => r.source === 'gusto' && String(r.period.payDate).startsWith(String(year))).reduce((t, r) => t + ((r.totals && r.totals.grossCents) || 0), 0),
       w2, nec, necBelowThreshold: figures.necBelowThreshold, necThresholdCents: figures.necThresholdCents,
       g1003: ye.g1003Totals(w2.map(w => ({ boxes: w.boxes }))),
       layouts: { efw2: ye.EFW2_LAYOUT_YEARS.includes(Number(year)), irisNec: ye.IRIS_NEC_LAYOUT_YEARS.includes(Number(year)) },
@@ -901,6 +1017,16 @@ module.exports = function createPayrollRoutes(deps) {
   // Same key and header as the pay stub import. Each job only READS and
   // DRAFTS; it never approves, pays or activates anything.
   // ===================================================================================
+  // The pages the Apps Script watches: federal, Georgia, and every state
+  // someone on payroll works in. A state with no known pages is reported as
+  // unwatched rather than silently skipped.
+  router.get('/api/payroll/automation/tax-sources', async (req, res) => {
+    const key = payrollKey();
+    if (!key) return res.status(503).json({ error: 'Payroll automations are not switched on. Set PAYROLL_INGEST_KEY.', code: 'PAYROLL_INGEST_NOT_CONFIGURED' });
+    if (!keyOk(req, key)) return res.status(401).json({ error: 'Wrong payroll key.', code: 'PAYROLL_KEY_INVALID' });
+    const states = Object.values((await db.get(PROFILES)) || {}).filter(p => p && p.status !== 'inactive').map(p => p.workState || 'GA');
+    res.json(tables.sourcesFor(states));
+  });
   router.post('/api/payroll/automation/:job', async (req, res) => {
     const key = payrollKey();
     if (!key) return res.status(503).json({ error: 'Payroll automations are not switched on. Set PAYROLL_INGEST_KEY.', code: 'PAYROLL_INGEST_NOT_CONFIGURED' });
@@ -918,6 +1044,29 @@ module.exports = function createPayrollRoutes(deps) {
     for (const a of await admins()) {
       await queueNotification(type, a.id, a.email, a.name, { subject, body, ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.PATHS.PAYROLL_ADMIN}`, ctaLabel: 'Open Payroll' }, { relatedEntityId: related });
     }
+  };
+  // Unopened electronic forms are reminded once; the owner hears about paper
+  // not yet mailed, or forms not released at all.
+  const yearEndReminders = async (year, today) => {
+    const row = (await rows(YEAR_END)).find(r => r.released && Number(r.year) === Number(year));
+    if (!row) {
+      await tellOwner('tax_forms_not_released', `${year} W-2s and 1099s are not released`, 'They are due to employees and contractors by January 31. Open Payroll → Year End.', `ye-unreleased:${year}:${today}`);
+      return { summary: 'not released' };
+    }
+    const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
+    let reminded = 0;
+    for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
+      const u = users.get(x.userId);
+      if (!x.eDelivery || x.openedAt || !u || !u.email) continue;
+      await queueNotification('tax_form_reminder', u.id, u.email, u.name, {
+        subject: `Your ${row.year} ${x.label} is waiting`, body: `Your ${row.year} ${x.label} is in My GFC under Hours & Pay. You need it to file your taxes.`,
+        ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
+      }, { relatedEntityId: `taxform-reminder:${row.year}:${x.userId}:${x.label}` });
+      reminded++;
+    }
+    const unmailed = [...row.w2, ...row.nec].filter(x => !x.eDelivery && !x.mailedAt);
+    if (unmailed.length) await tellOwner('tax_forms_unmailed', `${unmailed.length} paper tax form(s) not marked mailed`, 'Print and mail them, then mark each one mailed in Payroll → Year End. They are due by January 31.', `ye-unmailed:${year}:${today}`);
+    return { summary: `${reminded} reminded, ${unmailed.length} unmailed` };
   };
   const automationJobs = {
     // The day after a period ends: draft its run and tell the owner.
@@ -953,25 +1102,32 @@ module.exports = function createPayrollRoutes(deps) {
     'tax-form-reminders': async () => {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
       if (!(today.slice(5) >= '01-20' && today.slice(5) <= '02-15')) return { summary: 'not in season' };
-      const row = (await rows(YEAR_END)).find(r => r.released && Number(r.year) === Number(today.slice(0, 4)) - 1);
-      if (!row) {
-        if (today.slice(5) >= '01-20') await tellOwner('tax_forms_not_released', `${Number(today.slice(0, 4)) - 1} W-2s and 1099s are not released`, 'They are due to employees and contractors by January 31. Open Payroll → Taxes → Year End.', `ye-unreleased:${today}`);
-        return { summary: 'not released' };
-      }
-      const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
-      let reminded = 0;
-      for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
-        const u = users.get(x.userId);
-        if (!x.eDelivery || x.openedAt || !u || !u.email) continue;
-        await queueNotification('tax_form_reminder', u.id, u.email, u.name, {
-          subject: `Your ${row.year} ${x.label} is waiting`, body: `Your ${row.year} ${x.label} is in My GFC under Hours & Pay. You need it to file your taxes.`,
-          ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
-        }, { relatedEntityId: `taxform-reminder:${row.year}:${x.userId}:${x.label}` });
-        reminded++;
-      }
-      const unmailed = [...row.w2, ...row.nec].filter(x => !x.eDelivery && !x.mailedAt);
-      if (unmailed.length) await tellOwner('tax_forms_unmailed', `${unmailed.length} paper tax form(s) not marked mailed`, 'Print and mail them, then mark each one mailed in Payroll → Taxes → Year End. They are due by January 31.', `ye-unmailed:${today}`);
-      return { summary: `${reminded} reminded, ${unmailed.length} unmailed` };
+      return yearEndReminders(Number(today.slice(0, 4)) - 1, today);
+    },
+    // Rev 2 of the script: Jan 20, for the year it names.
+    'year-end-reminders': async (b) => {
+      const year = Number(b.taxYear);
+      if (!(year >= 2026 && year <= 2100)) return { summary: 'taxYear missing' };
+      return yearEndReminders(year, localDate(nowIso()) || nowIso().slice(0, 10));
+    },
+    // Jan 2: the figures are built and the owner is told what is ready and
+    // what is missing. Nothing is released: that stays the owner's click.
+    'year-end-build': async (b) => {
+      const year = Number(b.taxYear);
+      if (!(year >= 2026 && year <= 2100)) return { summary: 'taxYear missing' };
+      const y = await yearEndPreview(year);
+      if (y.error) { await tellOwner('tax_forms_build_blocked', `${year} W-2s and 1099s cannot be built yet`, y.error, `ye-build:${year}`); return { summary: y.code }; }
+      if (y.released) return { summary: 'already released' };
+      const blockers = [
+        ...y.employerMissing.map(m => `Missing: ${m}`),
+        ...(y.draftRuns || y.unpaidRuns ? [`${y.draftRuns} draft and ${y.unpaidRuns} unpaid run(s) with a ${year} pay date`] : []),
+        ...[...y.w2, ...y.nec].filter(x => x.missing.length).map(x => `${x.name}: ${x.missing.join(', ')}`),
+        ...(y.gustoGrossCents ? ['Some of these wages were paid through Gusto. Release here only if the app files this year\'s W-2s.'] : [])
+      ];
+      await tellOwner('tax_forms_ready_for_review', `${year} W-2s and 1099s are ready for your review`,
+        [`${y.w2.length} W-2(s) and ${y.nec.length} 1099-NEC(s). Review them in Payroll → Year End, then release. They are due by January 31.`, ...(blockers.length ? ['Before you can release:', ...blockers] : [])].join('\n'),
+        `ye-build:${year}`);
+      return { summary: `${y.w2.length} W-2, ${y.nec.length} 1099-NEC, ${blockers.length} blocker(s)` };
     },
     // On the send-by date, any approved run not fully paid.
     'payment-reminder': async () => {
@@ -997,7 +1153,7 @@ module.exports = function createPayrollRoutes(deps) {
     // the new figures; nothing changes pay on its own.
     'tax-source-changed': async (b) => {
       const src = str(b.source, 200), url = str(b.url, 500);
-      await tellOwner('payroll_tax_source_changed', 'A payroll tax source changed', `${src || 'A tax source'} changed (${url}). Review the new figures and approve a new table before they apply.`, `src:${src}:${str(b.hash, 80)}`);
+      await tellOwner('payroll_tax_source_changed', 'A payroll tax source changed', `${src || 'A tax source'}${b.jurisdiction ? ` (${str(b.jurisdiction, 20)})` : ''} changed (${url}). Review the new figures and approve a new table before they apply.`, `src:${src}:${str(b.hash, 80)}`);
       return { summary: 'owner told' };
     },
     'qbo-sync': async () => (deps.qboRetry ? deps.qboRetry() : { summary: 'QuickBooks not connected' })

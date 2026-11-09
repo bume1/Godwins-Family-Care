@@ -310,17 +310,21 @@ function irisNecCsv({ year, payer, recipients }) {
 const FILING_SHEET_COLUMNS = Object.freeze(['Form', 'Tax year', 'Name', 'SSN or TIN', 'Street', 'Line 2', 'City', 'State', 'ZIP',
   'Box 1 / 1a', 'Box 2', 'Box 3', 'Box 4', 'Box 5', 'Box 6', 'Box 12 TT', 'Box 15 state ID', 'Box 16', 'Box 17']);
 function filingSheetCsv({ year, gaWithholdingId, w2s, necs }) {
+  // Box 15-17: Georgia, or the state they worked in; blank where that state has no income tax.
+  const stateCols = (bx) => { const st = bx.stateCode || 'GA'; if (st !== 'GA' && !bx.box16 && !bx.box17) return ['', '', '']; return [`${st} ${bx.stateId || (st === 'GA' ? gaWithholdingId : '') || ''}`.trim(), d(bx.box16), d(bx.box17)]; };
   const d = (c) => (c == null ? '' : dollars(c));
   const addr = (a) => [a.line1, a.line2, a.city, a.state, `${a.zip || ''}${a.zip4 ? '-' + a.zip4 : ''}`];
   const rows = [
-    ...w2s.map(w => ['W-2', year, w.name, formatTin(w.ssn, 'ssn'), ...addr(w.address || {}), d(w.boxes.box1), d(w.boxes.box2), d(w.boxes.box3), d(w.boxes.box4), d(w.boxes.box5), d(w.boxes.box6), d(w.boxes.box12TT), `GA ${gaWithholdingId || ''}`.trim(), d(w.boxes.box16), d(w.boxes.box17)]),
+    ...w2s.map(w => ['W-2', year, w.name, formatTin(w.ssn, 'ssn'), ...addr(w.address || {}), d(w.boxes.box1), d(w.boxes.box2), d(w.boxes.box3), d(w.boxes.box4), d(w.boxes.box5), d(w.boxes.box6), d(w.boxes.box12TT), ...stateCols(w.boxes)]),
     ...necs.map(n => ['1099-NEC', year, n.name, formatTin(n.tin, n.tinType), ...addr(n.address || {}), d(n.boxes.box1a), '', '', d(n.boxes.box4 || 0), '', '', '', '', '', ''])
   ];
   return [FILING_SHEET_COLUMNS, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 
 /** Georgia G-1003 (annual withholding reconciliation) totals, filed on GTC. */
-function g1003Totals(w2s) {
+// Georgia's reconciliation counts Georgia W-2s only.
+function g1003Totals(all) {
+  const w2s = all.filter(w => (w.boxes.stateCode || 'GA') === 'GA');
   return {
     w2Count: w2s.length,
     gaWagesCents: w2s.reduce((a, w) => a + (w.boxes.box16 || 0), 0),

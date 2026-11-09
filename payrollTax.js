@@ -148,11 +148,44 @@ function georgiaWithholding(wagesCents, g4, ga, perYear) {
   return cents((annualTax / perYear + (g4.extraWithholdingCents || 0) / 100) * 100);
 }
 
+// ---- Another state's income tax (Georgia is above) -------------------------------
+// From that state's approved table and the person's state certificate
+// ({ filingStatus: 'single'|'married', allowances, extraWithholdingCents,
+// exempt }). A state with no income tax withholds nothing.
+function stateWithholding(wagesCents, table, cert, perYear) {
+  if (!table || !table.incomeTax) return 0;
+  if (!cert) throw new Error('no state withholding certificate');
+  if (cert.exempt) return 0;
+  const annual = (wagesCents / 100) * perYear;
+  const allowances = Number(cert.allowances) || 0;
+  let annualTax;
+  if (table.method === 'flat') {
+    annualTax = Math.max(0, annual - allowances * table.exemptionCents / 100) * table.ratePct / 100;
+  } else if (table.method === 'brackets') {
+    const st = cert.filingStatus === 'married' ? 'married' : 'single';
+    const taxable = Math.max(0, annual - table.standardDeductionCents[st] / 100 - allowances * table.allowanceCents / 100);
+    const row = table.brackets[st].find(r => taxable * 100 >= r[0] && (r[1] === null || taxable * 100 < r[1]));
+    annualTax = row ? row[2] / 100 + (taxable - row[0] / 100) * row[3] / 100 : 0;
+  } else throw new Error(`unknown state method ${table.method}`);
+  return cents((annualTax / perYear + (cert.extraWithholdingCents || 0) / 100) * 100);
+}
+
 // ---- Employer taxes ----------------------------------------------------------------
-function employerTaxes(wagesCents, ytdWagesCents, fed, sutaRatePct, ga) {
+function employerTaxes(wagesCents, ytdWagesCents, fed, sutaRatePct, ga, workState = 'GA') {
   const futaRoom = Math.max(0, fed.futaWageBaseCents - ytdWagesCents);
   const sutaBase = ga && ga.sutaWageBaseCents ? ga.sutaWageBaseCents : 0;
   const sutaRoom = Math.max(0, sutaBase - ytdWagesCents);
+  if (workState !== 'GA') {
+    // Another state: its own wage base and GFC's rate there; no Georgia unemployment.
+    return {
+      socialSecurity: socialSecurity(wagesCents, ytdWagesCents, fed),
+      medicare: cents(wagesCents * fed.medicareRatePct / 100),
+      futa: cents(Math.min(wagesCents, futaRoom) * fed.futaNetRatePct / 100),
+      gaSuta: 0,
+      sutaState: workState,
+      stateSuta: sutaRatePct === null || sutaRatePct === undefined ? null : cents(Math.min(wagesCents, sutaRoom) * sutaRatePct / 100)
+    };
+  }
   return {
     socialSecurity: socialSecurity(wagesCents, ytdWagesCents, fed),
     medicare: cents(wagesCents * fed.medicareRatePct / 100),     // no additional 0.9% for the employer
@@ -195,26 +228,32 @@ function hourlyEarnings(items) {
  * approved runs earlier in the same calendar year (by pay date).
  * Returns earnings, employee taxes, net, employer taxes.
  */
-function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perYear, sutaRatePct }) {
-  const fed = tables.federal, ga = tables.GA;
+function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perYear, sutaRatePct, workState = 'GA', stateCert }) {
+  const fed = tables.federal;
+  const st = workState || 'GA';
+  // Georgia first, with its own G-4 formula; any other state from its own table.
+  const stateTable = st === 'GA' ? tables.GA : (tables.states || {})[st];
+  if (!stateTable) throw new Error(`no approved ${st} table`);
   const grossCents = earnings.reduce((a, e) => a + e.amountCents, 0);
   const y = ytd || { grossCents: 0 };
   const taxes = {
     federal: federalWithholding(grossCents, w4, fed, perYear),
     socialSecurity: socialSecurity(grossCents, y.grossCents, fed),
     medicare: medicare(grossCents, y.grossCents, fed),
-    georgia: georgiaWithholding(grossCents, g4, ga, perYear)
+    georgia: st === 'GA' ? georgiaWithholding(grossCents, g4, stateTable, perYear) : 0
   };
+  if (st !== 'GA') taxes.state = stateWithholding(grossCents, stateTable, stateCert, perYear);
   const taxCents = Object.values(taxes).reduce((a, v) => a + v, 0);
   return {
     grossCents, taxes, taxCents,
     reimbursementsCents,
     netCents: grossCents - taxCents + reimbursementsCents,
-    employer: employerTaxes(grossCents, y.grossCents, fed, sutaRatePct, ga)
+    workState: st,
+    employer: employerTaxes(grossCents, y.grossCents, fed, sutaRatePct, stateTable, st)
   };
 }
 
 module.exports = {
   FREQUENCIES, DEFAULT_SETTINGS, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
-  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, employerTaxes, hourlyEarnings, paycheck
+  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck
 };
