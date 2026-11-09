@@ -37,6 +37,8 @@ const PATHS = Object.freeze({
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
   CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
   CLINICAL_TASKS: '/clinical#queues',
+  MY_ONBOARDING: '/my#onboarding',          // a staff member's OWN onboarding (a caregiver is redirected to /caregiver#onboarding, which resolves)
+  STAFF_ONBOARDING: '/onboarding',          // the OFFICE's staff-onboarding screen. Not `/my`, which is the person's own.
   CLINICAL_VETERANS: '/clinical#veterans',
   IME_CASES: '/ime',                        // the IME record analyzer: an examiner's claim files  // a provider's IME veterans for today       // straight to Tasks → My To-Dos (`queues` is that view's key)
   SCHEDULING: '/scheduling',                // ADMIN shift board, not the caregiver's
@@ -100,6 +102,16 @@ function messagesFor(user) {
 // `messagesFor` does: the destination belongs here, not at the call site.
 const tasksFor = () => PATHS.CLINICAL_TASKS;
 
+// Where a staff member reads their OWN onboarding. `/my` redirects a caregiver
+// to `/caregiver#onboarding`, and both pages resolve that fragment and fall
+// back to their home view, so one destination serves every account type.
+const myOnboardingFor = () => PATHS.MY_ONBOARDING;
+
+// Where the OFFICE works other people's onboarding. A separate destination on
+// purpose: pointing an office notice at `/my` would send an admin to their own
+// checklist to verify somebody else's licence.
+const staffOnboardingFor = () => PATHS.STAFF_ONBOARDING;
+
 // Where THIS person reads their pay stubs and tax forms.
 const payFor = (user) => (isCaregiver(user) ? PATHS.CAREGIVER_PAY : PATHS.MY_PAY);
 
@@ -120,4 +132,4 @@ const routeOf = (p) => String(p || '').split('#')[0].split('?')[0];
 // excluded here and checked by its own assertion with a bogus token.
 const ALL_PATHS = Object.freeze(Object.values(PATHS).filter(p => p !== PATHS.VIDEO_JOIN_PREFIX));
 
-module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, payFor, videoJoinFor, routeOf, isCaregiver, isClinical };
+module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, myOnboardingFor, staffOnboardingFor, payFor, videoJoinFor, routeOf, isCaregiver, isClinical };

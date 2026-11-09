@@ -1119,6 +1119,226 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- Staff onboarding and credentialing, 2026-11-09 ----------------------
+  //
+  // Owner: "make sure email notifications updates accordingly. Esp for new
+  // employees who need onboarding or credentialing reminders."
+  //
+  // A whole onboarding and credentialing system shipped between 2026-11-06 and
+  // 2026-11-08 — chapters A to H, renewals, recurring duties, spaced
+  // re-checks, a staff portal — and NOT ONE of it sent an email. A new hire
+  // found out what she owed by opening the app; a licence sixty days from
+  // lapsing was a number on a screen nobody was obliged to look at. Worst of
+  // it: the office returning an item REQUIRES a reason, stored it, and told
+  // her nothing — the same defect the client document rejection had, where a
+  // client told nothing sends the same blurry photo again.
+  //
+  // WHAT GOES IN THESE EMAILS IS NOT PHI, and that is a fact about the data,
+  // not a shortcut: an onboarding item is employment and credentialing data
+  // about a member of staff. So the detail sends on any transport, and
+  // `transportAllowsDetail` is deliberately not consulted — a notice that
+  // went vague here would say "something is waiting" about a licence that
+  // lapses on Friday. The other side of that coin is enforced, not trusted:
+  // A PATIENT NEVER APPEARS IN ONE. An onboarding track holds no client, and
+  // a build test asserts these notices reach for none.
+  //
+  // WHO IS TOLD: the person themselves, and the office (an admin or a
+  // manager) — never the rest of the team, and never a patient or family.
+  // The caller resolves the recipients; these builders take one user each.
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  // A list for the body, capped so a forty-item first week is readable; the
+  // count is stated whether or not every line is shown.
+  const listLines = (rows, render, cap = 8) => {
+    const shown = rows.slice(0, cap).map(render);
+    return rows.length > cap ? shown.concat([`…and ${rows.length - cap} more.`]) : shown;
+  };
+  const byWhen = (daysLeft, on) => {
+    if (!Number.isFinite(daysLeft)) return on ? `due ${on}` : 'no date recorded';
+    if (daysLeft < 0) return `EXPIRED ${plural(-daysLeft, 'day', 'days')} ago`;
+    if (daysLeft === 0) return 'expires today';
+    return `expires in ${plural(daysLeft, 'day', 'days')} (${on})`;
+  };
+
+  // ---- 1. Her onboarding has been opened -----------------------------------
+  async function staffOnboardingStarted({ user, chapterLabel, waitingCount, ctaUrl, actorId }) {
+    try {
+      return { notified: await send({
+        type: 'staff_onboarding_started', user,
+        subject: 'Your GFC onboarding is ready',
+        headline: 'Welcome — your onboarding is ready',
+        paragraphs: [
+          `Your onboarding has been set up${chapterLabel ? ` as ${chapterLabel}` : ''}. It lists what we need from you and what the office takes care of.`,
+          waitingCount > 0
+            ? `${plural(waitingCount, 'item is', 'items are')} waiting on you to start.`
+            : 'Nothing is waiting on you just yet — we will email you when something is.',
+          'You can upload documents and sign what needs signing from the portal. We will email you once a day while anything is outstanding, and whenever the office sends something back.'
+        ],
+        ctaUrl, ctaLabel: 'Open my onboarding',
+        relatedEntityId: `onbstart:${user.id}`, relatedEntityType: 'onboarding',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] start notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 2. The office sent an item back -------------------------------------
+  // THE REASON IS THE WHOLE POINT OF THIS NOTICE. The route requires one and
+  // was storing it where only a screen could show it.
+  async function staffOnboardingReturned({ user, itemTitle, reason, returnedByName, ctaUrl, actorId }) {
+    try {
+      return { notified: await send({
+        type: 'staff_onboarding_returned', user,
+        subject: `Needs another look — ${itemTitle}`,
+        headline: 'One of your onboarding items came back',
+        paragraphs: [
+          `${returnedByName || 'The office'} sent back "${itemTitle}".`,
+          reason ? `Reason given: "${reason}"` : 'No reason was recorded — ask the office what is needed.',
+          'Open your onboarding to put it right and send it again.'
+        ],
+        ctaUrl, ctaLabel: 'Open my onboarding',
+        // Keyed on the item AND the time, so a second return of the same item
+        // after she resubmits is its own email rather than a swallowed one.
+        relatedEntityId: `onbreturn:${user.id}:${itemTitle}:${Date.now()}`, relatedEntityType: 'onboarding',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] return notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 3. She submitted something for the office to verify -----------------
+  async function staffItemSubmitted({ user, staffName, itemTitle, ctaUrl, actorId }) {
+    try {
+      return { notified: await send({
+        type: 'staff_item_submitted', user,
+        subject: `Ready to verify — ${staffName}`,
+        headline: 'An onboarding item is ready to verify',
+        paragraphs: [
+          `${staffName} submitted "${itemTitle}".`,
+          'Open Staff Onboarding to verify it or send it back with a reason.'
+        ],
+        ctaUrl, ctaLabel: 'Open staff onboarding',
+        relatedEntityId: `onbsubmit:${staffName}:${itemTitle}`, relatedEntityType: 'onboarding',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] submit notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 4. Her daily digest -------------------------------------------------
+  // ONE EMAIL A DAY, EVERYTHING IN IT (owner, 2026-11-09). Her expiring
+  // credentials ride here rather than arriving as a second email the same
+  // morning. Returned items lead, because they are what she can act on today.
+  async function staffOnboardingDigest({ user, digest, ctaUrl, dedupeId }) {
+    try {
+      const d = digest || {};
+      const paras = [];
+      if ((d.returned || []).length) {
+        paras.push(`SENT BACK TO YOU — ${plural(d.returned.length, 'item', 'items')}:`);
+        paras.push(...listLines(d.returned, r => `• ${r.title}${r.reason ? ` — "${r.reason}"` : ''}`));
+      }
+      if ((d.expiring || []).length) {
+        paras.push(`CREDENTIALS — ${plural(d.expiring.length, 'needs', 'need')} renewing:`);
+        paras.push(...listLines(d.expiring, x => `• ${x.what} — ${byWhen(x.daysLeft, x.on)}`));
+      }
+      if ((d.outstanding || []).length) {
+        paras.push(`WAITING ON YOU — ${plural(d.outstanding.length, 'item', 'items')}:`);
+        paras.push(...listLines(d.outstanding, i => `• ${i.title}`));
+      }
+      if ((d.recurring || []).length) {
+        paras.push('RECURRING DUTIES due:');
+        paras.push(...listLines(d.recurring, r => `• ${r.requirement}${r.nextDue ? ` — due ${r.nextDue}` : ''}${r.overdue ? ' (overdue)' : ''}`));
+      }
+      if ((d.rechecks || []).length) {
+        paras.push('TRAINING RE-CHECKS open now:');
+        paras.push(...listLines(d.rechecks, m => `• ${m.title}`));
+      }
+      paras.push('Open your onboarding to work through these. This is one email a day while anything is outstanding.');
+      const urgent = (d.returned || []).length || (d.expiring || []).some(x => x.expired);
+      return { notified: await send({
+        type: 'staff_onboarding_digest', user,
+        subject: urgent ? 'Your onboarding needs attention' : 'Your onboarding — what is outstanding',
+        headline: 'What is waiting on you',
+        paragraphs: paras,
+        ctaUrl, ctaLabel: 'Open my onboarding',
+        relatedEntityId: dedupeId, relatedEntityType: 'onboarding',
+        phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] digest failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 5. A credential is expiring, to the OFFICE --------------------------
+  // At 30, 14, 7 and 1 days, and every day once it has lapsed: a lapsed
+  // licence is a stop-work condition, not a note for the next roll-up.
+  async function staffCredentialExpiring({ user, staffName, staffUserId, credential, milestone, ctaUrl, dedupeId }) {
+    try {
+      const lapsed = milestone === 0;
+      return { notified: await send({
+        type: 'staff_credential_expiring', user,
+        subject: lapsed ? `EXPIRED — ${credential.what}, ${staffName}` : `Expiring in ${plural(milestone, 'day', 'days')} — ${credential.what}, ${staffName}`,
+        headline: lapsed ? 'A credential has expired' : 'A credential is expiring',
+        paragraphs: [
+          lapsed
+            ? `${staffName}'s ${credential.what} ${byWhen(credential.daysLeft, credential.on)}. Check whether this stops them working until it is renewed and verified.`
+            : `${staffName}'s ${credential.what} ${byWhen(credential.daysLeft, credential.on)}.`,
+          `${staffName} has been told as well, in their daily onboarding email.`,
+          'Open Staff Onboarding to record the renewal once the new document arrives.'
+        ],
+        ctaUrl, ctaLabel: 'Open staff onboarding',
+        relatedEntityId: dedupeId, relatedEntityType: 'onboarding',
+        phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] credential notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 6. The office's weekly roll-up --------------------------------------
+  async function staffOnboardingWeekly({ user, rollup, ctaUrl, dedupeId }) {
+    try {
+      const r = rollup || {};
+      const paras = [];
+      if ((r.waitingOnOffice || []).length) {
+        paras.push('WAITING ON THE OFFICE to verify:');
+        paras.push(...listLines(r.waitingOnOffice, p => `• ${p.name} — ${plural(p.count, 'item', 'items')}`));
+      }
+      if ((r.expiring || []).length) {
+        paras.push('CREDENTIALS expiring or expired:');
+        paras.push(...listLines(r.expiring, p => `• ${p.name} — ${p.expired ? `${plural(p.expired, 'expired', 'expired')}, ` : ''}${plural(p.due, 'due', 'due')}`));
+      }
+      if ((r.stalled || []).length) {
+        paras.push('NOT MOVING — started a while ago, still waiting on them:');
+        paras.push(...listLines(r.stalled, p => `• ${p.name} — ${plural(p.count, 'item', 'items')}, started ${p.since}`));
+      }
+      if ((r.notYetStarted || []).length) {
+        paras.push('NO ONBOARDING STARTED YET:');
+        paras.push(...listLines(r.notYetStarted, p => `• ${p.name}`));
+      }
+      paras.push('Open Staff Onboarding to work through these. This goes out once a week.');
+      return { notified: await send({
+        type: 'staff_onboarding_weekly', user,
+        subject: 'Staff onboarding — this week',
+        headline: 'Staff onboarding and credentialing',
+        paragraphs: paras,
+        ctaUrl, ctaLabel: 'Open staff onboarding',
+        relatedEntityId: dedupeId, relatedEntityType: 'onboarding',
+        phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ONB] weekly roll-up failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
     // who hears about a client: the client and the POA of THAT client
     clientSideRecipients, ctaForRecipient,
@@ -1136,7 +1356,10 @@ function createNotifier(deps) {
     // messaging
     staffMessageWaiting,
     // clinical to-dos
-    taskAssigned, taskDueToday, taskOverdue, taskCompleted
+    taskAssigned, taskDueToday, taskOverdue, taskCompleted,
+    // staff onboarding and credentialing (2026-11-09)
+    staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
+    staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly
   };
 }
 
