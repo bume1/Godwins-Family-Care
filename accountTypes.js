@@ -214,6 +214,10 @@ const ENROLLMENT = link('enrollment', 'Enrollment', '/admin/enrollment', 'Intake
 const CLIENT_ACCOUNTS = link('clientAccounts', 'Client & Family Accounts', '/admin?view=users&group=clients',
   'Add and edit client logins and family contacts');
 const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, visits, orders and the clinical inbox');
+// Owner, 2026-11-09: Independent Medical Examinations get their own place
+// under Clinical: the exam-day list (moved out of the Admin Hub) and the AI
+// case review of claim files. Each half is gated by its own route.
+const IME = link('ime', 'Independent Medical Examinations', '/ime', 'Exam-day veterans list and the AI case review of claim files');
 const BILLING = link('billing', 'Billing', '/billing', 'Claims waiting on billing, patient statements, copays and home care hours');
 const ADMIN_HUB = link('admin', 'Admin Hub', '/admin', 'Settings, inbox, notifications and setup checks');
 const AUDIT_LOG = link('audit', 'Audit Log', '/audit', 'Who opened which record, and when');
@@ -248,7 +252,7 @@ function hubAreasFor(u) {
   }
   const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
     (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
-  if (clinicalOpen) add('clinical', 'Clinical', [CLINICAL]);
+  add('clinical', 'Clinical', [clinicalOpen && CLINICAL, (office || CLINICIAN_TYPES.includes(type)) && IME]);
   if (office) add('billing', 'Billing', [BILLING]);
   if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
   return areas;

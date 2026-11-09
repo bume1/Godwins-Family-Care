@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Godwins Family Care — IME Claim Files</title>
+  <title>Godwins Family Care — Independent Medical Examinations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -53,12 +53,31 @@
     .item .q{font-style:italic;color:var(--mute);font-size:13px;margin-top:2px}
     .cite{font-size:12px;margin-top:3px}
     ul.plain{list-style:none}
+    .areatabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+    .areatabs a{padding:9px 16px;border-radius:999px;font-weight:600;font-size:14px;text-decoration:none;color:var(--navy);background:#fff;border:1px solid var(--line)}
+    .areatabs a.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:var(--cream-d)}
+    .pill.arrived{background:var(--ok-bg);color:var(--ok)} .pill.seen{background:#e3edf7;color:#1d4a7a} .pill.no_show{background:var(--warn-bg);color:var(--warn)}
+    .match{background:var(--warn-bg);border:1px solid #e9c97a;border-radius:12px;padding:16px;margin-bottom:16px}
+    .grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end}
+    @media (max-width:800px){.grid5{grid-template-columns:1fr 1fr}}
   </style>
   <script src="/session-guard.js"></script>
+  <script src="/staff-nav.js"></script>
 </head>
 <body>
-  <div class="hdr"><span class="t">IME Claim Files</span><a href="/login">Back</a></div>
-  <div class="wrap" id="app"></div>
+  <div class="hdr"><span class="t">Independent Medical Examinations</span></div>
+  <div class="wrap">
+    <!-- The IME area (owner, 2026-11-09): the exam-day list that used to be in
+         the Admin Hub, and the AI case review of claim files. Each tab asks the
+         server on its own, so a person allowed one and not the other is told
+         which, rather than shown a blank page. -->
+    <nav class="areatabs" id="areatabs" aria-label="IME sections">
+      <a href="#exam" data-tab="exam">Exam Day</a>
+      <a href="#files" data-tab="files">Claim Files (AI Review)</a>
+    </nav>
+    <div id="app"></div>
+  </div>
 <script>
 (function () {
   'use strict';
@@ -103,10 +122,141 @@
   }
   function errBox(msg) { return h('div', { className: 'err', role: 'alert' }, msg); }
 
-  // ── routing: #case=<id> or the list ──
+  // ── routing: #exam (the default), #files, or #case=<id> ──
+  var metaErr = '';
+  function setTab(key) {
+    Array.prototype.forEach.call(document.querySelectorAll('#areatabs a'), function (a) {
+      a.className = a.getAttribute('data-tab') === key ? 'on' : '';
+    });
+  }
   function route() {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    if (examTimer) { clearInterval(examTimer); examTimer = null; }
     var m = /case=([^&]+)/.exec(location.hash);
+    var files = m || location.hash === '#files';
+    setTab(files ? 'files' : 'exam');
+    if (!files) { showExamDay(); return; }
+    if (!meta) { clear(root); root.appendChild(errBox(metaErr || 'Claim files could not be loaded.')); return; }
     if (m) showCase(decodeURIComponent(m[1])); else showList();
+  }
+
+  // ── Exam Day: the veterans the vendor sends for each exam day ──
+  // Moved from the Admin Hub (owner, 2026-11-09). A veteran has no account:
+  // this is a list, not a user. When one signs in on the Savannah clinic iPad
+  // (/veterans) the sign-in is matched here and the provider is emailed and
+  // texted. The office (admin or manager) adds veterans and matches sign-ins;
+  // a provider sees their own list. The server decides which.
+  var examTimer = null;
+  var examDate = (T && T.zonedParts) ? T.zonedParts(new Date()).isoDate : new Date().toISOString().slice(0, 10);
+  function ymd(v) { var p = String(v || '').split('-'); return p[0] ? p[1] + '/' + p[2] + '/' + p[0] : '—'; }
+  function vetTime(iso) { return iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''; }
+  function showExamDay() {
+    clear(root);
+    var box = h('div');
+    root.appendChild(box);
+    var addMsg = null;
+    var keepForm = { firstName: '', lastName: '', dob: '', providerUserId: '' };
+    function load() {
+      Promise.all([api('GET', '/api/veterans/roster?date=' + encodeURIComponent(examDate)),
+        api('GET', '/api/veterans/checkins?date=' + encodeURIComponent(examDate))]).then(function (res) {
+        var r = res[0], c = res[1];
+        clear(box);
+        if (!r.ok) { box.appendChild(errBox(r.body.error || 'The exam-day list could not be loaded.')); return; }
+        var office = c.ok;   // check-ins are the office's alone
+        render(r.body, office ? (c.body.rows || []) : [], office);
+      });
+    }
+    function act(p) { p.then(function (r) { if (!r.ok) alert(r.body.error || 'That did not work.'); load(); }); }
+    function render(d, checkins, office) {
+      var rows = d.rows || [], providers = d.providers || [];
+      var dateIn = h('input', { type: 'date', value: examDate, style: 'width:auto' });
+      dateIn.onchange = function () { examDate = dateIn.value || examDate; load(); };
+      box.appendChild(h('div', { className: 'card' }, [
+        h('div', { className: 'row', style: 'justify-content:space-between' }, [
+          h('div', {}, [h('h2', {}, 'Exam Day'),
+            h('p', { className: 'mute' }, 'Veterans the vendor is sending for each exam day, and the provider each one sees. They sign in on the Savannah clinic iPad at /veterans.')]),
+          dateIn
+        ])
+      ]));
+      if (office) {
+        var f = { first: h('input', { placeholder: 'First name', value: keepForm.firstName, required: true }),
+          last: h('input', { placeholder: 'Last name', value: keepForm.lastName, required: true }),
+          dob: h('input', { type: 'date', value: keepForm.dob, required: true }),
+          prov: h('select', { required: true }, [h('option', { value: '' }, 'Provider…')].concat(providers.map(function (p) { return h('option', { value: p.id }, p.name); }))) };
+        f.prov.value = keepForm.providerUserId;
+        var btn = h('button', { type: 'submit' }, 'Add Veteran');
+        var note = h('div');
+        var showPhoneNote = function () {
+          clear(note);
+          var sel = providers.filter(function (p) { return p.id === f.prov.value; })[0];
+          if (sel && !sel.hasPhone) note.appendChild(h('p', { className: 'mute', style: 'margin-top:8px' }, sel.name + ' has no mobile number on file, so they will get the arrival email but not the text. Add it under User Management.'));
+        };
+        f.prov.onchange = showPhoneNote;
+        var form = h('form', { className: 'card' }, [
+          h('h3', { style: 'margin-top:0' }, 'Add a veteran for ' + ymd(examDate)),
+          h('div', { className: 'grid5' }, [f.first, f.last, h('label', { style: 'margin:0' }, ['Date of birth', f.dob]), f.prov, btn]),
+          addMsg ? h('p', { style: 'margin-top:10px;color:' + (addMsg.ok ? 'var(--ok)' : 'var(--bad)') }, addMsg.text) : null,
+          note
+        ]);
+        showPhoneNote();
+        form.onsubmit = function (e) {
+          e.preventDefault(); btn.disabled = true;
+          keepForm = { firstName: f.first.value, lastName: f.last.value, dob: f.dob.value, providerUserId: f.prov.value };
+          api('POST', '/api/veterans/roster', { firstName: keepForm.firstName, lastName: keepForm.lastName, dob: keepForm.dob, providerUserId: keepForm.providerUserId, examDate: examDate }).then(function (r) {
+            if (r.ok) {
+              var row = r.body.row || {};
+              addMsg = { ok: true, text: 'Added ' + (row.firstName || keepForm.firstName) + ' ' + (row.lastName || keepForm.lastName) + ' to ' + (row.providerName || 'the provider') + '\'s list for ' + ymd(examDate) + '.' };
+              keepForm = { firstName: '', lastName: '', dob: '', providerUserId: keepForm.providerUserId };
+            } else addMsg = { ok: false, text: r.body.error || 'Could not add the veteran.' };
+            load();
+          });
+        };
+        box.appendChild(form);
+        var unmatched = checkins.filter(function (c) { return !c.rosterId; });
+        var openRows = rows.filter(function (r) { return !r.checkinId; });
+        if (unmatched.length) {
+          box.appendChild(h('div', { className: 'match' }, [
+            h('h3', { style: 'margin-top:0' }, 'Sign-ins to match (' + unmatched.length + ')'),
+            h('p', { className: 'mute' }, 'These veterans signed in but did not match anyone on the list, so no provider has been told yet.')
+          ].concat(unmatched.map(function (c) {
+            var pick = h('select', { style: 'width:auto' }, [h('option', { value: '' }, 'Match to…')].concat(openRows.map(function (r) {
+              return h('option', { value: r.id }, r.firstName + ' ' + r.lastName + ' (' + ymd(r.dob) + ') · ' + r.providerName); })));
+            var go = h('button', { disabled: true }, 'Match & Notify');
+            pick.onchange = function () { go.disabled = !pick.value; };
+            go.onclick = function () { act(api('POST', '/api/veterans/checkins/' + encodeURIComponent(c.id) + '/match', { rosterId: pick.value })); };
+            return h('div', { className: 'row', style: 'padding:8px 0;border-top:1px solid #e9c97a' }, [
+              h('div', { style: 'margin-right:auto' }, [h('strong', {}, c.firstName + ' ' + c.lastName), ' · DOB ' + ymd(c.dob) + ' · ' + (c.phone || '') + (c.email ? ' · ' + c.email : '') + ' · ' + vetTime(c.arrivedAt) + (c.matchState === 'ambiguous' ? ' · more than one possible match' : '')]),
+              pick, go]);
+          }))));
+        }
+      }
+      var body = rows.length ? rows.map(function (r) {
+        var provCell;
+        if (office) {
+          var sel = h('select', { style: 'width:auto' }, (providers.some(function (p) { return p.id === r.providerUserId; }) ? [] : [h('option', { value: r.providerUserId }, r.providerName || 'Unknown')])
+            .concat(providers.map(function (p) { return h('option', { value: p.id }, p.name); })));
+          sel.value = r.providerUserId;
+          sel.onchange = function () { act(api('PUT', '/api/veterans/roster/' + encodeURIComponent(r.id), { providerUserId: sel.value })); };
+          provCell = sel;
+        } else provCell = r.providerName || '—';
+        var actions = [];
+        if (r.status !== 'seen') actions.push(h('button', { className: 'link', onclick: function () { act(api('POST', '/api/veterans/roster/' + encodeURIComponent(r.id) + '/status', { status: 'seen' })); } }, 'Mark Seen'));
+        if (!r.arrivedAt && office) actions.push(' ', h('button', { className: 'link', style: 'color:var(--bad)', onclick: function () {
+          if (window.confirm('Remove ' + r.firstName + ' ' + r.lastName + '?')) act(api('DELETE', '/api/veterans/roster/' + encodeURIComponent(r.id))); } }, 'Remove'));
+        return h('tr', {}, [
+          h('td', {}, h('strong', {}, r.firstName + ' ' + r.lastName)), h('td', {}, ymd(r.dob)), h('td', {}, provCell),
+          h('td', {}, [h('span', { className: 'pill ' + (r.status || '') }, r.statusLabel || r.status || ''),
+            r.arrivedAt ? h('div', { className: 'mute' }, vetTime(r.arrivedAt) + (r.arrivalPhone ? ' · ' + r.arrivalPhone : '')) : null]),
+          h('td', { style: 'text-align:right;white-space:nowrap' }, actions)
+        ]);
+      }) : [h('tr', {}, h('td', { colspan: '5', className: 'mute' }, 'No veterans on the list for this day.'))];
+      box.appendChild(h('div', { className: 'card tablewrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['Veteran', 'DOB', 'Provider', 'Status', ''].map(function (t) { return h('th', {}, t); }))),
+        h('tbody', {}, body)
+      ])));
+    }
+    load();
+    examTimer = setInterval(function () { if (!document.querySelector('form.card input:focus, form.card select:focus')) load(); }, 30000);
   }
   window.addEventListener('hashchange', route);
 
@@ -480,8 +630,7 @@
 
   // ── start ──
   api('GET', '/api/ime/meta').then(function (r) {
-    if (!r.ok) { clear(root); root.appendChild(errBox(r.body.error || 'This page could not be loaded.')); return; }
-    meta = r.body;
+    if (r.ok) meta = r.body; else metaErr = r.body.error || 'Claim files could not be loaded.';
     route();
   });
 })();

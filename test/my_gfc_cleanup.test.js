@@ -50,7 +50,7 @@ test('every staff sidebar has a Portal Hub button, and the hub stays put when as
 
 test('the hub lists what each staff member can open; clients and family get nothing', () => {
   const ids = (t, extra) => at.hubTilesFor(Object.assign(at.fieldsFor(t), extra || {})).map(x => x.id);
-  for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) assert.deepStrictEqual(ids(t), ['myGfc', 'clinical'], t);
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) assert.deepStrictEqual(ids(t), ['myGfc', 'clinical', 'ime'], t);
   const cg = at.hubTilesFor(Object.assign(at.fieldsFor('caregiver'), { licenseLevel: 'pca' }));
   assert.deepStrictEqual(cg.map(x => [x.id, x.path]), [['myGfc', '/caregiver']]);
   assert.deepStrictEqual(ids('liaison'), ['myGfc']);

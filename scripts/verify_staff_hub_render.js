@@ -42,7 +42,8 @@ const MANAGER = { id: 'u-mgr', name: 'Morgan Manager', email: 'mgr@example.test'
 let viewer = ADMIN;
 
 const MIME = { '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.woff2': 'font/woff2', '.svg': 'image/svg+xml' };
-const PAGES = { '/login': 'login.html', '/admin': 'admin-hub.html', '/scheduling': 'scheduling.html', '/my': 'my.html' };
+const PAGES = { '/login': 'login.html', '/admin': 'admin-hub.html', '/scheduling': 'scheduling.html', '/my': 'my.html', '/ime': 'ime.html' };
+const json = (res, body, status) => { res.writeHead(status || 200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 
 (async () => {
   const srv = http.createServer((req, res) => {
@@ -65,6 +66,11 @@ const PAGES = { '/login': 'login.html', '/admin': 'admin-hub.html', '/scheduling
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ totalUsers: 42, clientUsers: 17, caregiverUsers: 12 }));
     }
+    if (url === '/api/veterans/roster') return json(res, { providers: [{ id: 'p1', name: 'Bethel Godwins', hasPhone: true }],
+      rows: [{ id: 'v1', firstName: 'Test', lastName: 'Veteran', dob: '1960-04-02', providerUserId: 'p1', providerName: 'Bethel Godwins', status: 'expected', statusLabel: 'Expected' }] });
+    if (url === '/api/veterans/checkins') return json(res, { rows: [{ id: 'c1', firstName: 'Walk', lastName: 'In', dob: '1955-01-01', phone: '555-0100', arrivedAt: '2026-11-09T14:00:00Z' }] });
+    if (url === '/api/ime/meta') return json(res, { isAdmin: true, retentionDays: 90, contractingEntities: [{ value: 'qtc', label: 'QTC' }], examiners: [], analysisAvailable: false, blockers: [], maxFileBytes: 1e7, maxFilesPerUpload: 10 });
+    if (url === '/api/ime/cases') return json(res, { cases: [] });
     if (url.startsWith('/api/')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(url.includes('users') || url.includes('list') ? '[]' : '{}');
@@ -129,6 +135,28 @@ const PAGES = { '/login': 'login.html', '/admin': 'admin-hub.html', '/scheduling
     ok(`${label}: the sidebar is labeled Admin Hub`, tag === 'Admin Hub', tag);
     ok(`${label}: Admin Hub has no page errors`, errors.length === 0, errors.join(' | '));
     if (shot) await page.screenshot({ path: path.join(shot, `admin-hub-${label}.png`), fullPage: true });
+    await ctx.close();
+  }
+
+  for (const [label, size] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
+    // 4. The hub banner is the brand graphic, whole.
+    let { page, ctx, errors } = await open('/login?hub=1', ADMIN, size);
+    const img = await page.$eval('main img[src="/banners/banner-hub.webp"]', e => ({ w: e.naturalWidth, shown: e.getBoundingClientRect().width })).catch(() => null);
+    ok(`${label}: hub banner is the brand graphic and loaded`, img && img.w > 1000 && img.shown > 300, JSON.stringify(img));
+    await ctx.close();
+
+    // 5. The IME area: Exam Day first, then Claim Files.
+    ({ page, ctx, errors } = await open('/ime', ADMIN, size));
+    const on = await page.$eval('#areatabs a.on', e => e.textContent).catch(() => '');
+    ok(`${label}: IME opens on Exam Day`, on === 'Exam Day', on);
+    ok(`${label}: Exam Day lists the veteran`, (await page.textContent('#app')).includes('Test Veteran'));
+    ok(`${label}: Exam Day shows sign-ins to match`, (await page.textContent('#app')).includes('Sign-ins to match (1)'));
+    ok(`${label}: IME page has the staff bar`, !!(await page.$('nav.gfc-sn')));
+    if (shot) await page.screenshot({ path: path.join(shot, `ime-${label}.png`), fullPage: true });
+    await page.click('#areatabs a[data-tab="files"]');
+    await page.waitForTimeout(500);
+    ok(`${label}: Claim Files tab shows the case list`, (await page.textContent('#app')).includes('All cases'));
+    ok(`${label}: IME page has no page errors`, errors.length === 0, errors.join(' | '));
     await ctx.close();
   }
 

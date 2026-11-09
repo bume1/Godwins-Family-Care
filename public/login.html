@@ -387,17 +387,11 @@
 
           {/* Main Content */}
           <main className="max-w-6xl mx-auto px-4 py-8">
-            {/* Dynamic Banner Header */}
-            <div className="relative rounded-2xl overflow-hidden shadow-lg mb-10" style={{minHeight: '160px'}}>
-              <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-admin.webp)', backgroundPosition: 'center 18%'}}></div>
-              <div className="absolute inset-0 bg-gradient-to-r from-primary-700/90 via-primary-600/70 to-transparent"></div>
-              <div className="relative p-5 sm:p-8 flex items-center min-h-[130px] sm:min-h-[160px]">
-                <div className="text-white">
-                  <h2 className="text-2xl sm:text-3xl font-bold drop-shadow-sm" style={{ color: '#fff' }}>Your Portals</h2>
-                  <p className="mt-2 text-white/80 text-sm">Select a portal to access Godwins Family Care services</p>
-                </div>
-              </div>
-            </div>
+            {/* The hub banner is GFC's own brand graphic (owner, 2026-11-09),
+                shown whole: it carries its own words, so nothing is laid over
+                it and it is never cropped. */}
+            <img src="/banners/banner-hub.webp" className="block w-full h-auto rounded-2xl shadow-lg mb-10"
+              alt="Godwins Family Care. Care That Sees You. Physician and FNP-led care organization providing Private Home Care, Home-Based Primary Care, and Independent Medical Examinations to home-bound residents and veterans in Metro Atlanta." />
 
             {areasErr && <div className="mb-6 p-4 rounded-xl bg-red-50 text-red-700 text-sm">{areasErr}</div>}
             {areas === null && !areasErr && <p className="text-gray-500 text-sm">Loading your areas…</p>}

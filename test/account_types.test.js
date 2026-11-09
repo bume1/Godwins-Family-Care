@@ -95,14 +95,14 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
     ['myGfc', ['myGfc']],
     ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
     ['clients', ['enrollment', 'clientAccounts']],
-    ['clinical', ['clinical']],
+    ['clinical', ['clinical', 'ime']],
     ['billing', ['billing']],
     ['adminCompliance', ['admin', 'audit', 'service', 'clientPortalAdmin']]
   ]);
   assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
     ['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']);
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) {
-    assert.deepEqual(areas(at.fieldsFor(t)), [['myGfc', ['myGfc']], ['clinical', ['clinical']]], t);
+    assert.deepEqual(areas(at.fieldsFor(t)), [['myGfc', ['myGfc']], ['clinical', ['clinical', 'ime']]], t);
   }
   assert.deepEqual(areas({ ...at.fieldsFor('caregiver'), licenseLevel: 'cna' }), [['myGfc', ['myGfc']]]);
   assert.equal(at.hubTilesFor({ ...at.fieldsFor('caregiver'), licenseLevel: 'cna' })[0].path, '/caregiver');
@@ -125,7 +125,7 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'enrollment', 'clientAccounts', 'clinical', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
+    'enrollment', 'clientAccounts', 'clinical', 'ime', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -135,9 +135,9 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
   // 'people' holds User Management, the one part of the Admin Hub open to
   // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
   const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'enrollment', 'clientAccounts'];
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'billing']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'billing'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'billing'],
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'ime', 'billing']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'ime', 'billing'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'ime', 'billing'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);

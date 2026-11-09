@@ -13,7 +13,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/[^\n]*/g, '$1').replace(/<!--[\s\S]*?-->/g, '');
 
 const STAFF_PAGES = ['admin-hub', 'admin-enrollment', 'scheduling', 'caregivers', 'clinical', 'billing',
-  'messages', 'onboarding', 'audit', 'my'];
+  'messages', 'onboarding', 'audit', 'my', 'ime'];
 
 test('every staff page carries the shared staff bar exactly once', () => {
   for (const p of STAFF_PAGES) {
@@ -92,4 +92,38 @@ test('User Management opens on either side of the People / Clients split', () =>
   const hub = read('public/admin-hub.html');
   assert.match(hub, /return g === 'staff' \|\| g === 'clients' \? g : 'all';/);
   assert.match(hub, /roleFilter === 'staff' \? !isClientSide : roleFilter === 'clients' \? isClientSide/);
+});
+
+test('Independent Medical Examinations is its own area under Clinical (owner, 2026-11-09)', () => {
+  for (const t of ['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw']) {
+    const clinical = at.hubAreasFor(at.fieldsFor(t)).find(a => a.id === 'clinical');
+    assert.ok(clinical && clinical.links.some(l => l.id === 'ime' && l.path === '/ime'), t);
+  }
+  for (const t of ['caregiver', 'client', 'family', 'liaison']) {
+    assert.ok(!at.hubTilesFor({ ...at.fieldsFor(t), licenseLevel: 'cna' }).some(l => l.id === 'ime'), t);
+  }
+  // A manager with no clinical access still runs exam day.
+  const none = at.hubAreasFor(at.fieldsFor('manager', { managerClinicalAccess: 'none' })).find(a => a.id === 'clinical');
+  assert.deepEqual(none.links.map(l => l.id), ['ime']);
+});
+
+test('the exam-day list moved from the Admin Hub into the IME area', () => {
+  const hub = stripComments(read('public/admin-hub.html'));
+  assert.ok(!/const VeteransPage|vetFetch|id: 'veterans'/.test(hub), 'the Admin Hub no longer carries the list or its menu entry');
+  assert.match(hub, /case 'veterans': window\.location\.replace\('\/ime#exam'\); return null;/, 'an old link lands in the new area');
+  const ime = stripComments(read('public/ime.html'));
+  for (const route of ["'/api/veterans/roster?date='", "'/api/veterans/checkins?date='", "'/api/veterans/checkins/'", "'/api/veterans/roster'"]) {
+    assert.ok(ime.includes(route), route);
+  }
+  assert.match(ime, /data-tab="exam">Exam Day<\/a>/);
+  assert.match(ime, /data-tab="files">Claim Files \(AI Review\)<\/a>/);
+  // The claim files refusal no longer blanks the whole page: Exam Day still loads.
+  assert.match(ime, /if \(r\.ok\) meta = r\.body; else metaErr = /);
+});
+
+test('the Portal Hub banner is the brand graphic, shown whole', () => {
+  const login = read('public/login.html');
+  assert.match(login, /<img src="\/banners\/banner-hub\.webp" className="block w-full h-auto/);
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'banners', 'banner-hub.webp')));
+  assert.ok(!/banner-admin\.webp/.test(stripComments(login)), 'the old photo banner is gone from the hub');
 });
