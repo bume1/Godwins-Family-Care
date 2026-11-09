@@ -536,7 +536,7 @@ const YearEnd = () => {
         {ye && (
           <>
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
-            {ye.gustoGrossCents > 0 && !rel && <Warn>These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. Release here only if the app is filing {yr}'s W-2s for the whole year. If Gusto is filing them, do not release here, or the wages are reported twice.</Warn>}
+            {ye.gustoGrossCents > 0 && !rel && <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-[13px] text-stone-700 mb-3">These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. GFC files {yr}'s W-2s from the app (owner, 2026-11-09), so those wages belong here. Before releasing, make sure Gusto is not also set to file {yr} W-2s, or the wages are reported twice.</div>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
             <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>
