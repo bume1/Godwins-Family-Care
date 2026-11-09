@@ -146,6 +146,34 @@ function composeChecklist(inputs) {
 
 const findItem = (id) => ALL_ITEMS.find(it => it.id === String(id || '')) || null;
 
+
+// ---- tasks the office added (owner, 2026-11-09) ----------------------------
+// An admin or manager adds a task to one person, or to everyone onboarding
+// under a chapter, now and later. It is shaped like a Playbook item so every
+// door (steps, files, notes, not applicable) treats it the same, and it is
+// never a Playbook item: no classification is claimed for it. She marks it
+// done; if the office asked to review it, it is complete only once reviewed.
+const CUSTOM_PHASE = Object.freeze({ id: 'GFC', label: 'Added by GFC', plainWhen: 'Tasks added by the office',
+  title: 'Added by GFC', when: 'Added by the office', ref: null });
+function customItem(row) {
+  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: ACTIONS.COMPLETE, actorBasis: 'STATED' })];
+  if (row.review) steps.push(Object.freeze({ actor: ACTORS.OFFICE, action: ACTIONS.REVIEW, actorBasis: 'STATED' }));
+  return Object.freeze({
+    id: String(row.id), chapter: 'GFC', phase: CUSTOM_PHASE.id, title: String(row.title || 'Task'), ref: null,
+    elements: row.details ? [String(row.details)] : undefined,
+    steps: Object.freeze(steps), classifications: [], classificationNote: 'Added by the office; not a Playbook item.',
+    custom: true, askForFile: !!row.askForFile,
+    scope: row.scope && row.scope.userId ? { userId: String(row.scope.userId) } : { chapter: row.scope && row.scope.chapter }
+  });
+}
+/** The office-added tasks that apply to this person: theirs, or their chapter's. Removed ones never. */
+function customItemsFor(rows, inputs, userId) {
+  const ch = normalizeInputs(inputs).chapter || 'C';
+  return (rows || []).filter(r => r && !r.removedAt && r.scope
+    && ((r.scope.userId && String(r.scope.userId) === String(userId)) || (!r.scope.userId && r.scope.chapter === ch)))
+    .map(customItem);
+}
+
 // ---- one item's state ------------------------------------------------------
 // Stored shape, per item id:
 //   { steps: { [index]: { at, byId, byName, filedBy, source?, verifiedOn?, note? } },
@@ -474,7 +502,7 @@ function recWithCourseDuties(ch, rec) {
   return Object.keys(extra).length ? Object.assign({}, rec, { recurring: Object.assign({}, rec.recurring || {}, extra) }) : rec;
 }
 
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows } = {}) {
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
   const rec = record || {};
@@ -484,7 +512,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   }).map(f => [f.moduleId, f]));
   const office = audience === 'office';
 
-  const items = composeChecklist(i).map(it => {
+  const custom = customItemsFor(customTasks, i, rec.userId);
+  const items = composeChecklist(i).concat(custom).map(it => {
     const st = (rec.items || {})[it.id] || null;
     const ns = nextStep(it, st);
     // A completed item whose document has expired reads Renewal Due.
@@ -534,7 +563,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       expiry,
       renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
-      carriedOver: carried.byItem[it.id] || []
+      carriedOver: carried.byItem[it.id] || [],
+      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined
     };
   });
 
@@ -562,7 +592,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     return out;
   });
 
-  const phases = ch.PHASES.map(p => {
+  const phases = ch.PHASES.concat(custom.length ? [Object.assign({ number: ch.PHASES.length + 1 }, CUSTOM_PHASE)] : []).map(p => {
     const its = items.filter(x => x.phase === p.id);
     const mods = phaseModules(p.id, i).map(m => m.id);
     const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
@@ -631,5 +661,5 @@ module.exports = {
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
-  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence
+  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, customItem, customItemsFor, CUSTOM_PHASE
 };
