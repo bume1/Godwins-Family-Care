@@ -50,8 +50,13 @@ test('twenty hours marks ready for clients; all 36 completes the forty-hour item
 
 test('every caregiver sees the annual collection; only the forty-hour route sees the PCA program', () => {
   const ids = (inputs) => T.buildTrack({ inputs: Object.assign({ chapter: 'A' }, inputs), record: {}, today: '2026-11-09' }).trainingCourses.map(c => c.id);
-  assert.deepStrictEqual(ids({}), ['ANNUAL_8']);
-  assert.deepStrictEqual(ids({ fortyHourRoute: true }), ['PCA_40', 'ANNUAL_8']);
+  assert.deepStrictEqual(ids({}), ['GFC_CORE', 'ANNUAL_8']);
+  assert.deepStrictEqual(ids({ fortyHourRoute: true }), ['GFC_CORE', 'PCA_40', 'ANNUAL_8']);
+  // A PCA, CNA or HHA certificate (or nursing) means no forty-hour program,
+  // even with the box ticked: she does the remaining training only.
+  assert.deepStrictEqual(ids({ fortyHourRoute: true, holdsCareCertificate: true }), ['GFC_CORE', 'ANNUAL_8']);
+  assert.deepStrictEqual(ids({ fortyHourRoute: true, caregiverClass: 'NURSING' }), ['GFC_CORE', 'ANNUAL_8']);
+  assert.ok(!T.composeChecklist({ chapter: 'A', fortyHourRoute: true, holdsCareCertificate: true }).some(i => i.id === 'A.6.07'));
   assert.deepStrictEqual(T.buildTrack({ inputs: { chapter: 'C' }, record: {} }).trainingCourses, []);
 });
 
@@ -92,4 +97,21 @@ test('a caregiver uploads a certificate through the route; it lands on her recor
     const bad = await fetch(`${base}/api/onboarding/me/courses/ANNUAL_8/NOPE/certificate`, { method: 'POST', body: fd });
     assert.strictEqual(bad.status, 404);
   } finally { server.close(); }
+});
+
+test('every caregiver takes the HIPAA and Introduction to Dementia Care modules, each with its own Care Courses link', () => {
+  const core = CC.COLLECTIONS.GFC_CORE.courses;
+  assert.deepStrictEqual(core.map(c => c.url), ['https://www.care-courses.com/company/qj5dz/module-detail', 'https://www.care-courses.com/company/q38w4/module-detail']);
+  const rows = wp.buildChecklist({}, [], {}, []);
+  const none = T.buildTrack({ inputs: { chapter: 'A' }, record: {}, today: '2026-11-09', packetRows: rows }).items.find(i => i.id === 'A.7.04');
+  assert.notStrictEqual(none.status, 'COMPLETE');
+  const both = T.buildTrack({ inputs: { chapter: 'A' }, record: { courseCerts: { GFC_CORE: { initial: allOf('GFC_CORE', '2026-11-05T10:00:00Z') } } }, today: '2026-11-09', packetRows: rows }).items.find(i => i.id === 'A.7.04');
+  assert.strictEqual(both.status, 'COMPLETE');
+});
+
+test('the certificate fact comes from the welcome packet, never from the Setup form', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
+  assert.match(src, /const CARE_CERTIFICATES = \['pca', 'cna', 'hha', 'lpn', 'rn'\];/);
+  assert.match(src, /\{ chapter, holdsCareCertificate: false \}/);
+  assert.match(src, /inputs: withPacketFacts\(rec\.inputs, pk\)/);
 });

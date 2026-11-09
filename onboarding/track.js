@@ -85,7 +85,12 @@ function normalizeInputs(raw) {
     baaRequired: r.baaRequired === true,
     // Chapter A (caregiver) inputs.
     caregiverClass: ['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass : null,
-    fortyHourRoute: r.fortyHourRoute === true,
+    // Owner, 2026-11-09: a caregiver who already holds a PCA, CNA or HHA
+    // certificate (or nursing licensure) never takes the forty-hour program;
+    // she does the remaining training only. `holdsCareCertificate` is read
+    // from her welcome packet by the server, never set by hand.
+    holdsCareCertificate: r.holdsCareCertificate === true,
+    fortyHourRoute: r.fortyHourRoute === true && r.holdsCareCertificate !== true && r.caregiverClass !== 'NURSING',
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -508,6 +513,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       packet,
       returned: st && st.returned ? st.returned : null,
       acknowledgments: ackStatus(it, st),
+      link: it.link || null,
       elements: it.elements
         ? it.elements.filter(e => typeof e === 'string' || matchesWhen(e.when, i)).map(e => (typeof e === 'string' ? { row: e } : { row: e.row, ref: e.ref }))
         : null,
@@ -564,7 +570,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   // Care Courses collections this person takes (Chapter A): the 40-hour
   // program on that route, and the current year's annual training.
   const todayYmd = ymd(today || new Date().toISOString());
-  const trainingCourses = ch.CHAPTER.id !== 'A' ? [] : ['PCA_40', 'ANNUAL_8']
+  const trainingCourses = ch.CHAPTER.id !== 'A' ? [] : ['GFC_CORE', 'PCA_40', 'ANNUAL_8']
     .filter(id => id !== 'PCA_40' || i.fortyHourRoute)
     .map(id => {
       const cycle = CC.cycleFor(id, todayYmd);

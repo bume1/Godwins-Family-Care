@@ -24,3 +24,13 @@
 ## Open for the owner
 - **Caregiver SOPs.** The Playbook's own modules (A.12: HIPAA, the app, care skills, dementia support) still need SOPs or materials. Care Courses covers the regulated training, not GFC's own procedures.
 - **Course list changes.** If Care Courses changes a collection, the list is updated by hand in `caregiverCourses.js`.
+
+## Addendum, same day
+- **Two required modules for every caregiver,** each with its own Care Courses link (collection `GFC_CORE`). Both must have a certificate for item A.7.04 to be done.
+  - HIPAA and Confidentiality: https://www.care-courses.com/company/qj5dz/module-detail
+  - Introduction to Dementia Care: https://www.care-courses.com/company/q38w4/module-detail
+- **Contractors (D.6.04)** take the same HIPAA module. The item carries an "Open the HIPAA course" button. Contractors keep TRN-005 as well (owner: yes to both).
+- **Certified caregivers skip the 40-hour program** (owner). A caregiver whose welcome packet lists a PCA, CNA, HHA, LPN or RN certificate never gets the 40-hour program, even if the box is ticked in Setup. A nurse classification is excluded the same way. She takes the remaining training only.
+  - The server reads the certificate fact from the packet on every build.
+  - The Setup form's copy of it is ignored on save, so nobody can set it by hand.
+- **"CareScout" = Care Courses.** The earlier addendum's CareScout wording is superseded.

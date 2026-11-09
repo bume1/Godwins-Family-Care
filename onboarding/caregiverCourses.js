@@ -19,7 +19,24 @@
 
 const c = (id, title, hours) => Object.freeze({ id, title, hours });
 
+const HIPAA_URL = 'https://www.care-courses.com/company/qj5dz/module-detail';
+const DEMENTIA_URL = 'https://www.care-courses.com/company/q38w4/module-detail';
+
 const COLLECTIONS = Object.freeze({
+  // Owner, 2026-11-09: two GFC-assigned modules every caregiver takes, each
+  // with its own Care Courses link (these two do have direct links). Hours
+  // are not published on the module pages, so none are claimed.
+  GFC_CORE: Object.freeze({
+    id: 'GFC_CORE',
+    title: 'GFC Required Modules',
+    url: null,
+    totalHours: null,
+    cycle: 'initial',
+    courses: Object.freeze([
+      Object.freeze({ id: 'CORE-HIPAA', title: 'HIPAA and Confidentiality', hours: null, url: HIPAA_URL }),
+      Object.freeze({ id: 'CORE-DEMENTIA', title: 'Introduction to Dementia Care', hours: null, url: DEMENTIA_URL })
+    ])
+  }),
   PCA_40: Object.freeze({
     id: 'PCA_40',
     title: 'Georgia Personal Care Assistant: 40-Hour Initial Training',
@@ -109,13 +126,13 @@ function progress(collectionId, certs, cycle) {
     const r = got[x.id] || null;
     const done = !!(r && (r.files || []).length && !r.returned);
     return {
-      id: x.id, title: x.title, hours: x.hours, done,
+      id: x.id, title: x.title, hours: x.hours, url: x.url || null, done,
       at: done ? r.at : null,
       returned: r && r.returned ? r.returned : null,
       files: r ? (r.files || []).map(f => ({ id: f.id, name: f.name, uploadedAt: f.uploadedAt, filedBy: f.filedBy })) : []
     };
   });
-  const hoursDone = Math.round(list.filter(x => x.done).reduce((s, x) => s + x.hours, 0) * 10) / 10;
+  const hoursDone = Math.round(list.filter(x => x.done).reduce((s, x) => s + (x.hours || 0), 0) * 10) / 10;
   const lastAt = list.filter(x => x.done).map(x => x.at).sort().pop() || null;
   return {
     id: col.id, title: col.title, url: col.url, cycle,
@@ -127,4 +144,4 @@ function progress(collectionId, certs, cycle) {
   };
 }
 
-module.exports = { COLLECTIONS, findCourse, cycleFor, progress };
+module.exports = { COLLECTIONS, HIPAA_URL, DEMENTIA_URL, findCourse, cycleFor, progress };

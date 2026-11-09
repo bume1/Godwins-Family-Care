@@ -128,10 +128,11 @@ test('the page offers D, shows its Training tab, and names it Contracted (1099)'
   assert.match(src, /Contracted \(1099\)/);
 });
 
-test('a contracted clinician takes HIPAA training on CareScout, uploads the certificate, and renews it yearly', () => {
+test('a contracted clinician takes the Care Courses HIPAA module, uploads the certificate, and renews it yearly', () => {
   const it = D.ITEMS.find(x => x.id === 'D.6.04');
   assert.ok(it && it.phase === 'D.6');
-  assert.match(it.title, /CareScout/);
+  assert.match(it.title, /HIPAA/);
+  assert.strictEqual(it.link.url, 'https://www.care-courses.com/company/qj5dz/module-detail');
   assert.strictEqual(it.repeats, 'annually');
   assert.deepStrictEqual(it.steps.map(s => [s.actor, s.action]), [['NEW_HIRE', 'SUBMIT'], ['CREDENTIALING_OWNER', 'VERIFY']]);
   assert.ok(T.composeChecklist({ chapter: 'D' }).some(x => x.id === 'D.6.04'));

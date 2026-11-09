@@ -129,23 +129,31 @@ module.exports = function createOnboardingRoutes(deps) {
   // Chapter A reads the caregiver's welcome packet checklist, derived the
   // same way the caregiver app and the scheduling gate derive it. Never
   // stored here: a stored copy goes stale the moment a document is accepted.
-  async function packetRowsFor(rec) {
-    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return undefined;
+  const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
+  async function packetFor(rec) {
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false };
     const id = String(rec.userId);
     const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
     const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
     const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === id);
-    return wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts);
+    const held = ((packet || {}).data || {}).certifications;
+    return {
+      rows: wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts),
+      certified: Array.isArray(held) && held.some(c => CARE_CERTIFICATES.includes(c))
+    };
   }
+  // Her inputs with what the packet says about her certificates.
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified) });
 
   async function buildFor(rec, audience) {
     const m = await manual();
+    const pk = await packetFor(rec);
     const track = T.buildTrack({
-      inputs: rec.inputs, record: rec, today: today(), audience,
+      inputs: withPacketFacts(rec.inputs, pk), record: rec, today: today(), audience,
       manualVersion: m.ok ? m.currentVersion : '2.2',
       moduleReviews: await reviews(),
       legacy: await legacyFor(rec.userId),
-      packetRows: await packetRowsFor(rec)
+      packetRows: pk.rows
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -496,9 +504,9 @@ module.exports = function createOnboardingRoutes(deps) {
     const m = await manual();
     const revs = await reviews();
     const packets = {};
-    for (const rec of rows) packets[rec.userId] = await packetRowsFor(rec);
+    for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const people = rows.map(rec => {
-      const t = T.buildTrack({ inputs: rec.inputs, record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId] });
+      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows });
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
@@ -565,7 +573,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });

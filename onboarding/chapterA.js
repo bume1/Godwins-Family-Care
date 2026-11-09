@@ -168,6 +168,11 @@ const ITEMS = Object.freeze([
     // Eight hours as GFC policy; the rule sets content, not hours.
     packet: ['orientation'], steps: [],
     classifications: [cls('Regulatory', 'Orientation', A2)] },
+  // A.12's HIPAA and dementia modules, taken on Care Courses (owner,
+  // 2026-11-09): done when both certificates are on file.
+  { id: 'A.7.04', phase: 'A.7', title: 'HIPAA, confidentiality and dementia care modules', ref: P('A.12'),
+    courses: 'GFC_CORE', steps: [],
+    classifications: [], classificationNote: NO_A2_ROW },
   { id: 'A.7.02', phase: 'A.7', title: 'Systems training', ref: P('A.7'),
     packet: ['app_training'], steps: [],
     classifications: [], classificationNote: NO_A2_ROW },

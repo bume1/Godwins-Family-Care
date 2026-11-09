@@ -252,14 +252,14 @@ const CourseCollection = ({ col, base, office, onChanged }) => {
   };
   return (
     <div className="card">
-      <div className="card-h"><h3 style={{ margin: 0 }}>{col.title}</h3><span>{col.hoursDone} of {col.totalHours} hours · {col.coursesDone} of {col.coursesTotal} courses</span></div>
-      <div className="bar"><span style={{ width: `${Math.round((col.hoursDone / col.totalHours) * 100)}%` }} /></div>
+      <div className="card-h"><h3 style={{ margin: 0 }}>{col.title}</h3><span>{col.totalHours ? `${col.hoursDone} of ${col.totalHours} hours · ` : ''}{col.coursesDone} of {col.coursesTotal} courses</span></div>
+      <div className="bar"><span style={{ width: `${Math.round((col.totalHours ? col.hoursDone / col.totalHours : col.coursesDone / col.coursesTotal) * 100)}%` }} /></div>
       <p style={{ fontSize: 14, margin: '10px 0' }}>
         Take each course on Care Courses, then upload its certificate of completion here.
-        {col.beforeClientHours ? ` The first ${col.beforeClientHours} hours are needed before you serve a client; the rest within ${col.withinMonths} months.` : ` This is your ${col.cycle} annual training.`}
+        {col.beforeClientHours ? ` The first ${col.beforeClientHours} hours are needed before you serve a client; the rest within ${col.withinMonths} months.` : col.cycle === 'initial' ? ' Required for every caregiver.' : ` This is your ${col.cycle} annual training.`}
       </p>
       {col.beforeClientHours && <div className={col.readyForClients ? 'ok' : 'note'}>{col.readyForClients ? `${col.beforeClientHours} hours done: ready to serve clients on this requirement.` : `${col.beforeClientHours - col.hoursDone > 0 ? (col.beforeClientHours - col.hoursDone) : 0} more hours before serving clients.`}</div>}
-      <a className="btn gold sm" href={col.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />Open the Courses</a>
+      {col.url && <a className="btn gold sm" href={col.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />Open the Courses</a>}
       {err && <div className="err">{err}</div>}{msg && <div className="ok">{msg}</div>}
       <div style={{ marginTop: 10 }}>
         {col.courses.map(c => (
@@ -267,7 +267,8 @@ const CourseCollection = ({ col, base, office, onChanged }) => {
             <span className="dot" style={{ width: 22, height: 22, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: c.done ? 'var(--green)' : '#fff', color: '#fff', border: c.done ? 'none' : '1.5px solid #9AA5AB', flex: 'none' }}>{c.done && <i className="ti ti-check" />}</span>
             <div className="t" style={{ flex: 1 }}>
               <b>{c.title}</b>
-              <div className="meta">{c.hours} {c.hours === 1 ? 'hour' : 'hours'}{c.done ? ` · certificate on file ${fmtDate(c.at)}` : ''}</div>
+              <div className="meta">{c.hours ? `${c.hours} ${c.hours === 1 ? 'hour' : 'hours'}` : 'Care Courses module'}{c.done ? ` · certificate on file ${fmtDate(c.at)}` : ''}</div>
+              {c.url && <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13 }}><i className="ti ti-external-link" /> Open this course</a>}
               {c.returned && <div className="err" style={{ marginTop: 4 }}>Sent back: {c.returned.reason}</div>}
               {c.files.map(f => <div key={f.id} style={{ fontSize: 13 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.courseCertFile(base, col.id, c.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a></div>)}
             </div>
@@ -466,6 +467,8 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             </div>
           </div>
         )}
+
+        {item.link && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
           <div><label className="f">From the welcome packet</label>
@@ -750,6 +753,7 @@ const Setup = ({ userId, inputs, onSaved }) => {
         </select>
         <label className="f">Their situation</label>
         {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+        {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
       </> : f.chapter === 'B' ? <>
         <label className="f">Her responsibilities</label>
         {['supervisoryDelegation', 'directsTraining'].map(k => <div key={k}>{flag(k)}</div>)}

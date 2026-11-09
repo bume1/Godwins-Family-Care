@@ -74,8 +74,8 @@ test('A.10 is copied with its classifications, and the registry attestation stan
 test('a caregiver defaults to A, the office reads the packet, and the caregiver app links to the policies', () => {
   const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
   assert.match(routes, /if \(t === 'caregiver'\) return 'A';/);
-  assert.match(routes, /packetRows: await packetRowsFor\(rec\)/);
-  assert.match(routes, /packetRows: packets\[rec\.userId\]/);
+  assert.match(routes, /packetRows: pk\.rows/);
+  assert.match(routes, /packetRows: packets\[rec\.userId\]\.rows/);
   assert.match(routes, /wpRepo\.buildChecklist\(\(packet \|\| \{\}\)\.data, docs, \(packet \|\| \{\}\)\.office, atts\)/);
   const cg = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
   assert.match(cg, /href="\/onboarding"[^>]*>Open My Onboarding/);
