@@ -137,7 +137,17 @@ module.exports = function createOnboardingRoutes(deps) {
   // stored here: a stored copy goes stale the moment a document is accepted.
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
   async function packetFor(rec) {
-    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false, licenseLevel: null };
+    if (!rec) return { rows: undefined, certified: false, licenseLevel: null };
+    // Every other chapter opens with the staff welcome packet (owner,
+    // 2026-11-09): one row, read from the packet My GFC writes. Signed is
+    // complete; anything else is still hers to do.
+    if (!rec.inputs || rec.inputs.chapter !== 'A') {
+      const sp = ((await db.get('staff_welcome_packets')) || []).find(r => r && String(r.user_id) === String(rec.userId)) || null;
+      const signed = !!(sp && sp.status === 'submitted');
+      return { rows: [{ kind: 'staff_welcome', item: 'WELCOME', title: 'Welcome packet', required: true, source: 'gfc_sign',
+        status: signed ? 'complete' : 'missing', signedAt: signed ? (sp.signed_at || null) : null }],
+        certified: false, licenseLevel: null };
+    }
     const id = String(rec.userId);
     const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
     const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
