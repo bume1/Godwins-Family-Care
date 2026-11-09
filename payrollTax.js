@@ -33,6 +33,43 @@ const DEFAULT_SETTINGS = Object.freeze({
   reminderLeadBusinessDays: 5
 });
 
+// TWO PAY SCHEDULES (owner, 2026-11-09): caregivers are paid every week,
+// everyone else every two weeks. Each schedule has its own frequency, first
+// Monday and payday, and a run belongs to exactly one of them. Settings saved
+// before this kept one schedule at the top level; that one is now "staff",
+// so an existing anchor and payday carry over untouched.
+const PAY_SCHEDULES = Object.freeze({
+  caregivers: { label: 'Caregivers', defaults: { frequency: 'weekly', anchor: '2026-01-05', payDateOffsetDays: 5 } },
+  staff: { label: 'Everyone else', defaults: { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5 } }
+});
+function scheduleSettings(settings, key) {
+  const s = settings || {};
+  const def = PAY_SCHEDULES[key] ? PAY_SCHEDULES[key].defaults : PAY_SCHEDULES.staff.defaults;
+  const saved = (s.schedules || {})[key];
+  if (saved) return { ...def, ...saved };
+  if (key === 'staff' || !PAY_SCHEDULES[key]) {
+    return { frequency: s.frequency || def.frequency, anchor: s.anchor || def.anchor, payDateOffsetDays: s.payDateOffsetDays !== undefined ? s.payDateOffsetDays : def.payDateOffsetDays };
+  }
+  return { ...def };
+}
+function normalizeSchedule(b, cur, label) {
+  const out = { ...cur };
+  if (b.frequency !== undefined) {
+    if (!FREQUENCIES[b.frequency]) return { error: `${label}: pay frequency is weekly or every two weeks.`, code: 'PAY_FREQUENCY' };
+    out.frequency = b.frequency;
+  }
+  if (b.anchor !== undefined) {
+    if (!isYmd(b.anchor) || new Date(ymdMs(b.anchor)).getUTCDay() !== 1) return { error: `${label}: the first pay period must start on a Monday.`, code: 'PAY_ANCHOR' };
+    out.anchor = b.anchor;
+  }
+  if (b.payDateOffsetDays !== undefined) {
+    const n = Number(b.payDateOffsetDays);
+    if (!Number.isInteger(n) || n < 0 || n > 14) return { error: `${label}: payday is 0 to 14 days after the period ends.`, code: 'PAY_DATE_OFFSET' };
+    out.payDateOffsetDays = n;
+  }
+  return { value: out };
+}
+
 function normalizeSettings(b, current) {
   const s = { ...DEFAULT_SETTINGS, ...(current || {}) };
   b = b || {};
@@ -62,6 +99,19 @@ function normalizeSettings(b, current) {
     if (n !== null && !(n >= 0 && n <= 15)) return { error: 'The Georgia unemployment rate is a percent between 0 and 15.', code: 'GA_SUTA_RATE' };
     s.gaSutaRatePct = n;
   }
+  if (b.schedules !== undefined) {
+    const next = {};
+    for (const key of Object.keys(PAY_SCHEDULES)) next[key] = scheduleSettings(s, key);
+    for (const [key, v] of Object.entries(b.schedules || {})) {
+      if (!PAY_SCHEDULES[key]) return { error: `There is no "${key}" pay schedule.`, code: 'PAY_SCHEDULE' };
+      const n = normalizeSchedule(v || {}, next[key], PAY_SCHEDULES[key].label);
+      if (n.error) return n;
+      next[key] = n.value;
+    }
+    s.schedules = next;
+    // The top-level fields mirror "staff", which older readers still use.
+    s.frequency = next.staff.frequency; s.anchor = next.staff.anchor; s.payDateOffsetDays = next.staff.payDateOffsetDays;
+  }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);
     if (!Number.isInteger(n) || n < 1 || n > 20) return { error: 'Reminder lead time is 1 to 20 business days.', code: 'REMINDER_LEAD' };
@@ -72,13 +122,17 @@ function normalizeSettings(b, current) {
 
 // The period a date falls in. A frequency change applies only from a period
 // that has not started (the route passes the anchor the change took effect).
-function periodFor(ymd, settings) {
-  const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+// With a schedule key, the period on that schedule; without one, the
+// top-level (staff) fields, as before.
+function periodFor(ymd, settings, schedule) {
+  const s = schedule ? scheduleSettings(settings, schedule) : { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const len = FREQUENCIES[s.frequency].days;
   const idx = Math.floor((ymdMs(ymd) - ymdMs(s.anchor)) / DAY / len);
   const start = addDays(s.anchor, idx * len);
   const end = addDays(start, len - 1);
-  return { start, end, payDate: addDays(end, s.payDateOffsetDays), frequency: s.frequency, perYear: FREQUENCIES[s.frequency].perYear };
+  const out = { start, end, payDate: addDays(end, s.payDateOffsetDays), frequency: s.frequency, perYear: FREQUENCIES[s.frequency].perYear };
+  if (schedule) out.schedule = schedule;
+  return out;
 }
 // The Monday that starts the overtime workweek a date falls in.
 function workweekStart(ymd) {
@@ -254,6 +308,6 @@ function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perY
 }
 
 module.exports = {
-  FREQUENCIES, DEFAULT_SETTINGS, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
+  FREQUENCIES, DEFAULT_SETTINGS, PAY_SCHEDULES, scheduleSettings, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
   bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck
 };

@@ -165,7 +165,9 @@ function runTotals(workers) {
 }
 
 function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
-  const perYear = tax.FREQUENCIES[settings.frequency].perYear;
+  // The run's own schedule decides the divisor (52 weekly, 26 biweekly).
+  const frequency = (period && period.frequency) || settings.frequency;
+  const perYear = tax.FREQUENCIES[frequency].perYear;
   const workers = [];
   for (const { user, profile } of people) {
     const uid = String(user.id);
@@ -206,7 +208,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
   workers.sort((a, b) => a.name.localeCompare(b.name));
   const totals = runTotals(workers);
   return {
-    period, frequency: settings.frequency, perYear,
+    period, frequency, perYear, schedule: (period && period.schedule) || null,
     workers, totals,
     blocked: workers.filter(w => w.missing.length).map(w => ({ userId: w.userId, name: w.name, missing: w.missing })),
     sutaRateMissing: workers.some(w => w.workState === 'GA') && (settings.gaSutaRatePct === null || settings.gaSutaRatePct === undefined),

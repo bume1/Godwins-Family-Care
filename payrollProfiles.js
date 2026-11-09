@@ -195,6 +195,11 @@ function normalizePaySetup(b) {
     if (b.hireDate && !isYmd(b.hireDate)) return { error: 'Hire date must be a date.', code: 'HIRE_DATE' };
     out.hireDate = b.hireDate || null;
   }
+  if (b.paySchedule !== undefined) {
+    // '' or null puts them back on the default for their role.
+    if (b.paySchedule && !PAY_SCHEDULE_KEYS.includes(b.paySchedule)) return { error: 'Choose the caregivers (weekly) or everyone-else schedule.', code: 'PAY_SCHEDULE' };
+    out.paySchedule = b.paySchedule || null;
+  }
   if (b.status !== undefined) {
     if (!['active', 'inactive'].includes(b.status)) return { error: 'Status is active or inactive.', code: 'STATUS' };
     out.status = b.status;
@@ -228,6 +233,14 @@ function withEmploymentType(profile, user) {
   const et = user && user.employmentType;
   if (!EMPLOYMENT_TYPES.includes(et) || profile.workerType === et) return profile;
   return { ...profile, workerType: et };
+}
+
+// Which pay schedule a person is on: what the owner set, else caregivers for
+// a caregiver and staff for everyone else.
+const PAY_SCHEDULE_KEYS = Object.freeze(['caregivers', 'staff']);
+function scheduleFor(p) {
+  if (p && PAY_SCHEDULE_KEYS.includes(p.paySchedule)) return p.paySchedule;
+  return p && p.isCaregiver ? 'caregivers' : 'staff';
 }
 
 const isEmployee = (p) => p && (p.workerType === WORKER_TYPES.W2 || p.workerType === WORKER_TYPES.HYBRID);
@@ -286,6 +299,7 @@ function publicProfile(p, opts = {}) {
   const { ssn, tin, payMethod, history, ...rest } = p;
   return {
     ...rest,
+    paySchedule: scheduleFor(p), paySchedulePinned: PAY_SCHEDULE_KEYS.includes(p.paySchedule),
     ssnLast4: ssn ? ssn.last4 : null,
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
     payMethod: payMethod ? {
@@ -300,5 +314,5 @@ module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature,
   normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
-  defaultProfile, withEmploymentType, isEmployee, isContractor, missingForPay, checklist, publicProfile
+  defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, checklist, publicProfile
 };

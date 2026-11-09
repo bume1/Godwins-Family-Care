@@ -301,10 +301,10 @@ test('a draft needs approved tables; approval refuses missing paperwork, then lo
   const { app } = harness('own', store);
   store.set('time_logs', [log('a', '2026-11-02', 480), { ...log('z', '2026-11-03', 240), caregiver_id: 'cg2' }]);
   store.set('payroll_settings', { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5, gaSutaRatePct: 2.7 });
-  let r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02' });
+  let r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
   assert.equal(r.body.code, 'PAYROLL_NO_TABLES', 'staged tables pay nothing');
   store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
-  r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02' });
+  r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
   assert.equal(r.status, 200);
   const runId = r.body.run.id;
   assert.ok(r.body.run.blocked.find(b => b.userId === 'cg1'));
@@ -379,4 +379,71 @@ test('W-2 or 1099 has one home: the user record wins over the payroll profile, a
 test('there is one staff clock (main\'s): payroll adds no clock of its own', () => {
   const src = read('routes/payroll.js') + read('public/my-pay.js') + read('payrollEngine.js');
   assert.doesNotMatch(src, /staff_time_entries|\/api\/my\/clock|staffEntries/);
+});
+
+// ---------------------------------------------------------------------------
+// TWO PAY SCHEDULES (owner, 2026-11-09): caregivers weekly, everyone else
+// every two weeks, each with its own runs.
+// ---------------------------------------------------------------------------
+test('two pay schedules: caregivers weekly, everyone else every two weeks, and old settings read as the staff schedule', () => {
+  const legacy = { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5 };
+  assert.deepEqual(tax.scheduleSettings(legacy, 'staff'), { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5 });
+  assert.equal(tax.scheduleSettings(legacy, 'caregivers').frequency, 'weekly');
+  const cgP = tax.periodFor('2026-11-04', legacy, 'caregivers');
+  assert.deepEqual([cgP.start, cgP.end, cgP.perYear, cgP.schedule], ['2026-11-02', '2026-11-08', 52, 'caregivers']);
+  const stP = tax.periodFor('2026-11-04', legacy, 'staff');
+  assert.deepEqual([stP.start, stP.end, stP.perYear, stP.schedule], ['2026-10-26', '2026-11-08', 26, 'staff']);
+  // Each schedule is validated on its own and says which one is wrong.
+  const bad = tax.normalizeSettings({ schedules: { caregivers: { anchor: '2026-11-04' } } }, legacy);
+  assert.equal(bad.code, 'PAY_ANCHOR'); assert.match(bad.error, /^Caregivers/);
+  assert.equal(tax.normalizeSettings({ schedules: { nurses: {} } }, legacy).code, 'PAY_SCHEDULE');
+  const ok = tax.normalizeSettings({ schedules: { caregivers: { payDateOffsetDays: 3 } } }, legacy).value;
+  assert.equal(ok.schedules.caregivers.payDateOffsetDays, 3);
+  assert.equal(ok.schedules.staff.frequency, 'biweekly', 'the untouched schedule keeps its values');
+  assert.equal(tax.periodFor('2026-11-04', ok, 'caregivers').payDate, '2026-11-11', 'a saved schedule is the one used');
+  // Who is on which: a caregiver weekly, anyone else biweekly, the owner can move a person.
+  assert.equal(pp.scheduleFor(pp.defaultProfile(cgUser)), 'caregivers');
+  assert.equal(pp.scheduleFor(pp.defaultProfile({ id: 'n1', role: 'user' })), 'staff');
+  assert.equal(pp.scheduleFor({ ...pp.defaultProfile(cgUser), paySchedule: 'staff' }), 'staff');
+  assert.equal(pp.normalizePaySetup({ paySchedule: 'monthly' }).code, 'PAY_SCHEDULE');
+  assert.equal(pp.normalizePaySetup({ paySchedule: '' }).value.paySchedule, null);
+});
+
+test('a run pays only the people on its schedule, and the weekly run divides by 52', async () => {
+  const store = new Map();
+  const { app } = harness('own', store);
+  const staffLog = { id: 'sx', caregiver_id: 'nx', client_id: null, shift_id: null, kind: 'staff', clock_in_at: '2026-11-03T13:00:00Z', clock_out_at: '2026-11-03T21:00:00Z', total_minutes: 480 };
+  store.set('time_logs', [log('a', '2026-11-02', 480), staffLog]);
+  store.set('payroll_settings', { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5, gaSutaRatePct: 2.7 });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  store.set('payroll_profiles', { cg1: cgProfile });
+  assert.equal((await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02' })).body.code, 'RUN_SCHEDULE', 'a run names its schedule');
+  let r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.run.schedule, r.body.run.perYear, r.body.run.period.end], ['caregivers', 52, '2026-11-08']);
+  assert.deepEqual(r.body.run.workers.map(w => w.userId), ['cg1']);
+  const cgRunId = r.body.run.id;
+  // The staff run for the overlapping period is its own run, not the caregiver one rebuilt.
+  r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'staff' });
+  assert.notEqual(r.body.run.id, cgRunId);
+  assert.ok(!r.body.run.workers.some(w => w.userId === 'cg1'), 'a caregiver is never in the staff run');
+  // Moving the caregiver to the staff schedule moves them.
+  store.set('payroll_profiles', { cg1: { ...cgProfile, paySchedule: 'staff' } });
+  r = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'staff' });
+  assert.deepEqual([r.body.run.workers.map(w => w.userId), r.body.run.perYear], [['cg1'], 26]);
+  // Both schedules can start a period on the same Monday; they are still two runs.
+  const a = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-10-26', schedule: 'caregivers' });
+  const b = await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-10-26', schedule: 'staff' });
+  assert.equal(a.body.run.period.start, b.body.run.period.start);
+  assert.notEqual(a.body.run.id, b.body.run.id, 'same start date, different schedules, different runs');
+  const ov = (await req(app, 'GET', '/api/payroll/admin/overview')).body;
+  assert.deepEqual(ov.schedules.map(s => [s.key, s.frequency]), [['caregivers', 'weekly'], ['staff', 'biweekly']]);
+});
+
+test('period close drafts each schedule on its own and skips one with nobody to pay', async () => {
+  const src = read('routes/payroll.js');
+  const job = src.slice(src.indexOf("'period-close': async"), src.indexOf("'missing-time': async"));
+  assert.match(job, /for \(const schedule of Object\.keys\(tax\.PAY_SCHEDULES\)\)/);
+  assert.match(job, /close:\$\{schedule\}:\$\{period\.start\}/, 'one owner notice per schedule and period');
+  assert.match(job, /!existing && !d\.run\.workers\.length/);
 });
