@@ -62,7 +62,7 @@ test('a person who works outside Georgia is blocked from app runs, never taxed a
   const profile = { ...pp.defaultProfile(user), workState: 'TX', payMethod: { method: 'check' }, ssn: { last4: '1' }, w4: { filingStatus: 'single' }, g4: { filingStatus: 'A' }, i9: { section1: {}, section2: {} }, hourlyRateCents: 1800 };
   const gathered = { byUser: new Map([['b1', [{ ref: 'log:1', kind: 'hours', date: '2026-11-02', minutes: 60, rateCents: 1800 }]]]), skipped: [] };
   const run = engine.buildRun({ period: { start: '2026-11-02', end: '2026-11-15', payDate: '2026-11-20' }, settings: { frequency: 'biweekly', gaSutaRatePct: 2.7 }, people: [{ user, profile }], gathered, ytdByUser: new Map(), tables: { federal: T.FED_2026, GA: T.GA_2026 } });
-  assert.match(run.blocked[0].missing.join(' '), /Works in TX/);
+  assert.match(run.blocked[0].missing.join(' '), /Works in Texas: approve a Texas tax table/);
 });
 
 test('Gusto made the deposits for its pay dates, so they never appear as taxes the app owes', () => {

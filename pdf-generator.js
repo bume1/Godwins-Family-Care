@@ -5,6 +5,7 @@
 
 const path = require('path');
 const PDFDocument = require('pdfkit');
+const { stateName: payrollStateName } = require('./payrollTaxTables');
 const { PDFDocument: PDFLib, StandardFonts, rgb } = require('pdf-lib');
 const consentText = require('./public/consent-text');   // approved consent bodies, versioned (Session 4.6)
 const insuranceEligibility = require('./insuranceEligibility'); // B1: one payer vocabulary
@@ -2790,7 +2791,9 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
         cells: [e.minutes ? hrs(e.minutes) : e.count ? String(e.count) : '', usd(e.amountCents), usd((y.earnings || {})[e.code] || 0)]
       })).concat(p.reimbursementsCents ? [{ label: 'Reimbursements (not taxed)', cells: ['', usd(p.reimbursementsCents), usd(y.reimbursementsCents)] }] : []),
       [['HOURS / QTY', 330, 70], ['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
-      const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'], ['Georgia income tax', 'georgia']];
+      const stCode = (worker.pay && worker.pay.workState) || workState || 'GA';
+      const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'],
+        stCode === 'GA' ? ['Georgia income tax', 'georgia'] : [`${payrollStateName(stCode)} income tax`, 'state']];
       table('TAXES WITHHELD', tl.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
       table('TOTALS', [
@@ -2855,7 +2858,7 @@ const W2_INSTRUCTIONS = Object.freeze([
   ['Box 1.', 'Enter this amount on the wages line of your tax return.'],
   ['Box 2.', 'Enter this amount on the federal income tax withheld line of your tax return.'],
   ['Box 12, code TT.', 'Total amount of qualified overtime compensation: only the premium part of overtime pay required by the Fair Labor Standards Act (the "half" of time-and-a-half). It is already included in box 1. You may be able to deduct it on your tax return. See the Instructions for Forms 1040 and 1040-SR.'],
-  ['Boxes 15 to 17.', 'Georgia wages and Georgia income tax withheld. Use Copy 2 with your Georgia income tax return.'],
+  ['Boxes 15 to 17.', 'State wages and state income tax withheld, when the state you worked in taxes wages. Use Copy 2 with your state income tax return. Blank if your state has no income tax.'],
   ['Keep Copy C of Form W-2 for at least 3 years after the due date for filing your income tax return.', 'However, to help protect your social security benefits, keep Copy C until you begin receiving social security benefits, just in case there is a question about your work record and/or earnings in a particular year.']
 ]);
 
@@ -2909,7 +2912,9 @@ async function generateW2EmployeePDF({ year, employer, employee, boxes, correcte
         // State boxes at the bottom.
         const sw = [70, 170, (W - 240) / 2, (W - 240) / 2];
         let sx = L;
-        [['15  State', 'GA'], ['Employer\'s state ID number', employer.gaWithholdingId || ''], ['16  State wages, tips, etc.', taxUsd(boxes.box16)], ['17  State income tax', taxUsd(boxes.box17)]]
+        // Georgia, or the state they worked in; a state with no income tax (Texas) leaves the row blank.
+        (() => { const st = boxes.stateCode || 'GA'; const blank = st !== 'GA' && !boxes.box16 && !boxes.box17;
+          return [['15  State', blank ? '' : st], ['Employer\'s state ID number', blank ? '' : (boxes.stateId || (st === 'GA' ? employer.gaWithholdingId : '') || '')], ['16  State wages, tips, etc.', blank ? '' : taxUsd(boxes.box16)], ['17  State income tax', blank ? '' : taxUsd(boxes.box17)]]; })()
           .forEach(([label, v], k) => { taxBox(doc, sx, y, sw[k], coreH, label, v); sx += sw[k]; });
         y += coreH + 8;
         // Form number, title and year together; the copy label; the Treasury line.
@@ -2920,7 +2925,7 @@ async function generateW2EmployeePDF({ year, employer, employee, boxes, correcte
         doc.font('Helvetica').fontSize(8).text('Department of the Treasury—Internal Revenue Service', L, y, { width: W, align: 'right' });
         y = doc.y + 8;
         if (c.note) doc.font('Helvetica').fontSize(8).text(c.note, L, y, { width: W });
-        doc.font('Helvetica').fontSize(7).fillColor('#444444').text('Separate each copy along its page. Copy B goes with your federal return, Copy 2 with your Georgia return, and you keep Copy C.', L, 740, { width: W, lineBreak: false });
+        doc.font('Helvetica').fontSize(7).fillColor('#444444').text('Separate each copy along its page. Copy B goes with your federal return, Copy 2 with your state return, and you keep Copy C.', L, 740, { width: W, lineBreak: false });
         doc.fillColor(TAXFORM_INK);
       });
       // Notice to Employee.

@@ -84,7 +84,7 @@ What it does on its own:
 2. In QuickBooks, create these accounts first. The app names any that are missing.
    - PNC Business Checking (Bank)
    - Payroll Clearing
-   - Payroll Liabilities: Federal Withholding, FICA, GA Withholding, FUTA and GA SUTA (each an Other Current Liability)
+   - Payroll Liabilities: Federal Withholding, FICA, GA Withholding, FUTA, GA SUTA, Other State Withholding and Other State SUTA (each an Other Current Liability). The last two carry Texas and any later state; each journal line names the state.
    - Wages: Home Care, and Wages: Clinical (Expense)
    - Payroll Tax Expense, and Contract Labor (Expense)
    - Income: Private Home Care (Income)
@@ -144,3 +144,18 @@ Good to know:
 - Gusto made the tax deposits for its pay dates, so they never appear as deposits the app says you owe.
 - The file itself is not kept anywhere.
 - **Anyone who works outside Georgia** (for example, a Texas address) is blocked from app runs. The app withholds Georgia tax only, so keep paying them outside the app until their state is added.
+
+## 11. Other states (Georgia first, then Texas)
+
+Georgia is the main state and works exactly as before. Texas ships as the second state. Any other state is added the same way when you hire there.
+
+**To pay someone who works in Texas:**
+1. **Payroll → Tax Tables:** approve the staged **Texas 2026** table. Texas has no state income tax; the table carries Texas unemployment on the first $9,000 of each person's wages.
+2. **Payroll → Settings → Other states:** enter GFC's Texas unemployment rate from the TWC notice, and the TWC account number.
+3. **Payroll → People:** set them to **Works in: Texas**. (The Gusto import sets this for you from their Gusto work address.)
+
+They are then paid in the app with no Georgia tax and no G-4. Their Texas unemployment shows on the Taxes calendar, due to the Texas Workforce Commission the last day of the month after each quarter. Their W-2 has no state wages in boxes 15 to 17, and they are left off Georgia's DOL-4N and G-1003. Mark the Texas new hire report from their People row.
+
+**Another state later:** stage that state's table under Tax Tables (choose the state, paste its figures, approve), set GFC's rate and account under Settings → Other states, and set the person's work state. If the state taxes wages, the person signs that state's withholding certificate in My GFC → Pay Setup before they can be paid. Until all of that is done, the run names what is missing and does not pay them.
+
+**QuickBooks:** create **Payroll Liabilities: Other State Withholding** and **Payroll Liabilities: Other State SUTA**. Each journal line names the state.

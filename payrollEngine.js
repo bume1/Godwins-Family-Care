@@ -23,6 +23,7 @@
 // PURE. The route gathers the rows; this decides the money.
 // ============================================================================
 const tax = require('./payrollTax');
+const { stateName } = require('./payrollTaxTables');
 const profiles = require('./payrollProfiles');
 
 const MAX_ITEM_MINUTES = 16 * 60;   // a single stamp longer than this is a mistake, not a shift
@@ -144,11 +145,22 @@ function runTotals(workers) {
     employerSocialSecurityCents: sum(w => w.pay.employer.socialSecurity),
     employerMedicareCents: sum(w => w.pay.employer.medicare),
     futaCents: sum(w => w.pay.employer.futa),
-    gaSutaCents: sum(w => w.pay.employer.gaSuta)
+    gaSutaCents: sum(w => w.pay.employer.gaSuta),
+    // Every state but Georgia, kept by state for its own deposits and reports.
+    stateWithholdingCents: sum(w => w.pay.taxes.state),
+    stateSutaCents: sum(w => w.pay.employer.stateSuta),
+    byState: {}
   };
+  for (const w of paid) {
+    const st = w.pay.workState || w.workState || 'GA';
+    if (st === 'GA') continue;
+    const b = totals.byState[st] || (totals.byState[st] = { wagesCents: 0, withheldCents: 0, sutaCents: 0 });
+    b.wagesCents += w.pay.grossCents; b.withheldCents += w.pay.taxes.state || 0; b.sutaCents += w.pay.employer.stateSuta || 0;
+  }
   // Cash GFC needs: net pay out now, plus every tax it will deposit.
   totals.cashNeededCents = totals.netCents + totals.federalCents + totals.socialSecurityCents + totals.medicareCents
-    + totals.georgiaCents + totals.employerSocialSecurityCents + totals.employerMedicareCents + totals.futaCents + totals.gaSutaCents;
+    + totals.georgiaCents + totals.employerSocialSecurityCents + totals.employerMedicareCents + totals.futaCents + totals.gaSutaCents
+    + totals.stateWithholdingCents + totals.stateSutaCents;
   return totals;
 }
 
@@ -165,20 +177,24 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
     const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
     const missing = profiles.missingForPay(profile);
-    // The app withholds and files for Georgia only. A person who works in
-    // another state (Gusto's import records it) is blocked, never taxed as Georgian.
-    if (profile && profile.workState && profile.workState !== 'GA') missing.push(`Works in ${profile.workState}: the app runs Georgia payroll only. Pay them outside the app until ${profile.workState} is added.`);
+    // Georgia first; another state is paid only once its table is approved,
+    // and never taxed as Georgian.
+    const ws = (profile && profile.workState) || 'GA';
+    const stTable = ws === 'GA' ? tables.GA : (tables.states || {})[ws];
+    if (ws !== 'GA' && !stTable) missing.push(`Works in ${stateName(ws)}: approve a ${stateName(ws)} tax table under Tax Tables first`);
+    if (ws !== 'GA' && stTable && stTable.incomeTax && !(profile && profile.stateCert)) missing.push(`${stateName(ws)} withholding certificate`);
+    const stRate = ws === 'GA' ? settings.gaSutaRatePct : ((settings.states || {})[ws] || {}).sutaRatePct;
     if (missingRate) missing.push(`Pay rate for ${missingRate} item${missingRate === 1 ? '' : 's'}`);
     const w = {
       userId: uid, name: user.name || user.email || uid,
       workerType: profile ? profile.workerType : 'W2', wageAccount: profile ? profile.wageAccount : 'clinical',
       payMethod: profile && profile.payMethod ? profile.payMethod.method : null,
-      refs: items.map(i => i.ref), earnings: lines, missing
+      refs: items.map(i => i.ref), earnings: lines, missing, workState: ws
     };
-    if (profile && profile.w4 && profile.g4) {
+    if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
       w.pay = tax.paycheck({
         earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: profile.w4, g4: profile.g4,
-        tables, perYear, sutaRatePct: settings.gaSutaRatePct
+        tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: profile.stateCert
       });
     }
     workers.push(w);
@@ -189,7 +205,9 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     period, frequency: settings.frequency, perYear,
     workers, totals,
     blocked: workers.filter(w => w.missing.length).map(w => ({ userId: w.userId, name: w.name, missing: w.missing })),
-    sutaRateMissing: settings.gaSutaRatePct === null || settings.gaSutaRatePct === undefined
+    sutaRateMissing: workers.some(w => w.workState === 'GA') && (settings.gaSutaRatePct === null || settings.gaSutaRatePct === undefined),
+    // Another state where someone was paid and GFC's rate there is not set.
+    stateRatesMissing: [...new Set(workers.filter(w => w.pay && w.workState !== 'GA' && w.pay.employer.stateSuta === null).map(w => w.workState))]
   };
 }
 
@@ -201,7 +219,7 @@ function ytdFrom(runs, { year, beforePayDate }) {
     if (beforePayDate && r.period.payDate >= beforePayDate) continue;
     for (const w of r.workers || []) {
       if (!w.pay) continue;
-      const y = out.get(w.userId) || { grossCents: 0, netCents: 0, taxes: { federal: 0, socialSecurity: 0, medicare: 0, georgia: 0 }, earnings: {}, reimbursementsCents: 0 };
+      const y = out.get(w.userId) || { grossCents: 0, netCents: 0, taxes: { federal: 0, socialSecurity: 0, medicare: 0, georgia: 0, state: 0 }, earnings: {}, reimbursementsCents: 0 };
       y.grossCents += w.pay.grossCents; y.netCents += w.pay.netCents; y.reimbursementsCents += w.pay.reimbursementsCents || 0;
       for (const k of Object.keys(y.taxes)) y.taxes[k] += w.pay.taxes[k] || 0;
       for (const e of w.earnings || []) y.earnings[e.code] = (y.earnings[e.code] || 0) + e.amountCents;

@@ -200,8 +200,11 @@ function buildImport({ entries, users, profiles, refsFor, at, by }) {
       missing: [],
       pay: {
         grossCents: e.gross, taxes, taxCents, reimbursementsCents, netCents: e.net,
-        employer: { socialSecurity: e.erSocialSecurity, medicare: e.erMedicare, futa: e.futa, gaSuta: e.gaSuta + e.gaAdmin, gaAdmin: e.gaAdmin, txSuta: e.txSuta }
+        workState: e.workState || 'GA',
+        employer: { socialSecurity: e.erSocialSecurity, medicare: e.erMedicare, futa: e.futa, gaSuta: e.gaSuta + e.gaAdmin, gaAdmin: e.gaAdmin,
+          ...(e.workState && e.workState !== 'GA' ? { sutaState: e.workState, stateSuta: e.txSuta } : {}) }
       },
+      workState: e.workState || 'GA',
       imported: { from: 'Gusto', department: e.department, workState: e.workState, payment: e.payment, historical: /historical/i.test(e.payment || '') }
     });
     run.payments[uid] = { confirmation: `Gusto ${e.payment || ''}`.trim(), at };

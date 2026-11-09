@@ -1,4 +1,5 @@
 'use strict';
+const { STATE_NAMES } = require('./payrollTaxTables');
 // ============================================================================
 // payrollProfiles.js — one payroll record per person (spec v2 §2 items 7, 13).
 //
@@ -101,6 +102,19 @@ function normalizeG4(b, ctx) {
   if (sig.error) return sig;
   return { value: { filingStatus: b.filingStatus, dependentAllowances: dep, additionalAllowances: add, extraWithholdingCents: extra, exempt: b.exempt === true, ...sig.value } };
 }
+// The withholding certificate for a state other than Georgia, in the generic
+// shape that state's approved table reads (filing status and allowances).
+function normalizeStateCert(b, ctx, state) {
+  b = b || {};
+  if (!['single', 'married'].includes(b.filingStatus)) return { error: 'Choose single or married.', code: 'STATE_CERT_STATUS' };
+  const allowances = b.allowances === '' || b.allowances === undefined || b.allowances === null ? 0 : Number(b.allowances);
+  if (!(Number.isInteger(allowances) && allowances >= 0 && allowances < 100)) return { error: 'Allowances are a whole number.', code: 'STATE_CERT_ALLOWANCES' };
+  const extra = money(b.extraWithholding);
+  if (extra === null) return { error: 'Enter extra withholding as dollars.', code: 'STATE_CERT_AMOUNT' };
+  const sig = signature(b, ctx);
+  if (sig.error) return sig;
+  return { value: { state, filingStatus: b.filingStatus, allowances, extraWithholdingCents: extra, exempt: b.exempt === true, ...sig.value } };
+}
 function normalizeI9Section1(b, ctx) {
   b = b || {};
   if (!I9_STATUS[b.status]) return { error: 'Choose your citizenship or immigration status.', code: 'I9_STATUS' };
@@ -173,8 +187,9 @@ function normalizePaySetup(b) {
   }
   if (b.workState !== undefined) {
     // Georgia only today; another state needs its own tables before it can run.
-    if (String(b.workState).toUpperCase() !== 'GA') return { error: 'Payroll runs for Georgia only. Another state needs its withholding tables added first.', code: 'WORK_STATE' };
-    out.workState = 'GA';
+    const st = String(b.workState).toUpperCase();
+    if (!STATE_NAMES[st]) return { error: 'Choose the state they work in.', code: 'WORK_STATE' };
+    out.workState = st;
   }
   if (b.hireDate !== undefined) {
     if (b.hireDate && !isYmd(b.hireDate)) return { error: 'Hire date must be a date.', code: 'HIRE_DATE' };
@@ -231,7 +246,7 @@ function missingForPay(p, { asContractor = false } = {}) {
   }
   if (!p.ssn) out.push('SSN');
   if (!p.w4) out.push('W-4');
-  if (!p.g4) out.push('G-4');
+  if (!p.g4 && (p.workState || 'GA') === 'GA') out.push('G-4');
   if (!(p.i9 && p.i9.section1 && p.i9.section2)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
   if (p.payType === 'hourly' && !p.isCaregiver && !(p.hourlyRateCents > 0)) out.push('Hourly rate');
   if (p.payType === 'salary' && !(p.salaryAnnualCents > 0)) out.push('Salary');
@@ -240,12 +255,15 @@ function missingForPay(p, { asContractor = false } = {}) {
 }
 
 // The paperwork checklist the person sees on My Pay.
-function checklist(p) {
+function checklist(p, opts = {}) {
   const rows = [];
   const emp = isEmployee(p), con = isContractor(p);
   if (emp) {
     rows.push({ key: 'w4', label: 'Form W-4 (federal withholding)', done: !!p.w4 });
-    rows.push({ key: 'g4', label: 'Form G-4 (Georgia withholding)', done: !!p.g4 });
+    // Georgia's G-4 for a Georgia worker; another state's certificate only
+    // where that state taxes wages (Texas does not).
+    if ((p.workState || 'GA') === 'GA') rows.push({ key: 'g4', label: 'Form G-4 (Georgia withholding)', done: !!p.g4 });
+    else if (opts.stateIncomeTax) rows.push({ key: 'statecert', label: `${STATE_NAMES[p.workState] || p.workState} withholding certificate`, done: !!(p.stateCert && p.stateCert.state === p.workState) });
     rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && p.i9.section1), note: p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
     rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   }
@@ -263,7 +281,7 @@ function checklist(p) {
 
 // What a screen may see. Never a full number: the last four, and whether one
 // is on file. `full` is for the owner's audited reveal only.
-function publicProfile(p) {
+function publicProfile(p, opts = {}) {
   if (!p) return null;
   const { ssn, tin, payMethod, history, ...rest } = p;
   return {
@@ -274,13 +292,13 @@ function publicProfile(p) {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
       routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null
     } : null,
-    checklist: checklist(p)
+    checklist: checklist(p, opts)
   };
 }
 
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature,
-  normalizeW4, normalizeG4, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, isEmployee, isContractor, missingForPay, checklist, publicProfile
 };

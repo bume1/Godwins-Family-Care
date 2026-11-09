@@ -100,17 +100,34 @@ module.exports = function createPayrollRoutes(deps) {
     const pick = (j) => all.filter(t => t.jurisdiction === j && t.status === 'active' && Number(t.year) === Number(year))
       .sort((a, b) => String(b.approvedAt).localeCompare(String(a.approvedAt)))[0] || null;
     const fed = pick('federal'), ga = pick('GA');
-    return fed && ga ? { federal: fed.data, GA: ga.data, ids: [fed.id, ga.id] } : null;
+    if (!(fed && ga)) return null;
+    // Every other state approved for the year (Texas, then any later one).
+    const states = {}, ids = [fed.id, ga.id];
+    for (const j of [...new Set(all.filter(t => t.jurisdiction !== 'federal' && t.jurisdiction !== 'GA').map(t => t.jurisdiction))].sort()) {
+      const t = pick(j);
+      if (t) { states[j] = t.data; ids.push(t.id); }
+    }
+    return { federal: fed.data, GA: ga.data, states, ids };
   };
   const ctxFor = (req) => ({ at: nowIso(), ipHash: hashIp ? hashIp(req) : null });
 
   // ===================================================================================
   // EACH PERSON'S OWN: pay setup (My GFC → Hours & Pay)
   // ===================================================================================
+  // Whether this person's work state (not Georgia) taxes wages, from that
+  // state's approved table for this year. Unknown reads as false: no form is
+  // asked for until the state is set up.
+  const stateTaxesWages = async (p) => {
+    const st = (p && p.workState) || 'GA';
+    if (st === 'GA') return false;
+    const t = (await rows(TAX_TABLES)).filter(x => x.jurisdiction === st && x.status === 'active').sort((a, b) => Number(b.year) - Number(a.year))[0];
+    return !!(t && t.data && t.data.incomeTax);
+  };
   router.get('/api/my/pay-setup', authenticateToken, requireStaff, async (req, res) => {
     const p = await profileFor(req.user);
+    const stateIncomeTax = await stateTaxesWages(p);
     res.json({
-      profile: pp.publicProfile(p),
+      profile: pp.publicProfile(p, { stateIncomeTax }), workState: p.workState || 'GA', workStateName: tables.stateName(p.workState || 'GA'),
       employee: pp.isEmployee(p), contractor: pp.isContractor(p), caregiver: !!p.isCaregiver,
       secretsStorable: pc.configured(env),
       options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, i9Status: pp.I9_STATUS, w9Class: pp.W9_CLASS, workTypes: WORK_TYPES, units: CI_UNITS,
@@ -130,6 +147,12 @@ module.exports = function createPayrollRoutes(deps) {
       switch (req.params.form) {
         case 'w4': { const n = pp.normalizeW4(b, ctx); if (n.error) return res.status(400).json(n); p.w4 = n.value; change = 'W-4 signed'; break; }
         case 'g4': { const n = pp.normalizeG4(b, ctx); if (n.error) return res.status(400).json(n); p.g4 = n.value; change = 'G-4 signed'; break; }
+        case 'state-cert': {
+          const st = p.workState || 'GA';
+          if (st === 'GA') return res.status(409).json({ error: 'You work in Georgia: sign the G-4.', code: 'STATE_CERT_GEORGIA' });
+          const n = pp.normalizeStateCert(b, ctx, st); if (n.error) return res.status(400).json(n);
+          p.stateCert = n.value; change = `${tables.stateName(st)} withholding certificate signed`; break;
+        }
         case 'i9': { const n = pp.normalizeI9Section1(b, ctx); if (n.error) return res.status(400).json(n); p.i9 = { ...(p.i9 || {}), section1: n.value }; change = 'I-9 Section 1 signed'; break; }
         case 'ssn': {
           const bad = pp.checkSsn(b.ssn); if (bad) return res.status(400).json({ error: bad, code: 'SSN_INVALID' });
@@ -174,7 +197,7 @@ module.exports = function createPayrollRoutes(deps) {
         default: return res.status(404).json({ error: 'Unknown form.' });
       }
       const saved = await saveProfile(req.user.id, p, change, req.user);
-      res.json({ profile: pp.publicProfile(saved) });
+      res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved) }) });
     } catch (e) {
       if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
       console.error('Pay setup error:', e);
@@ -316,7 +339,8 @@ module.exports = function createPayrollRoutes(deps) {
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
-        workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS
+        workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS,
+        stateNames: tables.STATE_NAMES
       });
     } catch (e) { console.error('Payroll overview error:', e); res.status(500).json({ error: 'Server error' }); }
   });
@@ -332,6 +356,17 @@ module.exports = function createPayrollRoutes(deps) {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
       const curPeriod = tax.periodFor(today, cur);
       n.value.anchor = tax.addDays(curPeriod.end, 1);
+    }
+    if ((req.body || {}).states !== undefined) {
+      const next = { ...(cur.states || {}) };
+      for (const [st, v] of Object.entries(req.body.states || {})) {
+        if (st === 'GA' || !tables.STATE_NAMES[st]) return res.status(400).json({ error: `${st} is not a state code (Georgia's settings are above).`, code: 'STATE_SETTINGS' });
+        const rate = v.sutaRatePct === '' || v.sutaRatePct === null || v.sutaRatePct === undefined ? null : Number(v.sutaRatePct);
+        if (rate !== null && !(rate >= 0 && rate <= 15)) return res.status(400).json({ error: `${tables.stateName(st)} unemployment rate is a percent between 0 and 15.`, code: 'STATE_SUTA_RATE' });
+        if (v.withholdingFrequency && !['monthly', 'quarterly', 'semiweekly'].includes(v.withholdingFrequency)) return res.status(400).json({ error: 'Withholding is filed monthly, quarterly or semiweekly.', code: 'STATE_FREQUENCY' });
+        next[st] = { sutaRatePct: rate, accountNumber: str(v.accountNumber, 40) || null, withholdingId: str(v.withholdingId, 40) || null, withholdingFrequency: v.withholdingFrequency || null };
+      }
+      n.value.states = next;
     }
     if ((req.body || {}).yearEnd !== undefined) {
       const y = ye.normalizeYearEnd(req.body.yearEnd, cur.yearEnd);
@@ -784,7 +819,8 @@ module.exports = function createPayrollRoutes(deps) {
   router.get('/api/payroll/admin/quarter/:year/:q', authenticateToken, requireAdmin, async (req, res) => {
     const tbl = await activeTables(Number(req.params.year));
     if (!tbl) return res.status(409).json({ error: 'No approved tables for that year.', code: 'PAYROLL_NO_TABLES' });
-    const s = cal.quarterSummary(await rows(RUNS), { year: req.params.year, quarter: req.params.q, fed: tbl.federal, sutaWageBaseCents: tbl.GA.sutaWageBaseCents });
+    const s = cal.quarterSummary(await rows(RUNS), { year: req.params.year, quarter: req.params.q, fed: tbl.federal, sutaWageBaseCents: tbl.GA.sutaWageBaseCents,
+      stateWageBases: Object.fromEntries(Object.entries(tbl.states || {}).map(([k, d]) => [k, d.sutaWageBaseCents])) });
     await logActivity(req.user.id, req.user.name, 'quarter_summary_opened', 'payroll', null, { year: req.params.year, quarter: req.params.q });
     res.json(s);
   });
@@ -795,7 +831,7 @@ module.exports = function createPayrollRoutes(deps) {
     const settings = await readSettings();
     const runs = await rows(RUNS);
     const paid = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'paid').map(x => ({ userId: x.userId, name: x.name, amountCents: x.totalCents, paidAt: x.paidAt }));
-    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal });
+    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal, incomeTaxStates: Object.entries(tbl.states || {}).filter(([, d]) => d.incomeTax).map(([k]) => k) });
     const profiles = await readProfiles();
     const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
     const employer = employerFor(settings);
@@ -804,7 +840,9 @@ module.exports = function createPayrollRoutes(deps) {
       const missing = [];
       if (!p.taxAddress) missing.push('Legal name and mailing address');
       if (!p.ssn) missing.push('SSN');
-      return { userId: String(e.userId), name: e.name, boxes: e, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented), email: (users.get(String(e.userId)) || {}).email || null };
+      // Box 15: Georgia's withholding number, or that state's own.
+      const stateId = e.stateCode === 'GA' ? employer.gaWithholdingId : (((settings.states || {})[e.stateCode] || {}).withholdingId || null);
+      return { userId: String(e.userId), name: e.name, boxes: { ...e, stateId }, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented), email: (users.get(String(e.userId)) || {}).email || null };
     });
     const nec = figures.nec.map(e => {
       const p = profiles[String(e.userId)] || {};
