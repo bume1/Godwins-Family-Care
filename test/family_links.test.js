@@ -223,7 +223,8 @@ test('build guard: an Admin Hub page error shows a message, never a blank screen
   const hub = read('public/admin-hub.html');
   assert.match(hub, /class PageErrorBoundary extends React\.Component/);
   assert.match(hub, /<PageErrorBoundary resetKey=\{activePage\}>\{renderPage\(\)\}<\/PageErrorBoundary>/, 'every page is wrapped');
-  assert.match(hub, /<PageErrorBoundary quiet>\s*<PossiblePoaLogins/, 'the suggestion panel cannot take User Management down');
+  // The POA-login suggestions moved to the Clients page with the client accounts.
+  assert.match(read('public/admin-enrollment.html'), /\{superAdmin && <CA\.PossiblePoaLogins /);
 });
 
 test('a POA signs in their own name: "<POA> as POA for <patient>"', () => {

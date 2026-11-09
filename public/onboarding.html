@@ -171,13 +171,13 @@ const STATUS = {
   NOT_APPLICABLE: { label: 'Not Applicable', sw: '#C9CED1', icon: 'ti-minus' }
 };
 const ACTION_WORD = { SUBMIT: 'Sends', SIGN: 'Signs', ACKNOWLEDGE: 'Acknowledges', COMPLETE: 'Completes', VERIFY: 'Verifies',
-  RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off' };
+  RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off', REVIEW: 'Reviews' };
 const done = (s) => s === 'COMPLETE' || s === 'NOT_APPLICABLE';
 // Who does a step, in one wording for the side panel and the list alike.
 const stepWho = (s, subjectName, viewerIsSubject) => (s.hers ? (viewerIsSubject ? 'You' : (subjectName || 'New hire')) : s.actorLabel);
 // "You sends" reads wrong: the second person takes the bare verb.
 const YOU_WORD = { SUBMIT: 'send', SIGN: 'sign', ACKNOWLEDGE: 'acknowledge', COMPLETE: 'complete', VERIFY: 'verify',
-  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off' };
+  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off', REVIEW: 'review' };
 const stepVerb = (s, viewerIsSubject) => (s.hers && viewerIsSubject ? YOU_WORD[s.action] : ACTION_WORD[s.action].toLowerCase());
 
 const Pill = ({ status }) => <span className={`pill p-${status}`}>{STATUS[status] ? STATUS[status].label : status}</span>;
@@ -456,7 +456,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                     </div>
                   )}
                   {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && (
-                    <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
+                    <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.action === 'REVIEW' ? 'Mark Reviewed' : s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
                   )}
                   {canAct(s) && s.action === 'SUBMIT' && (
                     <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -479,6 +479,14 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
 
+        {item.custom && item.askForFile && !done(item.status) && (office || viewerIsSubject) && (
+          <div style={{ margin: '6px 0 10px' }}>
+            <label className="btn sm gold" style={{ cursor: 'pointer' }}>
+              <i className="ti ti-upload" />{office ? 'Attach a File For Her' : 'Attach a File'}
+              <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+            </label>
+          </div>
+        )}
         {item.link && !(item.id === 'WELCOME' && office) && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
@@ -492,7 +500,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         )}
 
         {item.elements && item.elements.length > 0 && (
-          <div><label className="f">What is checked</label>
+          <div><label className="f">{item.custom ? 'Details' : 'What is checked'}</label>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.elements.map(e => <li key={e.row}>{e.row}</li>)}</ul></div>
         )}
 
@@ -532,6 +540,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
         </>}
+        {office && item.custom && (
+          <div style={{ marginTop: 16 }}>
+            <label className="f">Added by GFC</label>
+            <button className="btn sm warn" disabled={busy} onClick={() => {
+              const everyone = !(item.scope && item.scope.userId);
+              if (!window.confirm(everyone ? 'Remove this task from everyone it was added to? It comes off every checklist.' : 'Remove this task from her checklist?')) return;
+              run(() => call(`/api/onboarding/admin/custom-tasks/${encodeURIComponent(item.id)}`, { method: 'DELETE' }).then(onClose), 'Task removed.');
+            }}>Remove Task</button>
+          </div>
+        )}
         {item.sourceUrl && <div style={{ marginTop: 14, fontSize: 12.5 }}><a href={item.sourceUrl} target="_blank" rel="noopener">Source: Onboarding Playbook</a></div>}
       </div>
     </>
@@ -635,9 +653,76 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
 };
 
 // ---- OFFICE: one person ----------------------------------------------------
+// ---- tasks the office adds (owner, 2026-11-09) ----------------------------------
+// One person, or everyone onboarding under a chapter, now and later. She marks
+// it done; if the office ticks "reviews it", it is complete once reviewed.
+const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
+  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', review: false, askForFile: false });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
+  const chapterLabel = (id) => ((chapters || []).find(c => c[0] === id) || [id, id])[1];
+  const save = async () => {
+    setBusy(true); setErr('');
+    try {
+      await call('/api/onboarding/admin/custom-tasks', { method: 'POST', body: { title: f.title, details: f.details, review: f.review, askForFile: f.askForFile,
+        scope: f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter } } });
+      await onAdded();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="line-card" style={{ marginBottom: 12 }}>
+      <label className="f">Task name</label>
+      <input value={f.title} maxLength={200} onChange={e => set('title', e.target.value)} placeholder="e.g. Shadow Bethel on two home visits" />
+      <label className="f">Details (optional)</label>
+      <textarea rows={2} value={f.details} onChange={e => set('details', e.target.value)} placeholder="What to do, and anything that helps" />
+      <label className="f">Who gets it</label>
+      {person && <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={f.who === 'person'} onChange={() => set('who', 'person')} /> Only {person.name}</label>}
+      <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={f.who === 'chapter'} onChange={() => set('who', 'chapter')} /> Everyone onboarding as{person ? ` ${chapterLabel(person.chapter)}` : ':'}, now and later</label>
+      {f.who === 'chapter' && !person && (
+        <select value={f.chapter} onChange={e => set('chapter', e.target.value)} style={{ marginTop: 6 }}>
+          <option value="">Choose a type</option>
+          {(chapters || []).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      )}
+      <label style={{ display: 'block', fontSize: 14, marginTop: 10 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.review} onChange={e => set('review', e.target.checked)} /> Office reviews it after it is marked done</label>
+      <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.askForFile} onChange={e => set('askForFile', e.target.checked)} /> Ask them to attach a file</label>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button className="btn sm" disabled={busy || !f.title.trim() || (f.who === 'chapter' && !f.chapter)} onClick={save}>{busy ? 'Adding…' : 'Add Task'}</button>
+        <button className="btn sm ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
+const CustomTaskList = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [adding, setAdding] = useState(false);
+  const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/custom-tasks')); setErr(''); } catch (e) { setErr(e.message); } }, []);
+  useEffect(() => { load(); }, [load]);
+  const remove = async (t) => {
+    if (!window.confirm(`Remove "${t.title}"? It comes off every checklist it was added to.`)) return;
+    try { await call(`/api/onboarding/admin/custom-tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); await load(); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card">
+      <div className="card-h"><h2>Tasks Added by GFC</h2>{!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
+      {err && <div className="err">{err}</div>}
+      {adding && <AddTaskForm chapters={CHAPTER_CHOICES} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
+      {d && d.tasks.length === 0 && !adding && <div className="note">No tasks added yet. Add one here for everyone of a type, or from a person's checklist for just them.</div>}
+      {d && d.tasks.map(t => (
+        <div key={t.id} className="item" style={{ cursor: 'default' }}>
+          <div className="t"><b>{t.title}</b><div className="meta">{t.scopeLabel}{t.review ? ' · Office reviews' : ''}{t.askForFile ? ' · File requested' : ''} · Added by {t.createdByName}</div></div>
+          <button className="btn sm ghost" onClick={() => remove(t)}>Remove</button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const Person = ({ userId, onBack }) => {
   const [data, setData] = useState(null); const [err, setErr] = useState('');
   const [phase, setPhase] = useState(null); const [openItem, setOpenItem] = useState(null); const [tab, setTab] = useState('checklist');
+  const [adding, setAdding] = useState(false);
   const base = { office: true, userId };
   const personPath = `/api/onboarding/admin/people/${userId}`;
   const load = useCallback(async () => {
@@ -685,7 +770,10 @@ const Person = ({ userId, onBack }) => {
             ))}
           </div>
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
-            {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}</div>
+            {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}
+            {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
+          {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES}
+            onAdded={async () => { setAdding(false); await load(); setPhase('GFC'); }} onCancel={() => setAdding(false)} />}
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
@@ -730,7 +818,7 @@ const Person = ({ userId, onBack }) => {
       {tab === 'activity' && (
         <div className="card"><div className="card-h"><h2>Activity</h2></div>
           {data.events.length === 0 && <div className="note">Nothing recorded yet.</div>}
-          {data.events.map(e => <div key={e.id} style={{ fontSize: 14, padding: '6px 0', borderBottom: '1px solid #F1ECE1' }}>{fmtDate(e.at)} · {e.byName || 'Someone'} · {({ step: 'recorded a step', file: 'uploaded a file', acknowledgment: 'recorded an acknowledgment', returned: 'returned a submission', not_applicable: 'marked an item not applicable', module_complete: 'completed a module', module_signoff: 'signed off a module', determination: 'opened a service line', inputs: 'changed her setup', expiry_set: 'recorded an expiration date', renewal_started: 'started a renewal', recurring_done: 'recorded a recurring duty', recheck: 'recorded a refresher' })[e.type] || e.type}{e.onBehalf ? ' (on her behalf)' : ''}</div>)}
+          {data.events.map(e => <div key={e.id} style={{ fontSize: 14, padding: '6px 0', borderBottom: '1px solid #F1ECE1' }}>{fmtDate(e.at)} · {e.byName || 'Someone'} · {({ step: 'recorded a step', file: 'uploaded a file', acknowledgment: 'recorded an acknowledgment', returned: 'returned a submission', not_applicable: 'marked an item not applicable', module_complete: 'completed a module', module_signoff: 'signed off a module', determination: 'opened a service line', inputs: 'changed her setup', expiry_set: 'recorded an expiration date', renewal_started: 'started a renewal', recurring_done: 'recorded a recurring duty', recheck: 'recorded a refresher', custom_task_added: 'added a task', custom_task_removed: 'removed a task' })[e.type] || e.type}{e.onBehalf ? ' (on her behalf)' : ''}</div>)}
         </div>
       )}
       {tab === 'setup' && <Setup userId={userId} inputs={t.inputs} onSaved={load} />}
@@ -771,6 +859,7 @@ const Setup = ({ userId, inputs, onSaved }) => {
         </select>
         <label className="f">Their situation</label>
         {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+        {f.fortyHourReason && <div className="note"><b>Forty-hour PCA program:</b> {f.fortyHourReason}</div>}
         {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
       </> : f.chapter === 'H' ? <>
         <label className="f">The placement</label>
@@ -845,6 +934,7 @@ const Overview = ({ onOpen }) => {
           {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track', H: 'Student track', R1: 'Supervising physician track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
+      <CustomTaskList />
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>
     </div>
   );
@@ -908,7 +998,7 @@ const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
     <div className="tasks">
       {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
       {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
-      {(item.elements || []).length > 0 && <><H>What is checked</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
+      {(item.elements || []).length > 0 && <><H>{item.custom ? 'Details' : 'What is checked'}</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
       {item.courses && <div><Tick on={item.courses.hoursDone >= item.courses.totalHours} /> {item.courses.hoursDone} of {item.courses.totalHours} hours of courses</div>}
       {files.length > 0 && <><H>On file</H>{files.map(f => <div key={f.id}><i className="ti ti-file-text" /> {f.name}{f.status === 'received' ? ' (with the office for review)' : ''}</div>)}</>}
     </div>

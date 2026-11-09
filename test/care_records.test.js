@@ -155,8 +155,10 @@ test('the Incident Log is on the hub for the Super Admin, managers and coordinat
 });
 
 test('Enrollment is renamed Clients & Patients everywhere a person reads it; the address stays', () => {
-  const link = at.hubTilesFor(at.fieldsFor('admin')).find(l => l.id === 'enrollment');
-  assert.deepStrictEqual([link.name, link.path], ['Clients & Patients', '/admin/enrollment']);
+  // One standalone Clients area (owner, 2026-11-09): the tile is the page at
+  // /clients; /admin/enrollment still answers, redirecting there.
+  const link = at.hubTilesFor(at.fieldsFor('admin')).find(l => l.id === 'clients');
+  assert.deepStrictEqual([link.name, link.path], ['Clients & Patients', '/clients']);
   const page = read('public/admin-enrollment.html');
   assert.match(page, /<title>Godwins Family Care — Clients & Patients<\/title>/);
   assert.ok(!/Enrollment Submissions|Enrollment submissions/.test(page), 'no heading still says Enrollment Submissions');
@@ -170,7 +172,7 @@ test('Enrollment is renamed Clients & Patients everywhere a person reads it; the
 
 test('the client record shows its Care History from the route that owns it', () => {
   const code = strip(read('public/admin-enrollment.html'));
-  assert.match(code, /<Section title="Care History">\s*<CareHistory clientId=\{clientId\} \/>/);
+  assert.match(code, /<Section id="cl-history" title="Care History">\s*<CareHistory clientId=\{clientId\} \/>/);
   assert.match(code, /`\/api\/caregiver\/clients\/\$\{encodeURIComponent\(clientId\)\}\/care-history`/);
   assert.match(code, /e\.status === 403 \? 'Care history is for the office and clinical staff\.'/, 'a refusal is a sentence, not an empty history');
   for (const c of ['ChBlock', 'ChVisitLog', 'ChConcern', 'CareHistory']) {

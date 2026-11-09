@@ -31072,7 +31072,9 @@ app.post('/api/admin/bulk-password-reset', authenticateToken, requireAdmin, asyn
       if (userType === 'clients' && user.role !== config.ROLES.CLIENT) {
         continue;
       }
-      if (userType === 'users' && user.role === config.ROLES.CLIENT) {
+      // 'users' is staff: never a client, and never a family contact (owner,
+      // 2026-11-09: clients and family are reset from the Clients area).
+      if (userType === 'users' && (user.role === config.ROLES.CLIENT || user.role === 'family')) {
         continue;
       }
       if (userType === 'specific' && (!specificUserIds || !specificUserIds.includes(user.id))) {
@@ -31828,10 +31830,16 @@ app.get('/admin', (req, res) => {
   res.sendFile(__dirname + '/public/admin-hub.html');
 });
 
-// Staff enrollment-submissions view (Session 3.3, Scope A). Page is served to
-// any logged-in staff; the API routes it calls enforce role access.
-app.get('/admin/enrollment', (req, res) => {
+// THE CLIENTS AREA (owner, 2026-11-09): the enrollment view became the one
+// standalone Clients page (account, care team, family, enrollment). The page
+// is served to any logged-in staff; the API routes it calls enforce access.
+app.get('/clients', (req, res) => {
   res.sendFile(__dirname + '/public/admin-enrollment.html');
+});
+// The old address still works and keeps its ?client= deep link.
+app.get('/admin/enrollment', (req, res) => {
+  const q = req.originalUrl.indexOf('?');
+  res.redirect(302, '/clients' + (q === -1 ? '' : req.originalUrl.slice(q)));
 });
 
 // Clinician workspace (Session 4.1). Page shell is public; every
