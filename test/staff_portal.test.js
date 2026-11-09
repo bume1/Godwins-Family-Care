@@ -290,7 +290,7 @@ test('a community care liaison lands in My GFC and sees only the enrollment summ
   assert.strictEqual(f.role, 'liaison');
   assert.strictEqual(f.hasClinicalAccess, false);
   assert.strictEqual(at.landingFor(f), '/my');
-  assert.deepStrictEqual(at.hubTilesFor(f), [], 'no hub, no clinical workspace');
+  assert.deepStrictEqual(at.hubTilesFor(f).map(x => x.id), ['myGfc'], 'the hub offers only My GFC, never the clinical workspace');
   assert.ok(require('../config').MFA_REQUIRED_ROLES.includes('liaison'), 'two-step sign-in: they read client names');
   const h = await mount(t);
   h.as(LIAISON);

@@ -1002,6 +1002,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>
           {mineTrack && <button className={view === 'mine' ? 'on' : ''} onClick={() => setView('mine')}><i className="ti ti-user" />My Onboarding</button>}
+          <button onClick={() => { window.location.href = '/login?hub=1'; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           <button onClick={() => { window.location.href = '/admin'; }}><i className="ti ti-arrow-left" />Admin Hub</button>
         </nav>
       </aside>

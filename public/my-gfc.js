@@ -50,6 +50,8 @@ const { useState, useEffect, useCallback } = React;
 .mg-btn{width:auto;margin:0;border-radius:12px;padding:10px 16px;font-family:inherit;font-size:14.5px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;display:inline-flex;gap:7px;align-items:center;justify-content:center;text-decoration:none;box-shadow:0 6px 16px -8px rgba(3,61,80,.6);line-height:1.3}
 .mg-btn.mg-ghost{background:#fff;color:var(--navy);border:1.5px solid var(--edge2);box-shadow:none}
 .mg-btn.mg-warn{background:#fff;color:var(--red);border:1.5px solid rgba(181,70,46,.4);box-shadow:none}
+a.mg-btn,a.mg-btn:link,a.mg-btn:visited,a.mg-btn:hover{color:#fff;text-decoration:none}
+a.mg-btn.mg-ghost,a.mg-btn.mg-ghost:link,a.mg-btn.mg-ghost:visited,a.mg-btn.mg-ghost:hover{color:var(--navy)}
 .mg-btn.mg-sm{padding:7px 12px;font-size:13.5px;border-radius:10px} .mg-btn[disabled]{opacity:.5;cursor:not-allowed}
 .mg-pill{display:inline-flex;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600;white-space:nowrap;background:var(--wash);color:var(--navy)}
 .mg-pill.mg-ok{background:#e7f4ee;color:var(--green)} .mg-pill.mg-bad{background:#fdecea;color:var(--red)} .mg-pill.mg-wait{background:#FBF1DC;color:#6b5121}
@@ -221,7 +223,7 @@ function Documents({ docs, onError }) {
 // ---- Policies (live) --------------------------------------------------------------
 // Always the canonical copy in Drive, which the office updates in place. The
 // preview is Drive's own viewer, so it shows whatever version is current.
-function Policies({ policies }) {
+function Policies({ policies, isAdmin }) {
   const [open, setOpen] = useState(null);
   if (!policies) return <p className="mg-note">Loading…</p>;
   return (
@@ -244,7 +246,7 @@ function Policies({ policies }) {
           )}
         </div>
       ))}
-      <p className="mg-note" style={{ marginTop: 12 }}>These always open the current version in Google Drive. Sign in with your GFC Google account if Drive asks. Copies you signed are in My Documents.</p>
+      {isAdmin && <p className="mg-note" style={{ marginTop: 12 }}>These always open the current version in Google Drive. Sign in with your GFC Google account if Drive asks. Copies you signed are in My Documents.</p>}
     </div>
   );
 }
@@ -478,23 +480,6 @@ function BioEditor() {
   );
 }
 
-function TeamBios() {
-  const [team, setTeam] = useState(null); const [err, setErr] = useState('');
-  useEffect(() => { call('/api/my/admin/bios').then(d => setTeam(d.team)).catch(e => setErr(e.message)); }, []);
-  if (err) return <div className="mg-err">{err}</div>;
-  if (!team) return <p className="mg-note">Loading…</p>;
-  return team.map(p => (
-    <div className="mg-row" key={p.id} style={{ alignItems: 'flex-start' }}>
-      <AuthImage path={p.hasHeadshot ? `/api/my/admin/bios/${p.id}/headshot` : ''} version={p.updatedAt} alt={p.name} size={56} />
-      <div className="mg-grow">
-        <b>{p.name}</b>
-        <small>{p.title || p.typeLabel}</small>
-        <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginTop: 4, color: p.bio ? 'var(--ink)' : 'var(--mut)' }}>{p.bio || 'No bio yet.'}</div>
-      </div>
-      {p.hasHeadshot && <button className="mg-btn mg-ghost mg-sm" onClick={() => openFile(`/api/my/admin/bios/${p.id}/headshot`, `${p.name}.jpg`).catch(() => {})}>Download Photo</button>}
-    </div>
-  ));
-}
 
 
 // ---- The W-2 time clock -------------------------------------------------------
@@ -564,6 +549,9 @@ function LiaisonClients() {
 // look. A white sidebar on a computer, a white menu along the bottom of a
 // phone. `sections` fill the sidebar; `phoneTabs` fill the phone menu, which
 // only fits about five.
+// Back to the Portal Hub to reach other areas (owner, 2026-11-09). The query
+// keeps the hub from sending them straight back to their landing page.
+const PORTAL_HUB = '/login?hub=1';
 function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra }) {
   const isHome = view === 'home';
   return (
@@ -576,6 +564,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
             {sections.map(s => (
               <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
             ))}
+            <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           </nav>
           <div className="mg-foot">
             <b>{name}</b>{typeLabel}
@@ -613,8 +602,9 @@ const STAFF_SECTIONS = [
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders', short: 'Folders', subtitle: 'The Drive folders set up for your role.' },
   { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your time clock, hours and pay stubs.' },
-  { id: 'account', label: 'Account', icon: 'ti-user-circle', subtitle: 'Your headshot, website bio and sign-in.' },
-  { id: 'team', label: 'Team Bios', icon: 'ti-users', adminTeam: true, subtitle: 'Headshots and bios for the website. Each person keeps their own up to date.' }
+  // Headshots and bios are read by the admin team on each person's User
+  // Management form, not on a page here (owner, 2026-11-09).
+  { id: 'account', label: 'My Profile', icon: 'ti-user-circle', short: 'Profile', subtitle: 'Your headshot, website bio and sign-in.' }
 ];
 const staffSectionsFor = (profile) => STAFF_SECTIONS.filter(s => !s.adminTeam || (profile && profile.isAdmin));
 
@@ -659,7 +649,7 @@ function StaffTiles({ data, go, only, extra }) {
     { id: 'policies', el: <Tile key="policies" icon="ti-book" title="Policies" sub={policies && policies.some(p => p.signed && !p.signed.current) ? 'A policy was updated' : 'The current version of each policy'} onClick={() => go('policies')} /> },
     { id: 'folders', el: <Tile key="folders" icon="ti-folders" title="Shared Folders" sub={folders ? `${folders.length} assigned to you` : 'Drive folders for your role'} onClick={() => go('folders')} /> },
     { id: 'hours', el: <Tile key="hours" icon="ti-clock" title="Hours & Pay" sub={stubs && stubs.length ? `Last paid ${fmtDay(stubs[0].payDate)}` : 'Pay stubs'} onClick={() => go('hours')} /> },
-    { id: 'account', el: <Tile key="account" icon="ti-user-circle" title="Account" sub="Headshot, bio and sign-in" onClick={() => go('account')} /> }
+    { id: 'account', el: <Tile key="account" icon="ti-user-circle" title="My Profile" sub="Headshot, bio and sign-in" onClick={() => go('account')} /> }
   ];
   return <div className="mg-tiles">{extra}{all.filter(t => !only || only.includes(t.id)).map(t => t.el)}</div>;
 }
@@ -676,7 +666,7 @@ function StaffView({ view, data }) {
       </div>
     );
   }
-  if (view === 'policies') return <Section><Policies policies={policies} /></Section>;
+  if (view === 'policies') return <Section><Policies policies={policies} isAdmin={!!profile.isAdmin} /></Section>;
   if (view === 'folders') {
     return (
       <div>
@@ -701,14 +691,14 @@ function StaffView({ view, data }) {
     return (
       <div>
         <Section title="Headshot and Bio" sub="Used for your profile on the GFC website."><BioEditor /></Section>
-        <Section title="Sign-in and Security">
-          <p style={{ marginTop: 0 }}>Change your password, set up two-step sign-in and see the devices you're signed in on.</p>
-          <a className="mg-btn" href="/account"><i className="ti ti-shield-lock" />Account & Security</a>
+        {/* The one account area (owner, 2026-11-09): the same cards /account
+            shows clients and family, from /account-cards.js. */}
+        <Section title="Sign-in and Security" sub="Your password, two-step sign-in, backup codes and the devices you're signed in on.">
+          {window.GFCAccount ? <window.GFCAccount.AccountCards /> : <p className="mg-note">Loading…</p>}
         </Section>
       </div>
     );
   }
-  if (view === 'team' && profile.isAdmin) return <Section><TeamBios /></Section>;
   return null;
 }
 

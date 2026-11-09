@@ -672,6 +672,9 @@
       // `landing`, so it falls back to the same rule.
       const directDestination = (u) => {
         if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
+        // The sidebar's "Portal Hub" button (owner, 2026-11-09) comes here on
+        // purpose, so it stays on the hub rather than bouncing straight back.
+        if (new URLSearchParams(window.location.search).get('hub') === '1') return null;
         if (Object.prototype.hasOwnProperty.call(u, 'landing')) return u.landing || null;
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
         if (u.isManager) return null; // manager and care coordinator → the hub

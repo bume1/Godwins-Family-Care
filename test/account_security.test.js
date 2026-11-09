@@ -29,6 +29,10 @@ const root = path.join(__dirname, '..');
 const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
 const server = read('server.js');
 const page = read('public/account.html');
+// The account area is ONE component (owner, 2026-11-09), rendered in My GFC
+// → My Profile for staff and on /account for clients and family. The cards
+// live in public/account-cards.js; this suite reads them there.
+const cards = read('public/account-cards.js');
 
 const babel = (src) => {
   const blocks = [...src.matchAll(/<script type="text\/babel"[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]);
@@ -39,13 +43,13 @@ const babel = (src) => {
 // prose about that code proves nothing, and this repo has paid for it five
 // times.
 const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\\])\/\/[^\n]*/g, '$1');
-const js = strip(babel(page));
+const js = strip(cards) + '\n' + strip(babel(page));
 // `strip`'s block-comment regex is fooled by a `/*` inside a string or a
 // regex literal and will swallow everything to the next `*/`. It is safe on
 // this page's script and NOT safe on a large file — proven: run it over
 // server.js and `emailReminders` disappears. So the page block asserts it
 // survived, rather than letting a scan pass on a gutted string.
-assert.ok(js.includes('const deviceOf') && js.includes('EmailCard') && js.includes('ReactDOM'),
+assert.ok(js.includes('const deviceOf') && js.includes('EmailCard') && js.includes('ReactDOM') && js.includes('window.GFCAccount = {'),
   'stripping comments ate part of the page script — every scan below would be vacuous');
 
 // ---- 1. it exists, and people can get to it ---------------------------------
@@ -62,14 +66,16 @@ test('every signed-in surface links to it, because every role has an account', (
   // Match the LINK, not the bare path: my own comments on those pages say
   // "/account", so a scan for the path survived deleting every link — the
   // comment-as-code trap, pointed at my own test for the third time.
+  // Staff reach it in My GFC → My Profile (owner, 2026-11-09: one account
+  // area); clients and family on /account.
   const links = {
-    'public/admin-hub.html': /<a href="\/account"/,
-    'public/clinical.html': /<a className="btn ghost" href="\/account">/,
+    'public/admin-hub.html': /<a href="\/my#account"/,
+    'public/clinical.html': /<a className="btn ghost" href="\/my#account">/,
     'public/portal.html': /window\.location\.href = '\/account'/,
-    // The caregiver app is a caregiver's My GFC (owner, 2026-11-08): it loads
-    // the shared My GFC sections, whose Account section links the page.
-    'public/caregiver.html': /<script type="text\/babel" src="\/my-gfc\.js"><\/script>/,
-    'public/my-gfc.js': /<a className="mg-btn" href="\/account">/
+    'public/caregiver.html': /<script type="text\/babel" src="\/account-cards\.js"><\/script>/,
+    'public/my.html': /<script type="text\/babel" src="\/account-cards\.js"><\/script>/,
+    'public/my-gfc.js': /<window\.GFCAccount\.AccountCards \/>/,
+    'public/account.html': /<window\.GFCAccount\.AccountCards \/>/
   };
   for (const [f, re] of Object.entries(links)) {
     assert.match(read(f), re, `${f} has no way to reach the account page`);
@@ -80,7 +86,7 @@ test('the page reads who it is from the server, never from localStorage', () => 
   // A stored user object that has gone stale is indistinguishable from a good
   // one until somebody acts on the wrong account (PR #113's `Bearer null`).
   assert.match(js, /call\('\/api\/auth\/mfa\/status'\)/, 'the page does not ask the server who it is');
-  const reads = [...js.matchAll(/localStorage\.getItem\('([^']+)'\)/g)].map(m => m[1]);
+  const reads = [...new Set([...js.matchAll(/localStorage\.getItem\('([^']+)'\)/g)].map(m => m[1]))];
   assert.deepEqual(reads.sort(), ['admin_token', 'portal_token', 'unified_token'],
     `the page reads ${reads.join(', ')} from localStorage — it may read tokens and nothing else`);
   assert.doesNotMatch(js, /localStorage\.getItem\('[a-z_]*user'\)/,
@@ -204,7 +210,7 @@ test('the email card states what is true and offers no switch it cannot honour',
   const gate = server.slice(server.indexOf('// Whether a recipient may be emailed at all'));
   assert.match(gate.slice(0, 1400), /user\.emailUnsubscribed/,
     'the email gate no longer reads emailUnsubscribed — the page reports it as the live setting');
-  const card = js.slice(js.indexOf('const EmailCard'), js.indexOf('const App ='));
+  const card = js.slice(js.indexOf('const EmailCard'), js.indexOf('function AccountCards'));
   // The STATE, not merely a mention: the trailing paragraph also reads
   // `account.emailUnsubscribed`, so a bare match survived deleting the chip
   // that shows it. Assert the thing a person actually sees.
@@ -241,4 +247,11 @@ test('a device name is read from the user agent, and labelled as a guess', () =>
   assert.match(deviceOf('Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/120.0 Safari/537.36 Edg/120.0'), /Edge on Windows/);
   assert.match(js, /treat it as a hint rather than proof/,
     'the page presents a guessed device name as fact');
+});
+
+test('one account area: a staff member opening /account is sent to My GFC → My Profile', () => {
+  assert.match(page, /fetch\('\/api\/my\/profile'[\s\S]{0,200}window\.location\.replace\('\/my#account'\)/);
+  assert.match(page, /<script type="text\/babel" src="\/account-cards\.js"><\/script>/);
+  // The cards are written once: no second copy in the page.
+  assert.doesNotMatch(strip(babel(page)), /const PasswordCard|const MfaCard/);
 });
