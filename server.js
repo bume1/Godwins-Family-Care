@@ -24845,7 +24845,18 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
 
     const { override, overrideReason } = req.body || {};
     const comp = computeEnrollmentCompletion(client);
-    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length;
+    // A clinical client also needs the pre-visit half of the clinical
+    // enrollment checklist (owner, 2026-11-09): payer, records release, NPA
+    // and the clinical consents. The H&P and care plan are not asked for here;
+    // they need a visit, which needs enrollment. Activate still checks all six.
+    let missingClinicalSteps = [];
+    if (isClinicalServiceLine(client.serviceLine)) {
+      const roiEvents = await roiStore.listConsentEventsByClient(client.id);
+      missingClinicalSteps = clinicalRepo.missingPreApprovalSteps(clinicalRepo.deriveClinicalChecklist({
+        client, manualState: (client.clinicalEnrollment || {}).steps, roiEvents, isConsentSatisfied
+      }));
+    }
+    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length || missingClinicalSteps.length;
 
     if (incomplete && !override) {
       return res.status(409).json({
@@ -24853,6 +24864,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
         code: 'ENROLLMENT_INCOMPLETE',
         missingConsents: comp.missingConsentLabels,
         missingFields: comp.missingFieldLabels,
+        missingClinicalSteps,
         // Named so the UI can offer the override rather than leaving an admin
         // to discover it exists by reading the API.
         overridable: true
@@ -24881,7 +24893,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
       override: overrode ? {
         reason: String(overrideReason).trim().slice(0, 1000),
         missingConsents: comp.missingConsentLabels,
-        missingFields: comp.missingFieldLabels
+        missingFields: comp.missingFieldLabels,
+        missingClinicalSteps
       } : null
     };
     users[idx] = client;
@@ -24889,7 +24902,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id,
       overrode ? { override: true, reason: client.enrollmentApproval.override.reason,
-                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
+                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels,
+                   missingClinicalSteps } : {});
     // The client was never told they were approved. That was the one event
     // that says "you are done" and it was silent.
     await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
