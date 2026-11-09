@@ -138,7 +138,7 @@ const ITEMS = Object.freeze([
     packet: ['id_document', 'license_insurance'],
     steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
     classifications: [], classificationNote: NO_A2_ROW },
-  { id: 'A.6.06', phase: 'A.6', title: 'Qualifying route', ref: P('A.6'),
+  { id: 'A.6.06', phase: 'A.6', title: 'Credentials', ref: P('A.6'),
     packet: ['certification', 'cpr_first_aid'],
     elements: [
       { row: 'Companion or sitter: able to read, write and follow instructions; competency in client needs, meals, transportation, housekeeping, home safety, emergencies and infection control', when: { caregiverClass: 'COMPANION' } },

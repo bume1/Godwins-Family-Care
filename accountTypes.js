@@ -245,6 +245,15 @@ function hubTilesFor(u) {
   } else if (type === TYPES.MANAGER) {
     if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
     tiles.push(phc, enrollment, billingTile, messages, people);
+  } else if (CLINICIAN_TYPES.includes(type)) {
+    // Owner, 2026-11-09: every staff member can step back to the hub from
+    // their sidebar, so the hub lists what each of them can open.
+    tiles.push(MY_GFC, clinical);
+  } else if (type === TYPES.CAREGIVER && u.licenseLevel) {
+    // A caregiver's My GFC is the caregiver app.
+    tiles.push(Object.assign({}, MY_GFC, { path: '/caregiver' }));
+  } else if (type === TYPES.LIAISON) {
+    tiles.push(MY_GFC);
   }
   return tiles;
 }

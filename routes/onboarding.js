@@ -34,6 +34,8 @@ const defaultChapterFor = (u) => {
   if (t === 'caregiver') return 'A';
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
+  // A physician (MD or DO) is the delegating physician: Reference R1, Georgia.
+  if (t === 'provider' && u && ['MD', 'DO'].includes(u.prescriberCredential)) return 'R1';
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
   // Employed AND contracted: the full W-2 chapter plus the exam contract (E).
   if (t === 'provider' && u && u.employmentType === 'HYBRID') return 'E';
@@ -46,7 +48,9 @@ const CHAPTER_CHOICES = Object.freeze([
   { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
   { id: 'E', label: 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)' },
   { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination)' },
-  { id: 'G', label: 'Community Care Liaison (remote business development)' }
+  { id: 'G', label: 'Community Care Liaison (remote business development)' },
+  { id: 'H', label: 'Student or extern on an educational placement (unpaid)' },
+  { id: 'R1', label: 'Supervising (delegating) physician, Georgia' }
 ]);
 const C = require('../onboarding/chapterC');
 const wpRepo = require('../welcomePacketRepository');
@@ -131,19 +135,23 @@ module.exports = function createOnboardingRoutes(deps) {
   // stored here: a stored copy goes stale the moment a document is accepted.
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
   async function packetFor(rec) {
-    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false };
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false, licenseLevel: null };
     const id = String(rec.userId);
     const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
     const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
     const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === id);
     const held = ((packet || {}).data || {}).certifications;
+    const user = ((await getUsers()) || []).find(x => String(x.id) === id) || {};
     return {
+      licenseLevel: user.licenseLevel || null,
       rows: wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts),
       certified: Array.isArray(held) && held.some(c => CARE_CERTIFICATES.includes(c))
     };
   }
   // Her inputs with what the packet says about her certificates.
-  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified) });
+  // Her license level is read from her account, like her certificates from
+  // her packet: facts about her, never typed into Setup.
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null });
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -573,7 +581,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });

@@ -34,3 +34,10 @@
   - The server reads the certificate fact from the packet on every build.
   - The Setup form's copy of it is ignored on save, so nobody can set it by hand.
 - **"CareScout" = Care Courses.** The earlier addendum's CareScout wording is superseded.
+
+## Addendum: the 40-hour program is automatic; "Qualifying route" reads "Credentials"
+- **The owner activated a caregiver and the 40-hour training did not appear.** It depended on a Setup box ("forty-hour route") that nobody had ticked.
+- **Now it applies by itself** to a caregiver classified PCA with no PCA, CNA or HHA certificate in her packet.
+- **The classification comes from her license level on her account** (sitter → companion, PCA → PCA, CNA → PCA and certified, LPN → nursing) until the office sets one in Setup.
+- **The license level is read by the server from her account**, never from the Setup form. The office can still tick the box for anyone else it applies to.
+- **Item A.6.06** is titled "Credentials" (owner).

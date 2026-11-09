@@ -420,6 +420,12 @@ module.exports = function createStaffPortalRoutes(deps) {
     const team = (await getUsers()).filter(u => audienceOf(u)).map(u => Object.assign({ id: u.id, name: u.name || u.email, type: audienceOf(u), typeLabel: TYPE_LABELS[audienceOf(u)] }, publicBio(all[u.id])));
     return res.json({ team });
   });
+  // One person's headshot and bio, for their User Management form (admin team).
+  router.get('/api/my/admin/bios/:userId', authenticateToken, requireAdmin, async (req, res) => {
+    const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));
+    if (!u) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    return res.json(Object.assign({ id: u.id, name: u.name || u.email, typeLabel: TYPE_LABELS[audienceOf(u)] }, publicBio((await profiles())[u.id])));
+  });
   router.get('/api/my/admin/bios/:userId/headshot', authenticateToken, requireAdmin, async (req, res) => {
     const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));
     if (!u) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });

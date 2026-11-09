@@ -641,7 +641,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>{({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison', H: 'Student or Extern', R1: 'Supervising Physician (Georgia)' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ PLACEMENT: 'Educational placement, unpaid', '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -726,7 +726,7 @@ const LINE_CHOICES = [
   ['INSURED', 'In-Home Primary Care · Insurance Billing'], ['BEHAVIORAL', 'Psych Care']
 ];
 // Which Playbook chapter a person is onboarded on.
-const CHAPTER_CHOICES = [['A', 'Caregiver, employed (companion, PCA or licensed nursing)'], ['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)']];
+const CHAPTER_CHOICES = [['A', 'Caregiver, employed (companion, PCA or licensed nursing)'], ['B', 'Registered nurse, employed (private home care)'], ['C', 'Clinician (NP, MD, PA), employed'], ['D', 'Clinician (NP, PA), contracted only (1099)'], ['E', 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)'], ['F', 'Admin team and non-clinical staff (office, clinical operations, care coordination)'], ['G', 'Community Care Liaison (remote business development)'], ['H', 'Student or extern on an educational placement (unpaid)'], ['R1', 'Supervising (delegating) physician, Georgia']];
 const Setup = ({ userId, inputs, onSaved }) => {
   const [f, setF] = useState(Object.assign({ serviceLines: [], credentials: [], startDate: '', chapter: 'C', workState: 'GA' }, inputs || {}));
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
@@ -754,6 +754,12 @@ const Setup = ({ userId, inputs, onSaved }) => {
         <label className="f">Their situation</label>
         {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
         {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
+      </> : f.chapter === 'H' ? <>
+        <label className="f">The placement</label>
+        {['entersResidence'].map(k => <div key={k}>{flag(k)}</div>)}
+        <div className="note">If the student's work mainly benefits GFC, covers service hours or contributes to billable visits, they are an employee: choose the caregiver track instead.</div>
+      </> : f.chapter === 'R1' ? <>
+        <div className="note">Georgia only. North Carolina and Alabama requirements are not verified and are not built.</div>
       </> : f.chapter === 'B' ? <>
         <label className="f">Her responsibilities</label>
         {['supervisoryDelegation', 'directsTraining'].map(k => <div key={k}>{flag(k)}</div>)}
@@ -818,7 +824,7 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.notStarted.length > 0 && (
         <div className="card"><div className="card-h"><h2>Clinicians Not Yet Set Up</h2></div>
-          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
+          {d.notStarted.map(u => <div key={u.userId} className="item" style={{ cursor: 'default' }}><div className="t"><b>{u.name}</b><div className="meta">{({ A: 'Caregiver track', B: 'Registered nurse track', C: 'Clinician track', D: 'Contracted clinician track', E: 'Hybrid clinician track', G: 'Liaison track', H: 'Student track', R1: 'Supervising physician track' })[u.chapter] || 'Admin team track'}</div></div><button className="btn sm" onClick={() => start(u)}>Start Onboarding</button></div>)}
         </div>
       )}
       <div className="card"><div className="card-h"><h2>Status Legend</h2></div><Legend /></div>
@@ -996,6 +1002,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>
           {mineTrack && <button className={view === 'mine' ? 'on' : ''} onClick={() => setView('mine')}><i className="ti ti-user" />My Onboarding</button>}
+          <button onClick={() => { window.location.href = '/login?hub=1'; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           <button onClick={() => { window.location.href = '/admin'; }}><i className="ti ti-arrow-left" />Admin Hub</button>
         </nav>
       </aside>
