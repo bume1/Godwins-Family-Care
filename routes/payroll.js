@@ -977,6 +977,16 @@ module.exports = function createPayrollRoutes(deps) {
   // Same key and header as the pay stub import. Each job only READS and
   // DRAFTS; it never approves, pays or activates anything.
   // ===================================================================================
+  // The pages the Apps Script watches: federal, Georgia, and every state
+  // someone on payroll works in. A state with no known pages is reported as
+  // unwatched rather than silently skipped.
+  router.get('/api/payroll/automation/tax-sources', async (req, res) => {
+    const key = payrollKey();
+    if (!key) return res.status(503).json({ error: 'Payroll automations are not switched on. Set PAYROLL_INGEST_KEY.', code: 'PAYROLL_INGEST_NOT_CONFIGURED' });
+    if (!keyOk(req, key)) return res.status(401).json({ error: 'Wrong payroll key.', code: 'PAYROLL_KEY_INVALID' });
+    const states = Object.values((await db.get(PROFILES)) || {}).filter(p => p && p.status !== 'inactive').map(p => p.workState || 'GA');
+    res.json(tables.sourcesFor(states));
+  });
   router.post('/api/payroll/automation/:job', async (req, res) => {
     const key = payrollKey();
     if (!key) return res.status(503).json({ error: 'Payroll automations are not switched on. Set PAYROLL_INGEST_KEY.', code: 'PAYROLL_INGEST_NOT_CONFIGURED' });
@@ -994,6 +1004,29 @@ module.exports = function createPayrollRoutes(deps) {
     for (const a of await admins()) {
       await queueNotification(type, a.id, a.email, a.name, { subject, body, ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.PATHS.PAYROLL_ADMIN}`, ctaLabel: 'Open Payroll' }, { relatedEntityId: related });
     }
+  };
+  // Unopened electronic forms are reminded once; the owner hears about paper
+  // not yet mailed, or forms not released at all.
+  const yearEndReminders = async (year, today) => {
+    const row = (await rows(YEAR_END)).find(r => r.released && Number(r.year) === Number(year));
+    if (!row) {
+      await tellOwner('tax_forms_not_released', `${year} W-2s and 1099s are not released`, 'They are due to employees and contractors by January 31. Open Payroll → Year End.', `ye-unreleased:${year}:${today}`);
+      return { summary: 'not released' };
+    }
+    const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
+    let reminded = 0;
+    for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
+      const u = users.get(x.userId);
+      if (!x.eDelivery || x.openedAt || !u || !u.email) continue;
+      await queueNotification('tax_form_reminder', u.id, u.email, u.name, {
+        subject: `Your ${row.year} ${x.label} is waiting`, body: `Your ${row.year} ${x.label} is in My GFC under Hours & Pay. You need it to file your taxes.`,
+        ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
+      }, { relatedEntityId: `taxform-reminder:${row.year}:${x.userId}:${x.label}` });
+      reminded++;
+    }
+    const unmailed = [...row.w2, ...row.nec].filter(x => !x.eDelivery && !x.mailedAt);
+    if (unmailed.length) await tellOwner('tax_forms_unmailed', `${unmailed.length} paper tax form(s) not marked mailed`, 'Print and mail them, then mark each one mailed in Payroll → Year End. They are due by January 31.', `ye-unmailed:${year}:${today}`);
+    return { summary: `${reminded} reminded, ${unmailed.length} unmailed` };
   };
   const automationJobs = {
     // The day after a period ends: draft its run and tell the owner.
@@ -1029,25 +1062,32 @@ module.exports = function createPayrollRoutes(deps) {
     'tax-form-reminders': async () => {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
       if (!(today.slice(5) >= '01-20' && today.slice(5) <= '02-15')) return { summary: 'not in season' };
-      const row = (await rows(YEAR_END)).find(r => r.released && Number(r.year) === Number(today.slice(0, 4)) - 1);
-      if (!row) {
-        if (today.slice(5) >= '01-20') await tellOwner('tax_forms_not_released', `${Number(today.slice(0, 4)) - 1} W-2s and 1099s are not released`, 'They are due to employees and contractors by January 31. Open Payroll → Taxes → Year End.', `ye-unreleased:${today}`);
-        return { summary: 'not released' };
-      }
-      const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
-      let reminded = 0;
-      for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
-        const u = users.get(x.userId);
-        if (!x.eDelivery || x.openedAt || !u || !u.email) continue;
-        await queueNotification('tax_form_reminder', u.id, u.email, u.name, {
-          subject: `Your ${row.year} ${x.label} is waiting`, body: `Your ${row.year} ${x.label} is in My GFC under Hours & Pay. You need it to file your taxes.`,
-          ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
-        }, { relatedEntityId: `taxform-reminder:${row.year}:${x.userId}:${x.label}` });
-        reminded++;
-      }
-      const unmailed = [...row.w2, ...row.nec].filter(x => !x.eDelivery && !x.mailedAt);
-      if (unmailed.length) await tellOwner('tax_forms_unmailed', `${unmailed.length} paper tax form(s) not marked mailed`, 'Print and mail them, then mark each one mailed in Payroll → Taxes → Year End. They are due by January 31.', `ye-unmailed:${today}`);
-      return { summary: `${reminded} reminded, ${unmailed.length} unmailed` };
+      return yearEndReminders(Number(today.slice(0, 4)) - 1, today);
+    },
+    // Rev 2 of the script: Jan 20, for the year it names.
+    'year-end-reminders': async (b) => {
+      const year = Number(b.taxYear);
+      if (!(year >= 2026 && year <= 2100)) return { summary: 'taxYear missing' };
+      return yearEndReminders(year, localDate(nowIso()) || nowIso().slice(0, 10));
+    },
+    // Jan 2: the figures are built and the owner is told what is ready and
+    // what is missing. Nothing is released: that stays the owner's click.
+    'year-end-build': async (b) => {
+      const year = Number(b.taxYear);
+      if (!(year >= 2026 && year <= 2100)) return { summary: 'taxYear missing' };
+      const y = await yearEndPreview(year);
+      if (y.error) { await tellOwner('tax_forms_build_blocked', `${year} W-2s and 1099s cannot be built yet`, y.error, `ye-build:${year}`); return { summary: y.code }; }
+      if (y.released) return { summary: 'already released' };
+      const blockers = [
+        ...y.employerMissing.map(m => `Missing: ${m}`),
+        ...(y.draftRuns || y.unpaidRuns ? [`${y.draftRuns} draft and ${y.unpaidRuns} unpaid run(s) with a ${year} pay date`] : []),
+        ...[...y.w2, ...y.nec].filter(x => x.missing.length).map(x => `${x.name}: ${x.missing.join(', ')}`),
+        ...(y.gustoGrossCents ? ['Some of these wages were paid through Gusto. Release here only if the app files this year\'s W-2s.'] : [])
+      ];
+      await tellOwner('tax_forms_ready_for_review', `${year} W-2s and 1099s are ready for your review`,
+        [`${y.w2.length} W-2(s) and ${y.nec.length} 1099-NEC(s). Review them in Payroll → Year End, then release. They are due by January 31.`, ...(blockers.length ? ['Before you can release:', ...blockers] : [])].join('\n'),
+        `ye-build:${year}`);
+      return { summary: `${y.w2.length} W-2, ${y.nec.length} 1099-NEC, ${blockers.length} blocker(s)` };
     },
     // On the send-by date, any approved run not fully paid.
     'payment-reminder': async () => {
@@ -1073,7 +1113,7 @@ module.exports = function createPayrollRoutes(deps) {
     // the new figures; nothing changes pay on its own.
     'tax-source-changed': async (b) => {
       const src = str(b.source, 200), url = str(b.url, 500);
-      await tellOwner('payroll_tax_source_changed', 'A payroll tax source changed', `${src || 'A tax source'} changed (${url}). Review the new figures and approve a new table before they apply.`, `src:${src}:${str(b.hash, 80)}`);
+      await tellOwner('payroll_tax_source_changed', 'A payroll tax source changed', `${src || 'A tax source'}${b.jurisdiction ? ` (${str(b.jurisdiction, 20)})` : ''} changed (${url}). Review the new figures and approve a new table before they apply.`, `src:${src}:${str(b.hash, 80)}`);
       return { summary: 'owner told' };
     },
     'qbo-sync': async () => (deps.qboRetry ? deps.qboRetry() : { summary: 'QuickBooks not connected' })

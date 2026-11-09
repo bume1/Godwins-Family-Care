@@ -37,3 +37,11 @@
 - **Who files the 2026 W-2s, Gusto or the app?** The app's Year End figures now include Gusto-paid wages. If Gusto is also filing 2026 W-2s, releasing in the app would report those wages twice. The Year End page warns about this.
 - **Two pay schedules.** Gusto runs caregivers weekly and everyone else biweekly. The app has one pay frequency.
 - **Texas.** The Texas employee is paid outside the app until Texas unemployment (and a no-income-tax state) is added.
+
+## Also: the automations script, rev 2 (owner's)
+- `scripts/payroll_automations.gs` is now the owner's rev 2. The app serves the three calls it makes:
+  - `GET /api/payroll/automation/tax-sources`: pages for federal, Georgia, and each state someone on payroll works in. A state with no known pages, such as TX, comes back as `unwatched`.
+  - `year-end-build` (Jan 2): figures built and the owner emailed what is ready and what blocks release. Nothing is released.
+  - `year-end-reminders` (Jan 20) for a named tax year.
+- One addition to rev 2: `installPayrollTriggers` removes rev 1's `payrollTaxFormReminders` trigger. Without that, the old trigger would fail daily with "function not found".
+- A test calls every job the script names against the app and fails on any 404, so the two cannot drift.

@@ -244,3 +244,59 @@ test('the reminder job is quiet outside January 20 to February 15 and never reve
   assert.match(out.summary, /2 reminded, 1 unmailed/);
   for (const m of own.mail.slice(before)) assert.doesNotMatch(JSON.stringify(m[4]), /\d+\.\d{2}/);
 });
+
+test('the Apps Script and the app agree: every job the script calls exists, and so does the tax-sources read', async () => {
+  const gs = fs.readFileSync(path.join(ROOT, 'scripts/payroll_automations.gs'), 'utf8');
+  const called = [...gs.matchAll(/callPayrollJob_\('([a-z-]+)'/g)].map(m => m[1]);
+  assert.ok(called.length >= 8);
+  const { app } = harness('own');
+  const hdr = { 'X-GFC-Payroll-Key': 'k'.repeat(40), 'Content-Type': 'application/json' };
+  const srv = app.listen(0);
+  try {
+    for (const job of new Set(called)) {
+      const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/automation/${job}`, { method: 'POST', headers: hdr, body: JSON.stringify({ taxYear: 2026 }) });
+      assert.notEqual(r.status, 404, `the script calls ${job}, which the app does not have`);
+    }
+    assert.match(gs, /appRequest_\('get', '\/api\/payroll\/automation\/tax-sources'\)/);
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/automation/tax-sources`, { headers: hdr });
+    const b = await r.json();
+    assert.equal(r.status, 200);
+    assert.ok(b.sources.some(x => x.jurisdiction === 'federal') && b.sources.some(x => x.jurisdiction === 'GA'));
+    const noKey = await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/automation/tax-sources`);
+    assert.equal(noKey.status, 401);
+  } finally { srv.close(); }
+  assert.match(gs, /'payrollTaxFormReminders'\]/, 'rev 1\'s trigger is cleaned up on reinstall');
+});
+
+test('a state with no known tax pages is reported as unwatched, never silently skipped', () => {
+  const out = T.sourcesFor(['GA', 'TX']);
+  assert.deepEqual(out.unwatched, ['TX']);
+  assert.ok(!out.sources.some(s => s.jurisdiction === 'TX'));
+});
+
+test('the Jan 2 build tells the owner what is ready and what blocks release, and releases nothing', async () => {
+  const { app, store, mail } = harness('own'); seed(store);
+  const p = store.get('payroll_profiles'); delete p.e2.taxAddress; store.set('payroll_profiles', p);
+  const srv = app.listen(0);
+  try {
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/automation/year-end-build`, { method: 'POST', headers: { 'X-GFC-Payroll-Key': 'k'.repeat(40), 'Content-Type': 'application/json' }, body: JSON.stringify({ taxYear: 2026 }) });
+    const b = await r.json();
+    assert.match(b.summary, /2 W-2, 1 1099-NEC, 1 blocker/);
+  } finally { srv.close(); }
+  assert.equal((store.get('payroll_year_end') || []).filter(x => x.released).length, 0, 'nothing is released');
+  const note = mail.find(m => m[0] === 'tax_forms_ready_for_review');
+  assert.ok(note && /Lee Paper|e2/.test(note[4].body));
+  assert.doesNotMatch(note[4].body, /\d+\.\d{2}/, 'no figures in the email');
+});
+
+test('once the forms are released, the Jan 2 build stays quiet', async () => {
+  const { app, store, mail } = harness('own'); seed(store);
+  await req(app, 'POST', '/api/payroll/admin/year-end/2026/release');
+  const before = mail.length;
+  const srv = app.listen(0);
+  try {
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/automation/year-end-build`, { method: 'POST', headers: { 'X-GFC-Payroll-Key': 'k'.repeat(40), 'Content-Type': 'application/json' }, body: JSON.stringify({ taxYear: 2026 }) });
+    assert.equal((await r.json()).summary, 'already released');
+  } finally { srv.close(); }
+  assert.equal(mail.length, before);
+});

@@ -113,4 +113,29 @@ function seedRows(existing, { uuid, at }) {
   return add;
 }
 
-module.exports = { FED_2026, GA_2026, SEEDS, validateTable, seedRows, refreshStagedSeeds };
+// The pages the Apps Script watches for rate changes, one set per
+// jurisdiction. Served at GET /api/payroll/automation/tax-sources, with every
+// state someone on payroll works in, so a new state is watched (or reported
+// as unwatched) without editing the script.
+const SOURCE_PAGES = Object.freeze({
+  federal: [
+    { name: 'IRS Publication 15-T', url: 'https://www.irs.gov/pub/irs-pdf/p15t.pdf' },
+    { name: 'IRS Publication 15', url: 'https://www.irs.gov/pub/irs-pdf/p15.pdf' }
+  ],
+  GA: [
+    { name: "Georgia Employer's Tax Guide", url: 'https://dor.georgia.gov/withholding-tax' },
+    { name: 'Georgia Form G-4', url: 'https://dor.georgia.gov/document/form/tsdemployeeswithholdingallowancecertificateg-4pdf/download' },
+    { name: 'Georgia DOL employer tax', url: 'https://dol.georgia.gov/employers' }
+  ]
+});
+function sourcesFor(states) {
+  const want = ['federal', 'GA', ...[...new Set(states || [])].filter(s => s && s !== 'GA')];
+  const sources = [], unwatched = [];
+  for (const j of want) {
+    if (!SOURCE_PAGES[j]) { unwatched.push(j); continue; }
+    for (const p of SOURCE_PAGES[j]) sources.push({ ...p, jurisdiction: j });
+  }
+  return { sources, unwatched };
+}
+
+module.exports = { FED_2026, GA_2026, SEEDS, SOURCE_PAGES, validateTable, seedRows, refreshStagedSeeds, sourcesFor };

@@ -58,7 +58,8 @@ A run refuses anyone missing a W-4, G-4, SSN, I-9 or pay method, and names what 
 3. **Project Settings:** set the time zone to **America/New_York**, then add two script properties:
    - `GFC_APP_URL` = `https://app.godwinsfamilycarellc.com`
    - `GFC_PAYROLL_KEY` = the same value as `PAYROLL_INGEST_KEY` in the app's environment
-4. In the editor, pick **installPayrollTriggers** and press Run. Approve the permissions Google asks for. Running it again is safe.
+4. In the editor, pick **installPayrollTriggers** and press Run. Approve the permissions Google asks for. Running it again is safe, and it removes the old rev 1 reminder trigger.
+5. On the **Triggers** page (clock icon), set each trigger's failure notification to **Notify me immediately**, so a broken job is never silent.
 
 **`scripts/payroll_paystubs.gs` is optional.** Pay stubs from an in-app run are made by the app and need no script. That file is only for stubs from a payroll run done somewhere else (for example, a period you ran before switching). If you need it, add it as a second file in the same project; it uses the same two properties.
 
@@ -71,7 +72,8 @@ What it does on its own:
 | Payment reminder | Daily 8 AM | Approved runs past their send-by date remind you to send PNC payments. |
 | Tax reminders | Daily 9 AM | Deposits and filings due within your lead time. |
 | QuickBooks sync | Nightly 2 AM | Retries anything that failed to post. |
-| W-2 / 1099 reminders | Daily 10 AM, Jan 20 to Feb 15 | Anyone who has not opened an electronic W-2 or 1099 gets one reminder; you hear about paper copies not yet marked mailed. |
+| W-2 / 1099 build | Jan 2 | The year's W-2s and 1099s are built and you are emailed what is ready and what is missing. Nothing is released. |
+| W-2 / 1099 reminders | Jan 20 | Anyone who has not opened an electronic form gets one reminder; you hear about paper copies not yet mailed, or forms not released. |
 | Tax source watch | Weekly (daily in Dec and Jan) | When an IRS or Georgia source changes, you get an email to review and stage new rates. |
 
 **None of these approves, pays or switches on anything.** Those stay your clicks in the app.
