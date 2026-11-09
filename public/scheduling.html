@@ -224,6 +224,12 @@ const Empty = ({ icon, children }) => (
 // Post a shift
 // ============================================================================
 const PostShift = ({ roster, onPosted, setErr, setOk }) => {
+  // Who the shift is for (owner, 2026-11-09): a caregiver shift, or a staff
+  // shift by role. Providers are not here: they are on the EHR's calendar.
+  const [kind, setKind] = useState('caregiver');
+  const [staffRole, setStaffRole] = useState('');
+  const roleInfo = (roster.staffRoles || []).find(r => r.key === staffRole) || null;
+  const roleStaff = (roster.staff || []).filter(p => p.role === staffRole);
   const [clientId, setClientId] = useState('');
   const [date, setDate] = useState(todayPlus(1));
   const [start, setStart] = useState('09:00');
@@ -257,19 +263,21 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   const post = async (override) => {
     setErr(''); setOk(''); setBusy(true);
     try {
+      const when = { start: new Date(`${date}T${start}`).toISOString(), end: new Date(`${date}T${end}`).toISOString() };
       const res = await api('/api/scheduling/shifts', {
         method: 'POST',
-        body: JSON.stringify({
-          clientId,
-          start: new Date(`${date}T${start}`).toISOString(),
-          end: new Date(`${date}T${end}`).toISOString(),
-          requiredLicenseLevel: level,
-          poolVisibility: visibility,
-          assignToCaregiverId: assignTo || null,
-          payRate: payRate === '' ? null : payRate,
-          notes,
-          ...(override ? { override: true, overrideReason } : {})
-        })
+        body: JSON.stringify(kind === 'staff'
+          ? { staffRole, clientId: (roleInfo && roleInfo.clientVisits && clientId) || null, ...when,
+              assignToCaregiverId: assignTo || null, notes, ...(override ? { override: true, overrideReason } : {}) }
+          : {
+            clientId, ...when,
+            requiredLicenseLevel: level,
+            poolVisibility: visibility,
+            assignToCaregiverId: assignTo || null,
+            payRate: payRate === '' ? null : payRate,
+            notes,
+            ...(override ? { override: true, overrideReason } : {})
+          })
       });
       setOk((res && res.message) || 'Shift posted.');
       setNotes(''); setAssignTo(''); setPayRate('');
@@ -290,6 +298,53 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   return (
     <div className="card">
       <h2>Post a shift</h2>
+      <div className="btns" style={{ marginTop: 0 }}>
+        <button className={`btn ${kind === 'caregiver' ? '' : 'ghost'}`} onClick={() => { setKind('caregiver'); setAssignTo(''); }}>Caregiver Shift</button>
+        <button className={`btn ${kind === 'staff' ? '' : 'ghost'}`} onClick={() => { setKind('staff'); setAssignTo(''); setLevel(''); }}>Staff Shift</button>
+      </div>
+      {kind === 'staff' ? (
+        <>
+          <p className="sub">
+            A staff shift is for one role and goes to one person in it. RN, LMSW and LCSW shifts can be a client
+            visit or office time. Providers are scheduled on the clinical calendar in the EHR, not here.
+          </p>
+          <div className="grid">
+            <div>
+              <label>Role</label>
+              <select value={staffRole} onChange={e => { setStaffRole(e.target.value); setAssignTo(''); setClientId(''); }}>
+                <option value="">— Choose —</option>
+                {(roster.staffRoles || []).map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label>Who works it</label>
+              <select value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={!staffRole}>
+                <option value="">— Choose —</option>
+                {roleStaff.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              {staffRole && roleStaff.length === 0 && <p className="sub" style={{ marginTop: 4 }}>Nobody with this role yet. Set the account type in User Management.</p>}
+            </div>
+            {roleInfo && roleInfo.clientVisits && (
+              <div>
+                <label>Client visit (optional)</label>
+                <select value={clientId} onChange={e => setClientId(e.target.value)}>
+                  <option value="">Office time, no client</option>
+                  {roster.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
+            <div><label>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} /></div>
+            <div><label>Start</label><input type="time" value={start} onChange={e => setStart(e.target.value)} /></div>
+            <div><label>End</label><input type="time" value={end} onChange={e => setEnd(e.target.value)} /></div>
+          </div>
+          <div style={{ marginTop: 11 }}>
+            <label>Notes</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
+          </div>
+          <p className="sub">They are paid at their payroll rate, and the hours are never a client invoice line.</p>
+        </>
+      ) : (
+      <>
       <p className="sub">
         Post to the open pool for caregivers to claim, or straight to one caregiver to accept.
         An open shift is visible only to caregivers whose license level meets the requirement.
@@ -358,6 +413,8 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
         <label>Notes for the caregiver</label>
         <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
       </div>
+      </>
+      )}
       {clientId && !(roster.clients.find(c => c.id === clientId) || {}).hasCoordinates && (
         <div className="note">
           <b>This client has no address coordinates on file.</b>
@@ -387,9 +444,15 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
         </div>
       )}
       <div className="btns">
+        {kind === 'staff' ? (
+          <button className="btn gold" disabled={!staffRole || !assignTo || busy} onClick={() => post(false)}>
+            {busy ? 'Posting…' : 'Post Staff Shift'}
+          </button>
+        ) : (
         <button className="btn gold" disabled={!clientId || !level || busy} onClick={() => post(false)}>
           {busy ? 'Posting…' : (assignTo ? 'Post to Caregiver' : 'Post Shift')}
         </button>
+        )}
       </div>
     </div>
   );
@@ -402,7 +465,7 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
   const [assignee, setAssignee] = useState('');
   const [reason, setReason] = useState('');
   const [editing, setEditing] = useState(false);
-  const eligible = roster.caregivers.filter(c => {
+  const eligible = s.staffRole ? (roster.staff || []).filter(p => p.role === s.staffRole) : roster.caregivers.filter(c => {
     if (!s.requiredLicenseLevel) return true;
     const rank = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
     return rank[c.licenseLevel] >= rank[s.requiredLicenseLevel];
@@ -421,8 +484,8 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
         )}
       </div>
       <div className="mu">
-        {s.clientName}
-        {s.levelRequirementLabel ? ` · ${s.levelRequirementLabel}` : ''}
+        {s.staffRole ? `${s.staffRoleLabel} shift${s.clientName ? ` · visit: ${s.clientName}` : ' · office'}` : s.clientName}
+        {!s.staffRole && s.levelRequirementLabel ? ` · ${s.levelRequirementLabel}` : ''}
         {s.caregiverName ? ` · ${s.caregiverName}` : ''}
         {s.poolVisibility === 'care_team' ? ' · care team only' : ''}
       </div>
@@ -1229,7 +1292,7 @@ const App = () => {
       api('/api/scheduling/caregivers').catch(e => (e.status === 403 ? null : Promise.reject(e))),
       api('/api/scheduling/shifts').catch(() => ({ shifts: [] })),
       api('/api/scheduling/shift-requests').catch(() => ({ shiftRequests: [] })),
-      api('/api/scheduling/availability').catch(() => ({ availability: [] })),
+      api('/api/scheduling/availability?scope=all').catch(() => ({ availability: [] })),
       api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] })),
       api('/api/scheduling/change-requests').catch(() => ({ requests: [] })),
       api('/api/scheduling/availability/caregivers').catch(() => ({ caregivers: [] })),
@@ -1400,16 +1463,9 @@ const App = () => {
     } catch (e) { setErr(e.message); }
   };
 
-  const exportCsv = () => {
-    // The token rides as a query param because this is a file download, the
-    // same pattern the app's other authenticated downloads use.
-    window.location.href = `${API}/api/scheduling/payroll.csv?from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`;
-  };
-
-  // What gets INVOICED, as opposed to what gets paid. Completed visits only.
-  const exportBillingCsv = () => {
-    window.location.href = `${API}/api/scheduling/billing.csv?from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`;
-  };
+  // THE EXPORTS LIVE WHERE THE MONEY IS (owner, 2026-11-09). The payroll
+  // hours file is on Payroll and the client hours file on Billing. Scheduling
+  // is for scheduling; it shows the hours, it does not export them.
 
   if (loading) return <div className="wrap"><div className="empty">Loading…</div></div>;
 
@@ -1437,7 +1493,7 @@ const App = () => {
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
     { id: 'availability', label: 'Availability' },
     { id: 'changes', label: `Shift changes${changeRequests.filter(r => r.status === 'pending').length ? ` (${changeRequests.filter(r => r.status === 'pending').length})` : ''}` },
-    { id: 'time', label: `${access.managePay || access.viewPay ? 'Time & payroll' : 'Time logs'}${adjustments.requests.filter(r => r.status === 'pending').length ? ` (${adjustments.requests.filter(r => r.status === 'pending').length})` : ''}` },
+    { id: 'time', label: `Time logs${adjustments.requests.filter(r => r.status === 'pending').length ? ` (${adjustments.requests.filter(r => r.status === 'pending').length})` : ''}` },
     ...(access.manageLocations
       ? [{ id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }]
       : [])
@@ -1877,7 +1933,7 @@ const App = () => {
         {shownTab === 'time' && (
           <div>
             <div className="card">
-              <h2>Time &amp; payroll</h2>
+              <h2>Time logs &amp; hours</h2>
               <p className="sub">
                 {totals.hours === null || totals.hours === undefined ? '—' : `${totals.hours} hours`} in this range.
               </p>
@@ -1889,27 +1945,17 @@ const App = () => {
                 <button className={`btn ${flaggedOnly ? '' : 'ghost'}`} onClick={() => setFlaggedOnly(!flaggedOnly)}>
                   {flaggedOnly ? 'Flagged Only' : 'Show Flagged Only'}
                 </button>
-                {/* THE MONEY IS ADMIN'S. A manager runs the board and reads the
-                    hours behind it; payroll and billing are attestations about
-                    what people are paid and what clients owe, and those stayed
-                    where they were. The buttons are absent rather than present
-                    and answering 403. */}
-                {access.managePay && <button className="btn gold" onClick={exportCsv}>Export Payroll CSV</button>}
-                {access.managePay && <button className="btn" onClick={exportBillingCsv}>Export Billing CSV</button>}
               </div>
               {access.managePay ? (
                 <div className="note">
-                  <b>Two different questions.</b> Payroll is what caregivers are paid — every clock-in in
-                  the range, including shifts still open, with edit details and the pay period.
-                  Billing is what clients are invoiced — completed visits only, grouped by client, with
-                  the billable hours, whether the visit location could be verified, and whether the visit
-                  log was filed. Neither carries anything clinical.
+                  The hours files moved: the payroll hours export is on <a href="/payroll">Payroll</a> and the
+                  client hours export is on <a href="/billing#new">Billing</a>.
                 </div>
               ) : (
                 <div className="note">
                   <b>View only.</b> You can read the hours, payroll and billing below. To fix a wrong time, use
                   Request Correction on the time log: the Super Admin approves it. Entering hours that were never
-                  clocked and downloading the payroll and billing files stay with the Super Admin.
+                  clocked stays with the Super Admin.
                 </div>
               )}
             </div>
