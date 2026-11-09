@@ -405,9 +405,17 @@ module.exports = function createSchedulingRoutes(deps) {
       if (!officeWide && !isSchedulable(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
+      // OWN ROWS BY DEFAULT, FOR EVERYONE (owner report, 2026-11-09). The same
+      // personal Availability card mounts on My GFC for every staff member, and
+      // it asked this route with no parameters — so an admin, manager or care
+      // coordinator opening their OWN availability saw every caregiver's rows
+      // listed under "Submitted", as if they were theirs. Office-wide reading is
+      // now asked for by name (`scope=all`, or one `caregiverId`), and only the
+      // office may ask; anyone else asking still gets their own rows only.
       const rows = await readRows('caregiver_availability');
-      let mine = officeWide ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
-      if (officeWide && req.query.caregiverId) {
+      const wantsAll = officeWide && (req.query.scope === 'all' || !!req.query.caregiverId);
+      let mine = wantsAll ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      if (wantsAll && req.query.caregiverId) {
         mine = mine.filter(r => r.caregiver_id === String(req.query.caregiverId));
       }
       mine = mine.slice().sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));

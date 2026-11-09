@@ -1229,7 +1229,7 @@ const App = () => {
       api('/api/scheduling/caregivers').catch(e => (e.status === 403 ? null : Promise.reject(e))),
       api('/api/scheduling/shifts').catch(() => ({ shifts: [] })),
       api('/api/scheduling/shift-requests').catch(() => ({ shiftRequests: [] })),
-      api('/api/scheduling/availability').catch(() => ({ availability: [] })),
+      api('/api/scheduling/availability?scope=all').catch(() => ({ availability: [] })),
       api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] })),
       api('/api/scheduling/change-requests').catch(() => ({ requests: [] })),
       api('/api/scheduling/availability/caregivers').catch(() => ({ caregivers: [] })),
