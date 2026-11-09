@@ -50,6 +50,7 @@
 // ============================================================================
 
 const { renderGfcEmail } = require('./emailTemplates');
+const emailCopy = require('./emailCopy');       // the wording, in one editable place (2026-11-09)
 // The reminder's copy lives with the rest of the reminder rules, not here: the
 // "Your visit" opening is load-bearing (see sendToClientSide) and it is tested
 // where the rule is declared.
@@ -61,7 +62,11 @@ const familyLinks = require('./familyLinks');   // POA is per patient; one famil
 function createNotifier(deps) {
   const {
     getUsers, queueNotification, getAppBaseUrl, emailTransport,
-    staffRoles, clientRole, familyRole
+    staffRoles, clientRole, familyRole,
+    // The admin's edits to the wording. Optional, and defaulting to "none"
+    // deliberately: every existing test harness omits it and must keep
+    // proving the BUILT-IN path, which is what sends when nothing is edited.
+    getCopyOverrides
   } = deps;
 
   const transportAllowsDetail = () => {
@@ -126,13 +131,62 @@ function createNotifier(deps) {
     return { client, recipients };
   };
 
-  const send = async ({ type, user, subject, headline, paragraphs, fields, callout, calloutLabel, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
+  // The admin's edits to the wording. Read through a short cache because
+  // `send` runs once PER RECIPIENT and a notice to the whole office would
+  // otherwise read the store once per person. Thirty seconds is short enough
+  // that an edit takes effect on the next notice and long enough that a
+  // twelve-recipient notice is one read.
+  let overridesAt = 0, overridesCache = {};
+  const OVERRIDES_TTL_MS = 30 * 1000;
+  const loadOverrides = async () => {
+    if (typeof getCopyOverrides !== 'function') return {};
+    const now = Date.now();
+    if (now - overridesAt < OVERRIDES_TTL_MS) return overridesCache;
+    try {
+      overridesCache = (await getCopyOverrides()) || {};
+    } catch (e) {
+      // An unreadable override store means the BUILT-IN wording sends, which
+      // is the safe answer. Never a blank email.
+      console.error('[NOTIFICATIONS] could not read the email copy overrides; sending the built-in wording:', e.message);
+      overridesCache = {};
+    }
+    overridesAt = now;
+    return overridesCache;
+  };
+
+  // `copyId` + `data` is the editable path: the wording comes from
+  // emailCopy.js (built-in, or the admin's override of it) and the caller
+  // supplies only the values. The literal `subject`/`paragraphs` path is what
+  // every notice not yet migrated still uses, and the two are deliberately
+  // allowed side by side while the migration runs — a notice that keeps its
+  // literals simply is not on the editing screen yet, which is honest, where
+  // a half-migrated registry row would be a screen that does nothing.
+  const send = async ({ type, copyId, variant, data, user, subject, headline, paragraphs, fields, callout, calloutLabel, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
+    let copy = null;
+    if (copyId) {
+      copy = emailCopy.resolve(copyId, {
+        variant: variant || 'detailed', data: data || {}, overrides: await loadOverrides()
+      });
+      if (copy.missing) {
+        console.error(`[NOTIFICATIONS] no copy registered for "${copyId}"; falling back to the caller's wording`);
+        copy = null;
+      } else if (copy.usedFallback) {
+        console.error(`[NOTIFICATIONS] the saved wording for "${copyId}" is no longer valid, so the built-in sent: ${copy.problems.join('; ')}`);
+      }
+    }
     const rendered = renderGfcEmail({
-      greeting: firstNameOf(user), headline, paragraphs, fields, callout, calloutLabel, ctaUrl, ctaLabel
+      greeting: firstNameOf(user),
+      headline: copy ? copy.headline : headline,
+      paragraphs: copy ? copy.paragraphs : paragraphs,
+      fields,
+      callout: copy ? copy.callout : callout,
+      calloutLabel: copy ? copy.calloutLabel : calloutLabel,
+      ctaUrl, ctaLabel: (copy && copy.ctaLabel) || ctaLabel
     });
     const queued = await queueNotification(
       type, user.id, user.email, user.name,
-      { subject, body: rendered.text, htmlBody: rendered.html, ctaUrl, ctaLabel },
+      { subject: copy ? copy.subject : subject, body: rendered.text, htmlBody: rendered.html,
+        ctaUrl, ctaLabel: (copy && copy.ctaLabel) || ctaLabel },
       { relatedEntityId, relatedEntityType, createdBy: actorId || 'system', phi: !!phi }
     );
     return !!(queued && !queued.skipped);
@@ -189,21 +243,14 @@ function createNotifier(deps) {
         const ok = await send({
           type: rejected ? 'phc_document_rejected' : 'phc_document_accepted',
           user,
-          subject: rejected ? 'A document needs another look' : 'We received your document',
-          headline: rejected ? 'A document needs another look' : 'Document received',
-          paragraphs: rejected
-            ? (detail
-                ? [`We looked at ${thing}${forWhom} and need it sent again.`,
-                   'Upload a replacement from the Documents tab in your portal. There is nothing else to do in the meantime.']
-                : [`One of the documents${forWhom} needs to be sent again.`,
-                   'The reason is in the secure portal, along with the button to upload a replacement. For privacy we do not put document details in email.'])
-            : (detail
-                ? [`We received ${thing}${forWhom} and it is accepted. Nothing further is needed from you.`]
-                : [`A document${forWhom} was received and accepted. Nothing further is needed from you.`]),
-          // The reason rides in the callout, and ONLY when the transport can
-          // carry it. Staff type this field freely, so it is treated as PHI.
-          callout: rejected && detail && reason ? reason : null,
-          calloutLabel: 'Why we need it again',
+          // Two copyIds from one builder: accepted and rejected are different
+          // news and have always had different wording, which is why a
+          // copyId cannot be the same thing as a notification type.
+          copyId: rejected ? 'phc_document_rejected' : 'phc_document_accepted',
+          variant: detail ? 'detailed' : 'vague',
+          // The reason is staff free text, declared PHI in the registry, so
+          // the vague wording cannot carry it however it is edited.
+          data: { thing, forWhom, reason: reason || '' },
           ctaUrl: ctaForRecipient(url, client, actingFor), ctaLabel: 'Open your portal',
           relatedEntityId: `${uploadId}:${decision}`, relatedEntityType: 'document',
           actorId, phi: detail
@@ -322,7 +369,21 @@ function createNotifier(deps) {
   // because minting touches the token store, and this module deliberately
   // knows nothing about it. Returning null falls back to the portal button,
   // which is what every other notice gets.
-  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, calloutLabel, actorId, entityId, entityType, ctaFor }) => {
+  // `whose` is the noun this notice is about: 'visit', 'clinician visit',
+  // 'caregiver visit', 'test result'. It becomes the {{whoseVisit}}
+  // placeholder, which reads "Your caregiver visit" to the patient and
+  // "Ada Bell's caregiver visit" to a POA.
+  //
+  // That REPLACES the ordered-alternation rewrite below for any notice with a
+  // copyId. The rewrite matched the opening WORDS, so it broke the moment a
+  // sentence was reworded — it has already caused one real bug, and once an
+  // admin can edit the sentence no validator could see the next one coming.
+  // The rewrite stays for notices not yet migrated.
+  const whosePhrase = (whose, actingFor) => (actingFor && actingFor.name)
+    ? `${actingFor.name}'s ${whose}`
+    : `Your ${whose}`;
+
+  const sendToClientSide = async ({ clientId, type, copyId, variant, data, whose, subject, headline, paragraphs, fields, callout, calloutLabel, actorId, entityId, entityType, ctaFor }) => {
     const { client, recipients } = await apptRecipients(clientId);
     if (!client) return { notified: 0, reason: 'no client record' };
     if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
@@ -338,13 +399,22 @@ function createNotifier(deps) {
       }
       const ok = await send({
         type, user, subject, headline,
+        copyId, variant,
+        // The POA's copy differs only in whose visit it is, so that is a
+        // value rather than a second block of wording to keep in step.
+        data: copyId ? { ...(data || {}), whoseVisit: whosePhrase(whose || 'visit', actingFor) } : undefined,
         // A POA is told whose visit (or result) it is; the client is not told
         // their own name. EVERY client-side paragraph must open with one of the
         // phrases below, and the longer ones come FIRST because alternation is
         // ordered — with `visit` leading, "Your caregiver visit" fell through
         // unrewritten and a POA read "Your caregiver visit has moved" about a
         // visit that was not theirs. Found by rendering the POA's copy.
-        paragraphs: actingFor
+        // A notice WITH a copyId has no literal paragraphs: its wording comes
+        // from emailCopy.js and the POA's name arrives as {{whoseVisit}}
+        // above. The ordered-alternation rewrite below is only for the
+        // notices still carrying their literals, and goes when the last of
+        // them is migrated.
+        paragraphs: (!copyId && actingFor && Array.isArray(paragraphs))
           ? paragraphs.map(p => p.replace(
               /^Your (caregiver visit|clinician visit|visit|test result)/,
               (m, what) => `${actingFor.name}'s ${what}`))
@@ -376,14 +446,10 @@ function createNotifier(deps) {
       return await sendToClientSide({
         clientId: client.id,
         type: 'appointment_booked',
-        subject: detail ? `Your visit is scheduled — ${when}` : 'A visit has been scheduled',
-        headline: 'Your visit is scheduled',
-        paragraphs: detail
-          ? ['Your visit is booked. The details are below and in your portal.',
-             'If the time does not work, call the office and we will move it.',
-             'A reminder will reach you the day before.']
-          : ['A visit has been scheduled for you. The date and time are in your secure portal.',
-             'For privacy we do not put visit details in email.'],
+        // The wording lives in emailCopy.js so it can be edited in the Admin
+        // hub. Only the VALUES come from here.
+        copyId: 'appointment_booked', variant: detail ? 'detailed' : 'vague',
+        data: { when }, whose: 'visit',
         fields: visitFields(detail, { when, clinician, place }),
         actorId, entityId: eid
       });
@@ -593,13 +659,8 @@ function createNotifier(deps) {
         // knows which kind of visit moved. Two notices reading "Your care visit
         // has been rescheduled" and "Your visit has moved to …" told them a
         // visit had changed and left them to guess which.
-        subject: detail ? `Your clinician visit has moved to ${to}` : 'A clinician visit has been rescheduled',
-        headline: 'Your clinician visit has moved',
-        paragraphs: detail
-          ? [`Your visit with the clinician has moved from ${from} to ${to}.`,
-             'Nothing else about the visit has changed. Call the office if the new time does not work.']
-          : ['A visit has been moved to a new time. The new details are in your secure portal.',
-             'For privacy we do not put visit details in email.'],
+        copyId: 'appointment_rescheduled', variant: detail ? 'detailed' : 'vague',
+        data: { from, to }, whose: 'visit',
         fields: visitFields(detail, { when: to, clinician, place }),
         actorId, entityId: eid
       });
@@ -660,18 +721,11 @@ function createNotifier(deps) {
       return await sendToClientSide({
         clientId: client.id,
         type: 'appointment_cancelled',
-        subject: detail ? `Your visit on ${when} is cancelled` : 'A visit has been cancelled',
-        headline: 'Your visit is cancelled',
-        paragraphs: detail
-          ? [`Your visit on ${when} has been cancelled.`,
-             'Nothing else has changed about your care. Call the office when you are ready to rebook.']
-          : ['A scheduled visit has been cancelled. The details are in your secure portal.',
-             'Call the office when you are ready to rebook.'],
+        copyId: 'appointment_cancelled', variant: detail ? 'detailed' : 'vague',
+        // The cancellation reason is staff free text, so it is declared PHI in
+        // the registry and the vague wording cannot use it.
+        data: { when, reason: reason || '' }, whose: 'visit',
         fields: visitFields(detail, { when, clinician, place: null }),
-        // The cancellation reason is staff free text. It rides only where the
-        // transport can carry it, the same rule the document rejection follows.
-        callout: detail && reason ? reason : null,
-        calloutLabel: 'Why it was cancelled',
         actorId, entityId: eid
       });
     } catch (e) {
@@ -1384,15 +1438,15 @@ function createNotifier(deps) {
       for (const u of office) {
         const ok = await send({
           type: 'caregiver_packet_submitted', user: u,
-          subject: `Welcome packet submitted — ${name}`,
-          headline: 'A caregiver finished their welcome packet',
-          paragraphs: [
-            `${name} has completed and signed their caregiver welcome packet.`,
-            Number.isFinite(outstandingCount) && outstandingCount > 0
+          copyId: 'caregiver_packet_submitted',
+          data: {
+            caregiverName: name,
+            // Composed here rather than branched in the registry, so the
+            // editable wording has one shape and never reads "0 documents".
+            outstandingLine: Number.isFinite(outstandingCount) && outstandingCount > 0
               ? `${plural(outstandingCount, 'document is', 'documents are')} still outstanding on their checklist.`
-              : 'Their document checklist has nothing outstanding.',
-            'Their packet and checklist are in the admin hub.'
-          ],
+              : 'Their document checklist has nothing outstanding.'
+          },
           ctaUrl, ctaLabel: 'Open the caregiver queue',
           relatedEntityId: `packet:${packetId || name}`, relatedEntityType: 'welcome_packet',
           // Employment and credentialing data about staff, not a patient's.
@@ -1418,14 +1472,8 @@ function createNotifier(deps) {
       const label = documentLabel || 'A document';
       return { notified: await send({
         type: 'caregiver_document_returned', user,
-        subject: `Needs another look — ${label}`,
-        headline: 'One of your documents came back',
-        paragraphs: [
-          `${reviewedByName || 'The office'} sent back "${label}".`,
-          'Open the app to send a clearer copy.'
-        ],
-        callout: reason || null,
-        calloutLabel: reason ? 'Why we need it again' : null,
+        copyId: 'caregiver_document_returned',
+        data: { label, reviewedByName: reviewedByName || 'The office', reason: reason || '' },
         ctaUrl, ctaLabel: 'Open my documents',
         // Keyed on the document AND the moment, so a second return after they
         // re-send is its own email rather than one the dedupe swallows.
@@ -1550,13 +1598,11 @@ function createNotifier(deps) {
       for (const u of admins) {
         const ok = await send({
           type: 'password_reset_requested', user: u,
-          subject: 'Someone is locked out and waiting',
-          headline: 'A password reset is waiting',
-          paragraphs: detail
-            ? [`${requesterName || 'Someone'} (${requesterEmail || 'no address recorded'}) has asked for a password reset.`,
-               'They have been told an administrator will reach out, so this one is on the clock.']
-            : ['Somebody has asked for a password reset and is waiting to be let back in.',
-               'Open the admin hub to see who.'],
+          copyId: 'password_reset_requested', variant: detail ? 'detailed' : 'vague',
+          data: {
+            requesterName: requesterName || 'Someone',
+            requesterEmail: requesterEmail || 'no address recorded'
+          },
           ctaUrl, ctaLabel: 'Open the reset requests',
           relatedEntityId: `pwreset:${requestId || requesterEmail || 'unknown'}`, relatedEntityType: 'password_reset_request',
           // The requester may be a patient, so their name and address are
@@ -1651,16 +1697,15 @@ function createNotifier(deps) {
       for (const u of admins) {
         const ok = await send({
           type: 'feedback_submitted', user: u,
-          subject: category === 'bug' ? 'Somebody reported a problem' : 'New feedback has come in',
-          headline: category === 'bug' ? 'Somebody reported a problem' : 'New feedback has come in',
-          paragraphs: detail
-            ? [`${fromName || 'Someone'}${fromEmail ? ` (${fromEmail})` : ''} reported ${kind}.`]
-            : [`Somebody reported ${kind}. Open the admin hub to read it.`,
-               'For privacy we do not put the report in email.'],
-          // Free text somebody typed. It can name a patient, so it rides only
-          // where the transport can carry it.
-          callout: detail ? (message || null) : null,
-          calloutLabel: detail && message ? 'What they said' : null,
+          copyId: 'feedback_submitted', variant: detail ? 'detailed' : 'vague',
+          // The report itself is free text somebody typed and can name a
+          // patient, so the registry declares it PHI and the vague wording
+          // cannot carry it however it is edited.
+          data: {
+            subjectLine: category === 'bug' ? 'Somebody reported a problem' : 'New feedback has come in',
+            from: `${fromName || 'Someone'}${fromEmail ? ` (${fromEmail})` : ''}`,
+            kind, message: message || ''
+          },
           ctaUrl, ctaLabel: 'Open the inbox',
           relatedEntityId: `feedback:${feedbackId || Date.now()}`, relatedEntityType: 'feedback',
           actorId, phi: detail
@@ -1690,15 +1735,8 @@ function createNotifier(deps) {
       const detail = transportAllowsDetail();
       return { notified: await send({
         type: 'shift_cancelled', user,
-        subject: detail ? `Shift cancelled — ${when}` : 'A shift has been cancelled',
-        headline: 'A shift has been cancelled',
-        paragraphs: detail
-          ? [`Your ${when} shift${clientName ? ` for ${clientName}` : ''} has been cancelled. You do not need to go.`,
-             'Your schedule in the app is up to date.']
-          : ['One of your shifts has been cancelled. Open the app to see which one.',
-             'For privacy we do not put visit details in email.'],
-        callout: detail ? (reason || null) : null,
-        calloutLabel: detail && reason ? 'Why it was cancelled' : null,
+        copyId: 'shift_cancelled_caregiver', variant: detail ? 'detailed' : 'vague',
+        data: { when, forClient: clientName ? ` for ${clientName}` : '', reason: reason || '' },
         ctaUrl, ctaLabel: 'Open my schedule',
         relatedEntityId: `${shiftId}:cancelled`, relatedEntityType: 'shift',
         actorId, phi: detail

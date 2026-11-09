@@ -41,6 +41,7 @@ const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
+const emailCopy = require('./emailCopy');             // the editable wording of every notice (2026-11-09)
 const enrollmentGate = require('./enrollmentGate');
 const { createNotifier } = require('./notifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
@@ -21271,7 +21272,10 @@ const notify = createNotifier({
   getUsers, queueNotification, getAppBaseUrl, emailTransport,
   staffRoles: ENROLLMENT_STAFF_ROLES,
   clientRole: config.ROLES.CLIENT,
-  familyRole: config.ROLES.FAMILY
+  familyRole: config.ROLES.FAMILY,
+  // The admin's edits to the wording. Read through the notifier's own short
+  // cache, so a notice to twelve people is one read of the store.
+  getCopyOverrides: async () => (await db.get('email_copy_overrides')) || {}
 });
 const requireEnrollmentStaff = (req, res, next) => {
   const role = req.user.role;
@@ -31859,6 +31863,173 @@ app.put('/api/admin/notification-settings', authenticateToken, requireAdminHubAc
 // ============================================================
 
 // List all email templates
+// ============================================================================
+// THE EMAIL LIBRARY (2026-11-09) — every notice's wording, editable in place
+// ============================================================================
+// Owner: "update our email template library in-full so we can easily edit ANY
+// email." The editable unit is the PIECES the house template already takes —
+// subject, headline, paragraphs, the callout and its label, the button label
+// — never HTML. `emailCopy.js` holds the built-in wording and the rules; this
+// store holds only what somebody changed.
+//
+// Gated the same way the old template screen is: Super Admin. Editing the
+// words the practice says to patients is not a routine admin action.
+const EMAIL_COPY_OVERRIDES = 'email_copy_overrides';
+const readCopyOverrides = async () => (await db.get(EMAIL_COPY_OVERRIDES)) || {};
+
+const copyRowFor = (id, overrides) => {
+  const notice = emailCopy.listNotices().find(x => x.id === id);
+  if (!notice) return null;
+  const saved = overrides[id] || {};
+  return {
+    ...notice,
+    // What is actually in force per variant, and what the built-in says, so
+    // the editor can show both and offer a reset.
+    saved: emailCopy.VARIANTS.reduce((acc, v) => (saved[v] ? { ...acc, [v]: saved[v] } : acc), {}),
+    edited: !!(saved.updatedAt),
+    updatedAt: saved.updatedAt || null,
+    updatedBy: saved.updatedByName || null
+  };
+};
+
+app.get('/api/admin/email-copy', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const overrides = await readCopyOverrides();
+    const rows = emailCopy.listNotices().map(n => copyRowFor(n.id, overrides));
+    const audiences = Object.entries(emailCopy.AUDIENCES).map(([key, label]) => ({
+      key, label, notices: rows.filter(r => r.audience === key)
+    })).filter(g => g.notices.length);
+    res.json({ audiences, count: rows.length, editableFields: emailCopy.EDITABLE_FIELDS });
+  } catch (error) {
+    console.error('Email copy list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/admin/email-copy/:id', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const row = copyRowFor(req.params.id, await readCopyOverrides());
+    if (!row) return res.status(404).json({ error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' });
+    res.json(row);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Save an edit. The allow-list and every refusal live in emailCopy.js, so the
+// screen, this route and the send path cannot disagree about what is legal.
+app.put('/api/admin/email-copy/:id/:variant', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const { id, variant } = req.params;
+    const patch = (req.body || {}).copy;
+    const check = emailCopy.validateOverride(id, variant, patch);
+    if (!check.ok) {
+      return res.status(400).json({
+        error: check.errors[0].message, code: check.errors[0].code, errors: check.errors
+      });
+    }
+    const overrides = await readCopyOverrides();
+    const row = overrides[id] || {};
+    // Only the fields they changed are kept. A field set back to the built-in
+    // is removed rather than stored as a copy of it, which is what stops the
+    // store drifting from the code the way the lab library did.
+    const kept = {};
+    for (const f of emailCopy.EDITABLE_FIELDS) {
+      if (f in patch) kept[f] = patch[f];
+    }
+    overrides[id] = {
+      ...row, [variant]: kept,
+      updatedAt: new Date().toISOString(),
+      updatedById: req.user.id, updatedByName: req.user.name || req.user.email
+    };
+    await db.set(EMAIL_COPY_OVERRIDES, overrides);
+    // WHICH fields changed, never the words: an audit trail of email copy is
+    // a second copy of anything somebody typed into it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_edited', 'email_copy', id,
+      { variant, fields: Object.keys(kept) });
+    res.json(copyRowFor(id, overrides));
+  } catch (error) {
+    console.error('Email copy save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reset is a DELETE, not a write of the built-in back over itself.
+app.delete('/api/admin/email-copy/:id', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    if (!emailCopy.has(req.params.id)) return res.status(404).json({ error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' });
+    const overrides = await readCopyOverrides();
+    const variant = (req.query || {}).variant;
+    if (variant && emailCopy.VARIANTS.includes(variant) && overrides[req.params.id]) {
+      delete overrides[req.params.id][variant];
+      const left = emailCopy.VARIANTS.some(v => overrides[req.params.id][v]);
+      if (!left) delete overrides[req.params.id];
+    } else {
+      delete overrides[req.params.id];
+    }
+    await db.set(EMAIL_COPY_OVERRIDES, overrides);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_reset', 'email_copy', req.params.id, { variant: variant || 'all' });
+    res.json(copyRowFor(req.params.id, overrides));
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Preview an UNSAVED draft. The old template screen SAVED before previewing,
+// so half-finished wording went live and then sent; this takes the draft in
+// the request and writes nothing.
+const previewCopy = async (id, variant, draft) => {
+  const notice = emailCopy.listNotices().find(x => x.id === id);
+  if (!notice) return { error: { status: 404, body: { error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' } } };
+  const useVariant = emailCopy.VARIANTS.includes(variant) && notice.variants.includes(variant) ? variant : notice.variants[0];
+  if (draft) {
+    const check = emailCopy.validateOverride(id, useVariant, draft);
+    if (!check.ok) return { error: { status: 400, body: { error: check.errors[0].message, code: check.errors[0].code, errors: check.errors } } };
+  }
+  const data = {};
+  for (const p of notice.placeholders) data[p.key] = p.example;
+  // Resolved through the SAME function `send()` uses, then rendered through
+  // the SAME house template, so a preview cannot disagree with what sends.
+  const resolved = emailCopy.resolve(id, {
+    variant: useVariant, data,
+    overrides: draft ? { [id]: { [useVariant]: draft } } : await readCopyOverrides()
+  });
+  const base = await getAppBaseUrl();
+  const rendered = emailTemplates.renderGfcEmail({
+    greeting: 'Ada', headline: resolved.headline, paragraphs: resolved.paragraphs,
+    callout: resolved.callout, calloutLabel: resolved.calloutLabel,
+    ctaUrl: `${base}${appLinks.PATHS.PORTAL}`, ctaLabel: resolved.ctaLabel
+  });
+  return { subject: resolved.subject, text: rendered.text, html: rendered.html, variant: useVariant };
+};
+
+app.post('/api/admin/email-copy/:id/preview', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const out = await previewCopy(req.params.id, (req.body || {}).variant, (req.body || {}).copy || null);
+    if (out.error) return res.status(out.error.status).json(out.error.body);
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.json(out);
+  } catch (error) {
+    console.error('Email copy preview error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Send the draft to the person editing it, and only ever to them.
+app.post('/api/admin/email-copy/:id/test-send', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    if (!req.user.email) return res.status(400).json({ error: 'Your account has no email address on file.', code: 'NO_ADDRESS' });
+    const out = await previewCopy(req.params.id, (req.body || {}).variant, (req.body || {}).copy || null);
+    if (out.error) return res.status(out.error.status).json(out.error.body);
+    const sent = await sendEmail(req.user.email, `[TEST] ${out.subject}`, out.text, { htmlBody: out.html });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_test_sent', 'email_copy', req.params.id, { variant: out.variant });
+    res.json({ sent: !!(sent && !sent.skipped), to: req.user.email, reason: (sent && sent.reason) || null });
+  } catch (error) {
+    console.error('Email copy test-send error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/admin/email-templates', authenticateToken, requireAdminHubAccess, async (req, res) => {
   try {
     const templates = await getEmailTemplates();
