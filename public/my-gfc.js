@@ -552,14 +552,16 @@ function LiaisonClients() {
 // Back to the Portal Hub to reach other areas (owner, 2026-11-09). The query
 // keeps the hub from sending them straight back to their landing page.
 const PORTAL_HUB = '/login?hub=1';
-function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra }) {
+// `tag` names the area under the logo; the Admin Hub uses this same frame
+// (owner, 2026-11-09) and passes its own.
+function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra, tag = 'My GFC' }) {
   const isHome = view === 'home';
   return (
     <div className="mygfc">
       <div className="mg-shell">
         <aside className="mg-side">
           <img className="mg-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
-          <div className="mg-tag">My GFC</div>
+          <div className="mg-tag">{tag}</div>
           <nav>
             {sections.map(s => (
               <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
