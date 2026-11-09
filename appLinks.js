@@ -45,6 +45,11 @@ const PATHS = Object.freeze({
   ENROLLMENT: '/admin/enrollment',
   MESSAGES: '/messages',                    // managers + care coordinators (owner, 2026-10-15)
   LOGIN: '/login',
+  // Pay stubs, pay setup and tax forms live in My GFC's Hours & Pay section.
+  // A caregiver's My GFC is the caregiver app (2026-11-08).
+  MY_PAY: '/my#hours',
+  CAREGIVER_PAY: '/caregiver#hours',
+  PAYROLL_ADMIN: '/payroll',                // the owner's payroll screen
   // T1 C4: the one-tap video join link's PREFIX. The token is appended per
   // recipient (`videoJoinFor`), so this entry is the prefix and not a whole
   // path — which means the boot-time link sweep requests it with a bogus
@@ -94,6 +99,9 @@ function messagesFor(user) {
 // `messagesFor` does: the destination belongs here, not at the call site.
 const tasksFor = () => PATHS.CLINICAL_TASKS;
 
+// Where THIS person reads their pay stubs and tax forms.
+const payFor = (user) => (isCaregiver(user) ? PATHS.CAREGIVER_PAY : PATHS.MY_PAY);
+
 // A shift concerns a caregiver, so it points at their schedule — never the
 // admin board at `/scheduling`, which they cannot open.
 const shiftFor = () => PATHS.CAREGIVER_SCHEDULE;
@@ -111,4 +119,4 @@ const routeOf = (p) => String(p || '').split('#')[0].split('?')[0];
 // excluded here and checked by its own assertion with a bogus token.
 const ALL_PATHS = Object.freeze(Object.values(PATHS).filter(p => p !== PATHS.VIDEO_JOIN_PREFIX));
 
-module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, videoJoinFor, routeOf, isCaregiver, isClinical };
+module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, payFor, videoJoinFor, routeOf, isCaregiver, isClinical };

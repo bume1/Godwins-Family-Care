@@ -99,6 +99,21 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Each hours file used to make invoices, kept with the invoices made from
   // it: caregiver and client names with shift times.
   { key: 'invoice_hour_imports', phi: true, owner: 'PHC invoices 11/2026' },
+  // Payroll (2026-11-08). Employee data, not patient data, so phi:false — but
+  // SSNs, TINs and bank numbers are SEALED in payroll_profiles (payrollCrypto).
+  { key: 'payroll_profiles', phi: false, owner: 'payroll 11/2026', note: 'per person: W-4, G-4, I-9, W-9, pay method; secrets sealed, last four readable' },
+  { key: 'payroll_settings', phi: false, owner: 'payroll 11/2026' },
+  { key: 'payroll_tax_tables', phi: false, owner: 'payroll 11/2026', note: 'staged until the owner approves' },
+  { key: 'payroll_runs', phi: false, owner: 'payroll 11/2026', note: 'draft, approved (frozen), paid; liabilities and payment confirmations' },
+  { key: 'contractor_invoices', phi: false, owner: 'payroll 11/2026' },
+  { key: 'payroll_tax_payments', phi: false, owner: 'payroll 11/2026' },
+  { key: 'payroll_filing_confirmations', phi: false, owner: 'payroll 11/2026' },
+  { key: 'payroll_year_end', phi: false, owner: 'payroll 11/2026', note: 'year-end W-2 / 1099-NEC figures once released' },
+  { key: 'qbo_connection', phi: false, owner: 'quickbooks 11/2026', note: 'company id, sealed tokens, account ids' },
+  { key: 'qbo_oauth_states', phi: false, owner: 'quickbooks 11/2026', note: 'single-use sign-in states, ten minutes' },
+  { key: 'qbo_sync_log', phi: false, owner: 'quickbooks 11/2026', note: 'one row per event: ok or failed, never a value' },
+  { key: 'ime_fee_schedules', phi: false, owner: 'IME billing 11/2026', note: 'rates per contracting entity' },
+  { key: 'ime_invoices', phi: true, owner: 'IME billing 11/2026', note: 'exam lines carry the VA claim reference and exam date' },
   // B1: every eligibility result a biller recorded, append-only. The client
   // record holds the CURRENT answer per rank; this is how it got there.
   { key: 'insurance_verification_events', phi: true, owner: 'insurance eligibility 10/2026' },

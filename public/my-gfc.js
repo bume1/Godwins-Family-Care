@@ -603,7 +603,7 @@ const STAFF_SECTIONS = [
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text', short: 'Documents', subtitle: 'What you signed, and every file on record for you.' },
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
   { id: 'folders', label: 'Shared Folders', icon: 'ti-folders', short: 'Folders', subtitle: 'The Drive folders set up for your role.' },
-  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your time clock, hours and pay stubs.' },
+  { id: 'hours', label: 'Hours & Pay', icon: 'ti-clock', short: 'Pay', subtitle: 'Your time clock, pay stubs, pay setup and tax forms.' },
   // Headshots and bios are read by the admin team on each person's User
   // Management form, not on a page here (owner, 2026-11-09).
   { id: 'account', label: 'My Profile', icon: 'ti-user-circle', short: 'Profile', subtitle: 'Your headshot, website bio and sign-in.' }
@@ -686,6 +686,10 @@ function StaffView({ view, data }) {
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected and exported for payroll in Caregiver Scheduling → Time Logs.</p><a className="mg-btn mg-ghost" href="/scheduling">Open Caregiver Scheduling</a></Section>}
+        {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
+        {window.MyPay && <Section title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
+        {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
+        {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>
     );
   }

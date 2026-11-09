@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Payroll</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <script>
+    // The clinical workspace's palette, so a claim reads the same here as the
+    // visit it came from.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 500: '#033D50', 600: '#02334a', 700: '#022A38' },
+            accent: '#C9A44A',
+            cream: '#FAF7F2', creamdeep: '#efe9db',
+            stone: { 50: '#FCFAF6', 100: '#F1ECE2', 200: '#E8E0D2', 300: '#D9CFBE', 400: '#8E9BA1',
+              500: '#5b6b73', 600: '#4a5a62', 700: '#34444c', 800: '#1a2a32', 900: '#11202a' }
+          },
+          fontFamily: { serif: ['"Cormorant Garamond"', 'Georgia', 'serif'], sans: ['"DM Sans"', 'system-ui', 'sans-serif'] }
+        }
+      }
+    }
+  </script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The Billing module (owner, 2026-10-15; the claims workspace 2026-11-04).
+       Its own page, because billing covers both medical visits and home care
+       and the person working claims needs none of the clinical chart. The
+       classes below are the clinical workspace's, so the shared claim view
+       (/components/claim-shared.jsx) looks the same on both pages. */
+    :root { --navy:#033D50; --navy2:#0a5066; --navyd:#022A38; --goldd:#C9A44A; --gold:#F5CD85; --gold-ink:#9A7430;
+      --cream:#FAF7F2; --wash:#F6EFE2; --edge:#ECE4D6; --edge2:#E1D7C5; --ink:#1a2a32; --mut:#5b6b73; --danger:#B5462E;
+      --shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18); }
+    * { font-family: 'DM Sans', system-ui, sans-serif; }
+    body { background: var(--cream); color: var(--ink); }
+    .card { background:#fff; border:1px solid var(--edge); border-radius:16px; box-shadow:var(--shadow); }
+    .card-h { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:14px 18px; border-bottom:1px solid var(--edge); }
+    .card-h h2 { font-family:'Cormorant Garamond',serif; font-size:20px; color:var(--navy); font-weight:600; line-height:1.15; }
+    .lblu { font-size:10.5px; letter-spacing:1.2px; text-transform:uppercase; color:var(--gold-ink); font-weight:700; }
+    .inp { width:100%; border:1px solid var(--edge2); border-radius:10px; padding:8px 11px; font-size:13.5px; background:#fff; color:var(--ink); }
+    .inp:focus { outline:none; border-color:var(--navy); box-shadow:0 0 0 3px rgba(3,61,80,.10); }
+    .btn { display:inline-flex; align-items:center; gap:6px; border-radius:10px; padding:8px 15px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--navy); background:var(--navy); color:#fff; text-decoration:none; }
+    .btn:hover:not(:disabled) { background:var(--navy2); }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .btn.gold { background:#A9853A; border-color:#A9853A; color:#fff; }
+    .btn.gold:hover:not(:disabled) { background:var(--gold-ink); }
+    .btn.ghost { background:#fff; color:var(--navy); border-color:var(--edge2); }
+    .btn.ghost:hover:not(:disabled) { background:var(--wash); }
+    .chip { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:2px 10px; font-size:11px; font-weight:600; white-space:nowrap; }
+    .tabbtn { padding:10px 14px; font-size:14px; font-weight:600; color:rgba(255,255,255,.75); border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; background:none; border-top:0; border-left:0; border-right:0; }
+    .tabbtn:hover { color:#fff; }
+    .tabbtn.on { color:var(--gold); border-color:var(--gold); }
+    .cw-row { transition:background .12s; }
+    .cw-row:hover { background:#FCFAF6; }
+    .cw-row.on { background:var(--wash); box-shadow:inset 3px 0 0 var(--goldd); }
+    .fmt { font-size:13px; line-height:1.5; color:#1f2937; }
+    .fmt ul { list-style:disc; padding-left:1.25rem; margin:2px 0; }
+    .fmt ol { list-style:decimal; padding-left:1.4rem; margin:2px 0; }
+    .fmt h3 { font-size:14px; font-weight:700; color:#033D50; margin:4px 0 2px; }
+    .fmt strong { font-weight:700; } .fmt em { font-style:italic; } .fmt u { text-decoration:underline; }
+    .sigblock { border:2px solid #033D50; border-radius:10px; padding:10px 12px; background:#fff; }
+  </style>
+  <script src="/session-guard.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+<script type="text/babel">
+// ============================================================================
+// /payroll — the owner's payroll screen (spec v2, 2026-11-08). Super Admin
+// only: every route it calls is requireAdmin. Runs (draft, approve, pay),
+// people (pay setup, I-9 Section 2, reveal a number), contractor invoices,
+// taxes (deposits, filings, quarter and year-end figures), tax tables
+// (approve staged ones), QuickBooks, and settings. The server decides every
+// number; this page draws it.
+// ============================================================================
+const { useState, useEffect, useCallback } = React;
+const getToken = () => localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+const call = async (path, opts = {}) => {
+  const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) } });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status})`); err.code = data && data.code; err.status = res.status; err.data = data; throw err; }
+  return data;
+};
+const post = (p, b) => call(p, { method: 'POST', body: JSON.stringify(b || {}) });
+const put = (p, b) => call(p, { method: 'PUT', body: JSON.stringify(b || {}) });
+const enc = encodeURIComponent;
+const usd = (c) => (c === null || c === undefined ? '—' : `$${(Number(c) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`);
+const day = (ymd) => (ymd ? new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }) : '');
+const hrs = (m) => (m ? (m / 60).toFixed(2) : '0.00');
+
+const Card = ({ title, right, children }) => (
+  <div className="card mb-4"><div className="card-h"><h2>{title}</h2>{right}</div><div className="p-4 text-[13.5px]">{children}</div></div>
+);
+const Err = ({ e }) => (e ? <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3 mb-3 text-[13px]">{e}</div> : null);
+const Ok = ({ m }) => (m ? <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 p-3 mb-3 text-[13px]">{m}</div> : null);
+const Warn = ({ children }) => <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3 mb-3 text-[13px]">{children}</div>;
+
+// ---- Runs --------------------------------------------------------------------
+const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700' };
+const RunDetail = ({ id, onBack, reload }) => {
+  const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const [adj, setAdj] = useState({ userId: '', type: 'bonus', amount: '', note: '' });
+  const load = useCallback(() => call(`/api/payroll/admin/runs/${enc(id)}`).then(r => {
+    setRun(r.run);
+    if (r.run.status !== 'draft') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
+  }).catch(e => setErr(e.message)), [id]);
+  useEffect(() => { load(); }, [load]);
+  const act = async (fn, ok) => { setBusy(true); setErr(''); setMsg(''); try { await fn(); setMsg(ok); await load(); reload(); } catch (e) { setErr(e.message + (e.data && e.data.blocked ? ` ${e.data.blocked.map(b => `${b.name}: ${b.missing.join(', ')}`).join('; ')}` : '')); } setBusy(false); };
+  if (!run) return err ? <Err e={err} /> : <p>Loading…</p>;
+  const t = run.totals;
+  return (
+    <div>
+      <button className="btn ghost mb-3" onClick={onBack}>Back to Runs</button>
+      <Card title={`Pay period ${day(run.period.start)} to ${day(run.period.end)}`} right={<span className={`chip ${STATUS_CHIP[run.status]}`}>{run.status.toUpperCase()}</span>}>
+        <Err e={err} /><Ok m={msg} />
+        <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
+        {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
+        {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
+        <div className="grid sm:grid-cols-4 gap-3 mb-4">
+          {[['Gross pay', t.grossCents], ['Net pay', t.netCents], ['Taxes withheld', t.federalCents + t.socialSecurityCents + t.medicareCents + t.georgiaCents], ['Cash needed', t.cashNeededCents]].map(([k, v]) => (
+            <div key={k} className="rounded-xl border border-stone-200 p-3"><div className="lblu">{k}</div><div className="text-[20px] font-semibold text-primary">{usd(v)}</div></div>
+          ))}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px]">
+            <thead><tr className="text-left text-stone-500"><th className="py-1">Person</th><th>Hours</th><th>OT hrs</th><th className="text-right">Gross</th><th className="text-right">Federal</th><th className="text-right">SS</th><th className="text-right">Medicare</th><th className="text-right">Georgia</th><th className="text-right">Net</th></tr></thead>
+            <tbody>{run.workers.map(w => {
+              const reg = w.earnings.find(e => e.code === 'regular'), ot = w.earnings.find(e => e.code === 'overtime');
+              return (
+                <tr key={w.userId} className="border-t border-stone-100">
+                  <td className="py-1.5"><b>{w.name}</b>{w.missing.length > 0 && <div className="text-red-700 text-[12px]">Missing: {w.missing.join(', ')}</div>}</td>
+                  <td>{reg ? hrs(reg.minutes) : '—'}</td><td>{ot ? hrs(ot.minutes) : ''}</td>
+                  {w.pay ? <><td className="text-right">{usd(w.pay.grossCents)}</td><td className="text-right">{usd(w.pay.taxes.federal)}</td><td className="text-right">{usd(w.pay.taxes.socialSecurity)}</td><td className="text-right">{usd(w.pay.taxes.medicare)}</td><td className="text-right">{usd(w.pay.taxes.georgia)}</td><td className="text-right"><b>{usd(w.pay.netCents)}</b></td></>
+                    : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and G-4 are on file.</td>}
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
+        <p className="text-[12.5px] text-stone-500 mt-3">Employer taxes: Social Security {usd(t.employerSocialSecurityCents)}, Medicare {usd(t.employerMedicareCents)}, FUTA {usd(t.futaCents)}, Georgia unemployment {usd(t.gaSutaCents)}.</p>
+        {run.skippedItems && run.skippedItems.length > 0 && <Warn><b>Not paid, needs fixing:</b><ul className="list-disc pl-5">{run.skippedItems.map((s, i) => <li key={i}>{s.reason} ({s.ref})</li>)}</ul></Warn>}
+        {run.status === 'draft' && (
+          <div className="mt-4 grid gap-3">
+            <div className="flex flex-wrap gap-2 items-end">
+              <select className="inp !w-48" value={adj.userId} onChange={e => setAdj({ ...adj, userId: e.target.value })}><option value="">Person…</option>{run.workers.map(w => <option key={w.userId} value={w.userId}>{w.name}</option>)}</select>
+              <select className="inp !w-44" value={adj.type} onChange={e => setAdj({ ...adj, type: e.target.value })}><option value="bonus">Bonus</option><option value="reimbursement">Reimbursement (not taxed)</option><option value="correction">Correction</option></select>
+              <input className="inp !w-28" placeholder="$" value={adj.amount} onChange={e => setAdj({ ...adj, amount: e.target.value })} />
+              <input className="inp !w-56" placeholder="What it is for" value={adj.note} onChange={e => setAdj({ ...adj, note: e.target.value })} />
+              <button className="btn ghost" disabled={busy || !adj.userId || !adj.amount} onClick={() => act(() => post(`/api/payroll/admin/runs/${enc(id)}/adjustments`, adj), 'Added.')}>Add Line</button>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
+              <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
+            </div>
+          </div>
+        )}
+      </Card>
+      {sheet && (
+        <Card title="Payment Sheet (PNC)" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
+          <p className="mb-3 text-stone-500">Send each payment in the PNC app, then paste its confirmation number here. The run is paid when everyone has one.</p>
+          {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} />)}
+        </Card>
+      )}
+    </div>
+  );
+};
+const Copy = ({ text }) => <button className="btn ghost !py-0.5 !px-2 !text-[11px]" onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(text))}>Copy</button>;
+const PaymentRow = ({ runId, s, onDone }) => {
+  const [conf, setConf] = useState(''); const [full, setFull] = useState({}); const [err, setErr] = useState('');
+  const reveal = (field) => post(`/api/payroll/admin/people/${enc(s.userId)}/reveal`, { field }).then(r => setFull(f => ({ ...f, [field]: r.value }))).catch(e => setErr(e.message));
+  return (
+    <div className="flex flex-wrap justify-between gap-3 py-2 border-b border-stone-100">
+      <div>
+        <b className="text-primary">{s.name}</b> · <b>{s.net}</b> <Copy text={(s.netCents / 100).toFixed(2)} />
+        <div className="text-[12.5px] text-stone-500">
+          {s.method === 'direct_deposit' ? <>
+            {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : <button className="underline" onClick={() => reveal('routing')}>show</button>}
+            {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : <button className="underline" onClick={() => reveal('account')}>show</button>}
+          </> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
+        </div>
+        {err && <div className="text-red-700 text-[12px]">{err}</div>}
+      </div>
+      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : (
+        <div className="flex gap-2"><input className="inp !w-44" placeholder="Confirmation #" value={conf} onChange={e => setConf(e.target.value)} />
+          <button className="btn" disabled={!conf.trim()} onClick={() => post(`/api/payroll/admin/runs/${enc(runId)}/payments/${enc(s.userId)}`, { confirmation: conf }).then(onDone).catch(e => setErr(e.message))}>Mark Paid</button></div>
+      )}
+    </div>
+  );
+};
+const Runs = ({ data, reload }) => {
+  const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const [start, setStart] = useState(data.nextPeriod ? data.nextPeriod.start : '');
+  if (open) return <RunDetail id={open} onBack={() => setOpen(null)} reload={reload} />;
+  return (
+    <Card title="Payroll Runs">
+      <Err e={err} />
+      {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}
+      <div className="flex flex-wrap gap-2 items-end mb-4">
+        <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={start} onChange={e => setStart(e.target.value)} /></div>
+        <button className="btn" disabled={busy || !start} onClick={() => { setBusy(true); setErr(''); post('/api/payroll/admin/runs', { periodStart: start }).then(r => { reload(); setOpen(r.run.id); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); }}>Draft Payroll</button>
+      </div>
+      {data.runs.length === 0 && <p className="text-stone-500">No runs yet.</p>}
+      {data.runs.map(r => (
+        <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
+          <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
+          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span></span>
+        </button>
+      ))}
+    </Card>
+  );
+};
+
+// ---- People --------------------------------------------------------------------
+const Person = ({ p, data, reload }) => {
+  const pr = p.profile;
+  const [f, setF] = useState({ workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
+  const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
+  return (
+    <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
+      <Err e={err} /><Ok m={msg} />
+      <div className="grid sm:grid-cols-3 gap-2">
+        {p.employmentTypeOnUser
+          ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
+          : <label>W-2 or 1099<select className="inp" value={f.workerType} onChange={e => setF({ ...f, workerType: e.target.value })}>{Object.values(data.workerTypes).map(v => <option key={v} value={v}>{v === 'HYBRID' ? 'Both' : v}</option>)}</select></label>}
+        <label>Pay type<select className="inp" value={f.payType} onChange={e => setF({ ...f, payType: e.target.value })}>{data.payTypes.map(v => <option key={v} value={v}>{v.replace('_', ' ')}</option>)}</select></label>
+        <label>Wages account<select className="inp" value={f.wageAccount} onChange={e => setF({ ...f, wageAccount: e.target.value })}><option value="home_care">Home care</option><option value="clinical">Clinical</option></select></label>
+        {pr.isCaregiver ? <div className="text-[12.5px] text-stone-500">Caregiver pay rates stay on the user form and shifts (shift → client → base).</div>
+          : <label>Hourly rate $<input className="inp" value={f.hourlyRate} onChange={e => setF({ ...f, hourlyRate: e.target.value })} /></label>}
+        <label>Salary $/year<input className="inp" value={f.salaryAnnual} onChange={e => setF({ ...f, salaryAnnual: e.target.value })} /></label>
+        <label>Per visit $<input className="inp" value={f.perVisitRate} onChange={e => setF({ ...f, perVisitRate: e.target.value })} /></label>
+        <label>Per IME exam $<input className="inp" value={f.perExamRate} onChange={e => setF({ ...f, perExamRate: e.target.value })} /></label>
+        <label>Hire date<input type="date" className="inp" value={f.hireDate} onChange={e => setF({ ...f, hireDate: e.target.value })} /></label>
+        <label>Status<select className="inp" value={f.status} onChange={e => setF({ ...f, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
+      </div>
+      <div><button className="btn" onClick={save}>Save Pay Setup</button>
+        {!pr.newHireReportedAt && pr.workerType !== '1099' && <button className="btn ghost ml-2" onClick={() => post(`/api/payroll/admin/people/${enc(p.userId)}/new-hire-reported`).then(() => { setMsg('Recorded.'); reload(); }).catch(e => setErr(e.message))}>Mark GA New Hire Reported</button>}</div>
+      {pr.i9 && pr.i9.section1 && !pr.i9.section2 && (
+        <div className="border-t border-stone-100 pt-3">
+          <div className="lblu mb-1">I-9 Section 2: documents you examined</div>
+          {i9.docs.map((d, k) => (
+            <div key={k} className="flex flex-wrap gap-2 mb-2">
+              <select className="inp !w-24" value={d.list} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, list: e.target.value } : x)) })}><option>A</option><option>B</option><option>C</option></select>
+              <input className="inp !w-64" placeholder="Document title (e.g. U.S. Passport)" value={d.title} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, title: e.target.value } : x)) })} />
+              <input type="date" className="inp !w-44" value={d.expires} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, expires: e.target.value } : x)) })} />
+            </div>
+          ))}
+          <button className="btn ghost !py-1 mr-2" onClick={() => setI9({ ...i9, docs: [...i9.docs, { list: 'C', title: '', expires: '' }] })}>Add Document</button>
+          <label className="inline-block">First day of work <input type="date" className="inp !w-44" value={i9.firstDay} onChange={e => setI9({ ...i9, firstDay: e.target.value })} /></label>
+          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
+        </div>
+      )}
+    </div>
+  );
+};
+const People = ({ data, reload }) => {
+  const [open, setOpen] = useState(null);
+  return (
+    <Card title="People">
+      {!data.secretsStorable && <Warn>Secure storage is not switched on: set PAYROLL_ENCRYPTION_KEY on the server. Until then nobody can save an SSN or bank account.</Warn>}
+      <p className="text-stone-500 mb-3">Each person fills in their own paperwork in My GFC, under Hours & Pay. You set how they are paid and complete I-9 Section 2.</p>
+      {data.people.map(p => (
+        <div key={p.userId} className="border-b border-stone-100 py-2">
+          <button className="w-full text-left flex flex-wrap justify-between gap-2" onClick={() => setOpen(open === p.userId ? null : p.userId)}>
+            <span><b className="text-primary">{p.name}</b> <span className="text-stone-500 text-[12.5px]">· {p.accountType} · {p.profile.workerType === 'HYBRID' ? 'W-2 + 1099' : p.profile.workerType} · {p.profile.payType.replace('_', ' ')}</span></span>
+            {p.missing.length ? <span className="chip bg-red-50 text-red-700">Missing {p.missing.length}</span> : <span className="chip bg-emerald-50 text-emerald-700">Ready to pay</span>}
+          </button>
+          {p.missing.length > 0 && <div className="text-[12.5px] text-stone-500">{p.missing.join(' · ')}</div>}
+          {open === p.userId && <Person p={p} data={data} reload={reload} />}
+        </div>
+      ))}
+    </Card>
+  );
+};
+
+// ---- Contractors -----------------------------------------------------------------
+// 1099 examiners are paid from their completed exams (IME billing, step 7).
+const ExaminerPayouts = ({ reload }) => {
+  const [f, setF] = useState({ from: '', to: '' }); const [m, setM] = useState(''); const [e, setE] = useState('');
+  return (
+    <div className="flex flex-wrap gap-2 items-end mb-4">
+      <div><div className="lblu mb-1">Examiner payouts for</div><input type="date" className="inp !w-40" value={f.from} onChange={x => setF({ ...f, from: x.target.value })} /></div>
+      <input type="date" className="inp !w-40" value={f.to} onChange={x => setF({ ...f, to: x.target.value })} />
+      <button className="btn ghost" disabled={!f.from || !f.to} onClick={() => post('/api/payroll/admin/examiner-payouts', f).then(r => {
+        setM(`${r.created} payout invoice(s) built from completed exams.${r.skipped.length ? ' Skipped: ' + r.skipped.map(s => `${s.name} (${s.reason})`).join(', ') : ''}`); reload();
+      }).catch(x => setE(x.message))}>Build Examiner Payouts</button>
+      {m && <span className="text-emerald-700 text-[12.5px]">{m}</span>}{e && <span className="text-red-700 text-[12.5px]">{e}</span>}
+    </div>
+  );
+};
+const Contractors = ({ data, reload }) => {
+  const [err, setErr] = useState('');
+  const act = (inv, action) => {
+    const body = action === 'reject' ? { note: window.prompt('What should they fix?') || '' } : action === 'pay' ? { confirmation: window.prompt('PNC or Wise confirmation number') || '' } : {};
+    if ((action === 'reject' && !body.note) || (action === 'pay' && !body.confirmation)) return;
+    post(`/api/payroll/admin/contractor-invoices/${enc(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message));
+  };
+  return (
+    <Card title="Contractor Invoices">
+      <Err e={err} />
+      <ExaminerPayouts reload={reload} />
+      {data.contractorInvoices.length === 0 && <p className="text-stone-500">Nothing waiting.</p>}
+      {data.contractorInvoices.map(i => (
+        <div key={i.id} className="py-2 border-b border-stone-100">
+          <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}</span><b>{usd(i.totalCents)}</b></div>
+          {i.lines.map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
+          <div className="flex gap-2 mt-2">
+            {i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
+            {i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
+          </div>
+        </div>
+      ))}
+    </Card>
+  );
+};
+
+// ---- Taxes ----------------------------------------------------------------------------
+const Taxes = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [q, setQ] = useState(null);
+  const [yr, setYr] = useState(String(new Date().getFullYear())); const [qtr, setQtr] = useState(String(Math.floor(new Date().getMonth() / 3) + 1));
+  const load = () => call('/api/payroll/admin/taxes').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  if (!d) return err ? <Err e={err} /> : <p>Loading…</p>;
+  const pay = (g) => {
+    const confirmation = window.prompt(`Confirmation number for ${g.label} (${usd(g.amountCents - g.paidCents)})`);
+    if (!confirmation) return;
+    post('/api/payroll/admin/taxes/payments', { key: g.key, amount: ((g.amountCents - g.paidCents) / 100).toFixed(2), confirmation }).then(load).catch(e => setErr(e.message));
+  };
+  const file = (f) => { const c = window.prompt(`Confirmation for ${f.form}`); if (c) post(`/api/payroll/admin/filings/${enc(f.key)}/confirm`, { confirmation: c }).then(load).catch(e => setErr(e.message)); };
+  return (
+    <>
+      <Card title="Tax Deposits">
+        <Err e={err} />
+        <p className="text-stone-500 mb-3">You pay in EFTPS and the Georgia portals, then record the confirmation here. Due dates move to the next business day.</p>
+        {d.deposits.length === 0 && <p className="text-stone-500">Nothing owed yet. Deposits appear once a run is approved.</p>}
+        {d.deposits.map(g => (
+          <div key={g.key} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
+            <span><b className="text-primary">{g.label}</b><div className="text-[12.5px] text-stone-500">{g.agencyLabel} · due {day(g.dueDate)}{g.note ? ` · ${g.note}` : ''}</div></span>
+            <span>{usd(g.amountCents)} {g.open ? <button className="btn !py-1 ml-2" onClick={() => pay(g)}>Record Payment</button> : g.amountCents > 0 ? <span className="chip bg-emerald-50 text-emerald-700">PAID</span> : null}</span>
+          </div>
+        ))}
+      </Card>
+      <Card title="Filings">
+        {d.filings.map(f => (
+          <div key={f.key} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
+            <span><b className="text-primary">{f.form}</b> <span className="text-stone-500 text-[12.5px]">{f.quarter || f.year} · due {day(f.dueDate)}</span></span>
+            {f.confirmation ? <span className="chip bg-emerald-50 text-emerald-700">FILED · {f.confirmation.confirmation}</span> : <button className="btn ghost !py-1" onClick={() => file(f)}>Record Filing</button>}
+          </div>
+        ))}
+      </Card>
+      <Card title="Quarterly and Year-End Figures">
+        <div className="flex flex-wrap gap-2 items-end mb-3">
+          <input className="inp !w-24" value={yr} onChange={e => setYr(e.target.value)} />
+          <select className="inp !w-24" value={qtr} onChange={e => setQtr(e.target.value)}>{[1, 2, 3, 4].map(n => <option key={n} value={n}>Q{n}</option>)}</select>
+          <button className="btn" onClick={() => call(`/api/payroll/admin/quarter/${enc(yr)}/${enc(qtr)}`).then(setQ).catch(e => setErr(e.message))}>Show Quarter</button>
+        </div>
+        {q && (
+          <div className="grid sm:grid-cols-3 gap-3">
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Form 941</div>
+              <div>Line 1 employees: {q.form941.line1_employees}</div><div>Line 2 wages: {usd(q.form941.line2_wagesCents)}</div><div>Line 3 federal withheld: {usd(q.form941.line3_federalWithheldCents)}</div>
+              <div>Line 5a SS: {usd(q.form941.line5a_ssWagesCents)} → {usd(q.form941.line5a_taxCents)}</div><div>Line 5c Medicare: {usd(q.form941.line5c_medicareWagesCents)} → {usd(q.form941.line5c_taxCents)}</div>
+              <div>Line 5d: {usd(q.form941.line5d_taxCents)}</div><div><b>Line 6: {usd(q.form941.line6_totalBeforeAdjustmentsCents)}</b></div>
+              <div>Line 16 by month: {q.form941.line16_monthlyLiabilityCents.map(usd).join(' · ')}</div></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Georgia G-7</div>
+              <div>By month: {q.formG7.monthlyWithheldCents.map(usd).join(' · ')}</div><div><b>Total: {usd(q.formG7.totalWithheldCents)}</b></div></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Georgia DOL-4N</div>
+              <div>Total wages: {usd(q.formDOL4N.totalWagesCents)}</div><div>Over the wage base: {usd(q.formDOL4N.excessWagesCents)}</div><div><b>Taxable wages: {usd(q.formDOL4N.taxableWagesCents)}</b></div></div>
+          </div>
+        )}
+      </Card>
+    </>
+  );
+};
+
+// ---- Year end: W-2, 1099-NEC ----------------------------------------------------------
+// The figures come from approved runs and paid contractor invoices. Release
+// freezes them, puts each form in that person's My GFC, and emails a link to
+// everyone who agreed to electronic delivery. Everyone else is printed and
+// mailed from here.
+const download = async (url, name, setErr) => {
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
+  if (!r.ok) { const b = await r.json().catch(() => ({})); setErr(b.error || 'That file could not be built.'); return; }
+  const href = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a'); a.href = href; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 60000);
+};
+const YearEndSettings = ({ ye, onSaved }) => {
+  const e = ye.employer;
+  const [f, setF] = useState({ employerName: e.name || '', line1: (e.address || {}).line1 || '', line2: (e.address || {}).line2 || '', city: (e.address || {}).city || '', state: (e.address || {}).state || 'GA', zip: `${(e.address || {}).zip || ''}${(e.address || {}).zip4 || ''}`,
+    gaWithholdingId: e.gaWithholdingId || '', ssaUserId: e.ssaUserId || '', contactName: e.contactName || '', contactPhone: e.contactPhone || '', contactEmail: e.contactEmail || '' });
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const save = () => put('/api/payroll/admin/settings', { yearEnd: { employerName: f.employerName, employerAddress: { line1: f.line1, line2: f.line2, city: f.city, state: f.state, zip: f.zip },
+    gaWithholdingId: f.gaWithholdingId, ssaUserId: f.ssaUserId, contactName: f.contactName, contactPhone: f.contactPhone, contactEmail: f.contactEmail } })
+    .then(() => { setMsg('Saved.'); onSaved(); }).catch(x => setErr(x.message));
+  const box = (k, label, ph) => <label key={k}>{label}<input className="inp" value={f[k]} placeholder={ph || ''} onChange={x => setF({ ...f, [k]: x.target.value })} /></label>;
+  return (
+    <Card title="Employer Details for Tax Forms">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">These print on every W-2 and 1099. The EIN is under Settings.</p>
+      <div className="grid sm:grid-cols-3 gap-3 max-w-4xl">
+        {box('employerName', 'Legal name')}{box('line1', 'Street')}{box('line2', 'Suite')}{box('city', 'City')}{box('state', 'State')}{box('zip', 'ZIP')}
+        {box('gaWithholdingId', 'Georgia withholding number', '1234567-AB')}{box('ssaUserId', 'SSA BSO user ID (8 characters)')}
+        {box('contactName', 'Contact name')}{box('contactPhone', 'Contact phone')}{box('contactEmail', 'Contact email')}
+      </div>
+      <button className="btn mt-3" onClick={save}>Save</button>
+    </Card>
+  );
+};
+const YearEnd = () => {
+  const [yr, setYr] = useState(String(new Date().getFullYear() - (new Date().getMonth() < 6 ? 1 : 0)));
+  const [ye, setYe] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const load = useCallback(() => { setErr(''); call(`/api/payroll/admin/year-end/${enc(yr)}`).then(setYe).catch(e => { setYe(null); setErr(e.message); }); }, [yr]);
+  useEffect(() => { load(); }, [load]);
+  const rel = ye && ye.released;
+  const release = async () => {
+    if (!window.confirm(`Release the ${yr} W-2s and 1099s? The figures freeze, each person sees theirs in My GFC, and anyone who agreed to electronic forms is emailed a link. A change after this is a corrected form.`)) return;
+    setBusy(true);
+    try { const r = await post(`/api/payroll/admin/year-end/${enc(yr)}/release`); setMsg(`Released. ${r.emailed} emailed; ${r.paper.length} to print and mail.`); load(); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const mailed = (x, form) => post(`/api/payroll/admin/year-end/${enc(yr)}/forms/${enc(x.userId)}/${form}/mailed`).then(load).catch(e => setErr(e.message));
+  const formRow = (x, form, label, amount) => (
+    <div key={`${form}${x.userId}`} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
+      <span><b className="text-primary">{x.name}</b> <span className="text-stone-500 text-[12.5px]">{label} · {usd(amount)}{x.missing && x.missing.length ? ` · missing: ${x.missing.join(', ')}` : ''}</span></span>
+      <span className="flex gap-2 items-center">
+        {rel && <button className="btn ghost !py-1" onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/forms/${enc(x.userId)}/${form}.pdf`, `${yr}_${label}_${x.name}.pdf`, setErr)}>Print</button>}
+        {rel && (x.eDelivery ? <span className="chip bg-emerald-50 text-emerald-700">{x.openedAt ? 'OPENED' : 'EMAILED'}</span>
+          : x.mailedAt ? <span className="chip bg-emerald-50 text-emerald-700">MAILED {x.mailedAt}</span> : <button className="btn !py-1" onClick={() => mailed(x, form)}>Mark Mailed</button>)}
+        {!rel && <span className="chip">{x.eDelivery ? 'ELECTRONIC' : 'PAPER'}</span>}
+      </span>
+    </div>
+  );
+  const w2 = rel ? rel.w2 : ye ? ye.w2 : [];
+  const nec = rel ? rel.nec : ye ? ye.nec : [];
+  return (
+    <>
+      <Card title="Year End: W-2 and 1099-NEC" right={<span className="flex gap-2"><input className="inp !w-24" value={yr} onChange={e => setYr(e.target.value)} /></span>}>
+        <Err e={err} /><Ok m={msg} />
+        {ye && (
+          <>
+            {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
+            {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
+            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
+            <div className="lblu mb-1">W-2 ({w2.length})</div>
+            {w2.length === 0 && <p className="text-stone-500 mb-2">No wages paid in {yr}.</p>}
+            {w2.map(x => formRow(x, 'w2', 'W-2', x.boxes.box1))}
+            <div className="lblu mt-4 mb-1">1099-NEC ({nec.length})</div>
+            {nec.length === 0 && <p className="text-stone-500 mb-2">No contractor reached the threshold.</p>}
+            {nec.map(x => formRow(x, '1099-nec', '1099-NEC', x.boxes.box1a))}
+            <div className="flex flex-wrap gap-2 mt-4">
+              {!rel && <button className="btn" disabled={busy} onClick={release}>Release Forms</button>}
+              {rel && <span className="chip bg-emerald-50 text-emerald-700">RELEASED {String(rel.releasedAt).slice(0, 10)} BY {rel.releasedBy}</span>}
+              <button className="btn ghost" onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}?format=csv`, `gfc_year_end_${yr}.csv`, setErr)}>Summary (no SSNs)</button>
+            </div>
+          </>
+        )}
+      </Card>
+      {ye && (
+        <Card title="Filing">
+          <p className="text-stone-500 mb-3">These carry full Social Security numbers and tax IDs. Every download is logged. Delete the file once you have filed.</p>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Filing sheet</div>
+              <p className="text-[13px] mb-2">Every box for every form. Key the W-2s into SSA W-2 Online (Business Services Online) and the 1099s into the IRS IRIS Taxpayer Portal.</p>
+              <button className="btn ghost" disabled={!rel} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/filing-sheet.csv`, `gfc_${yr}_filing_sheet.csv`, setErr)}>Download Filing Sheet</button></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Upload files</div>
+              <p className="text-[13px] mb-2">{ye.layouts.efw2 ? 'SSA W-2 file (EFW2). Check it in AccuWage Online before you upload.' : `SSA has changed the W-2 file for ${yr} (overtime code TT), and that layout is not in the app yet. Use the filing sheet.`}</p>
+              <button className="btn ghost" disabled={!rel || !ye.layouts.efw2} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/ssa-w2.txt`, `gfc_${yr}_ssa_w2.txt`, setErr)}>SSA W-2 File</button>
+              <button className="btn ghost ml-2" disabled={!rel || !ye.layouts.irisNec} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/iris-1099-nec.csv`, `gfc_${yr}_iris_1099_nec.csv`, setErr)}>IRIS 1099-NEC CSV</button></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Georgia G-1003</div>
+              <div>W-2s: {ye.g1003.w2Count}</div><div>Georgia wages: {usd(ye.g1003.gaWagesCents)}</div><div><b>Georgia tax withheld: {usd(ye.g1003.gaWithheldCents)}</b></div>
+              <p className="text-[12.5px] text-stone-500 mt-1">File on the Georgia Tax Center with the W-2s. For {yr}, Georgia also asks for box 12 TT.</p></div>
+          </div>
+        </Card>
+      )}
+      {ye && <YearEndSettings ye={ye} onSaved={load} />}
+    </>
+  );
+};
+
+// ---- Tax tables ---------------------------------------------------------------------
+// A new year's table: the figures pasted as JSON, in the same shape as the
+// shipped ones (Show Figures on any table shows the shape). It is staged, and
+// pays nothing until it is approved.
+const StageTable = ({ reload }) => {
+  const [open, setOpen] = useState(false); const [f, setF] = useState({ year: '', jurisdiction: 'federal', source: '', json: '' }); const [err, setErr] = useState('');
+  if (!open) return <button className="btn ghost mb-3" onClick={() => setOpen(true)}>Stage a New Table</button>;
+  const save = () => {
+    let data; try { data = JSON.parse(f.json); } catch (e) { setErr('The figures are not valid JSON.'); return; }
+    post('/api/payroll/admin/tax-tables', { year: Number(f.year), jurisdiction: f.jurisdiction, source: f.source, data }).then(() => { setOpen(false); reload(); }).catch(e => setErr(e.message));
+  };
+  return (
+    <div className="border border-stone-200 rounded-xl p-3 mb-3 grid gap-2">
+      <Err e={err} />
+      <div className="flex flex-wrap gap-2"><input className="inp !w-24" placeholder="Year" value={f.year} onChange={e => setF({ ...f, year: e.target.value })} />
+        <select className="inp !w-36" value={f.jurisdiction} onChange={e => setF({ ...f, jurisdiction: e.target.value })}><option value="federal">Federal</option><option value="GA">Georgia</option></select>
+        <input className="inp" placeholder="Source (publication and date)" value={f.source} onChange={e => setF({ ...f, source: e.target.value })} /></div>
+      <textarea className="inp font-mono !text-[12px]" rows={8} placeholder="Paste the figures, in the shape Show Figures displays" value={f.json} onChange={e => setF({ ...f, json: e.target.value })} />
+      <div className="flex gap-2"><button className="btn" onClick={save}>Stage Table</button><button className="btn ghost" onClick={() => setOpen(false)}>Cancel</button></div>
+    </div>
+  );
+};
+const TaxTables = ({ data, reload }) => {
+  const [err, setErr] = useState(''); const [show, setShow] = useState(null);
+  return (
+    <Card title="Tax Tables">
+      <Err e={err} />
+      <p className="text-stone-500 mb-3">Payroll uses only approved tables. Check each staged table against its source document, then approve it. Approving replaces the active table for that year.</p>
+      <StageTable reload={reload} />
+      {data.taxTables.sort((a, b) => b.year - a.year).map(t => (
+        <div key={t.id} className="py-2 border-b border-stone-100">
+          <div className="flex flex-wrap justify-between gap-2">
+            <span><b className="text-primary">{t.jurisdiction === 'GA' ? 'Georgia' : 'Federal'} {t.year}</b> <span className={`chip ${t.status === 'active' ? 'bg-emerald-50 text-emerald-700' : t.status === 'staged' ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>{t.status.toUpperCase()}</span>
+              <div className="text-[12.5px] text-stone-500">{t.source}{t.approvedBy ? ` · approved by ${t.approvedBy}` : ''}</div></span>
+            <span className="flex gap-2"><button className="btn ghost !py-1" onClick={() => setShow(show === t.id ? null : t.id)}>{show === t.id ? 'Hide' : 'Show Figures'}</button>
+              {t.status === 'staged' && <button className="btn gold !py-1" onClick={() => window.confirm('Approve this table? Payroll will use it.') && post(`/api/payroll/admin/tax-tables/${enc(t.id)}/approve`).then(reload).catch(e => setErr(e.message))}>Approve</button>}</span>
+          </div>
+          {show === t.id && <pre className="text-[11.5px] bg-stone-50 rounded-lg p-2 mt-2 overflow-x-auto">{JSON.stringify(t.data, null, 1)}</pre>}
+        </div>
+      ))}
+    </Card>
+  );
+};
+
+// ---- QuickBooks -----------------------------------------------------------------------
+const QuickBooks = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const load = () => call('/api/payroll/admin/qbo').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  if (!d) return <Card title="QuickBooks"><Err e={err} />{!err && 'Loading…'}</Card>;
+  return (
+    <Card title="QuickBooks Online" right={d.connected ? <span className="chip bg-emerald-50 text-emerald-700">CONNECTED{d.environment === 'sandbox' ? ' (SANDBOX)' : ''}</span> : <span className="chip bg-stone-100 text-stone-600">NOT CONNECTED</span>}>
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">Private home care and payroll only. No clinical client, claim or payment is ever sent to QuickBooks.</p>
+      {!d.configured && <Warn>QuickBooks is not set up on the server. Missing: {d.missing.join(', ')}. See the setup guide.</Warn>}
+      {d.configured && !d.connected && <a className="btn" href="#" onClick={e => { e.preventDefault(); call('/api/payroll/admin/qbo/connect').then(r => { window.location.href = r.url; }).catch(x => setErr(x.message)); }}>Connect QuickBooks</a>}
+      {d.connected && <div className="flex gap-2 mb-3"><button className="btn ghost" onClick={() => post('/api/payroll/admin/qbo/retry').then(r => { setMsg(r.summary || 'Retried.'); load(); }).catch(e => setErr(e.message))}>Retry Failed Syncs</button>
+        <button className="btn ghost" onClick={() => post('/api/payroll/admin/qbo/disconnect').then(load).catch(e => setErr(e.message))}>Disconnect</button></div>}
+      {d.accounts && d.accounts.length > 0 && <Warn><b>Accounts to create in QuickBooks first:</b> {d.accounts.join(' · ')}</Warn>}
+      <div className="lblu mt-3 mb-1">Recent syncs</div>
+      {(d.log || []).length === 0 && <p className="text-stone-500">Nothing synced yet.</p>}
+      {(d.log || []).map(l => <div key={l.id} className="text-[12.5px] py-1 border-b border-stone-100">{l.at.slice(0, 16).replace('T', ' ')} · {l.event} · <b className={l.status === 'ok' ? 'text-emerald-700' : 'text-red-700'}>{l.status}</b>{l.error ? ` · ${l.error}` : ''}</div>)}
+    </Card>
+  );
+};
+
+// ---- Settings -------------------------------------------------------------------------
+const Settings = ({ data, reload }) => {
+  const s = data.settings;
+  const [f, setF] = useState({ frequency: s.frequency, payDateOffsetDays: s.payDateOffsetDays, federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  return (
+    <Card title="Payroll Settings">
+      <Err e={err} /><Ok m={msg} />
+      <div className="grid sm:grid-cols-2 gap-3 max-w-3xl">
+        <label>Pay frequency<select className="inp" value={f.frequency} onChange={e => setF({ ...f, frequency: e.target.value })}><option value="weekly">Weekly (Monday to Sunday)</option><option value="biweekly">Every two weeks (Monday through the second Sunday)</option></select>
+          <span className="text-[12px] text-stone-500">A change starts with the next period that has not begun. Withholding follows it automatically.</span></label>
+        <label>Payday, days after the period ends<input className="inp" type="number" value={f.payDateOffsetDays} onChange={e => setF({ ...f, payDateOffsetDays: e.target.value })} /></label>
+        <label>Federal deposit schedule<select className="inp" value={f.federalDepositSchedule} onChange={e => setF({ ...f, federalDepositSchedule: e.target.value })}><option value="monthly">Monthly</option><option value="semiweekly">Semiweekly</option></select></label>
+        <label>Georgia withholding filing<select className="inp" value={f.gaWithholdingFrequency} onChange={e => setF({ ...f, gaWithholdingFrequency: e.target.value })}><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="semiweekly">Semiweekly</option></select></label>
+        <label>Georgia unemployment rate (%)<input className="inp" value={f.gaSutaRatePct} onChange={e => setF({ ...f, gaSutaRatePct: e.target.value })} placeholder="from the GA DOL notice, e.g. 2.70" /></label>
+        <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
+        <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
+      </div>
+      <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, payDateOffsetDays: Number(f.payDateOffsetDays), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
+      <p className="text-[12.5px] text-stone-500 mt-4">Automations (Apps Script): {data.automationKeySet ? 'switched on' : 'off until PAYROLL_INGEST_KEY is set'}. See docs/PAYROLL_SETUP.md.</p>
+    </Card>
+  );
+};
+
+const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+const App = () => {
+  const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
+  const [data, setData] = useState(null); const [err, setErr] = useState('');
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(setData).catch(e => {
+    if (e.status === 401) { window.location.replace('/login'); return; }
+    setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
+  }), []);
+  useEffect(() => { if (!getToken()) { window.location.replace('/login'); return; } load(); }, [load]);
+  const pick = (t) => { setTab(t); try { history.replaceState(null, '', `/payroll#${t}`); } catch (e) { /* no history */ } };
+  return (
+    <>
+      <div className="bg-primary text-white sticky top-0 z-30">
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 pt-3 flex items-center justify-between gap-3">
+          <span className="font-serif text-[24px] font-semibold">Payroll</span>
+          <span className="flex items-center gap-4 text-[13.5px] font-semibold"><a className="text-[#F5CD85]" href="/billing">Billing</a><a className="text-[#F5CD85]" href="/my">My GFC</a><a className="text-[#F5CD85]" href="/login">Portal Hub</a></span>
+        </div>
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
+      </div>
+      <div className="max-w-[1300px] mx-auto px-4 lg:px-8 py-5">
+        <Err e={err} />
+        {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
+        {data && tab === 'runs' && <Runs data={data} reload={load} />}
+        {data && tab === 'people' && <People data={data} reload={load} />}
+        {data && tab === 'contractors' && <Contractors data={data} reload={load} />}
+        {data && tab === 'taxes' && <Taxes />}
+        {data && tab === 'yearend' && <YearEnd />}
+        {data && tab === 'tables' && <TaxTables data={data} reload={load} />}
+        {data && tab === 'qbo' && <QuickBooks />}
+        {data && tab === 'settings' && <Settings data={data} reload={load} />}
+      </div>
+    </>
+  );
+};
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
