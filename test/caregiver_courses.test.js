@@ -112,6 +112,30 @@ test('every caregiver takes the HIPAA and Introduction to Dementia Care modules,
 test('the certificate fact comes from the welcome packet, never from the Setup form', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
   assert.match(src, /const CARE_CERTIFICATES = \['pca', 'cna', 'hha', 'lpn', 'rn'\];/);
-  assert.match(src, /\{ chapter, holdsCareCertificate: false \}/);
+  assert.match(src, /\{ chapter, holdsCareCertificate: false, licenseLevel: null \}/);
   assert.match(src, /inputs: withPacketFacts\(rec\.inputs, pk\)/);
+});
+
+test('the forty-hour program applies by itself to an uncertified PCA, read from her license level', () => {
+  const ids = (inputs) => T.buildTrack({ inputs: Object.assign({ chapter: 'A' }, inputs), record: {}, today: '2026-11-09' }).trainingCourses.map(c => c.id);
+  // A PCA with no certificate in her packet: on, with nobody ticking a box.
+  assert.deepStrictEqual(ids({ licenseLevel: 'pca' }), ['GFC_CORE', 'PCA_40', 'ANNUAL_8']);
+  assert.ok(T.composeChecklist({ chapter: 'A', licenseLevel: 'pca' }).some(i => i.id === 'A.6.07'));
+  // A PCA whose packet lists a PCA, CNA or HHA certificate: off.
+  assert.deepStrictEqual(ids({ licenseLevel: 'pca', holdsCareCertificate: true }), ['GFC_CORE', 'ANNUAL_8']);
+  // CNA and LPN on the account are certified or licensed: off. A sitter: off.
+  assert.deepStrictEqual(ids({ licenseLevel: 'cna' }), ['GFC_CORE', 'ANNUAL_8']);
+  assert.deepStrictEqual(ids({ licenseLevel: 'lpn' }), ['GFC_CORE', 'ANNUAL_8']);
+  assert.deepStrictEqual(ids({ licenseLevel: 'sitter' }), ['GFC_CORE', 'ANNUAL_8']);
+  // The license level sets the classification until the office sets one.
+  assert.strictEqual(T.normalizeInputs({ chapter: 'A', licenseLevel: 'sitter' }).caregiverClass, 'COMPANION');
+  assert.strictEqual(T.normalizeInputs({ chapter: 'A', licenseLevel: 'sitter', caregiverClass: 'PCA' }).caregiverClass, 'PCA');
+  // Outside Chapter A the license level changes nothing.
+  assert.strictEqual(T.normalizeInputs({ chapter: 'C', licenseLevel: 'pca' }).fortyHourRoute, false);
+});
+
+test('the server reads her license level from her account for the track', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
+  assert.match(src, /licenseLevel: user\.licenseLevel \|\| null,/);
+  assert.match(src, /licenseLevel: \(pk && pk\.licenseLevel\) \|\| null/);
 });

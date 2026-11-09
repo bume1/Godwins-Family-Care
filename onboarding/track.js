@@ -56,6 +56,12 @@ const STATUS = Object.freeze({
 // ---- inputs -----------------------------------------------------------------
 const SERVICE_LINES = Object.freeze(['IME', 'PRIVATE_PAY', 'INSURED', 'BEHAVIORAL']);
 
+// A caregiver's license level on her account, read as a classification.
+const LEVEL_CLASS = Object.freeze({ sitter: 'COMPANION', pca: 'PCA', cna: 'PCA', lpn: 'NURSING' });
+const CERTIFIED_LEVELS = Object.freeze(['cna', 'lpn']);
+const classOf = (r) => (['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass
+  : (r.chapter === 'A' && LEVEL_CLASS[r.licenseLevel]) || null);
+
 function normalizeInputs(raw) {
   const r = raw || {};
   const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
@@ -83,14 +89,20 @@ function normalizeInputs(raw) {
     directsTraining: r.directsTraining === true,
     // Chapter D (contracted clinician) inputs.
     baaRequired: r.baaRequired === true,
-    // Chapter A (caregiver) inputs.
-    caregiverClass: ['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass : null,
+    // Chapter A (caregiver) inputs. The classification the office set, else
+    // the one her license level on the account implies (owner, 2026-11-09).
+    caregiverClass: ['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass
+      : (r.chapter === 'A' && LEVEL_CLASS[r.licenseLevel]) || null,
     // Owner, 2026-11-09: a caregiver who already holds a PCA, CNA or HHA
     // certificate (or nursing licensure) never takes the forty-hour program;
     // she does the remaining training only. `holdsCareCertificate` is read
     // from her welcome packet by the server, never set by hand.
-    holdsCareCertificate: r.holdsCareCertificate === true,
-    fortyHourRoute: r.fortyHourRoute === true && r.holdsCareCertificate !== true && r.caregiverClass !== 'NURSING',
+    holdsCareCertificate: r.holdsCareCertificate === true || CERTIFIED_LEVELS.includes(r.licenseLevel),
+    // The forty-hour program applies by itself to a PCA with no PCA, CNA or
+    // HHA certificate (owner, 2026-11-09: it had depended on a box nobody
+    // ticked). The office can still tick it for anyone else it applies to.
+    fortyHourRoute: (r.fortyHourRoute === true || (r.chapter === 'A' && classOf(r) === 'PCA'))
+      && !(r.holdsCareCertificate === true || CERTIFIED_LEVELS.includes(r.licenseLevel)) && classOf(r) !== 'NURSING',
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }

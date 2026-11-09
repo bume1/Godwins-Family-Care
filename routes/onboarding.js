@@ -135,19 +135,23 @@ module.exports = function createOnboardingRoutes(deps) {
   // stored here: a stored copy goes stale the moment a document is accepted.
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
   async function packetFor(rec) {
-    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false };
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false, licenseLevel: null };
     const id = String(rec.userId);
     const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
     const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
     const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === id);
     const held = ((packet || {}).data || {}).certifications;
+    const user = ((await getUsers()) || []).find(x => String(x.id) === id) || {};
     return {
+      licenseLevel: user.licenseLevel || null,
       rows: wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts),
       certified: Array.isArray(held) && held.some(c => CARE_CERTIFICATES.includes(c))
     };
   }
   // Her inputs with what the packet says about her certificates.
-  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified) });
+  // Her license level is read from her account, like her certificates from
+  // her packet: facts about her, never typed into Setup.
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null });
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -577,7 +581,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });

@@ -80,3 +80,7 @@ test('a caregiver defaults to A, the office reads the packet, and the caregiver 
   const cg = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
   assert.match(cg, /href="\/onboarding"[^>]*>Open My Onboarding/);
 });
+
+test('the A.6 credentials item reads "Credentials" (owner, 2026-11-09)', () => {
+  assert.strictEqual(A.ITEMS.find(i => i.id === 'A.6.06').title, 'Credentials');
+});
