@@ -116,6 +116,8 @@
   </style>
   <script src="/session-guard.js"></script>
   <script src="/staff-nav.js"></script>
+  <!-- The My GFC look (owner, 2026-11-09). After the page's own styles, so it wins. -->
+  <link rel="stylesheet" href="/css/gfc-theme.css">
 </head>
 <body>
   <div id="root"></div>
@@ -1448,8 +1450,8 @@ const App = () => {
       <div className="hdr">
         <span className="t">Scheduling</span>
         <span style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-          <a href="/admin">Admin hub</a>
-          <a href="/clinical">Clinical</a>
+          <a href="/caregivers">Home Care Oversight</a>
+          <a href="/admin?view=users&amp;group=staff">User Management</a>
         </span>
       </div>
       <div className="wrap">

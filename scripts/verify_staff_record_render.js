@@ -119,7 +119,7 @@ const PAGES = { '/admin': 'admin-hub.html', '/caregiver': 'caregiver.html' };
     ok(`${label}: header names the person`, t.includes('Cara Giver') && t.includes('← User Management'));
     ok(`${label}: glance chips`, t.includes('Onboarding 75%') && t.includes('Not cleared for shifts') && t.includes('1 document to review'), t.slice(0, 400));
     const menu = await page.$$eval('.sr-menu button', bs => bs.map(b => b.textContent));
-    ok(`${label}: caregiver sections`, JSON.stringify(menu) === JSON.stringify(['Account & Role', 'Credentials', 'Pay', 'Documents', 'Onboarding & Clearance', 'Bio & Headshot', 'Activity', 'Account Recovery']), JSON.stringify(menu));
+    ok(`${label}: caregiver sections`, JSON.stringify(menu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Pay', 'Documents', 'Onboarding & Clearance', 'Activity', 'Account Recovery']), JSON.stringify(menu));
     for (const id of ['sr-account', 'sr-credentials', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-bio', 'sr-activity', 'sr-recovery']) {
       ok(`${label}: #${id} is on the page`, !!(await page.$(`#${id}`)));
     }
@@ -136,7 +136,7 @@ const PAGES = { '/admin': 'admin-hub.html', '/caregiver': 'caregiver.html' };
     ({ page, ctx, errors } = await open('/admin?view=users&person=r1', ADMIN, size));
     t = await text(page);
     const rnMenu = await page.$$eval('.sr-menu button', bs => bs.map(b => b.textContent));
-    ok(`${label}: nurse sections`, JSON.stringify(rnMenu) === JSON.stringify(['Account & Role', 'Credentials', 'Documents', 'Onboarding & Clearance', 'Bio & Headshot', 'Account Recovery']), JSON.stringify(rnMenu));
+    ok(`${label}: nurse sections`, JSON.stringify(rnMenu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Documents', 'Onboarding & Clearance', 'Account Recovery']), JSON.stringify(rnMenu));
     ok(`${label}: nurse record has no caregiver-only parts`, !t.includes('Welcome Packet & Clearance') && !t.includes('Cleared for shifts'));
     ok(`${label}: nurse's signed policy`, t.includes('Field Addendum'));
     ok(`${label}: no page errors (nurse record)`, errors.length === 0, errors.join(' | '));

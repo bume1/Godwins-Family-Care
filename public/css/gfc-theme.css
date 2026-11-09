@@ -1,0 +1,50 @@
+/* ==========================================================================
+   GFC THEME — the My GFC look, for staff pages that still carry the older
+   darker-cream style (owner, 2026-11-09).
+   ==========================================================================
+   My GFC (public/my-gfc.js) set the look: a cream page, white cards with a
+   warm edge and a soft shadow, Cormorant headings in navy, DM Sans text, and
+   gold for what is selected. The home care pages (Home Care Oversight,
+   Caregiver Scheduling) were built before it, on a darker cream with flat
+   12px cards and a heavy navy title bar. This file brings them into line by
+   re-pointing their own tokens and classes, so no page markup has to change.
+
+   Load it AFTER a page's own <style>, so it wins. It only restyles the
+   class names those pages already use (.hdr, .wrap, .card, .tab, .btn,
+   .row, .note, form fields). The navy bar across the very top is the shared
+   staff bar (staff-nav.js), so a page's own title bar is now a plain title.
+   ========================================================================== */
+:root{
+  --cream:#FAF7F2; --cream-d:#FAF7F2; --wash:#F6EFE2;
+  --ink:#1a2a32; --mut:#41555f; --line:#ECE4D6; --edge2:#E1D7C5;
+  --goldd:#C9A44A; --gold-ink:#9A7430;
+}
+body{background:#FAF7F2;color:#1a2a32}
+
+/* The page title: a heading on the cream, not a second navy bar. */
+.hdr{background:transparent;color:#033D50;position:static;padding:26px 22px 6px;max-width:1180px;margin:0 auto;flex-wrap:wrap}
+.hdr .t{font-family:'Cormorant Garamond',Georgia,serif;font-size:36px;font-weight:600;color:#033D50;line-height:1.15}
+.hdr a,.hdr button{color:#033D50}
+.hdr a:hover,.hdr button:hover{color:#9A7430}
+
+/* Tabs: white pills; the selected one is gold, as in the My GFC menu. */
+.tab{border:1px solid #E1D7C5;background:#fff;color:#033D50;border-radius:999px}
+.tab:hover{border-color:#C9A44A}
+.tab.on{background:#C9A44A;border-color:#C9A44A;color:#fff}
+.tab .n{background:#B5462E}
+.tab.on .n{background:#fff;color:#9A7430}
+
+/* Cards: white, warm edge, 16px corners, a soft shadow. */
+.card{border:1px solid #ECE4D6;border-radius:16px;padding:18px 20px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}
+.card h2{font-size:22px}
+.row{border-bottom-color:#ECE4D6}
+
+/* Buttons and fields, rounded like My GFC's. */
+.btn{border-radius:12px}
+.btn.sm{border-radius:10px}
+.btn.ghost{border-color:#E1D7C5}
+input,select,textarea{border-color:#E1D7C5;border-radius:11px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#033D50;box-shadow:0 0 0 3px rgba(3,61,80,.1)}
+
+/* Notes: the My GFC wash, not a dashed box. */
+.note{background:#F6EFE2;border:1px solid #ECE4D6;border-radius:12px}

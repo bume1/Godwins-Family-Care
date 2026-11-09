@@ -464,7 +464,7 @@
     const VIEW_TITLES = {
       myday: 'My Day', queues: 'Tasks', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', 
       inbox: 'Inbox',
-      messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More', enrollment: 'Enrollment'
+      messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More', enrollment: 'Clients & Patients'
     };
 
     // The nav strip, DECLARED ONCE (owner report 2026-09-23: the top bar was
@@ -496,7 +496,7 @@
       // Owner, 2026-10-14: Enrollment in the sidebar, under Reports. It is its
       // own page (/admin/enrollment), so `href` leaves the workspace rather
       // than switching a view. That page gates who may read and write it.
-      { key: 'enrollment', tab: 'Enrollment', icon: 'ti-clipboard-list', group: 'main', href: '/admin/enrollment' },
+      { key: 'enrollment', tab: 'Clients & Patients', icon: 'ti-clipboard-list', group: 'main', href: '/admin/enrollment' },
       { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week', group: 'work' },
       // Owner, 2026-11-04: claims are worked on their own page, so billing's
       // queue is a link out, and only billing sees it.
@@ -1683,7 +1683,7 @@
         <div className="card-h"><h2><i className="ti ti-shield-check mr-1 text-accent" />Insurance</h2></div>
         <div className="p-4 text-sm">
           Insurance eligibility is checked and recorded on the enrollment record.{' '}
-          <a className="text-accent underline" href={`/admin/enrollment?client=${encodeURIComponent(patient.id)}`}>Open Enrollment</a>
+          <a className="text-accent underline" href={`/admin/enrollment?client=${encodeURIComponent(patient.id)}`}>Open Client Record</a>
         </div>
       </div>
     );
@@ -6556,7 +6556,7 @@
               <div className="text-[12px] text-stone-500">Care plan</div>
               <h1 className="serif text-[26px] font-semibold text-primary">{(client && client.name) || 'Client'}</h1>
             </div>
-            <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-arrow-left" />Enrollment</a>
+            <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-arrow-left" />Clients &amp; Patients</a>
           </div>
           {client && <CarePlanTab patient={client} />}
         </div>
@@ -10147,7 +10147,7 @@
           <div className="card">
             <div className="card-h"><h2>Staff Tools</h2></div>
             <div className="p-5">
-              <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-clipboard-list" />Enrollment</a>
+              <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-clipboard-list" />Clients &amp; Patients</a>
             </div>
           </div>
         )}
