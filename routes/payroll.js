@@ -170,11 +170,6 @@ module.exports = function createPayrollRoutes(deps) {
             : { ...n.value, at: ctx.at };
           change = `Pay method set: ${n.value.method}`; break;
         }
-        case 'offer': case 'handbook': {
-          const sig = pp.signature(b, ctx); if (sig.error) return res.status(400).json(sig);
-          p[req.params.form === 'offer' ? 'offerLetter' : 'handbook'] = sig.value;
-          change = req.params.form === 'offer' ? 'Offer letter acknowledged' : 'Handbook acknowledged'; break;
-        }
         case 'tax-address': {
           const n = ye.normalizeTaxAddress(b); if (n.error) return res.status(400).json(n);
           p.taxAddress = { ...n.value, at: ctx.at }; change = 'Legal name and mailing address for tax forms saved'; break;

@@ -447,3 +447,15 @@ test('period close drafts each schedule on its own and skips one with nobody to 
   assert.match(job, /close:\$\{schedule\}:\$\{period\.start\}/, 'one owner notice per schedule and period');
   assert.match(job, /!existing && !d\.run\.workers\.length/);
 });
+
+test('Pay Setup lists pay and tax paperwork only, grouped, and hiring paperwork is not repeated there', async () => {
+  const rows = pp.checklist({ ...pp.defaultProfile(cgUser) });
+  assert.deepEqual(rows.map(r => r.key), ['w4', 'g4', 'i9', 'ssn', 'pay', 'taxaddress', 'edelivery']);
+  assert.ok(rows.every(r => r.group === 'tax' || r.group === 'paid'));
+  assert.ok(!rows.some(r => /offer|handbook/i.test(r.key + r.label)), 'the offer letter and handbook belong to onboarding');
+  const { app } = harness('cg1');
+  assert.equal((await req(app, 'PUT', '/api/my/pay-setup/offer', { signatureName: 'Pat Care', agree: true })).status >= 400, true, 'and the form is gone from Pay Setup');
+  const page = read('public/my-pay.js');
+  assert.ok(!/offer: 'offer'|handbook: 'handbook'/.test(page));
+  assert.match(page, /'Tax forms' : 'Getting paid'/);
+});

@@ -271,6 +271,9 @@ function missingForPay(p, { asContractor = false } = {}) {
 function checklist(p, opts = {}) {
   const rows = [];
   const emp = isEmployee(p), con = isContractor(p);
+  // PAY AND TAX ONLY (owner, 2026-11-09). The offer letter and handbook are
+  // hiring paperwork and live in onboarding; listing them here as well is
+  // what made this read as "the list, plus more". Each row names its group.
   if (emp) {
     rows.push({ key: 'w4', label: 'Form W-4 (federal withholding)', done: !!p.w4 });
     // Georgia's G-4 for a Georgia worker; another state's certificate only
@@ -284,12 +287,9 @@ function checklist(p, opts = {}) {
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
   // Printed on the W-2 or 1099 (and the copy filed with the IRS and SSA).
   rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your W-2 or 1099)', done: !!p.taxAddress });
-  if (emp) {
-    rows.push({ key: 'offer', label: 'Offer letter', done: !!p.offerLetter });
-    rows.push({ key: 'handbook', label: 'Employee handbook', done: !!p.handbook });
-  }
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
-  return rows;
+  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
+  return rows.map(r => ({ ...r, group: GROUP[r.key] }));
 }
 
 // What a screen may see. Never a full number: the last four, and whether one
