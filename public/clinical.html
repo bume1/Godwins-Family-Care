@@ -3408,22 +3408,47 @@
     // nothing a relative plot does not. The brief's own sketch is dots joined
     // by lines. Everything here is drawn from coordinates the app already
     // holds, and nothing leaves the boundary.
-    const DayMap = ({ plot }) => {
+    // Why a stop is missing, in words that point at the right fix. Served
+    // per stop by the server (myDay.plotStops), never decided here.
+    const UNPLACED_REASON = {
+      not_linked: 'this visit\'s OpenEMR patient is not linked to a client in this app, so there is no address record to read',
+      no_coordinates: 'no coordinates on file — set them under Scheduling → Locations'
+    };
+    const UnplacedList = ({ rows }) => (
+      <ul className="text-[11.5px] text-amber-800 mt-1 space-y-0.5">
+        {rows.map((u, i) => (
+          <li key={u.eid || i}><b>{u.label || 'A patient'}</b>{u.time ? ` (${u.time})` : ''}: {UNPLACED_REASON[u.reason] || UNPLACED_REASON.no_coordinates}</li>
+        ))}
+      </ul>
+    );
+    const DayMap = ({ plot, calendar }) => {
       // SERVED, not computed here. The module that places a stop reaches into
       // the scheduling module for the one coordinate reader, and that chain
       // does not load in a page — so the page renders the server's answer and
       // decides no geometry of its own.
+      //
+      // AN EMPTY MAP HAS FOUR DIFFERENT CAUSES and each one says which. It used
+      // to say "no coordinates" for all four, so an admin who had set them was
+      // told to set them again.
       if (!plot || !plot.points || !plot.points.length) {
+        const unplaced = (plot && plot.unplaced) || [];
+        const msg = calendar && calendar.ok === false
+          ? `There are no visits to plot because the calendar could not be read. ${calendar.error || ''}`
+          : !plot || !plot.total
+            ? 'No visits on this day, so there is nothing to plot.'
+            : (plot.remote && !unplaced.length)
+              ? 'Every visit on this day is a video visit, so there is nowhere to drive.'
+              : 'None of this day\'s visits could be placed on the map:';
         return (
           <div className="p-4 text-[12.5px] text-amber-700">
-            None of today's visits has address coordinates, so there is nothing to plot.
-            An admin sets them under Scheduling → Locations.
+            {msg}
+            {unplaced.length > 0 && <UnplacedList rows={unplaced} />}
           </div>
         );
       }
       return (
         <div className="p-4">
-          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1' }}
+          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1', overflow: 'visible' }}
             role="img" aria-label="Today's stops, plotted by relative position">
             {plot.points.slice(0, -1).map((p, i) => {
               const n = plot.points[i + 1];
@@ -3444,9 +3469,12 @@
             Relative positions only — north is up. Not a street map, and no coordinates leave this app.
           </p>
           {plot.unplaceable > 0 && (
-            <p className="text-[11.5px] text-amber-700 text-center mt-1">
-              {plot.unplaceable} {plot.unplaceable === 1 ? 'stop has' : 'stops have'} no coordinates and could not be plotted.
-            </p>
+            <div className="mt-2">
+              <p className="text-[11.5px] text-amber-700">
+                {plot.unplaceable} {plot.unplaceable === 1 ? 'stop' : 'stops'} could not be plotted:
+              </p>
+              <UnplacedList rows={plot.unplaced || []} />
+            </div>
           )}
         </div>
       );
@@ -3996,7 +4024,7 @@
                   )}
                 </div>
               </div>
-              {mode === 'map' && day && <DayMap plot={day.plot} />}
+              {mode === 'map' && day && <DayMap plot={day.plot} calendar={day.calendar} />}
               {mode === 'nearby' && (
                 <div className="p-4">
                   {selected
