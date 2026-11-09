@@ -239,7 +239,88 @@ const PATHS = {
   recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`,
   courseCert: (w, col, c) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate` : `/api/onboarding/me/courses/${col}/${c}/certificate`,
   courseCertFile: (w, col, c, f) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate/${f}` : `/api/onboarding/me/courses/${col}/${c}/certificate/${f}`,
-  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`
+  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`,
+  material: (w, m) => w.office ? `/api/onboarding/admin/library/${m}/material` : `/api/onboarding/me/modules/${m}/material`,
+  materialFile: (w, m, f) => w.office ? `/api/onboarding/admin/library/${m}/material/files/${f}` : `/api/onboarding/me/modules/${m}/material/files/${f}`,
+  materialLinks: (m) => `/api/onboarding/admin/library/${m}/material/links`,
+  materialLink: (m, l) => `/api/onboarding/admin/library/${m}/material/links/${l}`,
+  materialFiles: (m) => `/api/onboarding/admin/library/${m}/material/files`,
+  materialFileRemove: (m, f) => `/api/onboarding/admin/library/${m}/material/files/${f}`,
+  materialNote: (m) => `/api/onboarding/admin/library/${m}/material/note`
+};
+
+// ---- training material (owner, 2026-11-09) ------------------------------------
+// What a module teaches from. The office sees which of four states a module is
+// in; staff see only whether it is ready, and a module with no material is
+// greyed out for them.
+const MATERIAL_LABEL = {
+  SOP_WRITTEN: { label: 'SOP Written', cls: 'p-COMPLETE' },
+  MATERIAL_ADDED: { label: 'Material Added', cls: 'p-COMPLETE' },
+  SOP_NOT_WRITTEN: { label: 'SOP Not Written', cls: 'p-RETURNED' },
+  SOP_MISSING_FROM_DRIVE: { label: 'SOP Missing From Drive', cls: 'p-RETURNED' },
+  NO_MATERIAL: { label: 'No Material', cls: 'p-NOT_STARTED' }
+};
+const materialDetail = (mat) => {
+  if (!mat) return '';
+  if (mat.status === 'SOP_WRITTEN') return `Teaches ${mat.sops.join(', ')}${mat.links.length + mat.files.length ? `, plus ${mat.links.length + mat.files.length} added item${mat.links.length + mat.files.length === 1 ? '' : 's'}` : ''}.`;
+  if (mat.status === 'MATERIAL_ADDED') return `${mat.links.length + mat.files.length} item${mat.links.length + mat.files.length === 1 ? '' : 's'} added by the office.`;
+  if (mat.status === 'SOP_NOT_WRITTEN') return `${mat.plannedSop} is planned but not written. Staff see this module greyed out until the SOP is written or material is added.`;
+  if (mat.status === 'SOP_MISSING_FROM_DRIVE') return `${mat.missingSops.join(', ')} is named here but was not found in the SOP document in Drive.`;
+  return 'No SOP covers this module and no material has been added. Staff see it greyed out.';
+};
+
+// The material itself: the SOP text read from Drive, then links and files.
+const MaterialView = ({ moduleId, base }) => {
+  const [d, setD] = useState(null); const [err, setErr] = useState('');
+  useEffect(() => { call(PATHS.material(base, moduleId)).then(setD).catch(e => setErr(e.message)); }, [moduleId, base.office]);
+  if (err) return <div className="err">{err}</div>;
+  if (!d) return <div className="note">Loading training…</div>;
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+      {d.note && <div className="note" style={{ whiteSpace: 'pre-wrap' }}>{d.note}</div>}
+      {d.sopDocument.readError && d.sops.length > 0 && <div className="err">The SOP could not be read from Drive right now ({d.sopDocument.readError}). <a href={d.sopDocument.url} target="_blank" rel="noopener">Open the SOP document</a>.</div>}
+      {d.sops.map(sec => (
+        <div key={sec.id} style={{ marginBottom: 14 }}>
+          <h3 style={{ fontSize: 17 }}>{sec.id}{sec.title ? ` · ${sec.title}` : ''}</h3>
+          {sec.lines ? <div style={{ fontSize: 14, lineHeight: 1.55 }}>{sec.lines.map((l, i) => l === '' ? <div key={i} style={{ height: 8 }} />
+            : l.startsWith('|') ? <div key={i} style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12.5, overflowWrap: 'anywhere' }}>{l}</div>
+            : <div key={i}>{l}</div>)}</div>
+            : <div className="note">This procedure could not be read. <a href={d.sopDocument.url} target="_blank" rel="noopener">Open the SOP document</a>.</div>}
+        </div>
+      ))}
+      {d.links.map(l => <div key={l.id} style={{ fontSize: 14, marginTop: 4 }}><i className={`ti ${l.kind === 'video' ? 'ti-player-play' : l.kind === 'document' ? 'ti-file-text' : 'ti-link'}`} /> <a href={l.url} target="_blank" rel="noopener">{l.label}</a></div>)}
+      {d.files.map(f => <div key={f.id} style={{ fontSize: 14, marginTop: 4 }}><i className="ti ti-paperclip" /> <a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.materialFile(base, moduleId, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a></div>)}
+      {d.sopDocument.version && d.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)', marginTop: 8 }}>Read from Clinical SOPs Set 1, v{d.sopDocument.version}.</div>}
+    </div>
+  );
+};
+
+// The office adds a module's material: links, files, and a short note.
+const MaterialEditor = ({ m, onChanged }) => {
+  const [label, setLabel] = useState(''); const [url, setUrl] = useState(''); const [kind, setKind] = useState('video');
+  const [note, setNote] = useState(m.material.note || ''); const [err, setErr] = useState(''); const [ok, setOk] = useState(''); const [busy, setBusy] = useState(false);
+  const run = async (fn, done) => { setErr(''); setOk(''); setBusy(true); try { await fn(); setOk(done); await onChanged(); } catch (e) { setErr(e.message); } setBusy(false); };
+  const mat = m.material;
+  return (
+    <div style={{ background: 'var(--cream)', borderRadius: 10, padding: 12 }}>
+      <div style={{ fontSize: 13.5, marginBottom: 8 }}>{materialDetail(mat)}</div>
+      {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
+      {mat.links.map(l => <div key={l.id} style={{ fontSize: 13.5, marginTop: 4 }}><a href={l.url} target="_blank" rel="noopener">{l.label}</a> <span style={{ color: 'var(--mut)' }}>({l.kind}) · {l.addedByName}</span> <button className="btn sm warn" disabled={busy} onClick={() => run(() => call(PATHS.materialLink(m.id, l.id), { method: 'DELETE' }), 'Link removed.')}>Remove</button></div>)}
+      {mat.files.map(f => <div key={f.id} style={{ fontSize: 13.5, marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.materialFile({ office: true }, m.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a> <span style={{ color: 'var(--mut)' }}>· {f.addedByName}</span> <button className="btn sm warn" disabled={busy} onClick={() => run(() => call(PATHS.materialFileRemove(m.id, f.id), { method: 'DELETE' }), 'File removed.')}>Remove</button></div>)}
+      <label className="f">Add a link (video, Drive document, or page)</label>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <select value={kind} onChange={e => setKind(e.target.value)}><option value="video">Video</option><option value="document">Document</option><option value="link">Link</option></select>
+        <input style={{ flex: 1, minWidth: 140 }} value={label} onChange={e => setLabel(e.target.value)} placeholder="Name staff will see" />
+        <input style={{ flex: 2, minWidth: 180 }} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://" />
+        <button className="btn sm" disabled={busy || !label || !url} onClick={() => run(async () => { await call(PATHS.materialLinks(m.id), { method: 'POST', body: { label, url, kind } }); setLabel(''); setUrl(''); }, 'Link added.')}>Add Link</button>
+      </div>
+      <label className="f">Upload a file</label>
+      <input type="file" disabled={busy} onChange={e => { const file = e.target.files && e.target.files[0]; if (!file) return; const fd = new FormData(); fd.append('file', file); run(() => call(PATHS.materialFiles(m.id), { method: 'POST', body: fd }), 'File added.'); e.target.value = ''; }} />
+      <label className="f">Note for staff (optional)</label>
+      <textarea rows={2} style={{ width: '100%' }} value={note} onChange={e => setNote(e.target.value)} placeholder="For example: watch the video, then read pages 3 to 5." />
+      <button className="btn sm ghost" disabled={busy} onClick={() => run(() => call(PATHS.materialNote(m.id), { method: 'PUT', body: { note } }), 'Note saved.')}>Save Note</button>
+    </div>
+  );
 };
 
 // ---- Care Courses training (caregivers, owner 2026-11-09) --------------------
@@ -620,7 +701,21 @@ const HOST = { EXECUTIVE_DIRECTOR: 'Executive Director', CLINICAL_DIRECTOR: 'Cli
 
 const ModuleCard = ({ m, checks, base, office, onChanged }) => {
   const [openQs, setOpenQs] = useState(false); const [shown, setShown] = useState({}); const [err, setErr] = useState('');
+  const [openMat, setOpenMat] = useState(false);
   const qs = (checks && checks[m.id]) || [];
+  const ready = !!(m.material && m.material.ready);
+  // Staff: a module with no material is greyed out with nothing to press.
+  if (!office && !ready && !m.complete) {
+    return (
+      <div className="line-card" style={{ opacity: 0.55, background: '#F3F1EC' }} aria-disabled="true">
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+          <b style={{ flex: 1 }}>{m.title}</b>
+          <span className="pill p-NOT_STARTED">Coming Soon</span>
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--mut)' }}>The training material for this module has not been added yet.</div>
+      </div>
+    );
+  }
   const selfAttest = m.signoff === 'ATTEST' || m.signoff === 'NONE';
   const complete = async () => {
     setErr('');
@@ -633,6 +728,9 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
+      {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}</span></div>}
+      {ready && <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => setOpenMat(!openMat)}>{openMat ? 'Hide Training' : 'Open Training'}</button>}
+      {openMat && <MaterialView moduleId={m.id} base={base} />}
       {office && m.versionFlag && m.versionFlag.status === 'FLAGGED' && <div className="err">Flagged: manual section {m.versionFlag.hits.join(', ')} changed. Review before the next new hire starts it.</div>}
       {office && m.versionFlag && m.versionFlag.status === 'PENDING' && <div className="note">Pending: manual sections not yet confirmed{m.proposedManualRefs && m.proposedManualRefs.length ? ` (drafted: ${m.proposedManualRefs.join(', ')})` : ''}{m.plannedSop ? ` · SOP still to write` : ''}.</div>}
       {err && <div className="err">{err}</div>}
@@ -943,6 +1041,7 @@ const Overview = ({ onOpen }) => {
 // ---- OFFICE: training library -------------------------------------------------
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
+  const [openMat, setOpenMat] = useState(null);
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/library')); } catch (e) { setErr(e.message); } }, []);
   useEffect(() => { load(); }, [load]);
   const review = async (m, confirm) => {
@@ -963,10 +1062,22 @@ const Library = () => {
           onChange={async (e) => { try { await call('/api/onboarding/admin/settings', { method: 'PUT', body: { checkQuestionsForStaff: e.target.checked } }); await load(); } catch (x) { setErr(x.message); } }} />
         Show training check questions to staff {d.settings && d.settings.checkQuestionsForStaff ? '(on)' : '(off until the SOPs are written)'}
       </label>
-      <table><thead><tr><th>Module</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
-        {mods.map(m => (
-          <tr key={m.id}>
-            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>Phase {m.phaseNumber} · {m.phaseLabel}</div></td>
+      {(() => {
+        const n = (st) => d.modules.filter(x => x.material && x.material.status === st).length;
+        return <div className="note">
+          {n('SOP_WRITTEN')} modules teach a written SOP · {n('MATERIAL_ADDED')} have material you added · {n('SOP_NOT_WRITTEN')} wait on an SOP not yet written · {n('NO_MATERIAL') + n('SOP_MISSING_FROM_DRIVE')} have nothing yet.
+          {' '}Staff see a module greyed out until it has an SOP or material. <a href={d.sopDocument.url} target="_blank" rel="noopener">SOP document</a>{d.sopDocument.version ? ` v${d.sopDocument.version}` : ''}.
+          {!d.sopDocument.ok && <div className="err">The SOP document could not be read from Drive ({d.sopDocument.reason}). Modules that teach an SOP stay open to staff meanwhile.</div>}
+        </div>;
+      })()}
+      <table><thead><tr><th>Module</th><th>Material</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
+        {mods.map(m => (<React.Fragment key={m.id}>
+          <tr>
+            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.id} · Phase {m.phaseNumber} · {m.phaseLabel}</div></td>
+            <td style={{ minWidth: 150 }}>{m.material && <span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span>}
+              {m.material && m.material.status === 'SOP_NOT_WRITTEN' && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.plannedSop}</div>}
+              {m.material && m.material.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.sops.join(', ')}</div>}
+              <div><button className="btn sm ghost" style={{ marginTop: 4 }} onClick={() => setOpenMat(openMat === m.id ? null : m.id)}>{openMat === m.id ? 'Close' : 'Manage Material'}</button></div></td>
             <td>{m.flag.status === 'FLAGGED' ? <span className="pill p-RETURNED">Flagged · {m.flag.hits.join(', ')}</span>
               : m.flag.status === 'PENDING' ? <span className="pill p-SUBMITTED">Pending</span>
               : m.flag.status === 'CHANGES_UNKNOWN' ? <span className="pill p-EXPIRED">Check Needed</span>
@@ -978,7 +1089,10 @@ const Library = () => {
               {m.flag.status === 'FLAGGED' && <button className="btn sm" onClick={() => review(m, false)}>Mark Reviewed</button>}
               {m.flag.status === 'PENDING' && <button className="btn sm" onClick={() => review(m, true)}>Confirm Sections</button>}
             </td>
-          </tr>))}
+          </tr>
+          {openMat === m.id && <tr><td colSpan={5}><MaterialEditor m={m} onChanged={load} />
+            {m.material.ready && <MaterialView moduleId={m.id} base={{ office: true }} />}</td></tr>}
+        </React.Fragment>))}
       </tbody></table>
     </div>
   );

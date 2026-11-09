@@ -156,6 +156,7 @@ const RunDetail = ({ id, onBack, reload }) => {
             })}</tbody>
           </table>
         </div>
+        <div className="mt-3"><button className="btn ghost" onClick={() => download(`/api/payroll/admin/runs/${enc(id)}/register.csv`, `payroll-register-${run.period.payDate}.csv`, setErr)}>Download Register CSV</button></div>
         <p className="text-[12.5px] text-stone-500 mt-3">Employer taxes: Social Security {usd(t.employerSocialSecurityCents)}, Medicare {usd(t.employerMedicareCents)}, FUTA {usd(t.futaCents)}, Georgia unemployment {usd(t.gaSutaCents)}{Object.entries(t.byState || {}).map(([st, b]) => `, ${stName(st)} unemployment ${usd(b.sutaCents)}`).join('')}.</p>
         {run.skippedItems && run.skippedItems.length > 0 && <Warn><b>Not paid, needs fixing:</b><ul className="list-disc pl-5">{run.skippedItems.map((s, i) => <li key={i}>{s.reason} ({s.ref})</li>)}</ul></Warn>}
         {run.status === 'draft' && (
@@ -168,7 +169,7 @@ const RunDetail = ({ id, onBack, reload }) => {
               <button className="btn ghost" disabled={busy || !adj.userId || !adj.amount} onClick={() => act(() => post(`/api/payroll/admin/runs/${enc(id)}/adjustments`, adj), 'Added.')}>Add Line</button>
             </div>
             <div className="flex gap-2">
-              <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
+              <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
               <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
             </div>
           </div>
@@ -247,24 +248,47 @@ const GustoImport = ({ reload }) => {
   );
 };
 
+// Hours for any range, the same file Scheduling used to export (moved here,
+// 2026-11-09): every clock-in, open shifts included, with edit details and
+// the pay period. Nothing clinical.
+const HoursExport = () => {
+  const [from, setFrom] = useState(''); const [to, setTo] = useState(''); const [err, setErr] = useState('');
+  return (
+    <Card title="Hours Export">
+      <Err e={err} />
+      <div className="flex flex-wrap gap-2 items-end">
+        <div><div className="lblu mb-1">From</div><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} /></div>
+        <div><div className="lblu mb-1">To</div><input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div>
+        <button className="btn ghost" disabled={!from || !to} onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${from}&to=${to}`, `payroll-hours-${from}-to-${to}.csv`, setErr); }}>Export Hours CSV</button>
+      </div>
+    </Card>
+  );
+};
+
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
-  const [start, setStart] = useState(data.nextPeriod ? data.nextPeriod.start : '');
+  const scheds = data.schedules || [];
+  const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'staff');
+  const cur = scheds.find(x => x.key === schedule);
+  const [start, setStart] = useState(cur ? cur.current.start : (data.nextPeriod ? data.nextPeriod.start : ''));
   if (open) return <RunDetail id={open} onBack={() => setOpen(null)} reload={reload} />;
+  const schedLabel = (k) => { const x = scheds.find(y => y.key === k); return x ? `${x.label} · ${x.frequency === 'weekly' ? 'weekly' : 'every two weeks'}` : ''; };
   return (
     <>
     <GustoImport reload={reload} />
+    <HoursExport />
     <Card title="Payroll Runs">
       <Err e={err} />
       {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}
       <div className="flex flex-wrap gap-2 items-end mb-4">
+        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); const x = scheds.find(y => y.key === e.target.value); if (x) setStart(x.current.start); }}>{scheds.map(x => <option key={x.key} value={x.key}>{schedLabel(x.key)} ({x.people})</option>)}</select></div>
         <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={start} onChange={e => setStart(e.target.value)} /></div>
-        <button className="btn" disabled={busy || !start} onClick={() => { setBusy(true); setErr(''); post('/api/payroll/admin/runs', { periodStart: start }).then(r => { reload(); setOpen(r.run.id); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); }}>Draft Payroll</button>
+        <button className="btn" disabled={busy || !start} onClick={() => { setBusy(true); setErr(''); post('/api/payroll/admin/runs', { periodStart: start, schedule }).then(r => { reload(); setOpen(r.run.id); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); }}>Draft Payroll</button>
       </div>
       {data.runs.length === 0 && <p className="text-stone-500">No runs yet.</p>}
       {data.runs.map(r => (
         <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
-          <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
+          <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">{r.schedule ? `${schedLabel(r.schedule)} · ` : ''}Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
           <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>{r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}</span>
         </button>
       ))}
@@ -276,7 +300,7 @@ const Runs = ({ data, reload }) => {
 // ---- People --------------------------------------------------------------------
 const Person = ({ p, data, reload }) => {
   const pr = p.profile;
-  const [f, setF] = useState({ workState: pr.workState || 'GA', workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
+  const [f, setF] = useState({ paySchedule: pr.paySchedulePinned ? pr.paySchedule : '', workState: pr.workState || 'GA', workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
   const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
@@ -288,6 +312,9 @@ const Person = ({ p, data, reload }) => {
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
           : <label>W-2 or 1099<select className="inp" value={f.workerType} onChange={e => setF({ ...f, workerType: e.target.value })}>{Object.values(data.workerTypes).map(v => <option key={v} value={v}>{v === 'HYBRID' ? 'Both' : v}</option>)}</select></label>}
         <label>Pay type<select className="inp" value={f.payType} onChange={e => setF({ ...f, payType: e.target.value })}>{data.payTypes.map(v => <option key={v} value={v}>{v.replace('_', ' ')}</option>)}</select></label>
+        <label>Pay schedule<select className="inp" value={f.paySchedule} onChange={e => setF({ ...f, paySchedule: e.target.value })}>
+          <option value="">{pr.isCaregiver ? 'Default: caregivers, weekly' : 'Default: everyone else, every two weeks'}</option>
+          {(data.schedules || []).map(x => <option key={x.key} value={x.key}>{x.label} ({x.frequency === 'weekly' ? 'weekly' : 'every two weeks'})</option>)}</select></label>
         <label>Works in<select className="inp" value={f.workState} onChange={e => setF({ ...f, workState: e.target.value })}>{statesGaFirst().map(c => <option key={c} value={c}>{stName(c)}</option>)}</select>
           {f.workState !== 'GA' && <span className="text-[12px] text-stone-500">Paid once a {stName(f.workState)} tax table is approved and GFC's {stName(f.workState)} unemployment rate is set.</span>}</label>
         <label>Wages account<select className="inp" value={f.wageAccount} onChange={e => setF({ ...f, wageAccount: e.target.value })}><option value="home_care">Home care</option><option value="clinical">Clinical</option></select></label>
@@ -510,7 +537,7 @@ const YearEnd = () => {
         {ye && (
           <>
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
-            {ye.gustoGrossCents > 0 && !rel && <Warn>These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. Release here only if the app is filing {yr}'s W-2s for the whole year. If Gusto is filing them, do not release here, or the wages are reported twice.</Warn>}
+            {ye.gustoGrossCents > 0 && !rel && <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-[13px] text-stone-700 mb-3">These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. GFC files {yr}'s W-2s from the app (owner, 2026-11-09), so those wages belong here. Before releasing, make sure Gusto is not also set to file {yr} W-2s, or the wages are reported twice.</div>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
             <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>
@@ -646,15 +673,22 @@ const OtherStates = ({ data, reload }) => {
 };
 const Settings = ({ data, reload }) => {
   const s = data.settings;
-  const [f, setF] = useState({ frequency: s.frequency, payDateOffsetDays: s.payDateOffsetDays, federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
+  const [sch, setSch] = useState(Object.fromEntries((data.schedules || []).map(x => [x.key, { frequency: x.frequency, payDateOffsetDays: x.payDateOffsetDays, anchor: x.anchor }])));
+  const setS = (k, field, v) => setSch({ ...sch, [k]: { ...sch[k], [field]: v } });
+  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   return (
     <Card title="Payroll Settings">
       <Err e={err} /><Ok m={msg} />
       <div className="grid sm:grid-cols-2 gap-3 max-w-3xl">
-        <label>Pay frequency<select className="inp" value={f.frequency} onChange={e => setF({ ...f, frequency: e.target.value })}><option value="weekly">Weekly (Monday to Sunday)</option><option value="biweekly">Every two weeks (Monday through the second Sunday)</option></select>
-          <span className="text-[12px] text-stone-500">A change starts with the next period that has not begun. Withholding follows it automatically.</span></label>
-        <label>Payday, days after the period ends<input className="inp" type="number" value={f.payDateOffsetDays} onChange={e => setF({ ...f, payDateOffsetDays: e.target.value })} /></label>
+        {(data.schedules || []).map(x => (
+          <div key={x.key} className="sm:col-span-2 border border-stone-200 rounded-xl p-3 grid sm:grid-cols-2 gap-2">
+            <div className="sm:col-span-2"><b className="text-primary">{x.label} pay schedule</b> <span className="text-[12.5px] text-stone-500">· {x.people} {x.people === 1 ? 'person' : 'people'} · this period {day(x.current.start)} to {day(x.current.end)}, paid {day(x.current.payDate)}</span></div>
+            <label>How often<select className="inp" value={sch[x.key].frequency} onChange={e => setS(x.key, 'frequency', e.target.value)}><option value="weekly">Weekly (Monday to Sunday)</option><option value="biweekly">Every two weeks (Monday through the second Sunday)</option></select></label>
+            <label>Payday, days after the period ends<input className="inp" type="number" value={sch[x.key].payDateOffsetDays} onChange={e => setS(x.key, 'payDateOffsetDays', e.target.value)} /></label>
+          </div>
+        ))}
+        <p className="sm:col-span-2 text-[12px] text-stone-500 -mt-1">Caregivers are on the caregivers schedule and everyone else on the other, unless you move a person under People. A change starts with the next period that has not begun. Withholding follows it automatically.</p>
         <label>Federal deposit schedule<select className="inp" value={f.federalDepositSchedule} onChange={e => setF({ ...f, federalDepositSchedule: e.target.value })}><option value="monthly">Monthly</option><option value="semiweekly">Semiweekly</option></select></label>
         <label>Georgia withholding filing<select className="inp" value={f.gaWithholdingFrequency} onChange={e => setF({ ...f, gaWithholdingFrequency: e.target.value })}><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="semiweekly">Semiweekly</option></select></label>
         <label>Georgia unemployment rate (%)<input className="inp" value={f.gaSutaRatePct} onChange={e => setF({ ...f, gaSutaRatePct: e.target.value })} placeholder="from the GA DOL notice, e.g. 2.70" /></label>
@@ -662,7 +696,7 @@ const Settings = ({ data, reload }) => {
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
       </div>
       <OtherStates data={data} reload={reload} />
-      <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, payDateOffsetDays: Number(f.payDateOffsetDays), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
+      <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, schedules: Object.fromEntries(Object.entries(sch).map(([k, v]) => [k, { frequency: v.frequency, payDateOffsetDays: Number(v.payDateOffsetDays) }])), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
       <p className="text-[12.5px] text-stone-500 mt-4">Automations (Apps Script): {data.automationKeySet ? 'switched on' : 'off until PAYROLL_INGEST_KEY is set'}. See docs/PAYROLL_SETUP.md.</p>
     </Card>
   );

@@ -3,8 +3,9 @@
 // ============================================================================
 // Loaded before /my-gfc.js on /my and /caregiver. Exports window.MyPay, which
 // my-gfc.js draws inside Hours & Pay beside the pay stubs it already lists:
-//   PaySetup            W-4, G-4, I-9, SSN, W-9, how you are paid, offer
-//                       letter, handbook, electronic tax forms
+//   PaySetup            W-4, G-4, I-9, SSN, W-9, how you are paid, tax
+//                       mailing address, electronic tax forms (pay and tax
+//                       only; hiring paperwork is in onboarding)
 //   ContractorInvoices  submit an invoice; see its status and 1099 total
 //   TaxForms            W-2 / 1099-NEC once the office releases them
 // Every value the server decides (which forms apply, what is missing) comes
@@ -154,9 +155,6 @@ function FormBody({ which, data, form, set }) {
       {form.method === 'wise' && <div><label>Wise email</label><input type="email" value={form.wiseEmail || ''} onChange={e => set({ ...form, wiseEmail: e.target.value })} /></div>}
     </div>
   );
-  if (which === 'offer' || which === 'handbook') return (
-    <Sign statement={which === 'offer' ? 'I have received and read my offer letter and accept its terms.' : 'I have received the Godwins Family Care employee handbook, and I agree to read it and follow it.'} form={form} set={set} />
-  );
   if (which === 'taxaddress') return (
     <div>
       <p className="mg-note">Exactly as on your Social Security card. This prints on your W-2 or 1099.</p>
@@ -186,7 +184,7 @@ function FormBody({ which, data, form, set }) {
   return null;
 }
 
-const ROUTE = { w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', offer: 'offer', handbook: 'handbook', edelivery: 'e-delivery' };
+const ROUTE = { w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
 
 function PaySetup() {
   const [data, setData] = useState(null);
@@ -208,25 +206,29 @@ function PaySetup() {
   const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : k === 'w9' && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
   return (
     <div className="mp-form">
-      {!data.secretsStorable && <div className="mg-note">The office has not switched on secure storage yet, so bank and tax ID numbers cannot be saved. The forms still save.</div>}
+      <p className="mg-note" style={{ marginTop: 0 }}>What payroll needs to pay you and send your W-2 or 1099. Your other hiring paperwork is in onboarding.</p>
+      {!data.secretsStorable && <div className="mg-note">Social Security and bank numbers can't be saved yet while the office finishes setting up payroll. You can fill in the other forms now and add those numbers later.</div>}
       {err && <div className="mg-err">{err}</div>}
       {msg && <p style={{ color: 'var(--green)', margin: '0 0 8px' }}>{msg}</p>}
       <div className="mp-items">
-        {p.checklist.map(c => (
-          <div key={c.key} className="mp-item">
+        {p.checklist.map((c, i) => (
+          <React.Fragment key={c.key}>
+          {(i === 0 || p.checklist[i - 1].group !== c.group) && c.group && <div className="mp-group" style={{ fontWeight: 600, fontSize: 12.5, textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--muted, #6b6b6b)', margin: i === 0 ? '0 0 6px' : '14px 0 6px' }}>{c.group === 'tax' ? 'Tax forms' : 'Getting paid'}</div>}
+          <div className="mp-item">
             <div><b>{c.label}</b><small>{c.done ? (detail(c.key) || 'Done') : c.optional ? 'Optional' : 'Not done yet'}{c.note ? ` · ${c.note}` : ''}</small></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={`mg-pill ${c.done ? 'mg-ok' : c.optional ? 'mg-wait' : 'mg-bad'}`}>{c.done ? 'Done' : 'To do'}</span>
-              <button className="mg-btn mg-ghost mg-sm" onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>
+              <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>
             </div>
           </div>
+          </React.Fragment>
         ))}
       </div>
       {open && (
         <div className="mg-card" style={{ boxShadow: 'none' }}>
           <FormBody which={open} data={data} form={form} set={setForm} />
           <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-            <button className="mg-btn" disabled={busy} onClick={save}>{['offer', 'handbook', 'w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
+            <button className="mg-btn" disabled={busy} onClick={save}>{['w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
             <button className="mg-btn mg-ghost" onClick={() => { setOpen(null); setForm({}); }}>Cancel</button>
           </div>
         </div>

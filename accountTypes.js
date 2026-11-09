@@ -210,8 +210,8 @@ const STAFF_ONBOARDING = link('onboarding', 'Staff Onboarding', '/onboarding', '
 // what is waiting on the office, each row opening the record it belongs to.
 const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Home Care Oversight', '/caregivers',
   'What is waiting on the office: concerns, visit logs to review, incidents, documents and clearance');
-const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
-  'Shifts, availability, time tracking, payroll and client locations');
+const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Staff Scheduling', '/scheduling',
+  'Shifts for caregivers and staff (providers are on the EHR calendar), availability, time logs and client locations');
 // ONE CLIENTS AREA (owner, 2026-11-09): the enrollment view and the client
 // half of User Management became one standalone page, named Clients &
 // Patients: each client's whole record, account and care history included.

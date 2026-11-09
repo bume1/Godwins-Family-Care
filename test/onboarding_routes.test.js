@@ -29,12 +29,24 @@ async function mount(t) {
     manualState: async () => ({ ok: true, currentVersion: '2.2', changeLog: VF.SEEDED_CHANGES.slice() }),
     checks: async () => ({ ok: true, sops: { 'SOP-SYS-01': [{ prompt: 'Where is the record?', answer: 'OpenEMR.', source: 'Manual 3.1' }] }, library: {}, errors: [] })
   };
+  const notices = [];
+  const notify = require('../notifications').createNotifier({
+    getUsers: async () => [OFFICE, NP],
+    queueNotification: async (type, id, email, name, data) => { notices.push({ type, email, ...data }); return { id: 'q' }; },
+    getAppBaseUrl: async () => 'https://app.test.local',
+    emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+    staffRoles: ['admin', 'user'], clientRole: 'client', familyRole: 'family'
+  });
   const app = express();
   app.use(express.json());
   app.use(require('../routes/onboarding')({
     db, config: {}, logActivity: async () => {}, getUsers: async () => [OFFICE, NP],
     authenticateToken: (req, _res, next) => { req.user = current; next(); },
-    drive, detectFileType: () => 'image/png', uuidv4: () => Math.random().toString(36).slice(2), sourceLoader
+    drive, detectFileType: () => 'image/png', uuidv4: () => Math.random().toString(36).slice(2), sourceLoader,
+    // The notifier is injected because server.js injects one (2026-11-09).
+    // Without it these tests exercise a router where nobody is ever emailed,
+    // which is a different function from the one that ships.
+    notify: () => notify, getAppBaseUrl: async () => 'https://app.test.local'
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
   t.after(() => server.close());
@@ -44,7 +56,7 @@ async function mount(t) {
     let data = null; try { data = await res.json(); } catch (_) { /* binary */ }
     return { status: res.status, data };
   };
-  return { store, uploads, call, base, as: (u) => { current = u; } };
+  return { store, uploads, call, base, notices, as: (u) => { current = u; } };
 }
 
 const startHer = async (h, inputs) => {
@@ -161,7 +173,9 @@ test('a flagged module cannot be started by a new learner; an unflagged one can'
   h.as(NP);
   const flagged = await h.call('POST', '/api/onboarding/me/modules/TRN-207/complete', {});
   assert.strictEqual(flagged.data.code, 'MODULE_UNDER_REVIEW');
-  const ok = await h.call('POST', '/api/onboarding/me/modules/TRN-001/complete', {});
+  // TRN-001 teaches no SOP, so it opens only once the office adds material
+  // (owner, 2026-11-09). TRN-003 teaches SOP-SYS-01 and is open as it stands.
+  const ok = await h.call('POST', '/api/onboarding/me/modules/TRN-003/complete', {});
   assert.strictEqual(ok.status, 200);
   const office = await h.call('POST', '/api/onboarding/me/modules/TRN-006/complete', {});
   assert.strictEqual(office.data.code, 'MODULE_OFFICE_SIGNOFF', 'a countersigned module is the office\'s');

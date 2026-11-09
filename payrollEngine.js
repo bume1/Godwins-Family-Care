@@ -73,6 +73,20 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     add(String(l.caregiver_id), { ref: `log:${l.id}`, kind: 'hours', source: 'Caregiver shift', date: d, minutes: Number(l.total_minutes), rateCents: Math.round(r.rate * 100), rateSource: r.source });
   }
 
+  // A clinician who is ON THE CLOCK (the staff clock or a staff shift) when
+  // a visit happens is already paid for that time by the clock. Paying the
+  // visit's minutes as well would pay the same hour twice. Per-visit pay is a
+  // different arrangement (a fee per visit), so only hourly visits are held.
+  const clockedSpans = new Map();
+  for (const l of timeLogs || []) {
+    if (!l || !l.clock_in_at || !l.clock_out_at) continue;
+    if (!(l.kind === 'staff' || (!l.shift_id && !l.client_id))) continue;
+    const k = String(l.caregiver_id);
+    if (!clockedSpans.has(k)) clockedSpans.set(k, []);
+    clockedSpans.get(k).push([Date.parse(l.clock_in_at), Date.parse(l.clock_out_at)]);
+  }
+  const onTheClock = (uid, a, b) => (clockedSpans.get(String(uid)) || []).some(([s, e]) => Date.parse(a) < e && Date.parse(b) > s);
+
   for (const t of visitTimings || []) {
     if (!t || !t.startedAt || !t.endedAt || !t.byId) continue;
     if (paidRefs && paidRefs.has(`visit:${t.id}`)) continue;
@@ -81,6 +95,7 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     const p = profilesById.get(String(t.byId));
     const mins = minutesBetween(t.startedAt, t.endedAt);
     if (!mins || mins > MAX_ITEM_MINUTES) { skipped.push({ userId: t.byId, ref: `visit:${t.id}`, reason: 'Visit start and end do not make a usable length.' }); continue; }
+    if (!(p && p.payType === 'per_visit') && onTheClock(t.byId, t.startedAt, t.endedAt)) continue;   // paid by the clock
     if (p && p.payType === 'per_visit') add(String(t.byId), { ref: `visit:${t.id}`, kind: 'visit', source: 'Clinical visit', date: d, count: 1, rateCents: p.perVisitRateCents || 0 });
     else if (p && p.payType === 'salary') continue;   // salary covers it
     else add(String(t.byId), { ref: `visit:${t.id}`, kind: 'hours', source: 'Clinical visit', date: d, minutes: mins, rateCents: (p && p.hourlyRateCents) || 0 });
@@ -165,7 +180,9 @@ function runTotals(workers) {
 }
 
 function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
-  const perYear = tax.FREQUENCIES[settings.frequency].perYear;
+  // The run's own schedule decides the divisor (52 weekly, 26 biweekly).
+  const frequency = (period && period.frequency) || settings.frequency;
+  const perYear = tax.FREQUENCIES[frequency].perYear;
   const workers = [];
   for (const { user, profile } of people) {
     const uid = String(user.id);
@@ -206,7 +223,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
   workers.sort((a, b) => a.name.localeCompare(b.name));
   const totals = runTotals(workers);
   return {
-    period, frequency: settings.frequency, perYear,
+    period, frequency, perYear, schedule: (period && period.schedule) || null,
     workers, totals,
     blocked: workers.filter(w => w.missing.length).map(w => ({ userId: w.userId, name: w.name, missing: w.missing })),
     sutaRateMissing: workers.some(w => w.workState === 'GA') && (settings.gaSutaRatePct === null || settings.gaSutaRatePct === undefined),

@@ -1695,6 +1695,12 @@ const scanAndQueueNotifications = async () => {
     // owner controls.
     await sendDueVisitReminders();
 
+    // ── Staff onboarding and credentialing (2026-11-09) ───────────────────
+    // Her daily digest, the office's credential milestones and the Monday
+    // roll-up. It rides this scanner rather than a timer of its own: unlike a
+    // to-do, none of it names a minute, so the scan is finer than the promise.
+    await onboardingRouter.notices.sweepOnboardingNotices();
+
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
@@ -3040,10 +3046,15 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
 // steps and the office completes or verifies the rest. The office half is
 // gated on admin-or-manager rather than clinical write, so a provider never
 // verifies her own licence or opens her own service line.
-app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+const onboardingRouter = onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
   drive: googledrive,
-  detectFileType: (buf) => detectFileType(buf)
-}));
+  detectFileType: (buf) => detectFileType(buf),
+  // Read LAZILY: `notify` is built further down this file, so passing it by
+  // value here would read the temporal dead zone.
+  notify: () => notify,
+  getAppBaseUrl
+});
+app.use(onboardingRouter);
 // My GFC: a staff member's own documents, policies and the Drive folders the
 // office assigned to their role or to them by name.
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
@@ -12706,7 +12717,7 @@ const resolveFacilityForVisit = async (emr, client, appointmentLocation, descrip
 
 const loadEncounterContext = async (req, res, { createRecord = true } = {}) => {
   const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
-  if (!client) { res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' }); return null; }
+  if (!client) { res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found', code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND' }); return null; }
   if (!client.openEmrPatientId) { res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' }); return null; }
   const emr = openemr.forActor(req.user);
   const actor = actorFromReq(req);
@@ -12714,7 +12725,16 @@ const loadEncounterContext = async (req, res, { createRecord = true } = {}) => {
   let rows = await loadRows('encounter_billing');
   let record = findBillingRecord(rows, encounterUuid);
   if (!record && createRecord) {
-    const ensured = await ensureBillingRecord(emr, client, encounterUuid, actor);
+    // The first touch reads the encounter from OpenEMR with this person's own
+    // sign-in. A lapsed sign-in answers with its own code ("Sign in to
+    // OpenEMR"), never a generic failure further up.
+    let ensured;
+    try { ensured = await ensureBillingRecord(emr, client, encounterUuid, actor); }
+    catch (e) {
+      const f = clinicalRepo.emrFailureResponse(e);
+      if (!f) throw e;
+      res.status(f.status).json(f.body); return null;
+    }
     if (ensured.error) { res.status(ensured.status).json({ error: ensured.error, code: 'ENCOUNTER_NOT_FOUND' }); return null; }
     rows = ensured.rows; record = ensured.record;
   }
@@ -13003,6 +13023,38 @@ const refuseIfClosed = (ctx, res) => {
     return true;
   }
   return false;
+};
+
+// ONE writer of an addendum's side effects, shared by the Addendum button and
+// an order added after signing, so the two cannot drift: the row, the
+// structured note, the re-filed signed-note PDF, the portal republish, and the
+// activity entry. The caller saves nothing else for it.
+const recordEncounterAddendum = async (ctx, addendum, { req, warnings, source } = {}) => {
+  const rows = await loadRows('encounter_addenda');
+  rows.push(addendum);
+  await db.set('encounter_addenda', rows);
+  const all = [...(ctx.addenda || []), addendum];
+  const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+  if (syncWarning) warnings.push(syncWarning);
+  // The formatted chart copy carries its addenda, so it is re-filed.
+  const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, ctx.record, ctx.attestation, all);
+  if (pdfWarning) warnings.push(pdfWarning);
+  // Portal P1: addenda are part of the signed record, so a published visit
+  // is republished with the addendum on it.
+  let portalOut = null;
+  if (ctx.record.portalPublished) {
+    portalOut = await publishEncounterToPortal(ctx, { addenda: all });
+    if (portalOut.warning) warnings.push(portalOut.warning);
+  }
+  await saveBillingRecord(ctx.rows, ctx.record);
+  // Written fresh, after the save above: the reads a publish waits on are long
+  // enough for billing to have touched this encounter.
+  await patchPortalOutcome(ctx.encounterUuid, portalOut);
+  await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_addendum', 'client', ctx.client.id, {
+    encounterUuid: ctx.encounterUuid, addendumId: addendum.id, byNpi: ctx.actor.npi || null,
+    ...(source ? { source: source.kind || null, orderId: source.orderId || null } : {})
+  });
+  ctx.addenda = all;
 };
 
 // ── Settings ──────────────────────────────────────────────────────────────
@@ -14932,7 +14984,32 @@ app.post('/api/clinical/orders/:orderId/accept', authenticateToken, requireClini
 app.post('/api/clinical/orders/:orderId/complete', authenticateToken, requireClinicalWrite,
   internalReferralStep(orderReq.applyInternalComplete, 'completed'));
 
+// ── New Order from the chart (owner, 2026-11-09) ──────────────────────────
+// The visits an order can be placed on, answered once for the Orders tab and
+// for the route's own check: open drafts, then the latest signed visit.
+const orderPlacementFor = async (client) => {
+  const [records, attestations] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+  return orderReq.orderPlacementTargets({
+    records, attestations, clientId: client.id,
+    labelFor: (r) => { const t = apptTypes.typeByKey(r.visit && r.visit.appointmentType); return t ? t.label : null; }
+  });
+};
+// Who may place SOMETHING from the chart — the same three doors the route
+// checks (direct, under a protocol, a referral), so the button is never shown
+// to someone the route will refuse.
+const canPlaceOrders = (user) => {
+  if (!clinicalRoles.canClinicalWrite(user)) return false;
+  const C = clinicalRoles.CAPABILITIES;
+  return clinicalRoles.can(user, C.ORDER_DIRECT) ||
+    (clinicalRoles.can(user, C.ORDER_STANDING) && clinicalRoles.ceilingFor(user).some(t => t !== 'screening')) ||
+    clinicalRoles.canRefer(user, orderReq.INTERNAL) || clinicalRoles.canRefer(user, orderReq.EXTERNAL);
+};
+// A double click or a retry while the first save is still running. One server
+// process; the stored key covers everything after the first save lands.
+const orderSubmitsInFlight = new Set();
+
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalWrite, async (req, res) => {
+  let inFlightKey = null;
   try {
     // ── DIRECT AUTHORITY IS CHECKED FIRST, for the same reason the Schedule II
     // scope check is: it depends on the CALLER and on whether a protocol was
@@ -14960,7 +15037,48 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
     }
     const ctx = await loadEncounterContext(req, res);
-    if (!ctx || refuseIfClosed(ctx, res)) return;
+    if (!ctx) return;
+    if (ctx.record && ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(409).json({ error: 'This visit was deleted. Place the order on another visit.', code: 'NOTE_VOIDED' });
+    }
+    // ── The same order, sent twice, is one order ──────────────────────────
+    const submitKey = orderReq.orderIdempotencyKey(req.user.id, ctx.encounterUuid, placing.idempotencyKey);
+    if (submitKey) {
+      const prior = (await loadRows('clinical_orders')).find(o => o && o.idempotencyKey === submitKey && o.clientId === ctx.client.id);
+      if (prior) {
+        const replayWarnings = [];
+        // The order saved and its addendum did not: write the addendum now,
+        // under the id the order already points at.
+        if (prior.afterSigning && prior.afterSigning.addendumId &&
+            !(ctx.addenda || []).some(a => a && a.id === prior.afterSigning.addendumId)) {
+          const again = clinicalRepo.buildAddendum({
+            id: prior.afterSigning.addendumId, encounterUuid: ctx.encounterUuid, clientId: ctx.client.id,
+            text: orderReq.buildOrderAddendumText(prior, { standingOrderRef: prior.standingOrder || null }),
+            actor: ctx.actor, source: { kind: 'order', orderId: prior.id, orderReference: prior.orderReference || null }
+          });
+          if (again.addendum) await recordEncounterAddendum(ctx, again.addendum, { req, warnings: replayWarnings, source: again.addendum.source });
+        }
+        return res.json({ message: 'Already recorded. This is the order you just placed.', order: orderForViewer(prior, req.user), duplicate: true, warnings: replayWarnings });
+      }
+      if (orderSubmitsInFlight.has(submitKey)) {
+        return res.status(409).json({ error: 'This order is already being saved. Wait a moment, then refresh the list.', code: 'ORDER_IN_FLIGHT' });
+      }
+      orderSubmitsInFlight.add(submitKey);
+      inFlightKey = submitKey;
+    }
+    // ── An order on a SIGNED visit (owner, 2026-11-09) ────────────────────
+    // Only when the page asks for it, only on the latest signed visit, only
+    // under the diagnoses that visit was signed with, and recorded on the
+    // note as an addendum. Coding and prescriptions stay closed.
+    const afterSigning = ctx.closed && placing.afterSigning === true;
+    if (placing.afterSigning === true && !ctx.closed) {
+      return res.status(409).json({ error: 'This visit is not signed yet. Place the order on it the usual way.', code: 'ENCOUNTER_NOT_CLOSED' });
+    }
+    if (!afterSigning && refuseIfClosed(ctx, res)) return;
+    if (afterSigning) {
+      const gate = orderReq.afterSigningGate({ targets: (await orderPlacementFor(ctx.client)).targets, encounterUuid: ctx.encounterUuid });
+      if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+    }
     // WHO or WHERE is resolved HERE, from ids, never from names typed in the
     // body: a colleague must be a real, active, licensed team member, and a saved
     // provider must be one on the list.
@@ -14996,14 +15114,18 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     const buildArgs = {
       id: orderId, clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId,
       encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor,
-      encounterDiagnoses: ctx.record.diagnoses
+      encounterDiagnoses: afterSigning ? orderReq.signedDiagnoses(ctx.record, ctx.attestation) : ctx.record.diagnoses
     };
     const built = orderType === orderReq.REFERRAL
       ? orderReq.buildReferral({ ...buildArgs, assignee: referralAssignee, provider: savedProvider })
       : orderType === orderReq.DME
         ? orderReq.buildDmeOrder({ ...buildArgs, client: ctx.client })
         : clinicalRepo.buildOrder(buildArgs);
+    if (built.error && afterSigning && built.code === 'ORDER_DX_UNKNOWN') {
+      return res.status(400).json({ error: 'This visit is signed. Link the order only to the diagnoses it was signed with, or start a new visit for a new diagnosis.', code: 'ORDER_DX_NOT_SIGNED' });
+    }
     if (built.error) return res.status(400).json({ error: built.error, code: built.code, ...(built.windowStart ? { windowStart: built.windowStart, windowEnd: built.windowEnd } : {}) });
+    if (submitKey) built.order.idempotencyKey = submitKey;
     const warnings = [];
 
     // ── Session 4.8: direct authority, or authority granted by a protocol ──
@@ -15131,6 +15253,18 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
         built.order.emrOrderError = e.message.slice(0, 300);
       }
     }
+    // The addendum is built BEFORE the order is saved, so the order carries
+    // the link to it in the same write.
+    let orderAddendum = null;
+    if (afterSigning) {
+      const ad = clinicalRepo.buildAddendum({
+        id: uuidv4(), encounterUuid: ctx.encounterUuid, clientId: ctx.client.id,
+        text: orderReq.buildOrderAddendumText(built.order, { standingOrderRef: execution ? execution.standingOrderRef : null }),
+        actor: ctx.actor, source: { kind: 'order', orderId: built.order.id, orderReference: built.order.orderReference || null }
+      });
+      orderAddendum = ad.addendum;
+      built.order.afterSigning = { addendumId: orderAddendum.id, encounterSignedAt: ctx.attestation.signedAt };
+    }
     const rows = await loadRows('clinical_orders');
     rows.push(built.order);
     await db.set('clinical_orders', rows);
@@ -15145,9 +15279,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       });
       await db.set('standing_order_executions', execRows);
     }
-    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
-    if (syncWarning) warnings.push(syncWarning);
-    await saveBillingRecord(ctx.rows, ctx.record);
+    if (orderAddendum) {
+      // The shared writer syncs the note and saves the record itself.
+      await recordEncounterAddendum(ctx, orderAddendum, { req, warnings, source: orderAddendum.source });
+    } else {
+      const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+      if (syncWarning) warnings.push(syncWarning);
+      await saveBillingRecord(ctx.rows, ctx.record);
+    }
     const referralFollowUp = isReferralOrder
       ? await afterReferralPlaced({ req, order: built.order, client: ctx.client, assigneeUser: referralAssigneeUser, savedProvider, warnings })
       : null;
@@ -15166,21 +15305,29 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       executedByClinicalRole: execution ? execution.executedBy.clinicalRole : null,
       transmission: 'manual',
       orderReference: built.order.orderReference,
-      medicareEnrollmentAcknowledged: !!built.order.medicareEnrollmentAcknowledgment
+      medicareEnrollmentAcknowledged: !!built.order.medicareEnrollmentAcknowledgment,
+      afterSigning: !!orderAddendum,
+      addendumId: orderAddendum ? orderAddendum.id : null
     });
     res.json({
-      message: internalReferral
+      message: orderAddendum
+        ? `Order recorded and added to the signed note as an addendum (${built.order.orderReference || 'transmission is manual'}).`
+        : internalReferral
         ? `Referred to ${referralAssignee.name}. It is waiting in their inbox${referralFollowUp && referralFollowUp.careTeamAdded ? ", and they have been added to this patient's care team" : ''}.`
         : execution
           ? `Order recorded under standing order "${execution.standingOrderRef.title}" v${execution.standingOrderRef.version} (transmission is manual)`
           : 'Order recorded (transmission is manual)',
-      order: built.order, warnings,
+      order: orderForViewer(built.order, req.user), warnings,
       careTeamAdded: referralFollowUp ? referralFollowUp.careTeamAdded : false,
       referralProvider: referralFollowUp ? referralFollowUp.provider : null
     });
   } catch (error) {
     console.error('Clinical order error:', error);
-    res.status(502).json({ error: `Order save failed: ${error.message}` });
+    const f = clinicalRepo.emrFailureResponse(error) ||
+      { status: 500, body: { error: `Order save failed: ${error.message}`, code: 'ORDER_SAVE_FAILED' } };
+    res.status(f.status).json(f.body);
+  } finally {
+    if (inFlightKey) orderSubmitsInFlight.delete(inFlightKey);
   }
 });
 // Status advance is an operational step (sent / resulted / cancelled), so it
@@ -15243,7 +15390,24 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
       sendChannelLabels: orderReq.SEND_CHANNEL_LABELS,
       defaultSendChannel: orderReq.DEFAULT_SEND_CHANNEL,
       faxSendChannels: orderReq.FAX_SEND_CHANNELS,
-      resultInterpretations: clinicalResults.INTERPRETATIONS
+      resultInterpretations: clinicalResults.INTERPRETATIONS,
+      // New Order from the chart: which visits an order can go on, and whether
+      // this viewer may place one at all. Built from the app's own records.
+      placement: await (async () => {
+        const p = await orderPlacementFor(client);
+        const C = clinicalRoles.CAPABILITIES;
+        return {
+          canPlace: canPlaceOrders(req.user),
+          canOrderDirect: clinicalRoles.can(req.user, C.ORDER_DIRECT),
+          canRefer: clinicalRoles.canRefer(req.user, orderReq.INTERNAL) || clinicalRoles.canRefer(req.user, orderReq.EXTERNAL),
+          requireStandingOrder: !clinicalRoles.can(req.user, C.ORDER_DIRECT),
+          linked: !!client.openEmrPatientId,
+          ...p,
+          emptyReason: client.openEmrPatientId ? p.emptyReason : 'NOT_LINKED',
+          orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES,
+          documentOrderTypes: orderReq.DOCUMENT_ORDER_TYPES
+        };
+      })()
     });
   } catch (error) {
     console.error('Clinical orders list error:', error);
@@ -19742,27 +19906,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authentic
     if (!ctx.closed) return res.status(409).json({ error: 'Addenda apply to signed encounters only — this encounter is still open; edit its coding directly', code: 'ENCOUNTER_NOT_CLOSED' });
     const built = clinicalRepo.buildAddendum({ id: uuidv4(), encounterUuid: ctx.encounterUuid, clientId: ctx.client.id, text: (req.body || {}).text, actor: ctx.actor });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
-    const rows = await loadRows('encounter_addenda');
-    rows.push(built.addendum);
-    await db.set('encounter_addenda', rows);
     const warnings = [];
-    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
-    if (syncWarning) warnings.push(syncWarning);
-    // The formatted chart copy carries its addenda, so it is re-filed.
-    const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, ctx.record, ctx.attestation, [...ctx.addenda, built.addendum]);
-    if (pdfWarning) warnings.push(pdfWarning);
-    // Portal P1: addenda are part of the signed record, so a published visit
-    // is republished with the addendum on it.
-    let portalOut = null;
-    if (ctx.record.portalPublished) {
-      portalOut = await publishEncounterToPortal(ctx, { addenda: [...ctx.addenda, built.addendum] });
-      if (portalOut.warning) warnings.push(portalOut.warning);
-    }
-    await saveBillingRecord(ctx.rows, ctx.record);
-    // Written fresh, after the save above: the reads a publish waits on are long
-    // enough for billing to have touched this encounter.
-    await patchPortalOutcome(ctx.encounterUuid, portalOut);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_addendum', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, addendumId: built.addendum.id, byNpi: ctx.actor.npi || null });
+    await recordEncounterAddendum(ctx, built.addendum, { req, warnings });
     res.json({ message: 'Addendum recorded', addendum: built.addendum, warnings });
   } catch (error) {
     console.error('Encounter addendum error:', error);
