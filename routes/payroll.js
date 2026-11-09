@@ -25,6 +25,7 @@ const cal = require('../payrollCalendar');
 const tables = require('../payrollTaxTables');
 const links = require('../appLinks');
 const ye = require('../payrollYearEnd');
+const gusto = require('../payrollGustoImport');
 const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
 
@@ -311,7 +312,7 @@ module.exports = function createPayrollRoutes(deps) {
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
-        runs: runs.map(r => ({ id: r.id, status: r.status, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
+        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
@@ -538,7 +539,9 @@ module.exports = function createPayrollRoutes(deps) {
 
   // Each worker's stub: a PDF filed in their role folder, a row in
   // staff_paystubs (the store My GFC already lists), and a link-only email.
-  const writeStubs = async (run, settings) => {
+  // opts.notify false: past pay dates imported from Gusto get stubs without
+  // an email per pay date.
+  const writeStubs = async (run, settings, opts = {}) => {
     const users = await getUsers();
     const all = await readProfiles();
     const ytd = engine.ytdFrom((await rows(RUNS)), { year: run.period.payDate.slice(0, 4) });   // includes this run
@@ -550,17 +553,20 @@ module.exports = function createPayrollRoutes(deps) {
       let driveFileId = null;
       try {
         const buf = await pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
-          ssnLast4: p.ssn ? p.ssn.last4 : null, accountLast4: p.payMethod ? p.payMethod.accountLast4 : null, payMethod: p.payMethod ? p.payMethod.method : null });
+          ssnLast4: p.ssn ? p.ssn.last4 : null,
+          accountLast4: w.imported ? null : p.payMethod ? p.payMethod.accountLast4 : null,
+          payMethod: w.imported ? w.payMethod : p.payMethod ? p.payMethod.method : null,
+          workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
         const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
         driveFileId = stored.fileId || stored.id || null;
       } catch (e) { report.pdfFailed++; console.error('Pay stub PDF error (non-fatal):', e.message); }
       const hours = Math.round(((w.earnings.find(e => e.code === 'regular') || {}).minutes || 0) / 60 * 100) / 100;
       const row = { id: uuidv4(), userId: w.userId, payDate: run.period.payDate, periodStart: run.period.start, periodEnd: run.period.end,
-        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: 'app', runId: run.id, importedAt: nowIso() };
+        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso() };
       const at = stubs.findIndex(x => String(x.userId) === row.userId && x.payDate === row.payDate && x.reference === row.reference);
       if (at === -1) stubs.push(row); else { row.id = stubs[at].id; stubs[at] = row; }
       report.written++;
-      if (user && user.email && queueNotification) {
+      if (opts.notify !== false && user && user.email && queueNotification) {
         // Link-only: says a stub is ready, never an amount (spec v2 item 16).
         const base = getAppBaseUrl ? await getAppBaseUrl() : '';
         await queueNotification('paystub_ready', user.id, user.email, user.name, {
@@ -573,6 +579,73 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(PAYSTUBS, stubs);
     return report;
   };
+
+  // ---- import past pay dates from Gusto ------------------------------------------------
+  // The owner pastes Gusto's Payroll Journal CSV. preview: what would be
+  // imported and who could not be matched. commit: the paid runs, their pay
+  // stubs in My GFC (no emails), and the app's own hours in those periods
+  // locked so a later app run never pays them again. The file is not stored.
+  router.post('/api/payroll/admin/import/gusto', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const parsed = gusto.parseJournal(b.csv);
+      if (parsed.error) return res.status(400).json(parsed);
+      const entries = gusto.netEntries(parsed.lines);
+      const users = await getUsers();
+      const profiles = await readProfiles();
+      const logs = await rows('time_logs');
+      const visits = await rows('visit_timings');
+      const inP = (iso, p) => { const d = localDate(iso); return d && d >= p.start && d <= p.end; };
+      const refsFor = (uid, p) => [
+        ...logs.filter(l => l && String(l.caregiver_id) === uid && l.clock_out_at && inP(l.clock_in_at, p)).map(l => `log:${l.id}`),
+        ...visits.filter(t => t && String(t.byId) === uid && t.endedAt && inP(t.startedAt, p)).map(t => `visit:${t.id}`)
+      ];
+      const built = gusto.buildImport({ entries, users: users.filter(u => isStaff(u)), profiles, refsFor, at: nowIso(), by: req.user.name || req.user.email });
+      for (const r of built.runs) r.totals = engine.runTotals(r.workers);
+      const existing = await rows(RUNS);
+      // An app run already covering the same person and pay date would mean
+      // paying twice; that pay date is left out and named.
+      const appPaid = new Set(existing.filter(r => r.source !== 'gusto' && r.status !== 'draft').flatMap(r => (r.workers || []).filter(w => w.pay).map(w => `${w.userId}|${r.period.payDate}`)));
+      const clashes = [];
+      for (const r of built.runs) {
+        r.workers = r.workers.filter(w => { const clash = appPaid.has(`${w.userId}|${r.period.payDate}`); if (clash) clashes.push(`${w.name}, pay date ${r.period.payDate}`); return !clash; });
+        r.totals = engine.runTotals(r.workers);
+      }
+      const runs = built.runs.filter(r => r.workers.length);
+      const replacing = runs.filter(r => existing.some(x => x.id === r.id)).length;
+      const nonGeorgia = built.matched.filter(m => m.workStates.some(st => st !== 'GA')).map(m => ({ userId: m.userId, name: m.name, states: m.workStates }));
+      const summary = {
+        payDates: [...new Set(runs.map(r => r.period.payDate))].length, stubs: runs.reduce((a, r) => a + r.workers.length, 0),
+        grossCents: runs.reduce((a, r) => a + r.totals.grossCents, 0), matched: built.matched, unmatched: built.unmatched,
+        warnings: [...parsed.warnings, ...built.warnings, ...clashes.map(c => `${c}: already paid by a payroll run in the app; not imported.`)],
+        replacing, nonGeorgia
+      };
+      if (b.commit !== true) return res.json({ preview: true, ...summary });
+
+      // Commit. Re-importing the same file replaces the same pay dates.
+      const ids = new Set(runs.map(r => r.id));
+      await db.set(RUNS, [...existing.filter(r => !ids.has(r.id)), ...runs]);
+      // Lock the app's hours inside imported periods, as an approval does.
+      const locked = new Map();
+      for (const r of runs) for (const w of r.workers) for (const ref of w.refs) if (ref.startsWith('log:')) locked.set(ref.slice(4), r.id);
+      if (locked.size) await db.set('time_logs', logs.map(l => (l && locked.has(String(l.id)) && !l.payroll_run_id ? { ...l, payroll_run_id: locked.get(String(l.id)) } : l)));
+      // Record the work state Gusto paid them in; a non-Georgia worker is
+      // then blocked from app runs by name.
+      const all = await db.get(PROFILES) || {};
+      for (const m of nonGeorgia) {
+        const p = all[m.userId] || pp.defaultProfile(users.find(u => String(u.id) === m.userId) || { id: m.userId });
+        const st = m.states[m.states.length - 1];
+        if (p.workState === st) continue;
+        all[m.userId] = { ...p, workState: st, history: [...(p.history || []), { at: nowIso(), change: `Work state set to ${st} from the Gusto import`, byId: req.user.id, byName: req.user.name || null }].slice(-200) };
+      }
+      if (nonGeorgia.length) await db.set(PROFILES, all);
+      const settings = await readSettings();
+      const stubReport = { written: 0, pdfFailed: 0 };
+      for (const r of runs) { const x = await writeStubs(r, settings, { notify: false }); stubReport.written += x.written; stubReport.pdfFailed += x.pdfFailed; }
+      await logActivity(req.user.id, req.user.name, 'payroll_gusto_imported', 'payroll', null, { payDates: summary.payDates, stubs: summary.stubs, unmatched: built.unmatched.length });
+      res.json({ committed: true, ...summary, stubsWritten: stubReport.written, pdfFailed: stubReport.pdfFailed });
+    } catch (e) { console.error('Gusto import error:', e); res.status(500).json({ error: 'The import could not be completed.' }); }
+  });
 
   // ---- PNC payment sheet (step 5) ------------------------------------------------------
   router.get('/api/payroll/admin/runs/:id/payment-sheet', authenticateToken, requireAdmin, async (req, res) => {
@@ -743,6 +816,9 @@ module.exports = function createPayrollRoutes(deps) {
     return {
       year: Number(year), employer, employerMissing: ye.employerMissing(employer), fileMissing: ye.fileMissing(employer),
       draftRuns: ye.openRunsIn(runs, year).length, unpaidRuns: ye.unpaidRunsIn(runs, year).length,
+      // Wages paid through Gusto this year are in these figures. If Gusto also
+      // files this year's W-2s, releasing here would report them twice.
+      gustoGrossCents: runs.filter(r => r.source === 'gusto' && String(r.period.payDate).startsWith(String(year))).reduce((t, r) => t + ((r.totals && r.totals.grossCents) || 0), 0),
       w2, nec, necBelowThreshold: figures.necBelowThreshold, necThresholdCents: figures.necThresholdCents,
       g1003: ye.g1003Totals(w2.map(w => ({ boxes: w.boxes }))),
       layouts: { efw2: ye.EFW2_LAYOUT_YEARS.includes(Number(year)), irisNec: ye.IRIS_NEC_LAYOUT_YEARS.includes(Number(year)) },

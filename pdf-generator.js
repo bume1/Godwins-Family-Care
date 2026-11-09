@@ -2738,7 +2738,7 @@ async function generatePhcInvoicePDF(inv) {
 // Current and year-to-date for every line. Last four of the SSN and the
 // deposit account only. Drawn from the approved run's frozen numbers; nothing
 // is recalculated here.
-async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod }) {
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, workState, paidThrough }) {
   return new Promise((resolve, reject) => {
     try {
       const ORG = consentText.ORG;
@@ -2767,7 +2767,7 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       const parts = String(ORG.address).split(/,\s*/);
       y0 = Math.max(
         lines(L, [[ORG.name, true], [parts.slice(0, parts.length - 2).join(', ')], [parts.slice(parts.length - 2).join(', ')], [employerEin ? `EIN ${employerEin}` : 'EIN not set']]),
-        lines(312, [[worker.name, true], [ssnLast4 ? `SSN •••-••-${ssnLast4}` : 'SSN not on file'], ['Work state: Georgia']])
+        lines(312, [[worker.name, true], [ssnLast4 ? `SSN •••-••-${ssnLast4}` : 'SSN not on file'], [`Work state: ${workState && workState !== 'GA' ? workState : 'Georgia'}`]])
       ) + 14;
 
       const table = (title, rows, cols) => {
@@ -2802,7 +2802,7 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
       y0 += 10;
       const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : 'Payment method not set';
-      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${how}`, L, y0);
+      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}`, L, y0);
       doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
       doc.page.margins.bottom = 0;   // the footer sits below the margin
       doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor('#BBBBBB').stroke();

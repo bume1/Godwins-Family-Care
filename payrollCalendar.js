@@ -66,6 +66,8 @@ function calendar(runs, payments, settings) {
   const groups = new Map();
   for (const r of runs || []) {
     if (!r || r.status === 'draft') continue;
+    // History imported from Gusto: Gusto made those deposits.
+    if (r.source === 'gusto') continue;
     for (const l of liabilitiesForRun(r, settings)) {
       const key = `${l.type}:${l.dueDate}`;
       const g = groups.get(key) || { key, agency: l.agency, agencyLabel: AGENCIES[l.agency], type: l.type, label: l.label, dueDate: l.dueDate, quarter: l.quarter || null, amountCents: 0, runIds: [] };

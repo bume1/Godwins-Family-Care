@@ -201,11 +201,54 @@ const PaymentRow = ({ runId, s, onDone }) => {
     </div>
   );
 };
+// Past pay dates from Gusto: the Payroll Journal CSV becomes paid runs and
+// pay stubs in each person's My GFC. Preview first; nothing is kept of the file.
+const GustoImport = ({ reload }) => {
+  const [csv, setCsv] = useState(''); const [name, setName] = useState('');
+  const [prev, setPrev] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const pick = (e) => {
+    const f = e.target.files && e.target.files[0];
+    setPrev(null); setMsg(''); setErr('');
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => { setCsv(String(rd.result || '')); setName(f.name); };
+    rd.onerror = () => setErr('That file could not be read.');
+    rd.readAsText(f);
+  };
+  const go = (commit) => {
+    setBusy(true); setErr('');
+    post('/api/payroll/admin/import/gusto', { csv, commit })
+      .then(r => { if (commit) { setMsg(`Imported ${r.stubs} pay stub(s) across ${r.payDates} pay date(s).${r.pdfFailed ? ` ${r.pdfFailed} PDF(s) could not be filed in Drive; the stubs still show.` : ''}`); setPrev(null); setCsv(''); reload(); } else setPrev(r); })
+      .catch(e => setErr(e.message)).finally(() => setBusy(false));
+  };
+  return (
+    <Card title="Import Past Pay From Gusto">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">In Gusto: Reports → Payroll Journal → this year → export CSV. Each matched person gets their past pay stubs in My GFC, and their year-to-date counts toward this year's limits and W-2. No one is emailed.</p>
+      <input type="file" accept=".csv,text/csv" onChange={pick} />
+      {csv && !prev && <button className="btn ml-2" disabled={busy} onClick={() => go(false)}>Preview {name}</button>}
+      {prev && (
+        <div className="mt-3">
+          <div><b>{prev.stubs}</b> pay stub(s) across <b>{prev.payDates}</b> pay date(s), {usd(prev.grossCents)} gross.{prev.replacing ? ` Replaces ${prev.replacing} pay date(s) imported before.` : ''}</div>
+          {prev.matched.map(m => <div key={m.userId} className="text-[13px]">· {m.name}: {m.payDates} pay date(s), {usd(m.grossCents)}</div>)}
+          {prev.unmatched.length > 0 && <Warn>Not imported (no matching account): {prev.unmatched.map(u => `${u.name} (${u.reason})`).join('; ')}</Warn>}
+          {prev.nonGeorgia.length > 0 && <Warn>{prev.nonGeorgia.map(n => `${n.name} works in ${n.states.join(', ')}`).join('; ')}. The app runs Georgia payroll only, so they will be blocked from app runs. Keep paying them outside the app for now.</Warn>}
+          {prev.warnings.length > 0 && <Warn>{prev.warnings.map((w, i) => <div key={i}>{w}</div>)}</Warn>}
+          <button className="btn mt-2" disabled={busy || !prev.stubs} onClick={() => go(true)}>Import</button>
+          <button className="btn ghost mt-2 ml-2" onClick={() => { setPrev(null); setCsv(''); }}>Cancel</button>
+        </div>
+      )}
+    </Card>
+  );
+};
+
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
   const [start, setStart] = useState(data.nextPeriod ? data.nextPeriod.start : '');
   if (open) return <RunDetail id={open} onBack={() => setOpen(null)} reload={reload} />;
   return (
+    <>
+    <GustoImport reload={reload} />
     <Card title="Payroll Runs">
       <Err e={err} />
       {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}
@@ -217,10 +260,11 @@ const Runs = ({ data, reload }) => {
       {data.runs.map(r => (
         <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
           <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
-          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span></span>
+          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>{r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}</span>
         </button>
       ))}
     </Card>
+    </>
   );
 };
 
@@ -454,6 +498,7 @@ const YearEnd = () => {
         {ye && (
           <>
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
+            {ye.gustoGrossCents > 0 && !rel && <Warn>These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. Release here only if the app is filing {yr}'s W-2s for the whole year. If Gusto is filing them, do not release here, or the wages are reported twice.</Warn>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
             <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>

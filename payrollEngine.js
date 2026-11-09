@@ -129,35 +129,8 @@ function earningsFor(profile, items, perYear) {
  *   ytdByUser: Map<userId, { grossCents, taxes, employer }> from earlier approved runs this year
  *   adjustments: [{ userId, type, amountCents, note }]
  */
-function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
-  const perYear = tax.FREQUENCIES[settings.frequency].perYear;
-  const workers = [];
-  for (const { user, profile } of people) {
-    const uid = String(user.id);
-    const items = gathered.byUser.get(uid) || [];
-    const adj = (adjustments || []).filter(a => String(a.userId) === uid);
-    const salaried = profile && profile.payType === 'salary';
-    if (!items.length && !adj.length && !salaried) continue;
-    const { lines, missingRate } = earningsFor(profile, items, perYear);
-    for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
-    const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
-    const missing = profiles.missingForPay(profile);
-    if (missingRate) missing.push(`Pay rate for ${missingRate} item${missingRate === 1 ? '' : 's'}`);
-    const w = {
-      userId: uid, name: user.name || user.email || uid,
-      workerType: profile ? profile.workerType : 'W2', wageAccount: profile ? profile.wageAccount : 'clinical',
-      payMethod: profile && profile.payMethod ? profile.payMethod.method : null,
-      refs: items.map(i => i.ref), earnings: lines, missing
-    };
-    if (profile && profile.w4 && profile.g4) {
-      w.pay = tax.paycheck({
-        earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: profile.w4, g4: profile.g4,
-        tables, perYear, sutaRatePct: settings.gaSutaRatePct
-      });
-    }
-    workers.push(w);
-  }
-  workers.sort((a, b) => a.name.localeCompare(b.name));
+/** A run's totals from its workers. Shared by app runs and imported history. */
+function runTotals(workers) {
   const paid = workers.filter(w => w.pay);
   const sum = (f) => paid.reduce((a, w) => a + (f(w) || 0), 0);
   const totals = {
@@ -176,6 +149,42 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
   // Cash GFC needs: net pay out now, plus every tax it will deposit.
   totals.cashNeededCents = totals.netCents + totals.federalCents + totals.socialSecurityCents + totals.medicareCents
     + totals.georgiaCents + totals.employerSocialSecurityCents + totals.employerMedicareCents + totals.futaCents + totals.gaSutaCents;
+  return totals;
+}
+
+function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
+  const perYear = tax.FREQUENCIES[settings.frequency].perYear;
+  const workers = [];
+  for (const { user, profile } of people) {
+    const uid = String(user.id);
+    const items = gathered.byUser.get(uid) || [];
+    const adj = (adjustments || []).filter(a => String(a.userId) === uid);
+    const salaried = profile && profile.payType === 'salary';
+    if (!items.length && !adj.length && !salaried) continue;
+    const { lines, missingRate } = earningsFor(profile, items, perYear);
+    for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
+    const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
+    const missing = profiles.missingForPay(profile);
+    // The app withholds and files for Georgia only. A person who works in
+    // another state (Gusto's import records it) is blocked, never taxed as Georgian.
+    if (profile && profile.workState && profile.workState !== 'GA') missing.push(`Works in ${profile.workState}: the app runs Georgia payroll only. Pay them outside the app until ${profile.workState} is added.`);
+    if (missingRate) missing.push(`Pay rate for ${missingRate} item${missingRate === 1 ? '' : 's'}`);
+    const w = {
+      userId: uid, name: user.name || user.email || uid,
+      workerType: profile ? profile.workerType : 'W2', wageAccount: profile ? profile.wageAccount : 'clinical',
+      payMethod: profile && profile.payMethod ? profile.payMethod.method : null,
+      refs: items.map(i => i.ref), earnings: lines, missing
+    };
+    if (profile && profile.w4 && profile.g4) {
+      w.pay = tax.paycheck({
+        earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: profile.w4, g4: profile.g4,
+        tables, perYear, sutaRatePct: settings.gaSutaRatePct
+      });
+    }
+    workers.push(w);
+  }
+  workers.sort((a, b) => a.name.localeCompare(b.name));
+  const totals = runTotals(workers);
   return {
     period, frequency: settings.frequency, perYear,
     workers, totals,
@@ -209,4 +218,4 @@ function paidRefsFrom(runs) {
   return s;
 }
 
-module.exports = { RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, buildRun, ytdFrom, paidRefsFrom };
+module.exports = { RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, runTotals, buildRun, ytdFrom, paidRefsFrom };

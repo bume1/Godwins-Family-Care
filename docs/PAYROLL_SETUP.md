@@ -129,3 +129,16 @@ Run one pay period both ways, in Gusto and in the app, and compare every stub li
 **Box 12 TT** is the overtime premium (the "half" of time-and-a-half) the app already pays. Employees may deduct it on their own return. Georgia asks for it on 2026 W-2s too.
 
 **1099-NEC** goes to each contractor paid **$2,000 or more** in the year (up from $600, for payments after 2025).
+
+## 10. Bringing past pay over from Gusto (Payroll → Runs → Import Past Pay From Gusto)
+
+1. In Gusto: **Reports → Payroll Journal**, this year, export CSV.
+2. In the app, choose the file and press **Preview**. It shows each matched person, their pay dates and total, anyone it could not match, and anyone who works outside Georgia.
+3. Press **Import**. Each matched person gets their past pay stubs in My GFC (no emails go out). Their year-to-date counts toward this year's Social Security, FUTA and Georgia unemployment limits. Hours already in the app for those pay periods are locked, so an app run never pays them again.
+
+Good to know:
+- People are matched to accounts by name. Someone with no account, or two accounts with the same name, is listed and skipped. Fix the account, then import again. Re-importing the same file replaces the same pay dates; it never doubles them.
+- Gusto's corrections (a reversal plus a new line) are netted; a pay date that nets to nothing is dropped.
+- Gusto made the tax deposits for its pay dates, so they never appear as deposits the app says you owe.
+- The file itself is not kept anywhere.
+- **Anyone who works outside Georgia** (for example, a Texas address) is blocked from app runs. The app withholds Georgia tax only, so keep paying them outside the app until their state is added.
