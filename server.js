@@ -4861,7 +4861,11 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // email addresses out of it (it cannot tell a staff address from a
       // patient's) and a console line is not where an admin works anyway. This
       // is what puts the reassignment on the screen that does it.
-      clinicalRoleAutoAssigned: !!u.clinicalRoleAutoAssigned,
+      // Only a clinician whose type nobody chose (accountTypes.clinicalRoleNeedsConfirming):
+      // a Super Admin's or manager's access comes from the account type.
+      clinicalRoleAutoAssigned: accountTypes.clinicalRoleNeedsConfirming(u),
+      // What this person can open, for the Portal Access column.
+      accessSummary: accountTypes.accessSummaryFor(u),
       enrollmentStatus: u.enrollmentStatus || null,
       careTeam: u.careTeam || null,
       familyOfClientId: u.familyOfClientId || null,

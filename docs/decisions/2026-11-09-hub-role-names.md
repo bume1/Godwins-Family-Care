@@ -21,3 +21,10 @@ The hub's role badge and its "Your Account" card worked the role out in the page
 
 - `test/staff_hub.test.js`: 2 new tests (every type's name, the page reading the server's name). One mutation (licence level dropped) confirmed caught.
 - Full suite: 3,543, 0 failing. `login.html` compiles.
+
+## Follow-up the same day: User Management (owner screenshot)
+
+- **Portal Access column** showed a lab-era "Client" badge on every row, staff included. It now lists what the person can open, from `accountTypes.accessSummaryFor` (the same landing and hub areas they get): for example "Portal Hub · Clinical" for a clinician, "Caregiver app", "Patient portal". A caregiver with no licence level reads "No access yet".
+- **"Clinical role still needs confirming" banner** listed the Super Admin as "provider". That flag is the 2026 clinical-role migration's guess. It now shows only for a clinician account whose account type nobody has chosen (`accountTypes.clinicalRoleNeedsConfirming`). A Super Admin's, manager's or coordinator's access comes from the account type, so the guess decides nothing for them.
+- **Role badge** colours follow the account type and the badge no longer wraps.
+- 2 more tests in `test/staff_hub.test.js`. Full suite: 3,545, 0 failing. `admin-hub.html` compiles.

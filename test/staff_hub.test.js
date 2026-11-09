@@ -159,3 +159,29 @@ test('the hub page shows the server\'s role name and works none out itself', () 
   assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(user\)/);
   assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(me\)/);
 });
+
+// Owner, 2026-11-09 (User Management screenshot): every staff row read
+// "Client" under Portal Access, and the Super Admin was asked to confirm a
+// guessed "provider" clinical role.
+test('User Management shows what each person can actually open', () => {
+  assert.deepEqual(at.accessSummaryFor({ ...at.fieldsFor('provider'), accountType: 'provider' }), ['Portal Hub', 'Clinical']);
+  assert.deepEqual(at.accessSummaryFor({ ...at.fieldsFor('client'), accountType: 'client', slug: 'jane' }), ['Patient portal']);
+  assert.deepEqual(at.accessSummaryFor({ role: 'vendor', licenseLevel: 'pca' }), ['Caregiver app']);
+  assert.deepEqual(at.accessSummaryFor({ role: 'vendor' }), [], 'a caregiver with no licence level opens nothing yet');
+  const admin = at.accessSummaryFor({ ...at.fieldsFor('admin'), accountType: 'admin' });
+  assert.ok(admin.includes('Admin & Compliance') && !admin.includes('Patient portal'));
+  const page = stripComments(read('public/admin-hub.html'));
+  assert.ok(!/title="Client Portal">Client</.test(page), 'the lab-era Client badge is gone');
+  assert.match(page, /user\.accessSummary/);
+  assert.match(read('server.js'), /accessSummary: accountTypes\.accessSummaryFor\(u\)/);
+});
+
+test('only a clinician whose type nobody chose is asked to confirm a guessed clinical role', () => {
+  const guessed = { clinicalRole: 'provider', clinicalRoleAutoAssigned: true };
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'admin' }), false, 'a Super Admin');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', isManager: true }), false, 'a manager');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', hasClinicalAccess: true }), true, 'an untyped clinician');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', accountType: 'provider' }), false, 'type chosen');
+  assert.equal(at.clinicalRoleNeedsConfirming({ role: 'user', clinicalRole: 'provider' }), false, 'never guessed');
+  assert.match(read('server.js'), /clinicalRoleAutoAssigned: accountTypes\.clinicalRoleNeedsConfirming\(u\)/);
+});

@@ -285,6 +285,29 @@ function hubAreasFor(u) {
   return areas;
 }
 
+// What this account can open, in a few words, for the ROLE / PORTAL ACCESS
+// column of User Management (owner, 2026-11-09). It used to show a lab-era
+// "Client" badge on every row. Read from the same landing and hub areas the
+// person actually gets, so the list cannot drift from what they see.
+const LANDING_NAMES = Object.freeze({ '/portal': 'Patient portal', '/caregiver': 'Caregiver app', '/my': 'My GFC' });
+function accessSummaryFor(u) {
+  const landing = landingFor(u);
+  if (landing) return [LANDING_NAMES[landing.replace(/^\/portal\/.*/, '/portal')] || landing];
+  const areas = hubAreasFor(u).map(a => a.name);
+  if (areas.length) return ['Portal Hub'].concat(areas.filter(n => n !== 'My GFC'));
+  return [];
+}
+
+// Does the 2026 clinical-role migration's guess still need an admin? Only for
+// a clinician account whose type nobody has chosen. A Super Admin, manager or
+// coordinator gets their access from the account type, so a guessed clinical
+// role on their record decides nothing and is not worth a banner; nor is one
+// on an account whose type an admin has saved.
+function clinicalRoleNeedsConfirming(u) {
+  return !!(u && u.clinicalRoleAutoAssigned && !isValidType(u.accountType) &&
+    CLINICIAN_TYPES.includes(accountTypeOf(u)));
+}
+
 // Every link the hub offers this account, flat, in area order.
 function hubTilesFor(u) {
   return hubAreasFor(u).reduce((all, a) => all.concat(a.links), []);
@@ -437,7 +460,7 @@ module.exports = {
   TYPES, ACCOUNT_TYPES, ALL_TYPES, isValidType,
   MANAGER_CLINICAL_ACCESS, DEFAULT_MANAGER_CLINICAL_ACCESS, isValidManagerAccess,
   CLINICIAN_TYPES, LEGACY_FLAGS,
-  fieldsFor, deriveType, accountTypeOf, accountTypeLabel, managerAccessOf, isConsistent,
+  fieldsFor, deriveType, accountTypeOf, accountTypeLabel, accessSummaryFor, clinicalRoleNeedsConfirming, managerAccessOf, isConsistent,
   landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
