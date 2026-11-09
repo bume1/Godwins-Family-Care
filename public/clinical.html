@@ -1756,6 +1756,8 @@
       const open = (i) => {
         if (i.kind === 'phone_call') return i.actionable ? documentCall(i) : onOpenChart(i.clientId, { tab: 'timeline' });
         if (i.encounterUuid) return onOpenEncounter(i.clientId, i.encounterUuid);
+        // A home care client has no chart here, so their plan opens on its own page.
+        if (i.kind === 'care_plan_co_sign' && i.noChart) { window.location.href = `/clinical?carePlan=${encodeURIComponent(i.clientId)}`; return; }
         return onOpenChart(i.clientId, i.kind === 'care_plan_co_sign' ? { tab: 'careplan' } : i.kind === 'internal_referral' ? { tab: 'referrals' } : undefined);
       };
       const referralStep = (i, fn) => {
@@ -6558,8 +6560,8 @@
       }, [patient.id]);
       const cp = existing && existing.carePlan;
       // The server answers whether THIS viewer can complete this plan, for
-      // this client's service line (an RN can complete a home care plan a
-      // coordinator wrote, never a clinical patient's).
+      // this client's service line and author (an RN completes a home care plan,
+      // and a clinical one a coordinator or LMSW wrote).
       const canCoSignPlan = !!(existing && existing.canCoSign);
       const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
       // An IHPC plan (or one an LMSW authored) waits on a PROVIDER signature, and
@@ -6602,6 +6604,20 @@
                 </span>
               </div>
               <div className="p-4 lg:p-5 grid gap-4">
+                {/* The co-signature sits ABOVE the plan (owner, 2026-11-09). At the
+                    foot of a long plan it was below the fold, and a clinician who
+                    never scrolled never knew a signature was waiting on them. */}
+                {providerPending && !canCoSignPlan && (
+                  <div className="text-[12.5px] text-amber-900">{cp.providerCoSignReason || 'Waiting for a clinician to co-sign beside the author.'} The plan is not active until then.</div>
+                )}
+                {providerPending && canCoSignPlan && (
+                  <div className="grid gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-[12.5px] text-amber-900">This plan needs your co-signature before it is active and the patient can see it. Read it below, then sign. The author's signature is kept.</div>
+                    <SignaturePad padRef={providerPadRef} />
+                    {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
+                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Co-Sign Plan'}</button>
+                  </div>
+                )}
                 <CarePlanView clientId={patient.id} existing={existing} canWrite={canWrite} onChanged={reload} />
                 {existing.docs && existing.docs[`v${cp.version}`] && existing.docs[`v${cp.version}`].signed && (
                   <div className="text-[13px]"><span className="text-stone-500">Signed PDF: </span>
@@ -6609,17 +6625,6 @@
                       ? <a className="text-primary underline" href={existing.docs[`v${cp.version}`].signed.driveUrl} target="_blank" rel="noreferrer">on Drive</a>
                       : 'stored'}
                     {existing.docs[`v${cp.version}`].signed.emrDocumented && ' · filed to OpenEMR'}
-                  </div>
-                )}
-                {providerPending && !canCoSignPlan && (
-                  <div className="text-[12.5px] text-amber-900">{cp.providerCoSignReason || 'Waiting for a clinician to co-sign beside the author.'} The plan is not active until then.</div>
-                )}
-                {providerPending && canCoSignPlan && (
-                  <div className="grid gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                    <div className="text-[12.5px] text-amber-900">This plan needs your co-signature beside the author's before it is active. The author's signature is kept.</div>
-                    <SignaturePad padRef={providerPadRef} />
-                    {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
-                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Co-sign Plan'}</button>
                   </div>
                 )}
                 {(existing.history || []).length > 1 && (

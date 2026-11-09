@@ -87,7 +87,10 @@ const item = (o) => ({
   overdue: !!o.overdue,
   actionable: !!o.actionable,
   waitingOn: o.waitingOn,
-  detail: o.detail || null
+  detail: o.detail || null,
+  // A home care client has no chart in the clinical workspace; their care plan
+  // opens on its own page. The screen reads this rather than the service line.
+  noChart: !!o.noChart
 });
 
 const buildInbox = ({
@@ -148,21 +151,23 @@ const buildInbox = ({
     }));
   }
 
-  // 3. An IHPC care plan an RN authored. The RN's signature is the AUTHORING
-  //    signature; a provider's completes it.
+  // 3. A care plan waiting on a clinician's co-signature: an IHPC plan an RN
+  //    authored, or any plan an LMSW or care coordinator wrote, home care
+  //    included. The author's signature is kept; the co-signature completes it.
   for (const c of (carePlanClients || [])) {
     const plan = c && c.carePlan;
     if (!plan || plan.providerCoSignStatus !== 'pending') continue;
     const authorId = plan.authoredById || (plan.authoredBy && plan.authoredBy.id) || null;
-    // Line-aware: an RN can complete a home care plan a coordinator or LMSW
-    // wrote, never a clinical patient's.
-    const canAct = clinicalRoles.canCompleteCarePlan(viewer, c.serviceLine) && notSelf(v, authorId);
+    // Line- and author-aware: an RN completes a home care plan, and a clinical
+    // one a coordinator or LMSW wrote, never a clinical one an RN wrote.
+    const canAct = clinicalRoles.canCompleteCarePlan(viewer, c.serviceLine, plan) && notSelf(v, authorId);
     items.push(item({
       kind: KINDS.CARE_PLAN_CO_SIGN,
       id: `${c.id}:v${plan.version || 1}`, clientId: c.id, patientName: c.name || nameOf(c.id),
       at: plan.authoredAt || plan.updatedAt || null,
       actionable: canAct,
       waitingOn: canAct ? 'you' : 'a clinician',
+      noChart: !clinicalRoles.isClinicalLine(c.serviceLine),
       detail: plan.providerCoSignReason || `Version ${plan.version || 1} is written and waiting on a clinician's co-signature.`
     }));
   }

@@ -10864,10 +10864,11 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
       catalog: carePlanCatalog.catalog(),
       newPlanDefaults: carePlanCatalog.newPlanDefaults(practiceToday()),
       // Whether THIS viewer can supply the co-signature a pending plan waits
-      // on, for this client's service line (an RN can complete a home care
-      // plan, never a clinical patient's). Same question the co-sign route asks.
+      // on, for this client's service line and this plan's author (an RN
+      // completes a home care plan, and a clinical one a coordinator or LMSW
+      // wrote). Same question the co-sign route asks.
       canCoSign: !!(client.carePlan && client.carePlan.providerCoSignStatus === 'pending'
-        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine)
+        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, client.carePlan)
         && String(client.carePlan.authoredById || '') !== String(req.user.id)),
       coSign: client.carePlanCoSign || {},
       docs: client.carePlanDocs || {},
@@ -10974,6 +10975,11 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
       clientId: client.id, emrDocumented, authorClinicalRole: planSig.clinicalRole,
       signatureRole: planSig.signatureRole, providerCoSignStatus: plan.providerCoSignStatus, serviceLine: client.serviceLine || null
     });
+    // A plan a licensed author completes is active now, so the client is told it
+    // is ready to sign. One that waits on a co-signature is told then instead.
+    if (!pendingProviderCoSign) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
+    }
     res.json({
       message: pendingProviderCoSign
         ? `Care plan v${plan.version} saved as the authoring signature. ${planSig.reason}`
@@ -11008,9 +11014,15 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     // An RN cannot clear an RN-authored IHPC plan, and an LMSW cannot clear
     // their own — the co-signature exists to add a credential the authoring
     // one does not carry.
-    const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
-    if (outcome.outcome !== clinicalRoles.CARE_PLAN_OUTCOME.COMPLETE) {
-      return res.status(403).json({ error: outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.', code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    // One answer for who may co-sign, shared with the care plan screen and the
+    // inbox: an RN may co-sign a clinical plan a coordinator or LMSW wrote,
+    // never one an RN wrote (owner, 2026-11-09).
+    if (!clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, plan)) {
+      const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
+      const rnOnRnPlan = clinicalRoles.resolveClinicalRole(req.user) === 'rn';
+      return res.status(403).json({ error: rnOnRnPlan
+        ? 'An RN wrote this clinical care plan, so it needs a provider or an LCSW to co-sign it.'
+        : (outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.'), code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
     }
     const sig = req.body && req.body.signatureImageB64;
     if (typeof sig !== 'string' || !/^data:image\/png;base64,/.test(sig)) {
@@ -11038,6 +11050,12 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
+    // The co-signature is what makes the plan active and visible in the portal,
+    // so this is the moment the client is told it is ready to sign. Not if they
+    // have already signed this version.
+    if (!(client.carePlanCoSign || {})[`v${plan.version}`]) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
+    }
     // If the client has already co-signed, the signed PDF stored and filed
     // then shows the provider line as pending. Issue it again with all three
     // signatures. Best-effort: a storage failure never voids the signature.
@@ -18868,7 +18886,9 @@ app.get('/api/clinical/digest', authenticateToken, requireTaskManager, async (re
     const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
     const inbox = clinicalInbox.buildInbox({
       viewer, encounterRecords: records, attestations, orders: orderRows,
-      carePlanClients: clients.filter(c => isClinicalServiceLine(c.serviceLine)),
+      // Every client: a home care plan a coordinator or LMSW wrote waits on a
+      // clinician too, and the inbox already counts it. The digest did not.
+      carePlanClients: clients,
       visitLogs, patientNames, now: new Date().toISOString()
     });
 

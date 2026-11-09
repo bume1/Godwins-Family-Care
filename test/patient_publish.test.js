@@ -533,15 +533,16 @@ test('9e. the result notice reaches a POA by name and says nothing about the res
   // client-side paragraph is allowed to use — which also catches an alternation
   // reordered so that a longer phrase stops matching.
   const rewrite = (para) => para.replace(
-    /^Your (caregiver visit|clinician visit|visit|test result)/,
+    /^Your (caregiver visit|clinician visit|visit|test result|care plan)/,
     (m, what) => `Ada Bell's ${what}`);
   for (const [para, want] of [
     ['Your test result has been reviewed.', "Ada Bell's test result has been reviewed."],
     ['Your visit is tomorrow.', "Ada Bell's visit is tomorrow."],
     ['Your caregiver visit has moved.', "Ada Bell's caregiver visit has moved."],
-    ['Your clinician visit has moved.', "Ada Bell's clinician visit has moved."]
+    ['Your clinician visit has moved.', "Ada Bell's clinician visit has moved."],
+    ['Your care plan is ready to review in your portal.', "Ada Bell's care plan is ready to review in your portal."]
   ]) assert.equal(rewrite(para), want, `a POA must be told whose it is: ${para}`);
-  assert.match(src, /\/\^Your \(caregiver visit\|clinician visit\|visit\|test result\)\//,
+  assert.match(src, /\/\^Your \(caregiver visit\|clinician visit\|visit\|test result\|care plan\)\//,
     'the longer phrases come first — alternation is ordered');
   assert.match(fn, /entityId: `\$\{resultId\}:reviewed`/);
 });
