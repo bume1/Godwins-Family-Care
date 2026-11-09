@@ -526,13 +526,26 @@ test('a caregiver cannot file against someone else by passing an id', async (t) 
   assert.strictEqual(store.caregiver_documents[0].caregiver_id, 'cg1');
 });
 
-test('an admin cannot file against a non-caregiver', async (t) => {
+// Owner, 2026-11-09: the office files for ANY staff member (every employee's
+// record in User Management has an Upload). A client or family account is
+// never staff, and that is still refused.
+test('the office files for any staff member, never for a client or family account', async (t) => {
+  const NURSE = { id: 'rn1', role: 'user', clinicalRole: 'rn', accountType: 'rn', name: 'Rhea Nurse' };
+  const CLIENT = { id: 'c1', role: 'client', name: 'Ada Bell' };
+  const FAMILY = { id: 'f1', role: 'family', name: 'Fay Bell' };
   const store = {};
-  const admin = await mountCaregiver(t, { as: ADMIN, store });
-  const res = await admin.post('/api/caregiver/documents',
-    { kind: 'w9', caregiverId: 'a1', fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
-  assert.strictEqual(res.status, 404);
-  assert.strictEqual((await res.json()).code, 'CAREGIVER_NOT_FOUND');
+  const admin = await mountCaregiver(t, { as: ADMIN, store, users: [CAREGIVER, OTHER_CG, ADMIN, NURSE, CLIENT, FAMILY] });
+  const ok = await admin.post('/api/caregiver/documents',
+    { kind: 'w9', caregiverId: 'rn1', fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
+  assert.strictEqual(ok.status, 200, 'a nurse is staff');
+  assert.strictEqual(store.caregiver_documents[0].caregiver_id, 'rn1');
+  for (const id of ['c1', 'f1', 'nobody']) {
+    const res = await admin.post('/api/caregiver/documents',
+      { kind: 'w9', caregiverId: id, fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
+    assert.strictEqual(res.status, 404, id);
+    assert.strictEqual((await res.json()).code, 'CAREGIVER_NOT_FOUND', id);
+  }
+  assert.strictEqual(store.caregiver_documents.length, 1, 'nothing was filed against a client or family account');
 });
 
 test('removing a document deletes the STORED FILE too, and only an admin may', async (t) => {

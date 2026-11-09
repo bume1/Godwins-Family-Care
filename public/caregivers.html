@@ -447,6 +447,11 @@ const Incidents = ({ rows }) => (
 // ============================================================================
 // Documents — what caregivers sent the office
 // ============================================================================
+// Each queue row opens the person's full record in User Management, where
+// everything about them lives (owner, 2026-11-09). This page is the office's
+// to-do list, not a second home for anyone's files.
+const recordHref = (userId, section) => `/admin?view=users&person=${encodeURIComponent(userId)}#${section}`;
+
 const Documents = ({ rows, reload, setErr, setOk }) => {
   // The Super Admin, a manager or a care coordinator reviews what a caregiver
   // sent (owner, 2026-11-03). Removing a document stays with the Super Admin.
@@ -461,13 +466,14 @@ const Documents = ({ rows, reload, setErr, setOk }) => {
       await reload();
     } catch (e) { setErr(e.message); }
   };
+  const waiting = rows.filter(d => d.status === 'received');
   return (
     <div className="card">
-      <h2>Caregiver documents</h2>
-      <p className="sub">LTC forms, certifications, receipts — whatever a caregiver sent in.</p>
-      {rows.length === 0
-        ? <Empty icon="file-off">Nothing sent yet.</Empty>
-        : rows.map(d => (
+      <h2>Documents to Review</h2>
+      <p className="sub">What staff sent in that nobody has accepted or sent back yet. Everything else on file for a person is on their record in User Management.</p>
+      {waiting.length === 0
+        ? <Empty icon="file-check">Nothing is waiting on review.</Empty>
+        : waiting.map(d => (
           <div className="row" key={d.id} style={{ display: 'block' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
               <div>
@@ -475,9 +481,12 @@ const Documents = ({ rows, reload, setErr, setOk }) => {
                 <div className="mu">{d.caregiverName} · {d.fileName} · {fmtWhen(d.uploadedAt)}</div>
                 {d.reviewNote && <div className="mu">Note: {d.reviewNote}</div>}
               </div>
-              <a className="btn sm ghost" style={{ textDecoration: 'none' }}
-                href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
-                target="_blank" rel="noreferrer">Open</a>
+              <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <a className="btn sm ghost" style={{ textDecoration: 'none' }}
+                  href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
+                  target="_blank" rel="noreferrer">Open</a>
+                <a className="btn sm ghost" style={{ textDecoration: 'none' }} href={recordHref(d.caregiverId, 'sr-documents')}>Open Record</a>
+              </span>
             </div>
             {d.status === 'received' && (
               <div style={{ marginTop: 6 }}>
@@ -570,10 +579,13 @@ const Onboarding = ({ setErr, setOk }) => {
 
   if (!rows) return <p className="mu">Loading…</p>;
   const all = rows.caregivers || [];
-  // Default to the half that is OURS to act on. A queue that mixes "we have
-  // not run their orientation" with "they have not photographed their TB
-  // result" cannot be worked, and only the first half is on this screen.
-  const list = onlyWaiting ? all.filter(c => c.waitingOnUs > 0) : all;
+  // The queue is the caregivers NOT YET CLEARED (owner, 2026-11-09); a
+  // cleared caregiver's onboarding lives on their record. Default to the half
+  // that is OURS to act on. A queue that mixes "we have not run their
+  // orientation" with "they have not photographed their TB result" cannot be
+  // worked, and only the first half is on this screen.
+  const notCleared = all.filter(c => !c.cleared);
+  const list = onlyWaiting ? notCleared.filter(c => c.waitingOnUs > 0) : notCleared;
 
   const setItem = async (caregiverId, kind, status) => {
     setErr(''); setOk('');
@@ -605,13 +617,13 @@ const Onboarding = ({ setErr, setOk }) => {
       </p>
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 10 }}>
         <input type="checkbox" checked={onlyWaiting} onChange={e => setOnlyWaiting(e.target.checked)} />
-        Only those waiting on us ({all.filter(c => c.waitingOnUs > 0).length} of {all.length})
+        Only those waiting on us ({notCleared.filter(c => c.waitingOnUs > 0).length} of {notCleared.length} not yet cleared)
       </label>
       {list.length === 0 && (
         <p className="mu">
           {onlyWaiting
-            ? 'Nothing is waiting on the office. Untick the box above to see every caregiver.'
-            : 'No caregivers on file yet.'}
+            ? 'Nothing is waiting on the office. Untick the box above to see every caregiver not yet cleared.'
+            : 'Every caregiver is cleared for shifts.'}
         </p>
       )}
       {list.map(c => {
@@ -633,9 +645,12 @@ const Onboarding = ({ setErr, setOk }) => {
                 {c.cleared ? 'Cleared' : `${doneCount} of ${office.length} office items`}
               </span>
             </div>
-            <button className="btn ghost sm" onClick={() => setOpen(open === c.caregiverId ? null : c.caregiverId)}>
-              {open === c.caregiverId ? 'Hide' : 'Set office items'}
-            </button>
+            <div className="btns">
+              <button className="btn ghost sm" onClick={() => setOpen(open === c.caregiverId ? null : c.caregiverId)}>
+                {open === c.caregiverId ? 'Hide' : 'Set office items'}
+              </button>
+              <a className="btn ghost sm" style={{ textDecoration: 'none' }} href={recordHref(c.caregiverId, 'sr-onboarding')}>Open Record</a>
+            </div>
             {open === c.caregiverId && (
               <div style={{ marginTop: 8 }}>
                 {office.length === 0 && <p className="mu">No office items are configured.</p>}
@@ -712,7 +727,7 @@ const App = () => {
         <div className="hdr"><span className="t">Caregiver Management</span><a href="/admin">Admin hub</a></div>
         <div className="wrap"><div className="card">
           <h2>Not your area</h2>
-          <p className="sub">This is for administrators, clinical staff and case managers.</p>
+          <p className="sub">This is for the caregiver office: the Super Admin, managers and care coordinators.</p>
         </div></div>
       </div>
     );
@@ -725,8 +740,8 @@ const App = () => {
     { id: 'escalations', label: 'Escalations', n: openEscalations },
     { id: 'logs', label: 'Visit logs', n: logStatus === 'pending_review' ? pendingLogs : 0 },
     { id: 'incidents', label: 'Incidents', n: 0 },
-    { id: 'documents', label: 'Documents', n: 0 },
-    { id: 'onboarding', label: 'Onboarding', n: 0 },
+    { id: 'documents', label: 'Documents to Review', n: documents.filter(d => d.status === 'received').length },
+    { id: 'onboarding', label: 'Not Yet Cleared', n: 0 },
     { id: 'broadcast', label: 'Feed post', n: 0 }
   ];
 

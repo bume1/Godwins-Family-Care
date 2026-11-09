@@ -2734,7 +2734,299 @@ async function generatePhcInvoicePDF(inv) {
   });
 }
 
+// ---- Pay stub (spec v1 "Pay stub contents"; owner, 2026-11-08) ---------------
+// Current and year-to-date for every line. Last four of the SSN and the
+// deposit account only. Drawn from the approved run's frozen numbers; nothing
+// is recalculated here.
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod }) {
+  return new Promise((resolve, reject) => {
+    try {
+      const ORG = consentText.ORG;
+      const doc = new PDFDocument({ size: 'LETTER', margin: 48 });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const NAVY = '#033D50', GOLD = '#C9A44A', CREAM = '#FAF7F2', INK = '#1a1a1a', MUTED = '#777777';
+      const L = 48, R = 564, W = R - L;
+      const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+      const day = (ymd) => gfcTime.fmtDate(`${ymd}T12:00:00Z`);
+      const p = worker.pay, y = ytd || { grossCents: 0, netCents: 0, taxes: {}, earnings: {}, reimbursementsCents: 0 };
+
+      doc.rect(0, 0, 612, 92).fill(CREAM);
+      doc.image(path.join(__dirname, 'public', 'brand', 'logo-full-color-transparent.png'), L, 18, { width: 150, height: 52 });
+      doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(20).text('PAY STUB', 312, 18, { width: R - 312, align: 'right' });
+      let my = 44;
+      for (const t of [`Pay date  ${day(run.period.payDate)}`, `Pay period  ${day(run.period.start)} to ${day(run.period.end)}`, `Stub  ${run.id.slice(0, 8).toUpperCase()}`]) {
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8.5).text(t, 312, my, { width: R - 312, align: 'right' }); my += 11;
+      }
+      let y0 = 110;
+      const head = (label, x, w) => { doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(8).text(label, x, y0); doc.moveTo(x, y0 + 11).lineTo(x + w, y0 + 11).lineWidth(0.7).strokeColor('#BBBBBB').stroke(); };
+      head('EMPLOYER', L, 230); head('EMPLOYEE', 312, R - 312);
+      const lines = (x, arr) => { let yy = y0 + 18; arr.forEach(([t, b]) => { doc.fillColor(INK).font(b ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).text(t, x, yy, { width: 240 }); yy = doc.y + 2; }); return yy; };
+      const parts = String(ORG.address).split(/,\s*/);
+      y0 = Math.max(
+        lines(L, [[ORG.name, true], [parts.slice(0, parts.length - 2).join(', ')], [parts.slice(parts.length - 2).join(', ')], [employerEin ? `EIN ${employerEin}` : 'EIN not set']]),
+        lines(312, [[worker.name, true], [ssnLast4 ? `SSN •••-••-${ssnLast4}` : 'SSN not on file'], ['Work state: Georgia']])
+      ) + 14;
+
+      const table = (title, rows, cols) => {
+        doc.rect(L, y0, W, 18).fill(NAVY);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(7.8);
+        doc.text(title, L + 8, y0 + 5.5);
+        cols.forEach(([label, x, w]) => doc.text(label, x, y0 + 5.5, { width: w, align: 'right' }));
+        y0 += 18;
+        for (const r of rows) {
+          doc.fillColor(INK).font(r.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.3).text(r.label, L + 8, y0 + 5, { width: 250 });
+          r.cells.forEach((c, i) => doc.text(c, cols[i][1], y0 + 5, { width: cols[i][2], align: 'right' }));
+          y0 += 18;
+          doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.4).strokeColor('#E2E2E2').stroke();
+        }
+        y0 += 12;
+      };
+      const hrs = (m) => (m ? (m / 60).toFixed(2) : '');
+      table('EARNINGS', worker.earnings.map(e => ({
+        label: e.label + (e.note ? ` · ${e.note}` : ''),
+        cells: [e.minutes ? hrs(e.minutes) : e.count ? String(e.count) : '', usd(e.amountCents), usd((y.earnings || {})[e.code] || 0)]
+      })).concat(p.reimbursementsCents ? [{ label: 'Reimbursements (not taxed)', cells: ['', usd(p.reimbursementsCents), usd(y.reimbursementsCents)] }] : []),
+      [['HOURS / QTY', 330, 70], ['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'], ['Georgia income tax', 'georgia']];
+      table('TAXES WITHHELD', tl.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
+      table('TOTALS', [
+        { label: 'Gross pay', cells: [usd(p.grossCents), usd(y.grossCents)] },
+        { label: 'Taxes withheld', cells: [usd(p.taxCents), usd(ytdTax)] },
+        { label: 'Deductions', cells: [usd(0), usd(0)] },
+        { label: 'Net pay', bold: true, cells: [usd(p.netCents), usd(y.netCents)] }
+      ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
+      y0 += 10;
+      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : 'Payment method not set';
+      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${how}`, L, y0);
+      doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
+      doc.page.margins.bottom = 0;   // the footer sits below the margin
+      doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor('#BBBBBB').stroke();
+      doc.fillColor(MUTED).font('Helvetica').fontSize(6.8).text(`Care That Sees You. ${ORG.name}  ·  ${ORG.phone}`, L, 748, { lineBreak: false });
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
+// ============================================================================
+// FORM W-2 (employee copies B, C, 2) and FORM 1099-NEC (Copy B, Copy 2)
+// ============================================================================
+// Substitute statements built to IRS Pub 1141 section 2.3 (W-2) and Pub 1179
+// (1099). Black ink on white; no logo, only the employer's name (Pub 1141
+// 2.01.04 allows nothing more on an employee copy). The SSN or TIN arrives
+// ALREADY TRUNCATED: this function is never handed a full number.
+const TAXFORM_INK = '#000000';
+const taxUsd = (c) => (Number(c || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+function taxBox(doc, x, y, w, h, label, value, { bold = false, size = 10 } = {}) {
+  doc.lineWidth(bold ? 2 : 0.6).strokeColor(TAXFORM_INK).rect(x, y, w, h).stroke();
+  doc.fillColor(TAXFORM_INK).font('Helvetica').fontSize(6.6).text(label, x + 3, y + 2.5, { width: w - 6, lineBreak: true, height: 16 });
+  if (value !== undefined && value !== null && value !== '') {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).text(String(value), x + 4, y + h - size - 4, { width: w - 8, lineBreak: false });
+  }
+}
+function taxAddrLines(a) {
+  if (!a) return [];
+  return [a.line1, a.line2, `${a.city || ''}, ${a.state || ''} ${a.zip || ''}${a.zip4 ? '-' + a.zip4 : ''}`].filter(s => s && String(s).trim() && String(s).trim() !== ',');
+}
+
+const W2_COPIES = Object.freeze([
+  { copy: 'B', label: "Copy B, To Be Filed With Employee's FEDERAL Tax Return.", boldCore: true },
+  { copy: 'C', label: "Copy C, For EMPLOYEE'S RECORDS.", note: 'This information is being furnished to the Internal Revenue Service. If you are required to file a tax return, a negligence penalty or other sanction may be imposed on you if this income is taxable and you fail to report it.' },
+  { copy: '2', label: "Copy 2, To Be Filed With Employee's State, City, or Local Income Tax Return." }
+]);
+
+// Notice to Employee: the instructions on the back of the official W-2,
+// trimmed to what applies to GFC's employees (Pub 1141 2.3.19), with the
+// EITC notice (2.3.20).
+const W2_INSTRUCTIONS = Object.freeze([
+  ['Notice to Employee', ''],
+  ['Do you have to file?', 'Refer to the Instructions for Forms 1040 and 1040-SR to determine if you are required to file a tax return. Even if you do not have to file a tax return, you may be eligible for a refund if box 2 shows an amount or if you are eligible for any credit.'],
+  ['Earned income tax credit (EITC).', 'You may be able to take the EITC for 2026 if your adjusted gross income (AGI) is less than a certain amount. The amount of the credit is based on income and family size. Workers without children could qualify for a smaller credit. You and any qualifying children must have valid social security numbers (SSNs). You cannot take the EITC if your investment income is more than the specified amount for 2026 or if income is earned for services provided while you were an inmate at a penal institution. For 2026 income limits and more information, visit www.irs.gov/EITC. See also Pub. 596, Earned Income Credit. Any EITC that is more than your tax liability is refunded to you, but only if you file a tax return.'],
+  ['Employee\'s social security number (SSN).', 'For your protection, this form may show only the last four digits of your SSN. However, your employer has reported your complete SSN to the IRS and SSA.'],
+  ['Clergy and religious workers.', 'If you are not subject to social security and Medicare taxes, see Pub. 517.'],
+  ['Corrections.', 'If your name, SSN, or address is incorrect, correct Copies B, C, and 2 and ask your employer to correct your employment record. Be sure to ask the employer to file Form W-2c, Corrected Wage and Tax Statement, with the Social Security Administration (SSA) to correct any name, SSN, or money amount error reported to the SSA on Form W-2. Be sure to get your copies of Form W-2c from your employer for all corrections made so you may file them with your tax return. If your name and SSN are correct but are not the same as shown on your social security card, you should ask for a new card that displays your correct name at any SSA office or by calling 800-772-1213. You may also visit the SSA website at www.SSA.gov.'],
+  ['Cost of employer-sponsored health coverage (if such cost is provided by the employer).', 'The reporting in box 12, using code DD, of the cost of employer-sponsored health coverage is for your information only. The amount reported with code DD is not taxable.'],
+  ['Credit for excess taxes.', 'If you had more than one employer in 2026 and more than $11,439 in social security tax was withheld, you may be able to claim a credit for the excess against your federal income tax. See the Instructions for Forms 1040 and 1040-SR.'],
+  ['Box 1.', 'Enter this amount on the wages line of your tax return.'],
+  ['Box 2.', 'Enter this amount on the federal income tax withheld line of your tax return.'],
+  ['Box 12, code TT.', 'Total amount of qualified overtime compensation: only the premium part of overtime pay required by the Fair Labor Standards Act (the "half" of time-and-a-half). It is already included in box 1. You may be able to deduct it on your tax return. See the Instructions for Forms 1040 and 1040-SR.'],
+  ['Boxes 15 to 17.', 'Georgia wages and Georgia income tax withheld. Use Copy 2 with your Georgia income tax return.'],
+  ['Keep Copy C of Form W-2 for at least 3 years after the due date for filing your income tax return.', 'However, to help protect your social security benefits, keep Copy C until you begin receiving social security benefits, just in case there is a question about your work record and/or earnings in a particular year.']
+]);
+
+/**
+ * employer: { name, ein, address:{line1,line2,city,state,zip,zip4}, gaWithholdingId }
+ * employee: { firstName, middle, lastName, suffix, ssnTruncated, address }
+ * boxes: { box1..box6, box12TT, box16, box17 }
+ */
+async function generateW2EmployeePDF({ year, employer, employee, boxes, corrected }) {
+  if (employee && /\d{9}/.test(String(employee.ssnTruncated || '').replace(/\D/g, ''))) throw new Error('A W-2 employee copy is never given a full SSN.');
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 40, info: { Title: `${year} Form W-2` } });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const L = 40, R = 572, W = R - L, top = 48;
+      const coreW = 128, coreH = 30, coreX = R - coreW * 2;
+      const empName = [employee.firstName, employee.middle, employee.lastName, employee.suffix].filter(Boolean).join(' ');
+      W2_COPIES.forEach((c, i) => {
+        if (i) doc.addPage();
+        doc.page.margins.bottom = 0;
+        let y = top;
+        // Identifying boxes on the left (never the upper right).
+        taxBox(doc, L, y, coreX - L, coreH, 'a  Employee\'s social security number', employee.ssnTruncated || '');
+        // Core boxes 1-6, upper right, in the official order.
+        const core = [['1  Wages, tips, other compensation', boxes.box1], ['2  Federal income tax withheld', boxes.box2],
+          ['3  Social security wages', boxes.box3], ['4  Social security tax withheld', boxes.box4],
+          ['5  Medicare wages and tips', boxes.box5], ['6  Medicare tax withheld', boxes.box6]];
+        core.forEach(([label, v], k) => {
+          const cx = coreX + (k % 2) * coreW, cy = y + Math.floor(k / 2) * coreH;
+          taxBox(doc, cx, cy, coreW, coreH, label, taxUsd(v), { bold: !!c.boldCore && k < 2 });
+        });
+        taxBox(doc, L, y + coreH, coreX - L, coreH, 'b  Employer identification number (EIN)', employer.ein || '');
+        const cH = coreH * 4;
+        doc.lineWidth(0.6).strokeColor(TAXFORM_INK).rect(L, y + coreH * 2, coreX - L, cH).stroke();
+        doc.fillColor(TAXFORM_INK).font('Helvetica').fontSize(6.6).text('c  Employer\'s name, address, and ZIP code', L + 3, y + coreH * 2 + 2.5);
+        doc.font('Helvetica').fontSize(9.5).text([employer.name, ...taxAddrLines(employer.address)].join('\n'), L + 4, y + coreH * 2 + 14, { width: coreX - L - 8 });
+        // Box 12 on the right, under the core data.
+        const by = y + coreH * 3;
+        taxBox(doc, coreX, by, coreW * 2, coreH, '12a  See instructions for box 12', boxes.box12TT > 0 ? `TT   ${taxUsd(boxes.box12TT)}` : '');
+        y += coreH * 2 + cH;
+        // Employee.
+        doc.lineWidth(0.6).rect(L, y, W, coreH * 3).stroke();
+        doc.font('Helvetica').fontSize(6.6).text('e  Employee\'s first name and initial     Last name     Suff.', L + 3, y + 2.5);
+        doc.fontSize(10).text(empName, L + 4, y + 13, { width: W - 8 });
+        doc.fontSize(6.6).text('f  Employee\'s address and ZIP code', L + 3, y + 32);
+        doc.fontSize(9.5).text(taxAddrLines(employee.address).join('\n'), L + 4, y + 43, { width: W - 8 });
+        y += coreH * 3;
+        // State boxes at the bottom.
+        const sw = [70, 170, (W - 240) / 2, (W - 240) / 2];
+        let sx = L;
+        [['15  State', 'GA'], ['Employer\'s state ID number', employer.gaWithholdingId || ''], ['16  State wages, tips, etc.', taxUsd(boxes.box16)], ['17  State income tax', taxUsd(boxes.box17)]]
+          .forEach(([label, v], k) => { taxBox(doc, sx, y, sw[k], coreH, label, v); sx += sw[k]; });
+        y += coreH + 8;
+        // Form number, title and year together; the copy label; the Treasury line.
+        doc.font('Helvetica-Bold').fontSize(13).text(`Form W-2  Wage and Tax Statement  ${year}${corrected ? '  (CORRECTED)' : ''}`, L, y);
+        doc.font('Helvetica').fontSize(8).text(`OMB No. 1545-0029`, L, y + 2, { width: W, align: 'right' });
+        y += 20;
+        doc.font('Helvetica-Bold').fontSize(9).text(c.label, L, y, { width: W * 0.6 });
+        doc.font('Helvetica').fontSize(8).text('Department of the Treasury—Internal Revenue Service', L, y, { width: W, align: 'right' });
+        y = doc.y + 8;
+        if (c.note) doc.font('Helvetica').fontSize(8).text(c.note, L, y, { width: W });
+        doc.font('Helvetica').fontSize(7).fillColor('#444444').text('Separate each copy along its page. Copy B goes with your federal return, Copy 2 with your Georgia return, and you keep Copy C.', L, 740, { width: W, lineBreak: false });
+        doc.fillColor(TAXFORM_INK);
+      });
+      // Notice to Employee.
+      doc.addPage();
+      doc.page.margins.bottom = 40;
+      doc.font('Helvetica-Bold').fontSize(13).text(`Form W-2 (${year})  Instructions for Employee`, 40, 48);
+      doc.moveDown(0.6);
+      for (const [h, t] of W2_INSTRUCTIONS) {
+        if (!t) continue;
+        doc.font('Helvetica-Bold').fontSize(8.6).text(h + ' ', { continued: true }).font('Helvetica').text(t, { width: 532 });
+        doc.moveDown(0.45);
+      }
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
+const NEC_INSTRUCTIONS = Object.freeze([
+  ['Recipient\'s taxpayer identification number (TIN).', 'For your protection, this form may show only the last four digits of your TIN. However, the payer has reported your complete TIN to the IRS.'],
+  ['Account number.', 'May show an account or other unique number the payer assigned to distinguish your account.'],
+  ['Box 1a.', 'Shows nonemployee compensation. If you are in the trade or business of catching fish, box 1a may show cash you received for the sale of fish. If the amount in this box is self-employment (SE) income, report it on Schedule C or F (Form 1040) if a sole proprietor, or on Form 1065 and Schedule K-1 (Form 1065) if a partnership, and the recipient/partner completes Schedule SE (Form 1040). If you are not an employee of the payer and believe the payer should have treated you as one, see Form 8919 and Pub. 1779, Independent Contractor or Employee. If you received amounts reported in box 1a and are not engaged in a trade or business, report them as other income on Schedule 1 (Form 1040).'],
+  ['Boxes 1b to 1d.', 'Show cash tips, the Treasury tipped occupation code(s) and qualified overtime compensation included in box 1a, when reported. Blank here: none were paid.'],
+  ['Box 4.', 'Shows backup withholding. A payer must backup withhold on certain payments if you did not give your TIN to the payer. See Form W-9 for information on backup withholding. Include this amount on your income tax return as tax withheld.'],
+  ['Boxes 5 to 7.', 'Show state income tax withheld, the state and payer\'s state number, and the state payment, when reported.'],
+  ['Future developments.', 'For the latest information about developments related to Form 1099-NEC and its instructions, such as legislation enacted after they were published, go to www.irs.gov/Form1099NEC.'],
+  ['Free File Program.', 'Go to www.irs.gov/FreeFile to see if you qualify for no-cost online federal tax preparation, e-filing, and direct deposit or payment options.']
+]);
+
+/**
+ * payer: { name, ein, address, phone }  (payer TIN is never truncated)
+ * recipient: { name, tinTruncated, address, account }
+ * boxes: { box1a, box4 }
+ */
+async function generate1099NecPDF({ year, payer, recipient, boxes, corrected }) {
+  if (recipient && /\d{9}/.test(String(recipient.tinTruncated || '').replace(/\D/g, ''))) throw new Error('A 1099 recipient copy is never given a full TIN.');
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 40, info: { Title: `${year} Form 1099-NEC` } });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const L = 40, R = 572, W = R - L, H = 30;
+      const leftW = 300, rx = L + leftW, rw = W - leftW;
+      const copies = [
+        { label: 'Copy B  For Recipient', legend: 'This is important tax information and is being furnished to the IRS. If you are required to file a return, a negligence penalty or other sanction may be imposed on you if this income is taxable and the IRS determines that it has not been reported.' },
+        { label: "Copy 2  To be filed with recipient's state income tax return, when required." }
+      ];
+      copies.forEach((c, i) => {
+        if (i) doc.addPage();
+        doc.page.margins.bottom = 0;
+        let y = 48;
+        // Year, form number and name prominently together (upper right).
+        doc.font('Helvetica-Bold').fontSize(14).text(`${year}  Form 1099-NEC${corrected ? '  CORRECTED' : ''}`, rx, y, { width: rw, align: 'right' });
+        doc.font('Helvetica').fontSize(10).text('Nonemployee Compensation', rx, y + 18, { width: rw, align: 'right' });
+        doc.fontSize(8).text('OMB No. 1545-0116', rx, y + 32, { width: rw, align: 'right' });
+        doc.lineWidth(0.6).strokeColor(TAXFORM_INK).rect(L, y, leftW, H * 3).stroke();
+        doc.font('Helvetica').fontSize(6.6).text('PAYER\'S name, street address, city or town, state or province, country, ZIP or foreign postal code, and telephone no.', L + 3, y + 2.5, { width: leftW - 6 });
+        doc.fontSize(9.5).text([payer.name, ...taxAddrLines(payer.address), payer.phone || ''].filter(Boolean).join('\n'), L + 4, y + 20, { width: leftW - 8 });
+        y += H * 3;
+        taxBox(doc, L, y, leftW / 2, H, 'PAYER\'S TIN', payer.ein || '');
+        taxBox(doc, L + leftW / 2, y, leftW / 2, H, 'RECIPIENT\'S TIN', recipient.tinTruncated || '');
+        taxBox(doc, rx, y, rw, H, '1a  Nonemployee compensation', `$ ${taxUsd(boxes.box1a)}`, { size: 11 });
+        y += H;
+        // Boxes 1b to 1d are new on the 2026 form (Rev. December 2026). GFC
+        // pays contractors no tips or overtime, so they stay empty.
+        taxBox(doc, L, y, leftW, H, 'RECIPIENT\'S name', recipient.name || '');
+        [['1b  Cash tips', ''], ['1c  Treasury tipped occupation code(s)', ''], ['1d  Overtime compensation', '']].forEach(([l, v], k) => taxBox(doc, rx + k * (rw / 3), y, rw / 3, H, l, v));
+        y += H;
+        doc.lineWidth(0.6).rect(L, y, leftW, H * 3).stroke();
+        doc.font('Helvetica').fontSize(6.6).text('Street address (including apt. no.); City or town, state or province, country, and ZIP or foreign postal code', L + 3, y + 2.5, { width: leftW - 6 });
+        doc.fontSize(9.5).text(taxAddrLines(recipient.address).join('\n'), L + 4, y + 22, { width: leftW - 8 });
+        taxBox(doc, rx, y, rw, H, '2  Payer made direct sales totaling $5,000 or more of consumer products to recipient for resale', '');
+        taxBox(doc, rx, y + H, rw, H, '3  Excess golden parachute payments', '');
+        // "Federal income tax withheld" in bold (Pub 1179).
+        doc.lineWidth(0.6).rect(rx, y + H * 2, rw, H).stroke();
+        doc.font('Helvetica-Bold').fontSize(7).text('4  Federal income tax withheld', rx + 3, y + H * 2 + 2.5);
+        doc.font('Helvetica').fontSize(10).text(`$ ${taxUsd(boxes.box4 || 0)}`, rx + 4, y + H * 3 - 14);
+        y += H * 3;
+        taxBox(doc, L, y, leftW, H, 'Account number (see instructions)', recipient.account || '');
+        y += H;
+        [['5  State tax withheld', ''], ['6  State/Payer\'s state no.', ''], ['7  State income', '']].forEach(([l, v], k) => taxBox(doc, L + k * (W / 3), y, W / 3, H, l, v));
+        y += H + 10;
+        doc.font('Helvetica-Bold').fontSize(9).text(c.label, L, y, { width: W * 0.6 });
+        doc.font('Helvetica').fontSize(8).text('Department of the Treasury - Internal Revenue Service', L, y, { width: W, align: 'right' });
+        y = doc.y + 6;
+        if (c.legend) doc.font('Helvetica').fontSize(8).text(c.legend, L, y, { width: W });
+        doc.fontSize(8).text(`Questions about this form: ${payer.phone || ''}`, L, doc.y + 6, { width: W });
+      });
+      doc.addPage();
+      doc.page.margins.bottom = 40;
+      doc.font('Helvetica-Bold').fontSize(13).text(`Form 1099-NEC (${year})  Instructions for Recipient`, 40, 48);
+      doc.moveDown(0.6);
+      for (const [h, t] of NEC_INSTRUCTIONS) {
+        doc.font('Helvetica-Bold').fontSize(8.6).text(h + ' ', { continued: true }).font('Helvetica').text(t, { width: 532 });
+        doc.moveDown(0.45);
+      }
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
 module.exports = {
+  generatePayStubPDF,
+  generateW2EmployeePDF,
+  generate1099NecPDF,
   generatePhcInvoicePDF,
   generateMessageNotePDF,
   generateSignedNotePDF,

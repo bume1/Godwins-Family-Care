@@ -60,6 +60,22 @@
     body { background: #FAF7F2; }
     .ah .mg-body { max-width: 1320px; }
     .ah .mg-tiles a.mg-tile { text-decoration: none; }
+    /* The staff record (owner, 2026-11-09): a page, not a pop-up. While one is
+       open, User Management's list and banners step aside. */
+    .sr-open > *:not(.staff-record) { display: none !important; }
+    .sr-body { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+    .sr-main { min-width: 0; }
+    .sr-sec { scroll-margin-top: 70px; }
+    .sr-form form { padding: 12px 0 0 !important; }
+    .sr-form .sticky { position: static !important; }
+    .sr-menu { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+    .sr-menu button { white-space: nowrap; background: #fff; border: 1px solid #ECE4D6; border-radius: 999px; padding: 7px 12px; font-size: 13.5px; font-weight: 600; color: #033D50; cursor: pointer; }
+    .sr-menu button:hover { border-color: #C9A44A; }
+    @media (min-width: 1100px) {
+      .sr-body { grid-template-columns: 210px minmax(0, 1fr); }
+      .sr-menu { flex-direction: column; position: sticky; top: 16px; overflow: visible; }
+      .sr-menu button { text-align: left; border-radius: 12px; }
+    }
     .sidebar-link { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.75rem; }
     .sidebar-link:hover { background: linear-gradient(90deg, rgba(3, 61, 80, 0.08) 0%, rgba(3, 61, 80, 0.02) 100%); }
     .sidebar-link.active { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-soft) 100%); color: white; box-shadow: 0 4px 14px -3px rgba(3, 61, 80, 0.4); }
@@ -1610,7 +1626,266 @@
       );
     };
 
-    const CaregiverDocsSection = ({ token, caregiverId, caregiverName }) => {
+    // ── THE STAFF RECORD (owner, 2026-11-09) ───────────────────────────────
+    // Every employee opens as one full-page record in User Management, laid
+    // out like the client view in Enrollment, so nothing about a person is
+    // split between User Management, Caregiver Management and Staff
+    // Onboarding. The account form is the record's first sections; these
+    // components are the rest. Each reads its own route, and each route
+    // decides who may see it.
+    const srFetch = async (token, path, opts = {}) => {
+      const res = await fetch(`${API_URL}${path}`, { ...opts, headers: { 'Authorization': `Bearer ${token}`, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) } });
+      let body = null;
+      try { body = await res.json(); } catch (e) { /* no body */ }
+      if (!res.ok) throw new Error((body && body.error) || `The server answered ${res.status}.`);
+      return body;
+    };
+    const srIsCaregiver = (u) => !!u && u.role === 'vendor';
+    const srIsClinical = (u) => !!u && (u.hasClinicalAccess || u.role === 'caseManager');
+    // The record's sections, in order, for this person. The page menu and the
+    // tests read this one list.
+    const staffRecordSections = (u, isSuperAdmin) => [
+      { id: 'sr-account', label: 'Account & Role' },
+      (srIsCaregiver(u) || srIsClinical(u) || (u && u.role === 'user')) && { id: 'sr-credentials', label: 'Credentials' },
+      srIsCaregiver(u) && { id: 'sr-pay', label: 'Pay' },
+      { id: 'sr-documents', label: 'Documents' },
+      { id: 'sr-onboarding', label: 'Onboarding & Clearance' },
+      { id: 'sr-welcome', label: 'Welcome Packet' },
+      { id: 'sr-bio', label: 'Bio & Headshot' },
+      srIsCaregiver(u) && { id: 'sr-activity', label: 'Activity' },
+      isSuperAdmin && { id: 'sr-recovery', label: 'Account Recovery' }
+    ].filter(Boolean);
+    const srJump = (id) => { const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+
+    // The header: who this is, and three things at a glance.
+    const StaffRecordTop = ({ token, user, onBack }) => {
+      const [glance, setGlance] = React.useState({});
+      React.useEffect(() => {
+        let live = true;
+        setGlance({});
+        srFetch(token, `/api/my/admin/people/${encodeURIComponent(user.id)}/documents`)
+          .then(d => live && setGlance(g => ({ ...g, waiting: (d.documents || []).filter(x => x.status === 'received').length })))
+          .catch(() => live && setGlance(g => ({ ...g, waiting: null })));
+        srFetch(token, `/api/onboarding/admin/people/${encodeURIComponent(user.id)}`)
+          .then(d => { const c = (d.track && d.track.counts) || {}; live && setGlance(g => ({ ...g, onboarding: c.items ? Math.round((c.complete / c.items) * 100) : 0 })); })
+          .catch(e => live && setGlance(g => ({ ...g, onboarding: /not been started/i.test(e.message) ? 'not started' : null })));
+        if (srIsCaregiver(user)) {
+          srFetch(token, `/api/caregiver/admin/welcome-packets/${encodeURIComponent(user.id)}`)
+            .then(d => live && setGlance(g => ({ ...g, cleared: !!(d.caregiver && d.caregiver.cleared) })))
+            .catch(() => live && setGlance(g => ({ ...g, cleared: null })));
+        }
+        return () => { live = false; };
+      }, [token, user.id]);
+      const chip = (text, tone) => (
+        <span className={`mg-pill ${tone || ''}`} style={{ fontSize: 13 }}>{text}</span>
+      );
+      const ob = glance.onboarding;
+      return (
+        <div className="mg-card" style={{ marginBottom: 16 }}>
+          <button type="button" onClick={onBack} className="text-sm font-semibold" style={{ color: '#033D50', background: 'none', border: 0, cursor: 'pointer', padding: 0 }}>← User Management</button>
+          <div className="flex flex-wrap items-end justify-between gap-3 mt-2">
+            <div>
+              <h1 style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', fontSize: 34, fontWeight: 600, color: '#033D50', lineHeight: 1.1, margin: 0 }}>{user.name || user.email}</h1>
+              <p className="text-sm" style={{ color: '#41555f', marginTop: 4 }}>{user.email}{user.accountStatus === 'inactive' ? ' · Inactive' : ''}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {ob === undefined ? chip('Onboarding…') : ob === null ? chip('Onboarding unavailable') : ob === 'not started' ? chip('Onboarding not started', 'mg-wait') : chip(`Onboarding ${ob}%`, ob === 100 ? 'mg-ok' : 'mg-wait')}
+              {srIsCaregiver(user) && (glance.cleared === undefined ? chip('Clearance…') : glance.cleared === null ? chip('Clearance unavailable') : glance.cleared ? chip('Cleared for shifts', 'mg-ok') : chip('Not cleared for shifts', 'mg-bad'))}
+              {glance.waiting === undefined ? chip('Documents…') : glance.waiting === null ? chip('Documents unavailable') : chip(glance.waiting ? `${glance.waiting} document${glance.waiting === 1 ? '' : 's'} to review` : 'No documents waiting', glance.waiting ? 'mg-wait' : 'mg-ok')}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const StaffRecordMenu = ({ sections }) => (
+      <nav className="sr-menu" aria-label="Record sections">
+        {sections.map(s => (
+          <button key={s.id} type="button" onClick={() => srJump(s.id)}>{s.label}</button>
+        ))}
+      </nav>
+    );
+
+    // What they signed: policies, the welcome packet and attestations. The
+    // uploaded files are CaregiverDocsSection, just above it.
+    const StaffSignedList = ({ token, user }) => {
+      const [d, setD] = React.useState(null);
+      const [err, setErr] = React.useState('');
+      React.useEffect(() => {
+        setD(null); setErr('');
+        srFetch(token, `/api/my/admin/people/${encodeURIComponent(user.id)}/documents`).then(setD).catch(e => setErr(e.message));
+      }, [token, user.id]);
+      const openPdf = async (path, name) => {
+        try {
+          const res = await fetch(`${API_URL}${path}`, { headers: { 'Authorization': `Bearer ${token}` } });
+          if (!res.ok) throw new Error(res.status === 401 ? 'Your session expired. Sign in again.' : 'That copy could not be opened.');
+          const url = URL.createObjectURL(await res.blob());
+          const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { setErr(e.message); }
+      };
+      if (err) return <p className="text-sm text-red-600 mt-3">{err}</p>;
+      if (!d) return <p className="text-sm text-gray-500 mt-3">Loading what they signed…</p>;
+      const signed = d.signed || [];
+      return (
+        <div className="mt-5 border-t pt-4">
+          <h4 className="font-medium text-gray-800 mb-1">What They Signed</h4>
+          {signed.length === 0 ? <p className="text-sm text-gray-500">Nothing signed yet.</p> : (
+            <div className="space-y-2">
+              {signed.map(x => (
+                <div key={x.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-800">{x.title}{x.version ? ` · v${x.version}` : ''}</div>
+                    <div className="text-xs text-gray-500">
+                      Signed {String(x.signedAt || '').slice(0, 10)}{x.filedByOffice ? ` · filed by ${x.filedByName || 'the office'}` : ''}
+                      {x.current === false ? ' · an older version' : ''}
+                    </div>
+                  </div>
+                  {x.pdf === 'packet' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onClick={() => openPdf(`/api/caregiver/welcome-packet/signed.pdf?caregiverId=${encodeURIComponent(user.id)}`, 'welcome-packet.pdf')}>Open</button>}
+                  {x.pdf === 'attestation' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onClick={() => openPdf(`/api/caregiver/welcome-packet/attestations/${encodeURIComponent(x.kind)}.pdf?caregiverId=${encodeURIComponent(user.id)}`, `${x.kind}.pdf`)}>Open</button>}
+                  {(x.links || []).slice(0, 1).map(href => <a key={href} href={href} target="_blank" rel="noopener noreferrer" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">View policy</a>)}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // Onboarding progress for anyone, and for a caregiver the welcome packet,
+    // the office's own checklist items and whether they are cleared for shifts.
+    const StaffOnboardingPanel = ({ token, user }) => {
+      const [ob, setOb] = React.useState(null);
+      const [obErr, setObErr] = React.useState('');
+      const [wp, setWp] = React.useState(null);
+      const [wpErr, setWpErr] = React.useState('');
+      const [busy, setBusy] = React.useState('');
+      const load = React.useCallback(() => {
+        setObErr(''); setWpErr('');
+        srFetch(token, `/api/onboarding/admin/people/${encodeURIComponent(user.id)}`).then(setOb).catch(e => { setOb(null); setObErr(e.message); });
+        if (srIsCaregiver(user)) srFetch(token, `/api/caregiver/admin/welcome-packets/${encodeURIComponent(user.id)}`).then(setWp).catch(e => { setWp(null); setWpErr(e.message); });
+      }, [token, user.id]);
+      React.useEffect(() => { setOb(null); setWp(null); load(); }, [load]);
+      const setItem = async (kind, status) => {
+        setBusy(kind); setWpErr('');
+        try {
+          await srFetch(token, `/api/caregiver/admin/welcome-packets/${encodeURIComponent(user.id)}/office-item`, { method: 'PUT', body: JSON.stringify({ kind, status }) });
+          load();
+        } catch (e) { setWpErr(e.message); }
+        setBusy('');
+      };
+      const counts = (ob && ob.track && ob.track.counts) || null;
+      const pct = counts && counts.items ? Math.round((counts.complete / counts.items) * 100) : 0;
+      const cg = wp && wp.caregiver;
+      return (
+        <div>
+          <p className="text-sm text-gray-600 mb-2">
+            {counts ? `${counts.complete} of ${counts.items} onboarding items complete (${pct}%).` : obErr ? obErr : 'Loading onboarding…'}
+            {counts && counts.waitingOnHer ? ` ${counts.waitingOnHer} waiting on them.` : ''}
+          </p>
+          {counts && <div className="mg-bar"><span style={{ width: `${pct}%` }} /></div>}
+          <a href={`/onboarding?person=${encodeURIComponent(user.id)}`} className="mg-btn mg-ghost mg-sm">Open full onboarding</a>
+          {srIsCaregiver(user) && (
+            <div className="mt-5 border-t pt-4">
+              <h4 className="font-medium text-gray-800 mb-1">Welcome Packet & Clearance</h4>
+              {wpErr && <p className="text-sm text-red-600 mb-2">{wpErr}</p>}
+              {!cg && !wpErr && <p className="text-sm text-gray-500">Loading…</p>}
+              {cg && (
+                <>
+                  <p className="text-sm mb-3">
+                    <span className={`mg-pill ${cg.cleared ? 'mg-ok' : 'mg-bad'}`}>{cg.cleared ? 'Cleared for shifts' : 'Not cleared for shifts'}</span>
+                    {!cg.cleared && cg.clearanceMessage ? <span className="text-gray-600 ml-2">{cg.clearanceMessage}</span> : null}
+                  </p>
+                  {(cg.outstanding || []).length > 0 && (
+                    <ul className="text-sm text-gray-700 list-disc pl-5 mb-3">
+                      {cg.outstanding.map((o, i) => <li key={i}>{o.title || o.label || String(o.kind || o)}{o.waitingOn === 'us' ? ' (waiting on the office)' : ''}</li>)}
+                    </ul>
+                  )}
+                  <h5 className="text-sm font-semibold text-gray-800 mb-2">Office-Checked Items</h5>
+                  <div className="space-y-2">
+                    {(cg.office || []).map(it => (
+                      <div key={it.kind} className="flex flex-wrap items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                        <div className="flex-1 min-w-[160px] text-sm">
+                          <b>{it.title}</b>{it.required ? '' : ' (optional)'}
+                          {it.officeByName && <div className="text-xs text-gray-500">Set by {it.officeByName} {String(it.officeAt || '').slice(0, 10)}</div>}
+                        </div>
+                        <select className="px-2 py-1.5 border rounded-lg text-sm" value={it.officeStatus || ''} disabled={busy === it.kind}
+                          onChange={e => setItem(it.kind, e.target.value)}>
+                          {!it.officeStatus && <option value="">Not set</option>}
+                          {(wp.officeStatuses || []).map(st => <option key={st} value={st}>{String(st).replace(/_/g, ' ')}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // What a caregiver filed, newest first, each linking to where it lives.
+    const StaffActivityPanel = ({ token, user }) => {
+      const [d, setD] = React.useState(null);
+      const [err, setErr] = React.useState('');
+      React.useEffect(() => {
+        setD(null); setErr('');
+        Promise.all([
+          srFetch(token, '/api/caregiver/visit-logs'),
+          srFetch(token, '/api/caregiver/escalations'),
+          srFetch(token, '/api/caregiver/incidents').catch(() => ({ incidents: [] }))
+        ]).then(([v, e, i]) => {
+          const mine = (rows) => (rows || []).filter(r => r && String(r.caregiver_id || r.caregiverId) === String(user.id));
+          setD({ logs: mine(v.visitLogs), escalations: mine(e.escalations), incidents: mine(i.incidents) });
+        }).catch(x => setErr(x.message));
+      }, [token, user.id]);
+      if (err) return <p className="text-sm text-red-600">{err}</p>;
+      if (!d) return <p className="text-sm text-gray-500">Loading…</p>;
+      const row = (label, list, href) => (
+        <a href={href} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100">
+          <span className="text-sm text-gray-800"><b>{list.length}</b> {label}</span>
+          <span className="text-xs text-gray-500">{list[0] ? `Latest ${String(list[0].submittedAt || list[0].raisedAt || list[0].reported_at || '').slice(0, 10)}` : 'None yet'}</span>
+        </a>
+      );
+      return (
+        <div className="space-y-2">
+          {row('visit logs filed', d.logs, '/caregivers')}
+          {row('concerns raised (escalations)', d.escalations, '/caregivers')}
+          {row('incident reports', d.incidents, '/caregivers')}
+        </div>
+      );
+    };
+
+    // The record's own sections below the account form.
+    // At module scope: a component declared inside another is a new type on
+    // every render, so React remounts it and a half-chosen file is lost.
+    const StaffRecordSec = ({ id, title, children }) => (
+      <div id={id} className="mg-card sr-sec"><h2 style={{ marginBottom: 10 }}>{title}</h2>{children}</div>
+    );
+    const StaffRecordPanels = ({ token, user }) => {
+      const Sec = StaffRecordSec;
+      return (
+        <>
+          <Sec id="sr-documents" title="Documents">
+            <CaregiverDocsSection token={token} caregiverId={user.id} caregiverName={user.name} inRecord />
+            <StaffSignedList token={token} user={user} />
+          </Sec>
+          <Sec id="sr-onboarding" title="Onboarding & Clearance">
+            <StaffOnboardingPanel token={token} user={user} />
+          </Sec>
+          {srIsCaregiver(user) && (
+            <Sec id="sr-activity" title="Activity">
+              <StaffActivityPanel token={token} user={user} />
+            </Sec>
+          )}
+        </>
+      );
+    };
+
+    const CaregiverDocsSection = ({ token, caregiverId, caregiverName, inRecord }) => {
       const [docs, setDocs] = React.useState([]);
       const [kinds, setKinds] = React.useState([]);
       const [kind, setKind] = React.useState('');
@@ -1705,6 +1980,21 @@
         } catch (e) { setMsg({ ok: false, text: e.message }); }
       };
 
+      // Accept, or send back with a reason, right on the record (owner,
+      // 2026-11-09). The same route Caregiver Management's queue uses; the
+      // server decides who may review (the caregiver office).
+      const [why, setWhy] = React.useState({});
+      const review = async (d, decision) => {
+        setMsg(null);
+        try {
+          await srFetch(token, `/api/caregiver/documents/${encodeURIComponent(d.id)}/review`, {
+            method: 'POST', body: JSON.stringify({ decision, reason: why[d.id] || '' })
+          });
+          setMsg({ ok: true, text: decision === 'accepted' ? 'Accepted.' : 'Sent back with your reason.' });
+          await load();
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+      };
+
       const remove = async (d) => {
         if (!window.confirm(`Remove ${d.kindLabel} "${d.fileName}"? This deletes the stored file.`)) return;
         const res = await api.deleteCaregiverDoc(token, d.id);
@@ -1722,8 +2012,8 @@
       }
 
       return (
-        <div className="mt-5 border-t pt-4">
-          <h4 className="font-medium text-gray-800 mb-1">Documents</h4>
+        <div className={inRecord ? '' : 'mt-5 border-t pt-4'}>
+          {!inRecord && <h4 className="font-medium text-gray-800 mb-1">Documents</h4>}
           <p className="text-xs text-gray-500 mb-3">
             Photo ID, paystub and W-9 for onboarding, plus anything {caregiverName || 'this caregiver'} has
             sent in. <span className="font-medium">Gusto is where payroll paperwork is actually submitted</span> —
@@ -1759,7 +2049,8 @@
             : (
               <div className="space-y-2">
                 {docs.map(d => (
-                  <div key={d.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                  <div key={d.id} className="p-2 bg-gray-50 rounded-lg">
+                    <div className="flex items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-gray-800 truncate">
                         {d.kindLabel}
@@ -1780,6 +2071,16 @@
                       className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">Open</button>
                     <button type="button" onClick={() => remove(d)}
                       className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs">Remove</button>
+                    </div>
+                    {d.status === 'received' && (
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <span className="text-xs font-semibold text-amber-800">Waiting on review</span>
+                        <input className="flex-1 min-w-[160px] px-2 py-1 border border-gray-200 rounded-lg text-xs" placeholder="Reason, if sending it back"
+                          value={why[d.id] || ''} onChange={e => setWhy({ ...why, [d.id]: e.target.value })} />
+                        <button type="button" onClick={() => review(d, 'accepted')} className="px-3 py-1.5 rounded-lg text-xs text-white" style={{ backgroundColor: '#033D50' }}>Accept</button>
+                        <button type="button" disabled={!(why[d.id] || '').trim()} onClick={() => review(d, 'rejected')} className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs disabled:opacity-50">Send Back</button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -2263,8 +2564,34 @@
         }
       };
 
+      // ?view=users&person=<id> opens that staff member's record (owner,
+      // 2026-11-09), so a record has an address the queues and the hub can
+      // link to. Read once, after the list has loaded.
+      const [personLink, setPersonLink] = useState(() => {
+        try { return new URLSearchParams(window.location.search).get('person'); } catch (e) { return null; }
+      });
+      useEffect(() => {
+        if (!personLink || !users.length) return;
+        const u = users.find(x => String(x.id) === String(personLink));
+        setPersonLink(null);
+        if (u) {
+          handleEdit(u);
+          const hash = window.location.hash;
+          if (hash) setTimeout(() => srJump(hash.slice(1)), 400);
+        }
+      }, [personLink, users]);
+      const setRecordUrl = (id) => {
+        try {
+          const q = new URLSearchParams(window.location.search);
+          if (id) q.set('person', id); else q.delete('person');
+          q.set('view', 'users');
+          window.history.replaceState(null, '', `${window.location.pathname}?${q.toString()}`);
+        } catch (e) { /* the address bar is a convenience */ }
+      };
+
       const handleEdit = (user) => {
         setChangePassword(false);
+        if (user && !['client', 'family'].includes(user.role)) { setRecordUrl(user.id); window.scrollTo(0, 0); }
         setEditingUser(user);
         setFormData({
           name: user.name || '',
@@ -2580,8 +2907,14 @@
         return matchesSearch && matchesRole;
       });
 
+      // A staff member being edited opens as a full-page RECORD (owner,
+      // 2026-11-09); a new account, a client and a family contact keep the
+      // pop-up. The list and banners are hidden while a record is open.
+      const recordUser = showForm && editingUser && !['client', 'family'].includes(editingUser.role) ? editingUser : null;
+      const closeRecord = () => { setShowForm(false); setEditingUser(null); setMessage(''); setEmailClash(null); setCompetencies([]); setEmrStatus(null); setRecordUrl(null); };
+
       return (
-        <div className="space-y-6">
+        <div className={recordUser ? 'space-y-6 sr-open' : 'space-y-6'}>
           <FinancialChangeQueue token={token} requests={financialPending} canDecide={isSuperAdmin} onChanged={loadData} />
           {isSuperAdmin && (
             <PageErrorBoundary quiet>
@@ -2767,11 +3100,15 @@
 
           {/* User Form Modal */}
           {showForm && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-                <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between">
-                  <h2 className="text-lg font-bold text-accent">{editingUser ? 'Edit User' : 'Create New User'}</h2>
-                  <button onClick={() => { setShowForm(false); setEditingUser(null); setCompetencies([]); setEmrStatus(null); }} className="text-gray-400 hover:text-gray-600">
+            <div className={recordUser ? 'staff-record' : 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4'}>
+              {recordUser && <StaffRecordTop token={token} user={recordUser} onBack={closeRecord} />}
+              <div className={recordUser ? 'sr-body' : 'contents'}>
+              {recordUser && <StaffRecordMenu sections={staffRecordSections(recordUser, isSuperAdmin)} />}
+              <div className={recordUser ? 'sr-main' : 'contents'}>
+              <div id={recordUser ? 'sr-account' : undefined} className={recordUser ? 'mg-card sr-sec sr-form' : 'bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto'}>
+                <div className={recordUser ? 'border-b pb-3 mb-1 flex items-center justify-between' : 'sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between'}>
+                  <h2 className="text-lg font-bold text-accent">{recordUser ? 'Account & Role' : editingUser ? 'Edit User' : 'Create New User'}</h2>
+                  <button onClick={() => { if (recordUser) { closeRecord(); return; } setShowForm(false); setEditingUser(null); setCompetencies([]); setEmrStatus(null); }} className="text-gray-400 hover:text-gray-600" aria-label="Close">
                     {Icons.close}
                   </button>
                 </div>
@@ -2878,7 +3215,7 @@
 
                   {/* License Level — shown for Caregiver (vendor) role */}
                   {formData.role === 'vendor' && (
-                    <div className="border-t pt-4">
+                    <div id="sr-credentials" className="border-t pt-4">
                       <label className="block text-sm font-medium text-gray-700 mb-1">License Level</label>
                       <select value={formData.licenseLevel} onChange={(e) => setFormData({ ...formData, licenseLevel: e.target.value })}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
@@ -2942,7 +3279,7 @@
                       a MANAGER's is chosen here (owner, 2026-10-15): View only by
                       default, or none, or chart editing. The levels are served. */}
                   {(formData.role === 'user' || formData.role === 'caseManager') && (
-                    <div className="border-t pt-4">
+                    <div id="sr-credentials" className="border-t pt-4">
                       <div className="p-3 bg-teal-50 rounded-lg">
                         {formData.accountType === 'manager' ? (
                           <>
@@ -3101,10 +3438,10 @@
                   )}
 
                   {editingUser && !['client', 'family'].includes(formData.role) && (
-                    <WelcomePacketSection token={token} userId={editingUser.id} userName={editingUser.name} />
+                    <div id="sr-welcome"><WelcomePacketSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
                   )}
                   {editingUser && !['client', 'family'].includes(formData.role) && (
-                    <StaffBioSection token={token} userId={editingUser.id} userName={editingUser.name} />
+                    <div id="sr-bio"><StaffBioSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
                   )}
 
                   {/* ── Account recovery ────────────────────────────────
@@ -3115,7 +3452,7 @@
                       recover for one that does not exist yet. Super Admin
                       only: MFA reset and EMR disconnect stay theirs. */}
                   {editingUser && isSuperAdmin && (
-                    <div className="border-t pt-4">
+                    <div id="sr-recovery" className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-1">Account recovery</h3>
                       <p className="text-sm text-gray-500 mb-3">
                         For a lost or replaced device. Neither of these is the password field above — reset that separately if it also needs to change.
@@ -3298,7 +3635,7 @@
 
                   {/* Vendor-specific fields */}
                   {formData.role === 'vendor' && (
-                    <div className="border-t pt-4">
+                    <div id="sr-pay" className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Vendor Settings</h3>
                       <p className="text-sm text-gray-500 mb-3">Vendors can submit service reports and view reports for their assigned clients</p>
                       <div>
@@ -3417,7 +3754,7 @@
                       `caregiver_documents` row a caregiver's do, so the office
                       has ONE place to look for one person's documents rather
                       than having to know which door a file came through. */}
-                  {(formData.role === 'vendor' || formData.hasClinicalAccess) && editingUser && (
+                  {(formData.role === 'vendor' || formData.hasClinicalAccess) && editingUser && !recordUser && (
                     <CaregiverDocsSection
                       token={token}
                       caregiverId={editingUser.id}
@@ -3770,8 +4107,8 @@
                   })()}
 
                   <div className="flex justify-end gap-3 pt-4 border-t sticky bottom-0 bg-white pb-2">
-                    <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); setEmailClash(null); setCompetencies([]); setEmrStatus(null); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
-                      Cancel
+                    <button type="button" onClick={() => { if (recordUser) { closeRecord(); return; } setShowForm(false); setEditingUser(null); setMessage(''); setEmailClash(null); setCompetencies([]); setEmrStatus(null); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
+                      {recordUser ? 'Close' : 'Cancel'}
                     </button>
                     <button type="submit" disabled={saving} className="px-6 py-2.5 rounded-lg font-medium flex items-center gap-2" style={{backgroundColor: '#033D50', color: 'white'}}>
                       {saving && <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></span>}
@@ -3779,6 +4116,9 @@
                     </button>
                   </div>
                 </form>
+              </div>
+              {recordUser && <StaffRecordPanels token={token} user={recordUser} />}
+              </div>
               </div>
             </div>
           )}

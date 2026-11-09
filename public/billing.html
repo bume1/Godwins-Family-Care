@@ -1204,7 +1204,102 @@ const PayersCard = ({ payers, reload }) => {
   );
 };
 
-const TABS = [['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Home Care Invoices'], ['settings', 'Settings']];
+// ---- IME / C&P exams -------------------------------------------------------------
+// A fee schedule per contracting entity; an exam with its report in bills
+// once at that entity's rate. The server decides what is billable.
+const IME_CHIP = { draft: 'bg-stone-100 text-stone-600', sent: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700', void: 'bg-red-50 text-red-700' };
+const ImeSchedule = ({ entity, label, schedule, canEdit, reload }) => {
+  const [rows, setRows] = useState(() => (schedule.rates || []).map(r => ({ code: r.code, label: r.label, rate: (r.rateCents / 100).toFixed(2) })));
+  const [open, setOpen] = useState(false); const [err, setErr] = useState('');
+  return (
+    <div className="border border-stone-200 rounded-xl p-3">
+      <div className="flex justify-between gap-2"><b className="text-primary">{label}</b>
+        {schedule.placeholder ? <span className="chip bg-amber-50 text-amber-800">NO RATES YET</span> : <span className="chip bg-emerald-50 text-emerald-700">{schedule.rates.length} RATES</span>}</div>
+      {(schedule.rates || []).map(r => <div key={r.code} className="text-[12.5px] text-stone-600">{r.label}: {usd(r.rateCents)}</div>)}
+      {schedule.placeholder && <p className="text-[12.5px] text-stone-500">Exams for {label} wait unbilled until its rates are entered.</p>}
+      {canEdit && !open && <button className="btn ghost !py-1 mt-2" onClick={() => setOpen(true)}>Edit Rates</button>}
+      {open && (
+        <div className="mt-2 grid gap-2">
+          {err && <div className="text-red-700 text-[12.5px]">{err}</div>}
+          {rows.map((r, i) => (
+            <div key={i} className="flex gap-2">
+              <input className="inp" placeholder="Exam type" value={r.label} onChange={e => setRows(rows.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} />
+              <input className="inp !w-28" placeholder="$" value={r.rate} onChange={e => setRows(rows.map((x, j) => (j === i ? { ...x, rate: e.target.value } : x)))} />
+              <button className="btn ghost !py-1" onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
+            </div>
+          ))}
+          <div className="flex gap-2"><button className="btn ghost !py-1" onClick={() => setRows([...rows, { code: '', label: '', rate: '' }])}>Add Exam Type</button>
+            <button className="btn !py-1" onClick={() => call(`/api/gfc/admin/ime-billing/schedules/${enc(entity)}`, { method: 'PUT', body: JSON.stringify({ rates: rows }) }).then(() => { setOpen(false); reload(); }).catch(e => setErr(e.message))}>Save Rates</button></div>
+        </div>
+      )}
+    </div>
+  );
+};
+const ImeBilling = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const [picks, setPicks] = useState({});   // caseId -> exam type code
+  const load = useCallback(() => call('/api/gfc/admin/ime-billing').then(setD).catch(e => setErr(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  if (!d) return err ? <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div> : <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>;
+  const make = (entity) => {
+    const mine = d.unbilled.filter(u => u.entity === entity && picks[u.caseId]);
+    setErr(''); setMsg('');
+    post('/api/gfc/admin/ime-billing/invoices', { entity, picks: mine.map(u => ({ caseId: u.caseId, code: picks[u.caseId] })) })
+      .then(r => { setMsg(`Draft ${r.invoice.number} made.`); setPicks({}); load(); }).catch(e => setErr(e.message));
+  };
+  const act = (inv, action) => {
+    const body = action === 'void' ? { reason: window.prompt('Why void it?') || '' } : action === 'record-payment' ? { reference: window.prompt('Check or remittance number') || '' } : {};
+    if ((action === 'void' && !body.reason) || (action === 'record-payment' && !body.reference)) return;
+    post(`/api/gfc/admin/ime-billing/invoices/${enc(inv.id)}/${action}`, body).then(load).catch(e => setErr(e.message));
+  };
+  const csv = async (inv) => { const r = await fetch(`${API}/api/gfc/admin/ime-billing/invoices/${enc(inv.id)}/csv`, { headers: { Authorization: `Bearer ${getToken()}` } }); if (!r.ok) { setErr('The CSV could not be built.'); return; } const a = document.createElement('a'); a.href = URL.createObjectURL(await r.blob()); a.download = `${inv.number}.csv`; a.click(); };
+  return (
+    <div className="grid gap-4">
+      {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 text-[13px] p-3">{err}</div>}
+      {msg && <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-[13px] p-3">{msg}</div>}
+      <div className="card"><div className="card-h"><h2>Fee Schedules</h2></div>
+        <div className="p-4 grid md:grid-cols-3 gap-3">{Object.entries(d.entities).map(([k, l]) => <ImeSchedule key={k} entity={k} label={l} schedule={d.schedules[k]} canEdit={d.canEditRates} reload={load} />)}</div></div>
+      <div className="card"><div className="card-h"><h2>Exams Ready to Bill</h2></div>
+        <div className="p-4 text-[13.5px]">
+          {d.unbilled.length === 0 && <p className="text-stone-500">No exams waiting. An exam shows here once its report is submitted.</p>}
+          {Object.entries(d.entities).map(([k, l]) => {
+            const list = d.unbilled.filter(u => u.entity === k);
+            if (!list.length) return null;
+            return (
+              <div key={k} className="mb-4">
+                <div className="lblu mb-1">{l} · {list.length} exam{list.length === 1 ? '' : 's'}</div>
+                {list.map(u => (
+                  <div key={u.caseId} className="flex flex-wrap justify-between gap-2 py-1.5 border-b border-stone-100">
+                    <span>Claim {u.referenceId || u.caseId} · exam {u.examDate || 'date not set'}</span>
+                    {u.ratesReady ? <select className="inp !w-64" value={picks[u.caseId] || ''} onChange={e => setPicks({ ...picks, [u.caseId]: e.target.value })}>
+                      <option value="">Exam type…</option>{u.rates.map(r => <option key={r.code} value={r.code}>{r.label} · {usd(r.rateCents)}</option>)}</select>
+                      : <span className="text-stone-500 text-[12.5px]">Waiting for {l}'s rates</span>}
+                  </div>
+                ))}
+                {list.some(u => picks[u.caseId]) && <button className="btn mt-2" onClick={() => make(k)}>Create {l} Invoice</button>}
+              </div>
+            );
+          })}
+        </div></div>
+      <div className="card"><div className="card-h"><h2>IME Invoices</h2></div>
+        <div className="p-4 text-[13.5px]">
+          {d.invoices.length === 0 && <p className="text-stone-500">None yet.</p>}
+          {d.invoices.map(i => (
+            <div key={i.id} className="flex flex-wrap justify-between gap-3 py-2 border-b border-stone-100">
+              <span><b className="text-primary">{i.number}</b> · {i.entityLabel} · {i.lines.length} exam{i.lines.length === 1 ? '' : 's'}{i.voidReason ? ` · voided: ${i.voidReason}` : ''}{i.paymentReference ? ` · paid, ${i.paymentReference}` : ''}</span>
+              <span className="flex flex-wrap gap-2 items-center"><b>{usd(i.totalCents)}</b> <span className={`chip ${IME_CHIP[i.status]}`}>{i.status.toUpperCase()}</span>
+                <button className="btn ghost !py-1" onClick={() => csv(i).catch(e => setErr(e.message))}>CSV</button>
+                {i.status === 'draft' && <button className="btn !py-1" onClick={() => act(i, 'send')}>Mark Sent</button>}
+                {i.status === 'sent' && <button className="btn !py-1" onClick={() => act(i, 'record-payment')}>Record Payment</button>}
+                {(i.status === 'draft' || i.status === 'sent') && <button className="btn ghost !py-1" onClick={() => act(i, 'void')}>Void</button>}</span>
+            </div>
+          ))}
+        </div></div>
+    </div>
+  );
+};
+
+const TABS = [['claims', 'Claims'], ['statements', 'Statements'], ['new', 'Home Care Invoices'], ['ime', 'IME Exams'], ['settings', 'Settings']];
 
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'claims'));
@@ -1259,6 +1354,7 @@ const App = () => {
         {data && tab === 'claims' && <ClaimsView names={names} initialClaim={initialClaim} isAdmin={isAdmin} />}
         {data && tab === 'statements' && <Statements data={data} reload={load} />}
         {data && tab === 'new' && <div className="grid gap-4"><GenerateInvoices data={data} reload={load} /><ClientBilling data={data} reload={load} /></div>}
+        {data && tab === 'ime' && <ImeBilling />}
         {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /><PayersCard payers={data.payers} reload={load} /></div>}
       </div>
     </>

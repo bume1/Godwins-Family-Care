@@ -678,8 +678,10 @@ test('SAFETY: a caregiver reaches only their OWN documents; staff reach all', ()
 });
 
 test('SAFETY: a Drive failure FAILS the caregiver upload — no row pointing at nothing', () => {
+  // Bounded to the handler itself (up to the next route), not a fixed window:
+  // a comment added inside it pushed the write past 6,000 characters.
   const i = routeSrc.indexOf("router.post('/api/caregiver/documents'");
-  const handler = routeSrc.slice(i, i + 6000);
+  const handler = routeSrc.slice(i, routeSrc.indexOf('\n  router.', i + 10));
   assert.match(handler, /DOCUMENT_STORAGE_UNAVAILABLE/, 'a storage failure is reported as one');
   const fail = handler.indexOf('DOCUMENT_STORAGE_UNAVAILABLE');
   const write = handler.indexOf("db.set('caregiver_documents'");
