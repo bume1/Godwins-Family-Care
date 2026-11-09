@@ -65,11 +65,15 @@ const staffFolders = require('../onboarding/staffFolders');
 const { createSourceLoader } = require('../onboarding/sourceLoader');
 const { contentDisposition } = require('../contentDisposition');
 const staffDocs = require('../staffDocuments');
+const TM = require('../onboarding/trainingMaterial');
 
 const RECORDS = 'onboarding_records';
 const EVENTS = 'onboarding_events';
 const REVIEWS = 'onboarding_module_reviews';
 const LEGACY = 'clinician_onboarding';
+const MATERIALS = TM.COLLECTION;
+// The Drive folder the office's training material lands in, one subfolder per module.
+const TRAINING_FOLDER = 'GFC Training Material';
 // Fallback only; the live ceiling is config.STAFF_DOCUMENT_MAX_SIZE (25 MB).
 const MAX_BYTES = 25 * 1024 * 1024;
 
@@ -190,6 +194,21 @@ module.exports = function createOnboardingRoutes(deps) {
   // her packet: facts about her, never typed into Setup.
   const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null });
 
+  // ---- training material (owner, 2026-11-09) --------------------------------
+  // What each module teaches from: a written SOP read live from Drive, or
+  // material the office added. A module with neither is greyed out for staff.
+  const materials = async () => (await db.get(MATERIALS)) || {};
+  async function sopState() {
+    if (!loader.sops) return { ok: false, ids: null, sections: {}, reason: 'SOP reader unavailable' };
+    try { return await loader.sops(); } catch (e) { return { ok: false, ids: null, sections: {}, reason: e.message }; }
+  }
+  async function materialMap(moduleIds) {
+    const [mats, sops] = await Promise.all([materials(), sopState()]);
+    const out = {};
+    moduleIds.forEach(id => { out[id] = TM.materialFor(findModule(id), mats[id] || null, sops.ids); });
+    return { byModule: out, sops };
+  }
+
   async function buildFor(rec, audience) {
     const m = await manual();
     const pk = await packetFor(rec);
@@ -216,6 +235,14 @@ module.exports = function createOnboardingRoutes(deps) {
       if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
       it.notes = st.notes || [];
       it.sourceUrl = it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
+    });
+    // Material per module. Staff see only ready / not ready; a module with no
+    // material is not available to them, whoever's turn it would otherwise be.
+    const mm = await materialMap(track.modules.map(x => x.id));
+    track.modules.forEach(x => {
+      const mat = mm.byModule[x.id];
+      x.material = audience === 'office' ? mat : TM.forStaff(mat);
+      if (!mat.ready && !x.complete) x.available = false;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
     track.manual = { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : (m.reason || null) };
@@ -553,6 +580,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const row = track.modules.find(x => x.id === m.id);
     if (!row) return res.status(409).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
     if (row.underReview) return res.status(409).json({ error: 'This module is being updated. It opens again once it is reviewed.', code: 'MODULE_UNDER_REVIEW' });
+    if (!row.material || !row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
     const blocked = m.unlocksAfter.filter(id => !(track.modules.find(x => x.id === id) || {}).complete);
     if (blocked.length) return res.status(409).json({ error: 'Finish the modules before this one first.', code: 'MODULE_LOCKED', outstanding: blocked });
     rec.training = rec.training || {};
@@ -575,6 +603,54 @@ module.exports = function createOnboardingRoutes(deps) {
     const rec = await myRecord(req, res); if (!rec) return;
     return doRecheck(req, res, rec, actorOf(req));
   });
+
+  // Her module's material: the SOP text read live from Drive, plus whatever
+  // the office added. Only for a module on her track that has material.
+  router.get('/api/onboarding/me/modules/:moduleId/material', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    const track = await buildFor(rec, 'new_hire');
+    const row = track.modules.find(x => x.id === req.params.moduleId);
+    if (!row) return res.status(404).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
+    if (!row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    await logActivity(req.user.id, req.user.name, 'onboarding_material_read', 'onboarding', rec.userId, { moduleId: row.id });
+    return res.json(await materialBody(row.id, row.material));
+  });
+  router.get('/api/onboarding/me/modules/:moduleId/material/files/:fileId', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    const track = await buildFor(rec, 'new_hire');
+    const row = track.modules.find(x => x.id === req.params.moduleId);
+    if (!row || !row.material.ready) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    return sendMaterialFile(req, res, row.id);
+  });
+
+  // The SOP sections a module teaches, in the catalog's order, plus the
+  // office's links and files. A section that could not be read says so.
+  async function materialBody(moduleId, mat) {
+    const sops = await sopState();
+    return {
+      moduleId,
+      sops: (mat.sops || []).map(id => {
+        const sec = sops.sections && sops.sections[id];
+        return sec ? { id, title: sec.title, lines: sec.lines } : { id, title: null, lines: null, unreadable: true };
+      }),
+      sopDocument: { version: sops.version || null, url: driveViewUrl('CLINICAL_SOPS_SET1'), readError: sops.ok ? null : (sops.reason || 'The SOP document could not be read.') },
+      links: mat.links || [], files: mat.files || [], note: mat.note || ''
+    };
+  }
+  async function sendMaterialFile(req, res, moduleId) {
+    const f = TM.findFile((await materials())[moduleId], req.params.fileId);
+    if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    try {
+      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      await logActivity(req.user.id, req.user.name, 'onboarding_material_file_read', 'onboarding', moduleId, { fileId: f.id });
+      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
+      return res.send(buf);
+    } catch (e) {
+      return res.status(502).json({ error: 'That file could not be opened.', code: 'FILE_UNREADABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(e).reason : null });
+    }
+  }
 
   // ---- THE OFFICE ------------------------------------------------------------
   router.get('/api/onboarding/admin/overview', authenticateToken, requireOffice, async (req, res) => {
@@ -830,6 +906,7 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/admin/library', authenticateToken, requireOffice, async (req, res) => {
     const m = await manual();
     const revs = await reviews();
+    const mm = await materialMap(MODULES.map(x => x.id));
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
     return res.json({
       settings: await settings(),
@@ -838,8 +915,10 @@ module.exports = function createOnboardingRoutes(deps) {
         id: x.id, title: x.title, phase: x.phase, phaseLabel: (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
-        plannedSop: x.plannedSop, flag: flags[x.id], review: revs[x.id] || null
-      }))
+        plannedSop: x.plannedSop, flag: flags[x.id], review: revs[x.id] || null,
+        sopRefs: x.sopRefs, material: mm.byModule[x.id]
+      })),
+      sopDocument: { ok: !!mm.sops.ok, version: mm.sops.version || null, reason: mm.sops.ok ? null : (mm.sops.reason || null), url: driveViewUrl('CLINICAL_SOPS_SET1') }
     });
   });
   router.put('/api/onboarding/admin/settings', authenticateToken, requireOffice, async (req, res) => {
@@ -871,7 +950,70 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true, review: entry });
   });
 
+  // ---- training material (office) -----------------------------------------
+  // The office adds what a module teaches from when no written SOP covers it,
+  // or alongside one. Every change is stamped with who and when, and removing
+  // keeps the row, so what someone learned from stays on record.
+  const moduleOr404 = (req, res) => {
+    const m = findModule(req.params.moduleId);
+    if (!m) res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
+    return m;
+  };
+  async function saveMaterial(req, res, m, change, detail) {
+    const all = await materials();
+    try {
+      all[m.id] = change(all[m.id] || null);
+    } catch (e) { return res.status(e.status || 400).json({ error: e.message, code: e.code }); }
+    await db.set(MATERIALS, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_material_changed', 'onboarding', m.id, detail);
+    const sops = await sopState();
+    return res.json({ ok: true, material: TM.materialFor(m, all[m.id], sops.ids) });
+  }
+  const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
+  router.get('/api/onboarding/admin/library/:moduleId/material', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    const sops = await sopState();
+    return res.json(await materialBody(m.id, TM.materialFor(m, (await materials())[m.id] || null, sops.ids)));
+  });
+  router.get('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    return sendMaterialFile(req, res, m.id);
+  });
+  router.post('/api/onboarding/admin/library/:moduleId/material/links', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.addLink(e, req.body, officeActor(req), nowIso(), uuidv4()), { action: 'link_added' });
+  });
+  router.delete('/api/onboarding/admin/library/:moduleId/material/links/:linkId', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.remove(e, 'links', req.params.linkId, officeActor(req), nowIso()), { action: 'link_removed' });
+  });
+  router.put('/api/onboarding/admin/library/:moduleId/material/note', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.setNote(e, (req.body || {}).note, officeActor(req), nowIso()), { action: 'note_set' });
+  });
+  router.post('/api/onboarding/admin/library/:moduleId/material/files', authenticateToken, requireOffice, upload.single('file'), async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
+    const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: STAFF_MAX, keyPrefix: m.id });
+    if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    let stored;
+    try {
+      stored = await drive.uploadStaffDocumentFile(TRAINING_FOLDER, `${m.id} ${m.title}`.slice(0, 120), prepared.safeName, req.file.buffer, prepared.mime);
+    } catch (err) {
+      // A storage failure REFUSES the upload: a row pointing at nothing would
+      // read as material staff could open.
+      return res.status(502).json({ error: 'We could not store that file. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(err).reason : null });
+    }
+    const file = { id: uuidv4(), name: trim(req.file.originalname || prepared.safeName, 200), mime: prepared.mime, driveFileId: stored.fileId || stored.id || null };
+    return saveMaterial(req, res, m, (e) => TM.addFile(e, file, officeActor(req), nowIso()), { action: 'file_added' });
+  });
+  router.delete('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const m = moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.remove(e, 'files', req.params.fileId, officeActor(req), nowIso()), { action: 'file_removed' });
+  });
+
   return router;
 };
 
-module.exports.COLLECTIONS = { RECORDS, EVENTS, REVIEWS };
+module.exports.COLLECTIONS = { RECORDS, EVENTS, REVIEWS, MATERIALS };
