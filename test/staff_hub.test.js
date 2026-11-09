@@ -67,8 +67,8 @@ test('the bar names the area you are in, query string included', () => {
   const where = (pathname, search = '') => (currentArea(areas, { pathname, search, origin: 'http://x' }) || {}).id || null;
   assert.equal(where('/caregivers'), 'people');
   assert.equal(where('/scheduling'), 'people');
-  assert.equal(where('/admin/enrollment'), 'clients');
-  assert.equal(where('/admin', '?view=users&group=clients'), 'clients');
+  assert.equal(where('/clients'), 'clients');
+  assert.equal(where('/clients', '?client=c1'), 'clients');
   assert.equal(where('/admin', '?view=users&group=staff'), 'people');
   assert.equal(where('/admin'), 'adminCompliance');
   assert.equal(where('/clinical'), 'clinical');
@@ -88,9 +88,10 @@ test('the Admin Hub wears the My GFC frame, banner and all', () => {
   assert.ok(!/banner-admin\.webp/.test(stripComments(hub.slice(hub.indexOf('const DashboardPage')))), 'the old dashboard banner is gone');
 });
 
-test('User Management opens on either side of the People / Clients split', () => {
+test('User Management is our team; the old clients filter goes to the Clients area', () => {
   const hub = read('public/admin-hub.html');
-  assert.match(hub, /return g === 'staff' \|\| g === 'clients' \? g : 'all';/);
+  assert.match(hub, /if \(g === 'clients'\) \{ window\.location\.replace\('\/clients'\); return 'all'; \}/);
+  assert.match(hub, /return g === 'staff' \? g : 'all';/);
   assert.match(hub, /roleFilter === 'staff' \? !isClientSide : roleFilter === 'clients' \? isClientSide/);
 });
 

@@ -32,7 +32,7 @@ test('the edit form sends a password only when "Set a new password" is ticked', 
   const body = hub.slice(i, hub.indexOf('} else {', i));
   assert.match(body, /delete updateData\.password;/);
   assert.match(body, /if \(changePassword && formData\.password\) \{\s*updateData\.password = formData\.password;\s*updateData\.resetPassword = true;/);
-  assert.match(hub, /const handleEdit = \(user\) => \{\s*setChangePassword\(false\);/, 'every edit starts with the box unticked');
+  assert.match(hub, /const handleEdit = \(user\) => \{[\s\S]{0,600}?\n        setChangePassword\(false\);/, 'every edit starts with the box unticked');
 });
 
 test('on an edit the password box is not rendered until asked for, and never invites autofill', () => {

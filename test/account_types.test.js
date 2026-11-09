@@ -94,7 +94,7 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
   assert.deepEqual(areas(at.fieldsFor('admin')), [
     ['myGfc', ['myGfc']],
     ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
-    ['clients', ['enrollment', 'clientAccounts']],
+    ['clients', ['clients']],
     ['clinical', ['clinical', 'ime']],
     ['billing', ['billing']],
     ['adminCompliance', ['admin', 'audit', 'service', 'clientPortalAdmin']]
@@ -118,14 +118,14 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
   const area = (t, id) => at.hubAreasFor(at.fieldsFor(t)).find(a => a.id === id);
   for (const t of ['admin', 'manager', 'coordinator']) {
     assert.equal(area(t, 'people').links.find(l => l.id === 'users').path, '/admin?view=users&group=staff', t);
-    assert.deepEqual(area(t, 'clients').links.map(l => [l.id, l.path]),
-      [['enrollment', '/admin/enrollment'], ['clientAccounts', '/admin?view=users&group=clients']], t);
+    // One standalone Clients area (owner, 2026-11-09), not a filtered User Management.
+    assert.deepEqual(area(t, 'clients').links.map(l => [l.id, l.path]), [['clients', '/clients']], t);
   }
 });
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'enrollment', 'clientAccounts', 'clinical', 'ime', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
+    'clients', 'clinical', 'ime', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -134,7 +134,7 @@ test('only the Super Admin sees the Admin Hub, the Service Portal and the Client
 test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
   // 'people' holds User Management, the one part of the Admin Hub open to
   // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
-  const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'enrollment', 'clientAccounts'];
+  const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'clients'];
   assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'ime', 'billing']);
   assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'ime', 'billing'], 'View only by default');
   assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'ime', 'billing'],
@@ -143,7 +143,7 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
   }
   const tile = (id) => at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === id);
-  assert.equal(tile('enrollment').path, '/admin/enrollment');
+  assert.equal(tile('clients').path, '/clients');
   assert.equal(tile('billing').path, '/billing');
 });
 

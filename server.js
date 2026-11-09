@@ -31807,10 +31807,16 @@ app.get('/admin', (req, res) => {
   res.sendFile(__dirname + '/public/admin-hub.html');
 });
 
-// Staff enrollment-submissions view (Session 3.3, Scope A). Page is served to
-// any logged-in staff; the API routes it calls enforce role access.
-app.get('/admin/enrollment', (req, res) => {
+// THE CLIENTS AREA (owner, 2026-11-09): the enrollment view became the one
+// standalone Clients page (account, care team, family, enrollment). The page
+// is served to any logged-in staff; the API routes it calls enforce access.
+app.get('/clients', (req, res) => {
   res.sendFile(__dirname + '/public/admin-enrollment.html');
+});
+// The old address still works and keeps its ?client= deep link.
+app.get('/admin/enrollment', (req, res) => {
+  const q = req.originalUrl.indexOf('?');
+  res.redirect(302, '/clients' + (q === -1 ? '' : req.originalUrl.slice(q)));
 });
 
 // Clinician workspace (Session 4.1). Page shell is public; every

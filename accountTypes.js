@@ -210,9 +210,9 @@ const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Caregiver Management',
   'Escalations, visit log review, incidents, documents and the caregiver feed');
 const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
   'Shifts, availability, time tracking, payroll and client locations');
-const ENROLLMENT = link('enrollment', 'Enrollment', '/admin/enrollment', 'Intake, consents, documents, approvals and patient accounts');
-const CLIENT_ACCOUNTS = link('clientAccounts', 'Client & Family Accounts', '/admin?view=users&group=clients',
-  'Add and edit client logins and family contacts');
+// ONE CLIENTS AREA (owner, 2026-11-09): the enrollment view and the client
+// half of User Management became one standalone page.
+const CLIENTS = link('clients', 'Clients', '/clients', 'Every client: account, care team, family, enrollment, consents and documents');
 const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, visits, orders and the clinical inbox');
 // Owner, 2026-11-09: Independent Medical Examinations get their own place
 // under Clinical: the exam-day list (moved out of the Admin Hub) and the AI
@@ -248,7 +248,7 @@ function hubAreasFor(u) {
       (isAdmin || u.isManager === true) && STAFF_ONBOARDING,
       CAREGIVER_MANAGEMENT, CAREGIVER_SCHEDULING
     ]);
-    add('clients', 'Clients', [ENROLLMENT, CLIENT_ACCOUNTS]);
+    add('clients', 'Clients', [CLIENTS]);
   }
   const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
     (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
