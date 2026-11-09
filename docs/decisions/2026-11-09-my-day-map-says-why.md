@@ -9,11 +9,12 @@ The map itself worked. Rendered in Chromium with real `myDay` output, stops with
 2. the OpenEMR calendar could not be read,
 3. every visit was a video visit,
 4. the visit's OpenEMR patient is not linked to an app client (`openEmrPatientId`), so there is no client record to read coordinates from.
+5. (follow-up, same day) two client records share the patient's name: Scheduling → Locations shows the one with coordinates, the visit points at the other. Reported as `other_record`.
 
 So an admin who had set coordinates was told to set them again. Video visits were also counted as "no coordinates".
 
 ## What changed
-- `myDay.plotStops` returns `unplaced` (name, time, `reason`: `not_linked` | `no_coordinates`), `remote` and `total`. Video visits are no longer counted as unplaceable.
+- `myDay.plotStops` returns `unplaced` (name, time, `reason`: `not_linked` | `other_record` | `no_coordinates`); the route passes every client record so a same-name duplicate holding the coordinates can be named, `remote` and `total`. Video visits are no longer counted as unplaceable.
 - `DayMap` takes the calendar status and says which of the four cases it is, and lists each unplotted stop with the fix that applies.
 - SVG labels near the edge are no longer clipped.
 

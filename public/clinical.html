@@ -3412,7 +3412,8 @@
     // per stop by the server (myDay.plotStops), never decided here.
     const UNPLACED_REASON = {
       not_linked: 'this visit\'s OpenEMR patient is not linked to a client in this app, so there is no address record to read',
-      no_coordinates: 'no coordinates on file — set them under Scheduling → Locations'
+      no_coordinates: 'no coordinates on file — set them under Scheduling → Locations',
+      other_record: 'there are two client records with this name. The coordinates are on the other one, and this visit points at this one. Merge them, or add the coordinates to the record this visit uses'
     };
     const UnplacedList = ({ rows }) => (
       <ul className="text-[11.5px] text-amber-800 mt-1 space-y-0.5">

@@ -1345,6 +1345,20 @@ test('an unplotted stop says WHY, and a video visit is never counted as missing 
   assert.match(pageCode, /not linked to a client in this app/);
 });
 
+test('a visit pointing at a duplicate client record says the coordinates are on the other one', () => {
+  const plot = myDay.plotStops({
+    stops: [{ eid: '1', clientId: 'dup', patientName: 'Juanita  Guess' }, { eid: '2', clientId: 'solo', patientName: 'Ray Moss' }],
+    clients: [
+      { id: 'real', name: 'juanita guess', address: { lat: 33.9, lng: -84.5 } },
+      { id: 'dup', name: 'Juanita Guess' },
+      { id: 'solo', name: 'Ray Moss' }
+    ]
+  });
+  assert.deepStrictEqual(plot.unplaced.map(u => u.reason), ['other_record', 'no_coordinates']);
+  assert.match(pageCode, /other_record:/);
+  assert.match(serverCode, /clients: Array\.from\(clientsById\.values\(\)\)/);
+});
+
 test('the map sends no coordinates to a tile provider, because there is no tile provider', () => {
   // A tile provider would receive the coordinates of every patient's home on
   // every render — a disclosure of where people live, to a third party with no

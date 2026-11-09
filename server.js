@@ -18320,7 +18320,8 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     // load in a page. One implementation beats a second one that drifts.
     const plot = myDay.plotStops({
       stops: day.visits.filter(v => v.state !== myDay.VISIT_STATE.CANCELLED),
-      width: 100, height: 100
+      width: 100, height: 100,
+      clients: Array.from(clientsById.values())
     });
     res.json({ ...day, plot, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
   } catch (error) {

@@ -225,14 +225,34 @@ const MAP_PADDING = 0.08; // fraction of the box kept clear at each edge
 //                    record to read coordinates from (link the chart).
 //   no_coordinates — the client exists and has none (Scheduling → Locations).
 // A video visit is not a stop at all and is counted apart, never as unplaced.
-const unplacedReason = (s) => (!s.clientId ? 'not_linked' : 'no_coordinates');
+//   other_record   — the visit's client has none, but ANOTHER client record
+//                    with the same name does. Scheduling → Locations shows that
+//                    record with coordinates while the visit points at this
+//                    one, which is exactly "it says none, but I added them"
+//                    (owner report, 2026-11-09). Merge or relink the records.
+const normName = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const unplacedReason = (s, namesWithCoords) => {
+  if (!s.clientId) return 'not_linked';
+  const n = normName(s.patientName);
+  const others = (n && namesWithCoords && namesWithCoords.get(n)) || [];
+  return others.some(id => String(id) !== String(s.clientId)) ? 'other_record' : 'no_coordinates';
+};
 
-const plotStops = ({ stops, width = 100, height = 100 }) => {
+// `clients` is optional: every client record, so a same-name record holding
+// the coordinates can be named. Without it the reasons stay as before.
+const plotStops = ({ stops, width = 100, height = 100, clients }) => {
   const all = (stops || []).filter(Boolean);
+  const namesWithCoords = new Map();
+  for (const c of (clients || [])) {
+    if (!c || !coordsOf(c)) continue;
+    const n = normName(c.name);
+    if (!n) continue;
+    namesWithCoords.set(n, [...(namesWithCoords.get(n) || []), c.id]);
+  }
   const remote = all.filter(s => !s.coords && s.remote).length;
   const unplaced = all.filter(s => !s.coords && !s.remote).map(s => ({
     eid: s.eid || null, clientId: s.clientId || null,
-    label: s.patientName || null, time: s.time || null, reason: unplacedReason(s)
+    label: s.patientName || null, time: s.time || null, reason: unplacedReason(s, namesWithCoords)
   }));
   const placed = all.filter(s => s.coords);
   if (!placed.length) return { points: [], bounds: null, unplaceable: unplaced.length, unplaced, remote, total: all.length };
