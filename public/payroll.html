@@ -247,6 +247,23 @@ const GustoImport = ({ reload }) => {
   );
 };
 
+// Hours for any range, the same file Scheduling used to export (moved here,
+// 2026-11-09): every clock-in, open shifts included, with edit details and
+// the pay period. Nothing clinical.
+const HoursExport = () => {
+  const [from, setFrom] = useState(''); const [to, setTo] = useState(''); const [err, setErr] = useState('');
+  return (
+    <Card title="Hours Export">
+      <Err e={err} />
+      <div className="flex flex-wrap gap-2 items-end">
+        <div><div className="lblu mb-1">From</div><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} /></div>
+        <div><div className="lblu mb-1">To</div><input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div>
+        <button className="btn ghost" disabled={!from || !to} onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${from}&to=${to}`, `payroll-hours-${from}-to-${to}.csv`, setErr); }}>Export Hours CSV</button>
+      </div>
+    </Card>
+  );
+};
+
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
   const scheds = data.schedules || [];
@@ -258,6 +275,7 @@ const Runs = ({ data, reload }) => {
   return (
     <>
     <GustoImport reload={reload} />
+    <HoursExport />
     <Card title="Payroll Runs">
       <Err e={err} />
       {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}

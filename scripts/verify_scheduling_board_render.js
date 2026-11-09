@@ -362,7 +362,7 @@ const posted = [];   // every POST body the page sends
   activeShifts = SHIFTS;
   await page.goto(`${base}/scheduling`, { waitUntil: 'networkidle' });
   await page.waitForSelector('.calhdr', { timeout: 15000 });
-  await page.click('button:has-text("Time & payroll")');
+  await page.click('button:has-text("Time logs")');
   await page.waitForTimeout(400);
 
   const payTable = await page.locator('.card:has-text("Payroll (view only)") table').first();

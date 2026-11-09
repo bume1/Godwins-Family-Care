@@ -511,7 +511,11 @@ test('screens: the pay views carry no download, and the time boxes read Eastern'
   const pv = page.slice(page.indexOf('const PayView'), page.indexOf('// ====', page.indexOf('const PayView')));
   assert.ok(pv.length > 200, 'the read-only view exists');
   assert.ok(!/\.csv|download|clipboard|window\.print/i.test(pv), 'no download, copy or print control in the view');
-  assert.match(page, /access\.managePay && <button className="btn gold" onClick=\{exportCsv\}>/, 'the export stays the Super Admin\'s');
+  // The exports moved to the money pages (owner, 2026-11-09): Scheduling
+  // shows hours and exports none; Payroll and Billing (both Super Admin) do.
+  assert.ok(!/payroll\.csv|billing\.csv/.test(page.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")), 'scheduling exports no money file');
+  assert.match(read('public/payroll.html'), /download\(`\/api\/scheduling\/payroll\.csv\?from=/);
+  assert.match(read('public/billing.html'), /\{isAdmin && <HoursExport \/>\}/, 'the billing export stays the Super Admin\'s');
   assert.match(page, /onRequest=\{!access\.managePay && access\.manageSchedule \? requestAdjustment : null\}/);
   // The correction box used to hold the raw UTC instant, so saving it moved a visit four hours.
   const row = page.slice(page.indexOf('const TimeLogRow'), page.indexOf('const AdjustmentQueue'));
