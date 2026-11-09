@@ -34,6 +34,8 @@ const defaultChapterFor = (u) => {
   if (t === 'caregiver') return 'A';
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
+  // A physician (MD or DO) is the delegating physician: Reference R1, Georgia.
+  if (t === 'provider' && u && ['MD', 'DO'].includes(u.prescriberCredential)) return 'R1';
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
   // Employed AND contracted: the full W-2 chapter plus the exam contract (E).
   if (t === 'provider' && u && u.employmentType === 'HYBRID') return 'E';
@@ -46,7 +48,9 @@ const CHAPTER_CHOICES = Object.freeze([
   { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
   { id: 'E', label: 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)' },
   { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination)' },
-  { id: 'G', label: 'Community Care Liaison (remote business development)' }
+  { id: 'G', label: 'Community Care Liaison (remote business development)' },
+  { id: 'H', label: 'Student or extern on an educational placement (unpaid)' },
+  { id: 'R1', label: 'Supervising (delegating) physician, Georgia' }
 ]);
 const C = require('../onboarding/chapterC');
 const wpRepo = require('../welcomePacketRepository');

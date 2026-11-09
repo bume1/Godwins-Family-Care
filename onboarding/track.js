@@ -25,7 +25,7 @@ const V = require('./vocabulary');
 const C = require('./chapterC');
 // Every chapter built so far. A person's record names theirs in inputs.chapter
 // (owner, 2026-11-08: clinicians first, the admin team next, the rest after).
-const CHAPTERS = Object.freeze({ A: require('./chapterA'), B: require('./chapterB'), C, D: require('./chapterD'), E: require('./chapterE'), F: require('./chapterF'), G: require('./chapterG') });
+const CHAPTERS = Object.freeze({ A: require('./chapterA'), B: require('./chapterB'), C, D: require('./chapterD'), E: require('./chapterE'), F: require('./chapterF'), G: require('./chapterG'), H: require('./chapterH'), R1: require('./chapterR1') });
 const chapterOf = (inputs) => CHAPTERS[(inputs && inputs.chapter) || 'C'] || C;
 // Item and acknowledgment ids are unique across chapters, so one lookup serves all.
 // Chapter E carries C's items as they are, so an id appears once here.
