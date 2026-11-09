@@ -54,6 +54,8 @@ const CHAPTER_CHOICES = Object.freeze([
 ]);
 const C = require('../onboarding/chapterC');
 const wpRepo = require('../welcomePacketRepository');
+const welcomePacketPdf = require('../welcomePacketPdf');
+const attestations = require('../caregiverAttestations');
 const CC = require('../onboarding/caregiverCourses');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
@@ -143,11 +145,27 @@ module.exports = function createOnboardingRoutes(deps) {
     const held = ((packet || {}).data || {}).certifications;
     const user = ((await getUsers()) || []).find(x => String(x.id) === id) || {};
     return {
-      licenseLevel: user.licenseLevel || null,
+      licenseLevel: user.licenseLevel || null, docs, atts, user,
       rows: wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts),
       certified: Array.isArray(held) && held.some(c => CARE_CERTIFICATES.includes(c))
     };
   }
+  // The welcome-wizard files behind one Chapter A item: her uploads of the
+  // item's packet kinds (a rejected one is not evidence) and the forms she
+  // signed. Ids are ours ('packet:<row>', 'form:<kind>'), never a Drive id.
+  function welcomeFilesFor(item, pk) {
+    const kinds = (item && item.packet) || [];
+    if (!kinds.length || !pk || !pk.docs) return [];
+    const uploads = pk.docs.filter(d => kinds.includes(d.kind) && !d.deleted_at && d.status !== 'rejected')
+      .map(d => ({ id: `packet:${d.id}`, name: d.file_name || 'Document', uploadedAt: d.uploaded_at,
+        uploadedByName: d.uploaded_by_name || null, filedBy: d.uploaded_by_office ? 'OFFICE_ON_BEHALF' : 'SELF',
+        fromWelcomePacket: true, status: d.status }));
+    const forms = (pk.atts || []).filter(a => kinds.includes(a.kind) && a.signed_at)
+      .map(a => ({ id: `form:${a.kind}`, name: `${attestations.titleFor(a.kind) || a.kind} (signed)`, uploadedAt: a.signed_at,
+        filedBy: 'SELF', fromWelcomePacket: true, status: 'signed' }));
+    return uploads.concat(forms);
+  }
+
   // Her inputs with what the packet says about her certificates.
   // Her license level is read from her account, like her certificates from
   // her packet: facts about her, never typed into Setup.
@@ -172,6 +190,10 @@ module.exports = function createOnboardingRoutes(deps) {
       // Files: our own ids only. A Drive id never leaves the server.
       const st = (rec.items || {})[it.id] || {};
       it.files = (st.files || []).map(f => ({ id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy }));
+      // Chapter A: what she sent or signed in the welcome wizard shows on the
+      // item it belongs to (owner, 2026-11-09), read from the stores the
+      // welcome packet writes, never copied. Opened through doDownload.
+      if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
       it.notes = st.notes || [];
       it.sourceUrl = it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
     });
@@ -390,6 +412,35 @@ module.exports = function createOnboardingRoutes(deps) {
   }
 
   async function doDownload(req, res, rec) {
+    // A welcome-wizard file on a Chapter A item: only one of HER files, of a
+    // kind that item names, and nothing else, can be reached this way.
+    if (/^(packet|form):/.test(String(req.params.fileId || ''))) {
+      const item = T.findItem(req.params.itemId);
+      const pk = await packetFor(rec);
+      const f = welcomeFilesFor(item, pk).find(x => x.id === req.params.fileId);
+      if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+      try {
+        let buf; let mime; let name = f.name;
+        if (f.id.startsWith('packet:')) {
+          const row = pk.docs.find(d => `packet:${d.id}` === f.id);
+          if (!row.drive_file_id) return res.status(404).json({ error: 'No stored file is attached to that record.', code: 'DOC_FILE_MISSING' });
+          buf = await drive.downloadFileBuffer(row.drive_file_id);
+          mime = row.mime_type || 'application/octet-stream';
+        } else {
+          const kind = f.id.slice('form:'.length);
+          const record = pk.atts.find(a => a.kind === kind && a.signed_at);
+          buf = await welcomePacketPdf.generateSignedAttestationPDF(record, pk.user);
+          mime = 'application/pdf'; name = `${name}.pdf`;
+        }
+        await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Content-Disposition', contentDisposition('inline', name));
+        return res.send(buf);
+      } catch (e) {
+        return res.status(502).json({ error: 'That file could not be opened.', code: 'FILE_UNREADABLE',
+          detail: drive.describeDriveError ? drive.describeDriveError(e).reason : null });
+      }
+    }
     const st = (rec.items || {})[req.params.itemId] || {};
     const f = (st.files || []).find(x => x.id === req.params.fileId);
     if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
