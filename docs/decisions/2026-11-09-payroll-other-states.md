@@ -42,3 +42,15 @@
 - Approve the Texas table.
 - Enter GFC's Texas rate and TWC account number.
 - Create the two QuickBooks accounts.
+
+## Every state's official pages (added the same day)
+- `payrollStateSources.js` is data only. It covers all 50 states and DC: whether the state taxes wages, its official withholding and unemployment pages, and its other payroll programs (paid leave, disability, local income tax).
+- **How it was compiled.** It was built 2026-11-09 by fetching each page. `verified: false` marks the pages whose site blocked the sandbox.
+- **Five non-.gov domains.** Five official agencies are not on .gov domains: FL, LA, MN, ND and WV.
+- **The watch list now covers every state.** `sourcesFor` serves federal, then Georgia, then each work state's pages from this file, so Texas is watched (TWC "Your 2026 Tax Rates").
+- **Texas figures confirmed on TWC's own pages:**
+  - the $9,000 wage base
+  - 2026 rates from 0.32% to 6.32%
+  - a 2026 entry-level rate of 2.70%
+- **New guard.** A state with a program withheld from pay is blocked by name until the app handles that program. Examples: WA PFML and WA Cares, CA SDI, PA local EIT. Without this, the person would be paid short. Texas and Georgia have none.
+- Reference only, not shipped as tables: the agent's 2026 wage bases and new-employer rates for the other states are in its working notes. Each state's table is staged from its own source when GFC first hires there.

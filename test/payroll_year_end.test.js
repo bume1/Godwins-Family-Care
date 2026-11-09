@@ -268,10 +268,12 @@ test('the Apps Script and the app agree: every job the script calls exists, and 
   assert.match(gs, /'payrollTaxFormReminders'\]/, 'rev 1\'s trigger is cleaned up on reinstall');
 });
 
-test('a state with no known tax pages is reported as unwatched, never silently skipped', () => {
-  const out = T.sourcesFor(['GA', 'TX']);
-  assert.deepEqual(out.unwatched, ['TX']);
-  assert.ok(!out.sources.some(s => s.jurisdiction === 'TX'));
+test('every state is watched from its official pages; one with none would be reported, never silently skipped', () => {
+  const out = T.sourcesFor(['GA', 'TX', 'ZZ']);
+  assert.deepEqual(out.unwatched, ['ZZ']);
+  assert.ok(out.sources.some(s => s.jurisdiction === 'TX' && /twc\.texas\.gov/.test(s.url)));
+  assert.equal(Object.keys(T.STATE_SOURCES).length, 51, 'every state and DC');
+  for (const [k, v] of Object.entries(T.STATE_SOURCES)) for (const p of v.pages) assert.match(p.url, /^https:\/\//, k);
 });
 
 test('the Jan 2 build tells the owner what is ready and what blocks release, and releases nothing', async () => {

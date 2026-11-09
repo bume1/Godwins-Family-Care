@@ -340,7 +340,9 @@ module.exports = function createPayrollRoutes(deps) {
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
         workTypes: WORK_TYPES, payTypes: pp.PAY_TYPES, workerTypes: pp.WORKER_TYPES, wageAccounts: pp.WAGE_ACCOUNTS,
-        stateNames: tables.STATE_NAMES
+        stateNames: tables.STATE_NAMES,
+        // Each state's other payroll programs, for the Settings card.
+        statePrograms: Object.fromEntries(Object.entries(tables.STATE_SOURCES).map(([k, v]) => [k, v.otherPrograms || []]))
       });
     } catch (e) { console.error('Payroll overview error:', e); res.status(500).json({ error: 'Server error' }); }
   });

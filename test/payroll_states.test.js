@@ -132,3 +132,13 @@ test('a work state is any state, Georgia by default', () => {
   assert.equal(pp.normalizePaySetup({ workState: 'ZZ' }).code, 'WORK_STATE');
   assert.equal(pp.defaultProfile({ id: 'x' }).workState, 'GA');
 });
+
+test('a state that withholds for paid leave or a local tax is blocked by name until the app handles it, never paid short', () => {
+  const WA = { incomeTax: false, method: 'none', sutaWageBaseCents: 7860000 };
+  const p = base('w1', { workState: 'WA' });
+  const r = run(p, { states: { WA: { sutaRatePct: 1 } } }, { ...TABLES, states: { WA } });
+  assert.match(r.blocked[0].missing.join(' '), /Washington also withholds for .*Paid Family and Medical Leave/);
+  assert.equal(r.workers[0].pay !== undefined && r.blocked.length === 0, false);
+  assert.deepEqual(T.employeePrograms('TX'), [], 'Texas has none');
+  assert.deepEqual(T.employeePrograms('GA'), []);
+});

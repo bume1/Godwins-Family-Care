@@ -23,7 +23,7 @@
 // PURE. The route gathers the rows; this decides the money.
 // ============================================================================
 const tax = require('./payrollTax');
-const { stateName } = require('./payrollTaxTables');
+const { stateName, employeePrograms } = require('./payrollTaxTables');
 const profiles = require('./payrollProfiles');
 
 const MAX_ITEM_MINUTES = 16 * 60;   // a single stamp longer than this is a mistake, not a shift
@@ -182,6 +182,10 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const ws = (profile && profile.workState) || 'GA';
     const stTable = ws === 'GA' ? tables.GA : (tables.states || {})[ws];
     if (ws !== 'GA' && !stTable) missing.push(`Works in ${stateName(ws)}: approve a ${stateName(ws)} tax table under Tax Tables first`);
+    // A state that withholds for paid leave, disability or a local tax: not
+    // handled yet, so blocked rather than paid short.
+    const progs = ws === 'GA' ? [] : employeePrograms(ws);
+    if (progs.length) missing.push(`${stateName(ws)} also withholds for ${progs.map(p => p.program).join('; ')}. The app does not handle these yet, so pay them outside the app`);
     if (ws !== 'GA' && stTable && stTable.incomeTax && !(profile && profile.stateCert)) missing.push(`${stateName(ws)} withholding certificate`);
     const stRate = ws === 'GA' ? settings.gaSutaRatePct : ((settings.states || {})[ws] || {}).sutaRatePct;
     if (missingRate) missing.push(`Pay rate for ${missingRate} item${missingRate === 1 ? '' : 's'}`);

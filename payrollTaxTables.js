@@ -53,6 +53,7 @@ const GA_2026 = {
 };
 
 // ---- other states (Georgia is first and keeps its own G-4 formula above) ----
+const { STATE_SOURCES } = require('./payrollStateSources');
 // Every state an employee may work in. A person in a state is paid in the app
 // only once that state has a table the owner approved, like Georgia's.
 const STATE_NAMES = Object.freeze({
@@ -86,7 +87,7 @@ const SEEDS = Object.freeze([
   { key: 'GA-2026', year: 2026, jurisdiction: 'GA', data: GA_2026,
     source: 'Georgia DOR Employer\'s Withholding Tax Guide 2026 (revised Sept 2026), Tables E and F: 4.99% from May 11, 2026. Form G-4 rev. 06/03/26. GA DOL wage base $9,500.' },
   { key: 'TX-2026', year: 2026, jurisdiction: 'TX', data: TX_2026,
-    source: 'Texas: no state income tax on wages. Texas Workforce Commission unemployment tax, taxable wage base $9,000 (Texas Labor Code 201.082); new employer 2.7% or the industry average if higher. Set GFC\'s own rate from the TWC notice in Settings.' }
+    source: 'Texas: no state income tax on wages (Texas Comptroller; Tex. Const. art. 8 sec. 24-a). TWC "Your 2026 Tax Rates": tax on the first $9,000 per employee, 2026 rates 0.32% to 6.32%; TWC New Texas Employer Information: 2026 entry-level rate 2.70% (or the industry average if higher). Set GFC\'s own rate from the TWC notice in Settings.' }
 ]);
 
 // A table the owner stages by hand is checked for shape before it is stored.
@@ -182,15 +183,22 @@ const SOURCE_PAGES = Object.freeze({
     { name: 'Georgia DOL employer tax', url: 'https://dol.georgia.gov/employers' }
   ]
 });
+// Programs a state withholds from pay besides income tax (paid leave,
+// disability, local income tax). The app does not withhold these yet.
+const employeePrograms = (code) => ((STATE_SOURCES[code] || {}).otherPrograms || []).filter(p => p.who !== 'employer');
+
 function sourcesFor(states) {
   // Federal, then Georgia, then every other state in alphabetical order.
   const want = ['federal', 'GA', ...[...new Set(states || [])].filter(s => s && s !== 'GA').sort()];
   const sources = [], unwatched = [];
   for (const j of want) {
-    if (!SOURCE_PAGES[j]) { unwatched.push(j); continue; }
-    for (const p of SOURCE_PAGES[j]) sources.push({ ...p, jurisdiction: j });
+    // Federal and Georgia from the curated lists above; every other state from
+    // its official pages in payrollStateSources.js.
+    const pages = SOURCE_PAGES[j] || ((STATE_SOURCES[j] || {}).pages || []).map(p => ({ name: `${stateName(j)}: ${p.name}`, url: p.url }));
+    if (!pages.length) { unwatched.push(j); continue; }
+    for (const p of pages) sources.push({ ...p, jurisdiction: j });
   }
   return { sources, unwatched };
 }
 
-module.exports = { FED_2026, GA_2026, TX_2026, STATE_NAMES, stateName, SEEDS, SOURCE_PAGES, validateTable, validateStateTable, seedRows, refreshStagedSeeds, sourcesFor };
+module.exports = { FED_2026, GA_2026, TX_2026, STATE_NAMES, STATE_SOURCES, stateName, employeePrograms, SEEDS, SOURCE_PAGES, validateTable, validateStateTable, seedRows, refreshStagedSeeds, sourcesFor };

@@ -633,6 +633,7 @@ const OtherStates = ({ data, reload }) => {
       {codes.map(c => (
         <div key={c} className="grid sm:grid-cols-4 gap-2 mb-3 max-w-4xl">
           <div className="font-semibold text-primary sm:col-span-4">{stName(c)}</div>
+          {((data.statePrograms || {})[c] || []).length > 0 && <div className="sm:col-span-4"><Warn>{stName(c)} also has: {data.statePrograms[c].map(p => `${p.program} (${p.who === 'employer' ? 'paid by GFC' : 'withheld from pay'})`).join('; ')}. {data.statePrograms[c].some(p => p.who !== 'employer') ? 'The app does not withhold these yet, so people here are paid outside the app for now.' : 'GFC owes these directly; they are not in the app yet.'}</Warn></div>}
           <label>Unemployment rate (%)<input className="inp" value={f[c].sutaRatePct} onChange={e => set(c, 'sutaRatePct', e.target.value)} placeholder="from the state notice" /></label>
           <label>Unemployment account no.<input className="inp" value={f[c].accountNumber} onChange={e => set(c, 'accountNumber', e.target.value)} /></label>
           <label>Withholding ID (if the state taxes wages)<input className="inp" value={f[c].withholdingId} onChange={e => set(c, 'withholdingId', e.target.value)} /></label>
