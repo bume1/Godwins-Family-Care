@@ -142,13 +142,36 @@ function FormBody({ which, data, form, set }) {
   if (which === 'offer' || which === 'handbook') return (
     <Sign statement={which === 'offer' ? 'I have received and read my offer letter and accept its terms.' : 'I have received the Godwins Family Care employee handbook, and I agree to read it and follow it.'} form={form} set={set} />
   );
+  if (which === 'taxaddress') return (
+    <div>
+      <p className="mg-note">Exactly as on your Social Security card. This prints on your W-2 or 1099.</p>
+      <div className="mp-grid">
+        <div><label>First name</label><input type="text" value={form.firstName || ''} onChange={e => set({ ...form, firstName: e.target.value })} /></div>
+        <div><label>Middle name or initial</label><input type="text" value={form.middle || ''} onChange={e => set({ ...form, middle: e.target.value })} /></div>
+        <div><label>Last name</label><input type="text" value={form.lastName || ''} onChange={e => set({ ...form, lastName: e.target.value })} /></div>
+        <div><label>Suffix</label><input type="text" value={form.suffix || ''} onChange={e => set({ ...form, suffix: e.target.value })} /></div>
+      </div>
+      <label>Street address</label><input type="text" value={form.line1 || ''} onChange={e => set({ ...form, line1: e.target.value })} />
+      <label>Apartment or unit</label><input type="text" value={form.line2 || ''} onChange={e => set({ ...form, line2: e.target.value })} />
+      <div className="mp-grid">
+        <div><label>City</label><input type="text" value={form.city || ''} onChange={e => set({ ...form, city: e.target.value })} /></div>
+        <div><label>State</label><input type="text" maxLength={2} value={form.state || ''} onChange={e => set({ ...form, state: e.target.value.toUpperCase() })} /></div>
+        <div><label>ZIP</label><input type="text" inputMode="numeric" value={form.zip || ''} onChange={e => set({ ...form, zip: e.target.value })} /></div>
+      </div>
+    </div>
+  );
+  // The terms come from the server and the consent records their version
+  // (Pub 1141 2.4: the disclosures must be shown before consent).
   if (which === 'edelivery') return (
-    <label className="mp-check"><input type="checkbox" checked={!!form.consented} onChange={e => set({ ...form, consented: e.target.checked })} /><span>I agree to receive my W-2 or 1099 electronically, by signing in to GFC. I can withdraw this any time, and I can ask for a paper copy.</span></label>
+    <div>
+      <ul className="mg-note" style={{ paddingLeft: 18, margin: '0 0 10px' }}>{((data.options && data.options.eDelivery && data.options.eDelivery.disclosure) || []).map((t, i) => <li key={i}>{t}</li>)}</ul>
+      <label className="mp-check"><input type="checkbox" checked={!!form.consented} onChange={e => set({ ...form, consented: e.target.checked, disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version })} /><span>I have read the above and agree to get my W-2 or 1099 electronically in My GFC.</span></label>
+    </div>
   );
   return null;
 }
 
-const ROUTE = { w4: 'w4', g4: 'g4', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', offer: 'offer', handbook: 'handbook', edelivery: 'e-delivery' };
+const ROUTE = { w4: 'w4', g4: 'g4', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', offer: 'offer', handbook: 'handbook', edelivery: 'e-delivery' };
 
 function PaySetup() {
   const [data, setData] = useState(null);
@@ -179,7 +202,7 @@ function PaySetup() {
             <div><b>{c.label}</b><small>{c.done ? (detail(c.key) || 'Done') : c.optional ? 'Optional' : 'Not done yet'}{c.note ? ` · ${c.note}` : ''}</small></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={`mg-pill ${c.done ? 'mg-ok' : c.optional ? 'mg-wait' : 'mg-bad'}`}>{c.done ? 'Done' : 'To do'}</span>
-              <button className="mg-btn mg-ghost mg-sm" onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented) } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>
+              <button className="mg-btn mg-ghost mg-sm" onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>
             </div>
           </div>
         ))}
@@ -258,10 +281,20 @@ function ContractorInvoices({ Section }) {
 
 function TaxForms() {
   const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
   useEffect(() => { call('/api/my/tax-forms').then(setD).catch(() => setD({ forms: [] })); }, []);
   if (!d) return <p className="mg-note">Loading…</p>;
   if (!d.forms.length) return <p className="mg-note">Your W-2 or 1099 shows here once the office releases it, by January 31.</p>;
-  return <div className="mp-items">{d.forms.map(f => <div key={f.year} className="mp-item"><div><b>{f.year}</b><small>{f.forms.join(', ')} ready. Ask the office for your copy.</small></div></div>)}</div>;
+  const open = async (f) => {
+    // A PDF needs the sign-in header, so it is fetched, not linked.
+    const r = await fetch(`/api/my/tax-forms/${encodeURIComponent(f.year)}/${encodeURIComponent(f.form)}.pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!r.ok) { setErr(r.status === 401 ? 'Your sign-in has expired. Sign in again to download.' : 'That form could not be opened. Try again, or ask the office.'); return; }
+    setErr('');
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a'); a.href = url; a.download = `${f.year}_${f.label}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+  return <div>{err && <div className="mg-err">{err}</div>}<div className="mp-items">{d.forms.map(f => <div key={`${f.year}${f.form}`} className="mp-item"><div><b>{f.year} {f.label}{f.corrected ? ' (corrected)' : ''}</b><small>Print it and attach Copy B to your federal return. Keep Copy C.</small></div><button className="mg-btn mg-ghost mg-sm" onClick={() => open(f)}>Download</button></div>)}</div></div>;
 }
 
 window.MyPay = { PaySetup, ContractorInvoices, TaxForms };

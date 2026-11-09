@@ -3106,7 +3106,16 @@ app.get('/oauth/quickbooks/callback', async (req, res) => {
 // until the owner approves them (spec v2 item 14).
 (async () => {
   try {
-    const existing = (await db.get('payroll_tax_tables')) || [];
+    let existing = (await db.get('payroll_tax_tables')) || [];
+    // A staged (unapproved) shipped table takes corrected source text; an
+    // approved one is never rewritten.
+    const fresh = payrollTaxTables.refreshStagedSeeds(existing);
+    if (fresh.length) {
+      const byId = new Map(fresh.map(t => [t.id, t]));
+      existing = existing.map(t => byId.get(t.id) || t);
+      await db.set('payroll_tax_tables', existing);
+      console.log(`[PAYROLL] Updated ${fresh.length} staged tax table(s) with corrected source notes.`);
+    }
     const add = payrollTaxTables.seedRows(existing, { uuid: uuidv4, at: new Date().toISOString() });
     if (add.length) { await db.set('payroll_tax_tables', [...existing, ...add]); console.log(`[PAYROLL] Staged ${add.length} shipped tax table(s) for the owner to approve.`); }
   } catch (e) { console.error('[PAYROLL] Tax table seed failed (non-fatal):', e.message); }

@@ -368,7 +368,6 @@ const Taxes = () => {
           <input className="inp !w-24" value={yr} onChange={e => setYr(e.target.value)} />
           <select className="inp !w-24" value={qtr} onChange={e => setQtr(e.target.value)}>{[1, 2, 3, 4].map(n => <option key={n} value={n}>Q{n}</option>)}</select>
           <button className="btn" onClick={() => call(`/api/payroll/admin/quarter/${enc(yr)}/${enc(qtr)}`).then(setQ).catch(e => setErr(e.message))}>Show Quarter</button>
-          <button className="btn ghost" onClick={async () => { const r = await fetch(`/api/payroll/admin/year-end/${enc(yr)}?format=csv`, { headers: { Authorization: `Bearer ${getToken()}` } }); if (!r.ok) { setErr('Year-end figures could not be built.'); return; } const a = document.createElement('a'); a.href = URL.createObjectURL(await r.blob()); a.download = `gfc_year_end_${yr}.csv`; a.click(); }}>Download Year-End (W-2 / 1099)</button>
         </div>
         {q && (
           <div className="grid sm:grid-cols-3 gap-3">
@@ -384,6 +383,111 @@ const Taxes = () => {
           </div>
         )}
       </Card>
+    </>
+  );
+};
+
+// ---- Year end: W-2, 1099-NEC ----------------------------------------------------------
+// The figures come from approved runs and paid contractor invoices. Release
+// freezes them, puts each form in that person's My GFC, and emails a link to
+// everyone who agreed to electronic delivery. Everyone else is printed and
+// mailed from here.
+const download = async (url, name, setErr) => {
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
+  if (!r.ok) { const b = await r.json().catch(() => ({})); setErr(b.error || 'That file could not be built.'); return; }
+  const href = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a'); a.href = href; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 60000);
+};
+const YearEndSettings = ({ ye, onSaved }) => {
+  const e = ye.employer;
+  const [f, setF] = useState({ employerName: e.name || '', line1: (e.address || {}).line1 || '', line2: (e.address || {}).line2 || '', city: (e.address || {}).city || '', state: (e.address || {}).state || 'GA', zip: `${(e.address || {}).zip || ''}${(e.address || {}).zip4 || ''}`,
+    gaWithholdingId: e.gaWithholdingId || '', ssaUserId: e.ssaUserId || '', contactName: e.contactName || '', contactPhone: e.contactPhone || '', contactEmail: e.contactEmail || '' });
+  const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const save = () => put('/api/payroll/admin/settings', { yearEnd: { employerName: f.employerName, employerAddress: { line1: f.line1, line2: f.line2, city: f.city, state: f.state, zip: f.zip },
+    gaWithholdingId: f.gaWithholdingId, ssaUserId: f.ssaUserId, contactName: f.contactName, contactPhone: f.contactPhone, contactEmail: f.contactEmail } })
+    .then(() => { setMsg('Saved.'); onSaved(); }).catch(x => setErr(x.message));
+  const box = (k, label, ph) => <label key={k}>{label}<input className="inp" value={f[k]} placeholder={ph || ''} onChange={x => setF({ ...f, [k]: x.target.value })} /></label>;
+  return (
+    <Card title="Employer Details for Tax Forms">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">These print on every W-2 and 1099. The EIN is under Settings.</p>
+      <div className="grid sm:grid-cols-3 gap-3 max-w-4xl">
+        {box('employerName', 'Legal name')}{box('line1', 'Street')}{box('line2', 'Suite')}{box('city', 'City')}{box('state', 'State')}{box('zip', 'ZIP')}
+        {box('gaWithholdingId', 'Georgia withholding number', '1234567-AB')}{box('ssaUserId', 'SSA BSO user ID (8 characters)')}
+        {box('contactName', 'Contact name')}{box('contactPhone', 'Contact phone')}{box('contactEmail', 'Contact email')}
+      </div>
+      <button className="btn mt-3" onClick={save}>Save</button>
+    </Card>
+  );
+};
+const YearEnd = () => {
+  const [yr, setYr] = useState(String(new Date().getFullYear() - (new Date().getMonth() < 6 ? 1 : 0)));
+  const [ye, setYe] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const load = useCallback(() => { setErr(''); call(`/api/payroll/admin/year-end/${enc(yr)}`).then(setYe).catch(e => { setYe(null); setErr(e.message); }); }, [yr]);
+  useEffect(() => { load(); }, [load]);
+  const rel = ye && ye.released;
+  const release = async () => {
+    if (!window.confirm(`Release the ${yr} W-2s and 1099s? The figures freeze, each person sees theirs in My GFC, and anyone who agreed to electronic forms is emailed a link. A change after this is a corrected form.`)) return;
+    setBusy(true);
+    try { const r = await post(`/api/payroll/admin/year-end/${enc(yr)}/release`); setMsg(`Released. ${r.emailed} emailed; ${r.paper.length} to print and mail.`); load(); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const mailed = (x, form) => post(`/api/payroll/admin/year-end/${enc(yr)}/forms/${enc(x.userId)}/${form}/mailed`).then(load).catch(e => setErr(e.message));
+  const formRow = (x, form, label, amount) => (
+    <div key={`${form}${x.userId}`} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
+      <span><b className="text-primary">{x.name}</b> <span className="text-stone-500 text-[12.5px]">{label} · {usd(amount)}{x.missing && x.missing.length ? ` · missing: ${x.missing.join(', ')}` : ''}</span></span>
+      <span className="flex gap-2 items-center">
+        {rel && <button className="btn ghost !py-1" onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/forms/${enc(x.userId)}/${form}.pdf`, `${yr}_${label}_${x.name}.pdf`, setErr)}>Print</button>}
+        {rel && (x.eDelivery ? <span className="chip bg-emerald-50 text-emerald-700">{x.openedAt ? 'OPENED' : 'EMAILED'}</span>
+          : x.mailedAt ? <span className="chip bg-emerald-50 text-emerald-700">MAILED {x.mailedAt}</span> : <button className="btn !py-1" onClick={() => mailed(x, form)}>Mark Mailed</button>)}
+        {!rel && <span className="chip">{x.eDelivery ? 'ELECTRONIC' : 'PAPER'}</span>}
+      </span>
+    </div>
+  );
+  const w2 = rel ? rel.w2 : ye ? ye.w2 : [];
+  const nec = rel ? rel.nec : ye ? ye.nec : [];
+  return (
+    <>
+      <Card title="Year End: W-2 and 1099-NEC" right={<span className="flex gap-2"><input className="inp !w-24" value={yr} onChange={e => setYr(e.target.value)} /></span>}>
+        <Err e={err} /><Ok m={msg} />
+        {ye && (
+          <>
+            {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
+            {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
+            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
+            <div className="lblu mb-1">W-2 ({w2.length})</div>
+            {w2.length === 0 && <p className="text-stone-500 mb-2">No wages paid in {yr}.</p>}
+            {w2.map(x => formRow(x, 'w2', 'W-2', x.boxes.box1))}
+            <div className="lblu mt-4 mb-1">1099-NEC ({nec.length})</div>
+            {nec.length === 0 && <p className="text-stone-500 mb-2">No contractor reached the threshold.</p>}
+            {nec.map(x => formRow(x, '1099-nec', '1099-NEC', x.boxes.box1a))}
+            <div className="flex flex-wrap gap-2 mt-4">
+              {!rel && <button className="btn" disabled={busy} onClick={release}>Release Forms</button>}
+              {rel && <span className="chip bg-emerald-50 text-emerald-700">RELEASED {String(rel.releasedAt).slice(0, 10)} BY {rel.releasedBy}</span>}
+              <button className="btn ghost" onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}?format=csv`, `gfc_year_end_${yr}.csv`, setErr)}>Summary (no SSNs)</button>
+            </div>
+          </>
+        )}
+      </Card>
+      {ye && (
+        <Card title="Filing">
+          <p className="text-stone-500 mb-3">These carry full Social Security numbers and tax IDs. Every download is logged. Delete the file once you have filed.</p>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Filing sheet</div>
+              <p className="text-[13px] mb-2">Every box for every form. Key the W-2s into SSA W-2 Online (Business Services Online) and the 1099s into the IRS IRIS Taxpayer Portal.</p>
+              <button className="btn ghost" disabled={!rel} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/filing-sheet.csv`, `gfc_${yr}_filing_sheet.csv`, setErr)}>Download Filing Sheet</button></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Upload files</div>
+              <p className="text-[13px] mb-2">{ye.layouts.efw2 ? 'SSA W-2 file (EFW2). Check it in AccuWage Online before you upload.' : `SSA has changed the W-2 file for ${yr} (overtime code TT), and that layout is not in the app yet. Use the filing sheet.`}</p>
+              <button className="btn ghost" disabled={!rel || !ye.layouts.efw2} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/ssa-w2.txt`, `gfc_${yr}_ssa_w2.txt`, setErr)}>SSA W-2 File</button>
+              <button className="btn ghost ml-2" disabled={!rel || !ye.layouts.irisNec} onClick={() => download(`/api/payroll/admin/year-end/${enc(yr)}/iris-1099-nec.csv`, `gfc_${yr}_iris_1099_nec.csv`, setErr)}>IRIS 1099-NEC CSV</button></div>
+            <div className="rounded-xl border border-stone-200 p-3"><div className="lblu mb-1">Georgia G-1003</div>
+              <div>W-2s: {ye.g1003.w2Count}</div><div>Georgia wages: {usd(ye.g1003.gaWagesCents)}</div><div><b>Georgia tax withheld: {usd(ye.g1003.gaWithheldCents)}</b></div>
+              <p className="text-[12.5px] text-stone-500 mt-1">File on the Georgia Tax Center with the W-2s. For {yr}, Georgia also asks for box 12 TT.</p></div>
+          </div>
+        </Card>
+      )}
+      {ye && <YearEndSettings ye={ye} onSaved={load} />}
     </>
   );
 };
@@ -478,7 +582,7 @@ const Settings = ({ data, reload }) => {
   );
 };
 
-const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
@@ -504,6 +608,7 @@ const App = () => {
         {data && tab === 'people' && <People data={data} reload={load} />}
         {data && tab === 'contractors' && <Contractors data={data} reload={load} />}
         {data && tab === 'taxes' && <Taxes />}
+        {data && tab === 'yearend' && <YearEnd />}
         {data && tab === 'tables' && <TaxTables data={data} reload={load} />}
         {data && tab === 'qbo' && <QuickBooks />}
         {data && tab === 'settings' && <Settings data={data} reload={load} />}

@@ -71,6 +71,7 @@ What it does on its own:
 | Payment reminder | Daily 8 AM | Approved runs past their send-by date remind you to send PNC payments. |
 | Tax reminders | Daily 9 AM | Deposits and filings due within your lead time. |
 | QuickBooks sync | Nightly 2 AM | Retries anything that failed to post. |
+| W-2 / 1099 reminders | Daily 10 AM, Jan 20 to Feb 15 | Anyone who has not opened an electronic W-2 or 1099 gets one reminder; you hear about paper copies not yet marked mailed. |
 | Tax source watch | Weekly (daily in Dec and Jan) | When an IRS or Georgia source changes, you get an email to review and stage new rates. |
 
 **None of these approves, pays or switches on anything.** Those stay your clicks in the app.
@@ -107,3 +108,24 @@ The run is paid only when everyone has one.
 ## 8. Before retiring Gusto
 
 Run one pay period both ways, in Gusto and in the app, and compare every stub line. Retire Gusto only when they match.
+
+## 9. Year end: W-2s and 1099s (Payroll → Year End)
+
+**Once, before January:** fill in **Employer Details for Tax Forms** on the Year End tab. You need the Georgia withholding number (it prints in box 15) and, for the SSA, your Business Services Online user ID and a contact.
+
+**Each person:** My GFC → Hours & Pay → Pay Setup now has **Legal name and mailing address**, exactly as on their Social Security card. Release refuses anyone missing it and names them.
+
+**In January:**
+1. Finish every run with a pay date in the year (paid, not just approved).
+2. Press **Release Forms**. The figures freeze. Each person sees theirs in My GFC. Anyone who agreed to electronic forms is emailed a link (never the form). Everyone else is listed for paper.
+3. Print each paper form with **Print**, mail it, then press **Mark Mailed**.
+4. Download the **Filing Sheet** and key the W-2s into **SSA W-2 Online** (Business Services Online) and the 1099-NECs into the **IRS IRIS Taxpayer Portal**. File Georgia's **G-1003** on the Georgia Tax Center with the totals shown.
+5. Delete the filing sheet from your computer once filed. It carries full SSNs.
+
+**Why there is no upload file for 2026 yet:** SSA and the IRS both changed their 2026 layouts (overtime goes in W-2 box 12, code TT, and the 1099-NEC gained boxes 1b to 1d). Those layouts could not be confirmed when this was built, so the app will not guess at them. The upload buttons switch on once a year's layout is added. For a handful of forms, keying them in is quick.
+
+**Deadline:** W-2s and 1099-NECs go to people by January 31 and are filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend; February 1, 2027 for tax year 2026).
+
+**Box 12 TT** is the overtime premium (the "half" of time-and-a-half) the app already pays. Employees may deduct it on their own return. Georgia asks for it on 2026 W-2s too.
+
+**1099-NEC** goes to each contractor paid **$2,000 or more** in the year (up from $600, for payments after 2025).

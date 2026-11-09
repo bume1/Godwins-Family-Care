@@ -251,11 +251,13 @@ function checklist(p) {
   }
   if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
+  // Printed on the W-2 or 1099 (and the copy filed with the IRS and SSA).
+  rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your W-2 or 1099)', done: !!p.taxAddress });
   if (emp) {
     rows.push({ key: 'offer', label: 'Offer letter', done: !!p.offerLetter });
     rows.push({ key: 'handbook', label: 'Employee handbook', done: !!p.handbook });
   }
-  rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true });
+  rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
   return rows;
 }
 

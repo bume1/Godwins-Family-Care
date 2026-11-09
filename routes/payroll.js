@@ -24,6 +24,8 @@ const engine = require('../payrollEngine');
 const cal = require('../payrollCalendar');
 const tables = require('../payrollTaxTables');
 const links = require('../appLinks');
+const ye = require('../payrollYearEnd');
+const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
 
 const PROFILES = 'payroll_profiles';          // { [userId]: profile }
@@ -33,6 +35,7 @@ const RUNS = 'payroll_runs';
 const CONTRACTOR_INVOICES = 'contractor_invoices';
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
+const YEAR_END = 'payroll_year_end';          // one row per released tax year
 const PAYSTUBS = 'staff_paystubs';            // shared with routes/staffPortal.js
 const STAFF_TYPES = ['admin', 'manager', 'provider', 'rn', 'lcsw', 'lmsw', 'coordinator', 'caregiver', 'liaison'];
 const WORK_TYPES = Object.freeze({ admin: 'Admin', training: 'Training', clinical: 'Clinical (not a visit)', exam: 'IME exam work', client_visit: 'Client visit' });
@@ -109,7 +112,9 @@ module.exports = function createPayrollRoutes(deps) {
       profile: pp.publicProfile(p),
       employee: pp.isEmployee(p), contractor: pp.isContractor(p), caregiver: !!p.isCaregiver,
       secretsStorable: pc.configured(env),
-      options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, i9Status: pp.I9_STATUS, w9Class: pp.W9_CLASS, workTypes: WORK_TYPES, units: CI_UNITS }
+      options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, i9Status: pp.I9_STATUS, w9Class: pp.W9_CLASS, workTypes: WORK_TYPES, units: CI_UNITS,
+        // Shown before someone agrees to electronic W-2s and 1099s (Pub 1141 2.4).
+        eDelivery: { version: ye.E_DELIVERY_VERSION, disclosure: ye.E_DELIVERY_DISCLOSURE } }
     });
   });
 
@@ -146,9 +151,25 @@ module.exports = function createPayrollRoutes(deps) {
           p[req.params.form === 'offer' ? 'offerLetter' : 'handbook'] = sig.value;
           change = req.params.form === 'offer' ? 'Offer letter acknowledged' : 'Handbook acknowledged'; break;
         }
-        case 'e-delivery':
-          p.eDelivery = { consented: b.consented === true, at: ctx.at, ipHash: ctx.ipHash };
-          change = b.consented === true ? 'Agreed to electronic W-2/1099' : 'Withdrew electronic W-2/1099 consent'; break;
+        case 'tax-address': {
+          const n = ye.normalizeTaxAddress(b); if (n.error) return res.status(400).json(n);
+          p.taxAddress = { ...n.value, at: ctx.at }; change = 'Legal name and mailing address for tax forms saved'; break;
+        }
+        case 'e-delivery': {
+          // Consent is given against the disclosure the person was shown.
+          if (b.consented === true && b.disclosureVersion !== ye.E_DELIVERY_VERSION) return res.status(409).json({ error: 'Read the current terms, then agree again.', code: 'E_DELIVERY_TERMS_CHANGED' });
+          const was = !!(p.eDelivery && p.eDelivery.consented);
+          p.eDelivery = { consented: b.consented === true, version: b.consented === true ? ye.E_DELIVERY_VERSION : null, at: ctx.at, ipHash: ctx.ipHash };
+          change = b.consented === true ? 'Agreed to electronic W-2/1099' : 'Withdrew electronic W-2/1099 consent';
+          // A withdrawal is confirmed in writing with its effective date (Pub 1141 2.4.02).
+          if (was && b.consented !== true && req.user.email) {
+            await queueNotification('tax_form_consent_withdrawn', req.user.id, req.user.email, req.user.name, {
+              subject: 'You will get your W-2 or 1099 on paper',
+              body: `We received your request on ${localDate(ctx.at) || ctx.at.slice(0, 10)}, and it takes effect today. Your W-2 or 1099 will come by mail. Forms already issued stay available in My GFC.`
+            }, { relatedEntityId: `edelivery:${req.user.id}:${ctx.at}` }).catch(e => console.error('Consent withdrawal notice (non-fatal):', e.message));
+          }
+          break;
+        }
         default: return res.status(404).json({ error: 'Unknown form.' });
       }
       const saved = await saveProfile(req.user.id, p, change, req.user);
@@ -203,11 +224,59 @@ module.exports = function createPayrollRoutes(deps) {
   });
 
   // ---- tax forms (W-2, 1099-NEC), link-only ------------------------------------------
+  const formsFor = (row, userId) => [
+    ...(row.w2 || []).filter(x => String(x.userId) === String(userId)).map(x => ({ form: 'w2', label: 'W-2', ...x })),
+    ...(row.nec || []).filter(x => String(x.userId) === String(userId)).map(x => ({ form: '1099-nec', label: '1099-NEC', ...x }))
+  ];
   router.get('/api/my/tax-forms', authenticateToken, requireStaff, async (req, res) => {
-    const forms = ((await db.get('payroll_year_end')) || []).filter(f => f.released && (f.w2 || []).concat(f.nec || []).some(x => String(x.userId) === String(req.user.id)))
-      .map(f => ({ year: f.year, forms: [...(f.w2 || []).filter(x => String(x.userId) === String(req.user.id)).map(() => 'W-2'), ...(f.nec || []).filter(x => String(x.userId) === String(req.user.id)).map(() => '1099-NEC')] }));
+    const forms = (await rows(YEAR_END)).filter(r => r.released).flatMap(r => formsFor(r, req.user.id).map(x => ({
+      year: r.year, form: x.form, label: x.label, releasedAt: r.releasedAt, corrected: !!x.corrected
+    }))).sort((a, b) => b.year - a.year);
     res.json({ forms });
   });
+  router.get('/api/my/tax-forms/:year/:form.pdf', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const all = await rows(YEAR_END);
+      const i = all.findIndex(r => r.released && String(r.year) === String(req.params.year));
+      const item = i === -1 ? null : formsFor(all[i], req.user.id).find(x => x.form === req.params.form);
+      if (!item) return res.status(404).json({ error: 'Form not found.' });
+      const buf = await renderTaxForm(all[i], item);
+      // The first open is recorded: the reminder job stops chasing once it is.
+      const list = item.form === 'w2' ? all[i].w2 : all[i].nec;
+      const k = list.findIndex(x => String(x.userId) === String(req.user.id));
+      if (k !== -1 && !list[k].openedAt) { list[k].openedAt = nowIso(); await db.set(YEAR_END, all); }
+      await logActivity(req.user.id, req.user.name, 'tax_form_opened', 'tax_form', `${req.params.year}:${item.form}`, {});
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', `${req.params.year}_${item.label}.pdf`));
+      res.send(buf);
+    } catch (e) { console.error('Tax form error:', e); res.status(500).json({ error: 'The form could not be built.' }); }
+  });
+
+  // One copy of the employer as the forms and files print it.
+  const employerFor = (settings) => {
+    const y = settings.yearEnd || {};
+    return {
+      ein: settings.employerEin || null,
+      name: y.employerName || ORG.name,
+      address: y.employerAddress || ye.parseAddress(ORG.address),
+      gaWithholdingId: y.gaWithholdingId || null,
+      ssaUserId: y.ssaUserId || null,
+      contactName: y.contactName || null,
+      contactPhone: y.contactPhone || String(ORG.phone || '').replace(/\D/g, '') || null,
+      contactEmail: y.contactEmail || ORG.email || null,
+      phone: ORG.phone
+    };
+  };
+  // Renders from the FROZEN released row; never from today's records.
+  const renderTaxForm = async (row, item) => {
+    if (item.form === 'w2') {
+      return pdf.generateW2EmployeePDF({ year: row.year, employer: row.employer, corrected: !!item.corrected, boxes: item.boxes,
+        employee: { ...item.taxName, ssnTruncated: item.ssnLast4 ? `XXX-XX-${item.ssnLast4}` : '', address: item.address } });
+    }
+    return pdf.generate1099NecPDF({ year: row.year, corrected: !!item.corrected, boxes: item.boxes,
+      payer: { name: row.employer.name, ein: row.employer.ein, address: row.employer.address, phone: row.employer.phone },
+      recipient: { name: item.name, tinTruncated: item.tinLast4 ? (item.tinType === 'ein' ? `XX-XXX${item.tinLast4}` : `XXX-XX-${item.tinLast4}`) : '', address: item.address } });
+  };
 
   // ===================================================================================
   // THE OWNER'S: /api/payroll/admin/*
@@ -262,6 +331,11 @@ module.exports = function createPayrollRoutes(deps) {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
       const curPeriod = tax.periodFor(today, cur);
       n.value.anchor = tax.addDays(curPeriod.end, 1);
+    }
+    if ((req.body || {}).yearEnd !== undefined) {
+      const y = ye.normalizeYearEnd(req.body.yearEnd, cur.yearEnd);
+      if (y.error) return res.status(400).json(y);
+      n.value.yearEnd = y.value;
     }
     if ((req.body || {}).employerEin !== undefined) {
       const e = String(req.body.employerEin || '').replace(/\D/g, '');
@@ -641,24 +715,186 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'quarter_summary_opened', 'payroll', null, { year: req.params.year, quarter: req.params.q });
     res.json(s);
   });
-  router.get('/api/payroll/admin/year-end/:year', authenticateToken, requireAdmin, async (req, res) => {
-    const tbl = await activeTables(Number(req.params.year));
-    if (!tbl) return res.status(409).json({ error: 'No approved tables for that year.', code: 'PAYROLL_NO_TABLES' });
+  // ---- year end: W-2, 1099-NEC, filing ---------------------------------------------
+  const yearEndPreview = async (year) => {
+    const tbl = await activeTables(Number(year));
+    if (!tbl) return { error: 'No approved tables for that year.', code: 'PAYROLL_NO_TABLES', status: 409 };
+    const settings = await readSettings();
+    const runs = await rows(RUNS);
     const paid = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'paid').map(x => ({ userId: x.userId, name: x.name, amountCents: x.totalCents, paidAt: x.paidAt }));
-    const y = cal.yearEnd(await rows(RUNS), paid, { year: req.params.year, fed: tbl.federal });
+    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal });
+    const profiles = await readProfiles();
+    const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
+    const employer = employerFor(settings);
+    const w2 = figures.w2.map(e => {
+      const p = profiles[String(e.userId)] || {};
+      const missing = [];
+      if (!p.taxAddress) missing.push('Legal name and mailing address');
+      if (!p.ssn) missing.push('SSN');
+      return { userId: String(e.userId), name: e.name, boxes: e, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented), email: (users.get(String(e.userId)) || {}).email || null };
+    });
+    const nec = figures.nec.map(e => {
+      const p = profiles[String(e.userId)] || {};
+      const missing = [];
+      if (!p.taxAddress) missing.push('Mailing address');
+      if (!(p.w9 && p.tin)) missing.push('W-9');
+      return { userId: String(e.userId), name: (p.w9 && (p.w9.businessName || p.w9.name)) || e.name, boxes: { box1a: e.box1, box4: 0 }, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented) };
+    });
+    return {
+      year: Number(year), employer, employerMissing: ye.employerMissing(employer), fileMissing: ye.fileMissing(employer),
+      draftRuns: ye.openRunsIn(runs, year).length, unpaidRuns: ye.unpaidRunsIn(runs, year).length,
+      w2, nec, necBelowThreshold: figures.necBelowThreshold, necThresholdCents: figures.necThresholdCents,
+      g1003: ye.g1003Totals(w2.map(w => ({ boxes: w.boxes }))),
+      layouts: { efw2: ye.EFW2_LAYOUT_YEARS.includes(Number(year)), irisNec: ye.IRIS_NEC_LAYOUT_YEARS.includes(Number(year)) },
+      released: (await rows(YEAR_END)).find(r => String(r.year) === String(year)) || null
+    };
+  };
+  router.get('/api/payroll/admin/year-end/:year', authenticateToken, requireAdmin, async (req, res) => {
+    const y = await yearEndPreview(req.params.year);
+    if (y.error) return res.status(y.status).json({ error: y.error, code: y.code });
     await logActivity(req.user.id, req.user.name, 'year_end_opened', 'payroll', null, { year: req.params.year });
     if (req.query.format === 'csv') {
-      const head = 'Form,Name,Box 1,Box 2,Box 3,Box 4,Box 5,Box 6,Box 16 (GA wages),Box 17 (GA tax)\r\n';
+      // The summary (no SSNs or TINs). The filing sheet below carries them.
+      const head = 'Form,Name,Box 1/1a,Box 2,Box 3,Box 4,Box 5,Box 6,Box 12 TT,Box 16 (GA wages),Box 17 (GA tax)\r\n';
       const d = (c) => (Number(c || 0) / 100).toFixed(2);
-      const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
-      const body = [...y.w2.map(e => ['W-2', q(e.name), d(e.box1), d(e.box2), d(e.box3), d(e.box4), d(e.box5), d(e.box6), d(e.box16), d(e.box17)].join(',')),
-        ...y.nec.map(e => ['1099-NEC', q(e.name), d(e.box1), '', '', '', '', '', '', ''].join(','))].join('\r\n');
+      const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+      const body = [...y.w2.map(e => ['W-2', q(e.name), d(e.boxes.box1), d(e.boxes.box2), d(e.boxes.box3), d(e.boxes.box4), d(e.boxes.box5), d(e.boxes.box6), d(e.boxes.box12TT), d(e.boxes.box16), d(e.boxes.box17)].join(',')),
+        ...y.nec.map(e => ['1099-NEC', q(e.name), d(e.boxes.box1a), '', '', '', '', '', '', '', ''].join(','))].join('\r\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', contentDisposition('attachment', `gfc_year_end_${req.params.year}.csv`));
       return res.send(head + body + '\r\n');
     }
     res.json(y);
   });
+
+  // Release: freezes the figures, makes the forms visible in My GFC and emails
+  // a link (never the form) to everyone who agreed to electronic delivery.
+  // Everyone else is on the paper list.
+  router.post('/api/payroll/admin/year-end/:year/release', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const year = Number(req.params.year);
+      const today = localDate(nowIso()) || nowIso().slice(0, 10);
+      if (!(Number(today.slice(0, 4)) > year)) return res.status(409).json({ error: `${year} is not over yet. Release its forms in January.`, code: 'YE_YEAR_NOT_OVER' });
+      const all = await rows(YEAR_END);
+      if (all.some(r => Number(r.year) === year && r.released)) return res.status(409).json({ error: 'These forms are already released. A change now is a corrected form (W-2c or a corrected 1099).', code: 'YE_ALREADY_RELEASED' });
+      const y = await yearEndPreview(year);
+      if (y.error) return res.status(y.status).json({ error: y.error, code: y.code });
+      if (y.draftRuns || y.unpaidRuns) return res.status(409).json({ error: `${y.draftRuns} draft and ${y.unpaidRuns} unpaid run(s) with a ${year} pay date. Finish them first.`, code: 'YE_RUNS_OPEN' });
+      if (y.employerMissing.length) return res.status(409).json({ error: `Missing: ${y.employerMissing.join(', ')}.`, code: 'YE_EMPLOYER_MISSING' });
+      const blocked = [...y.w2, ...y.nec].filter(x => x.missing.length);
+      if (blocked.length) return res.status(409).json({ error: `Missing for ${blocked.map(x => `${x.name} (${x.missing.join(', ')})`).join('; ')}.`, code: 'YE_PEOPLE_MISSING' });
+      const profiles = await readProfiles();
+      const freeze = (x, form) => {
+        const p = profiles[x.userId] || {};
+        const t = p.taxAddress || {};
+        const base = { userId: x.userId, boxes: x.boxes, eDelivery: x.eDelivery, openedAt: null, mailedAt: null,
+          address: { line1: t.line1, line2: t.line2, city: t.city, state: t.state, zip: t.zip, zip4: t.zip4 } };
+        // Only the last four of an SSN or TIN is kept with the released form;
+        // the filing sheet reads the sealed number from the profile.
+        return form === 'w2'
+          ? { ...base, name: [t.firstName, t.lastName].join(' '), taxName: { firstName: t.firstName, middle: t.middle, lastName: t.lastName, suffix: t.suffix }, ssnLast4: p.ssn && p.ssn.last4 }
+          : { ...base, name: x.name, tinType: p.tin && p.tin.type, tinLast4: p.tin && p.tin.last4 };
+      };
+      const row = { id: uuidv4(), year, released: true, releasedAt: nowIso(), releasedBy: req.user.name,
+        employer: y.employer, w2: y.w2.map(x => freeze(x, 'w2')), nec: y.nec.map(x => freeze(x, 'nec')) };
+      await db.set(YEAR_END, [...all.filter(r => Number(r.year) !== year), row]);
+      await logActivity(req.user.id, req.user.name, 'tax_forms_released', 'payroll', String(year), { w2: row.w2.length, nec: row.nec.length });
+      const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
+      let emailed = 0;
+      for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
+        const u = users.get(x.userId);
+        if (!x.eDelivery || !u || !u.email) continue;
+        await queueNotification('tax_form_ready', u.id, u.email, u.name, {
+          subject: `Your ${year} ${x.label} is ready`,
+          body: `Your ${year} ${x.label} is ready in My GFC under Hours & Pay. Sign in to open, download or print it.`,
+          ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
+        }, { relatedEntityId: `taxform:${year}:${x.userId}:${x.label}` });
+        emailed++;
+      }
+      res.json({ released: row, emailed, paper: [...row.w2, ...row.nec].filter(x => !x.eDelivery).map(x => ({ userId: x.userId, name: x.name })) });
+    } catch (e) { console.error('Tax form release error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  const releasedItem = async (year, userId, form) => {
+    const all = await rows(YEAR_END);
+    const i = all.findIndex(r => r.released && String(r.year) === String(year));
+    if (i === -1) return null;
+    const list = form === 'w2' ? all[i].w2 : form === '1099-nec' ? all[i].nec : null;
+    const k = (list || []).findIndex(x => String(x.userId) === String(userId));
+    return k === -1 ? null : { all, row: all[i], list, k, item: { form, label: form === 'w2' ? 'W-2' : '1099-NEC', ...list[k] } };
+  };
+  // The paper copy for someone who did not agree to electronic delivery.
+  router.get('/api/payroll/admin/year-end/:year/forms/:userId/:form.pdf', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const r = await releasedItem(req.params.year, req.params.userId, req.params.form);
+      if (!r) return res.status(404).json({ error: 'Form not found.' });
+      const buf = await renderTaxForm(r.row, r.item);
+      await logActivity(req.user.id, req.user.name, 'tax_form_printed', 'tax_form', `${req.params.year}:${req.params.form}:${req.params.userId}`, {});
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', `${req.params.year}_${r.item.label}_${r.item.name}.pdf`));
+      res.send(buf);
+    } catch (e) { console.error('Tax form print error:', e); res.status(500).json({ error: 'The form could not be built.' }); }
+  });
+  router.post('/api/payroll/admin/year-end/:year/forms/:userId/:form/mailed', authenticateToken, requireAdmin, async (req, res) => {
+    const r = await releasedItem(req.params.year, req.params.userId, req.params.form);
+    if (!r) return res.status(404).json({ error: 'Form not found.' });
+    const mailedOn = tax.isYmd((req.body || {}).mailedOn) ? req.body.mailedOn : (localDate(nowIso()) || nowIso().slice(0, 10));
+    r.list[r.k] = { ...r.list[r.k], mailedAt: mailedOn, mailedBy: req.user.name };
+    await db.set(YEAR_END, r.all);
+    await logActivity(req.user.id, req.user.name, 'tax_form_mailed', 'tax_form', `${req.params.year}:${req.params.form}:${req.params.userId}`, { mailedOn });
+    res.json({ ok: true, mailedAt: mailedOn });
+  });
+
+  // Filing downloads carry FULL SSNs and TINs: built on request from the
+  // sealed numbers, never stored, every download logged (counts only).
+  const filingPeople = async (row) => {
+    const profiles = await readProfiles();
+    const open = (sealed) => (sealed ? pc.open(sealed, env) : null);
+    return {
+      w2s: row.w2.map(x => ({ ...x, ...(x.taxName || {}), ssn: open((profiles[x.userId] || {}).ssn && profiles[x.userId].ssn.enc) })),
+      necs: row.nec.map(x => {
+        const p = profiles[x.userId] || {};
+        const t = p.taxAddress || {};
+        const isBusiness = !!(p.w9 && (p.w9.businessName || p.tin && p.tin.type === 'ein'));
+        return { ...x, tin: open(p.tin && p.tin.enc), tinType: (p.tin && p.tin.type) || 'ssn', isBusiness, businessName: (p.w9 && (p.w9.businessName || p.w9.name)) || x.name,
+          firstName: t.firstName, middle: t.middle, lastName: t.lastName, suffix: t.suffix, box1Cents: x.boxes.box1a };
+      })
+    };
+  };
+  const sendFile = (res, type, name, body) => {
+    res.setHeader('Content-Type', type);
+    res.setHeader('Content-Disposition', contentDisposition('attachment', name));
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(body);
+  };
+  const FILING_FILES = { 'filing-sheet.csv': 'filing_sheet', 'ssa-w2.txt': 'efw2', 'iris-1099-nec.csv': 'iris' };
+  const filingFile = (file) => async (req, res) => {
+    const kind = FILING_FILES[file];
+    req.params.file = file;
+    try {
+      const row = (await rows(YEAR_END)).find(r => r.released && String(r.year) === String(req.params.year));
+      if (!row) return res.status(409).json({ error: 'Release the forms first, so the file matches what people received.', code: 'YE_NOT_RELEASED' });
+      if (kind === 'efw2') {
+        const missing = ye.fileMissing(row.employer);
+        if (missing.length) return res.status(409).json({ error: `Missing: ${missing.join(', ')}.`, code: 'YE_FILE_SETTINGS' });
+      }
+      const people = await filingPeople(row);
+      let body;
+      if (kind === 'filing_sheet') body = ye.filingSheetCsv({ year: row.year, gaWithholdingId: row.employer.gaWithholdingId, w2s: people.w2s, necs: people.necs });
+      else if (kind === 'efw2') body = ye.efw2File({ year: row.year, employer: row.employer, employees: people.w2s });
+      else body = ye.irisNecCsv({ year: row.year, payer: row.employer, recipients: people.necs });
+      await logActivity(req.user.id, req.user.name, `tax_filing_${kind}_downloaded`, 'payroll', String(row.year), { w2: people.w2s.length, nec: people.necs.length });
+      sendFile(res, kind === 'efw2' ? 'text/plain; charset=us-ascii' : 'text/csv; charset=utf-8', `gfc_${row.year}_${req.params.file.replace(/-/g, '_')}`, body);
+    } catch (e) {
+      if (e.code === 'EFW2_LAYOUT_UNKNOWN' || e.code === 'IRIS_LAYOUT_UNKNOWN') return res.status(409).json({ error: e.message, code: e.code });
+      if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
+      console.error('Year-end file error:', e);
+      res.status(500).json({ error: 'The file could not be built.' });
+    }
+  };
+  router.get('/api/payroll/admin/year-end/:year/filing-sheet.csv', authenticateToken, requireAdmin, filingFile('filing-sheet.csv'));
+  router.get('/api/payroll/admin/year-end/:year/ssa-w2.txt', authenticateToken, requireAdmin, filingFile('ssa-w2.txt'));
+  router.get('/api/payroll/admin/year-end/:year/iris-1099-nec.csv', authenticateToken, requireAdmin, filingFile('iris-1099-nec.csv'));
 
   // ===================================================================================
   // AUTOMATIONS (Apps Script): POST /api/payroll/automation/:job
@@ -710,6 +946,32 @@ module.exports = function createPayrollRoutes(deps) {
         if (u && u.email) await queueNotification('staff_clock_open', u.id, u.email, u.name, { subject: 'You are still clocked in', body: 'You clocked in more than 12 hours ago and have not clocked out. Clock out, or tell the office the right time.', ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC' }, { relatedEntityId: e.id });
       }
       return { summary: `${open.length} open` };
+    },
+    // From January 20: anyone who has not opened an electronic form is
+    // reminded once; the owner is told what paper is still unmailed. Forms
+    // are due to people by January 31.
+    'tax-form-reminders': async () => {
+      const today = localDate(nowIso()) || nowIso().slice(0, 10);
+      if (!(today.slice(5) >= '01-20' && today.slice(5) <= '02-15')) return { summary: 'not in season' };
+      const row = (await rows(YEAR_END)).find(r => r.released && Number(r.year) === Number(today.slice(0, 4)) - 1);
+      if (!row) {
+        if (today.slice(5) >= '01-20') await tellOwner('tax_forms_not_released', `${Number(today.slice(0, 4)) - 1} W-2s and 1099s are not released`, 'They are due to employees and contractors by January 31. Open Payroll → Taxes → Year End.', `ye-unreleased:${today}`);
+        return { summary: 'not released' };
+      }
+      const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
+      let reminded = 0;
+      for (const x of [...row.w2.map(v => ({ ...v, label: 'W-2' })), ...row.nec.map(v => ({ ...v, label: '1099-NEC' }))]) {
+        const u = users.get(x.userId);
+        if (!x.eDelivery || x.openedAt || !u || !u.email) continue;
+        await queueNotification('tax_form_reminder', u.id, u.email, u.name, {
+          subject: `Your ${row.year} ${x.label} is waiting`, body: `Your ${row.year} ${x.label} is in My GFC under Hours & Pay. You need it to file your taxes.`,
+          ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.payFor(u)}`, ctaLabel: 'Open My GFC'
+        }, { relatedEntityId: `taxform-reminder:${row.year}:${x.userId}:${x.label}` });
+        reminded++;
+      }
+      const unmailed = [...row.w2, ...row.nec].filter(x => !x.eDelivery && !x.mailedAt);
+      if (unmailed.length) await tellOwner('tax_forms_unmailed', `${unmailed.length} paper tax form(s) not marked mailed`, 'Print and mail them, then mark each one mailed in Payroll → Taxes → Year End. They are due by January 31.', `ye-unmailed:${today}`);
+      return { summary: `${reminded} reminded, ${unmailed.length} unmailed` };
     },
     // On the send-by date, any approved run not fully paid.
     'payment-reminder': async () => {

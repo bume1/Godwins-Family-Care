@@ -58,6 +58,9 @@ function payrollMissingTime() { return callPayrollJob_('missing-time'); }
 function payrollPaymentReminder() { return callPayrollJob_('payment-reminder'); }
 function payrollTaxReminders() { return callPayrollJob_('tax-reminders'); }
 function payrollQuickBooksSync() { return callPayrollJob_('qbo-sync'); }
+// January 20 to February 15 only (the app checks the date): unopened W-2s and
+// 1099s get one reminder, and the owner hears about unmailed paper copies.
+function payrollTaxFormReminders() { return callPayrollJob_('tax-form-reminders'); }
 
 // Weekly, and daily in December and January when the new year's tables land.
 function payrollTaxSourceWatch() {
@@ -78,7 +81,7 @@ function payrollTaxSourceWatch() {
 }
 
 function installPayrollTriggers() {
-  var mine = ['payrollPeriodClose', 'payrollMissingTime', 'payrollPaymentReminder', 'payrollTaxReminders', 'payrollQuickBooksSync', 'payrollTaxSourceWatch'];
+  var mine = ['payrollPeriodClose', 'payrollMissingTime', 'payrollPaymentReminder', 'payrollTaxReminders', 'payrollQuickBooksSync', 'payrollTaxSourceWatch', 'payrollTaxFormReminders'];
   ScriptApp.getProjectTriggers().forEach(function (t) { if (mine.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('payrollPeriodClose').timeBased().everyDays(1).atHour(7).create();
   ScriptApp.newTrigger('payrollMissingTime').timeBased().everyDays(1).atHour(18).create();
@@ -86,5 +89,6 @@ function installPayrollTriggers() {
   ScriptApp.newTrigger('payrollTaxReminders').timeBased().everyDays(1).atHour(9).create();
   ScriptApp.newTrigger('payrollQuickBooksSync').timeBased().everyDays(1).atHour(2).create();
   ScriptApp.newTrigger('payrollTaxSourceWatch').timeBased().everyDays(1).atHour(6).create();
+  ScriptApp.newTrigger('payrollTaxFormReminders').timeBased().everyDays(1).atHour(10).create();
   Logger.log('Payroll triggers installed.');
 }

@@ -171,12 +171,15 @@ function yearEnd(runs, contractorPayments, { year, fed }) {
     .sort((a, b) => a.period.payDate.localeCompare(b.period.payDate));
   for (const r of yr) for (const w of r.workers || []) {
     if (!w.pay) continue;
-    const e = w2.get(w.userId) || { userId: w.userId, name: w.name, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, box16: 0, box17: 0 };
+    const e = w2.get(w.userId) || { userId: w.userId, name: w.name, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, box12TT: 0, box16: 0, box17: 0 };
     const before = e.box5;
     e.box1 += w.pay.grossCents; e.box2 += w.pay.taxes.federal;
     e.box3 += Math.max(0, Math.min(w.pay.grossCents, fed.ssWageBaseCents - before));
     e.box4 += w.pay.taxes.socialSecurity; e.box5 += w.pay.grossCents; e.box6 += w.pay.taxes.medicare;
     e.box16 += w.pay.grossCents; e.box17 += w.pay.taxes.georgia;
+    // Box 12 code TT (new for 2026): qualified overtime, which is only the
+    // premium half; the overtime earnings line is already exactly that.
+    for (const l of w.earnings || []) if (l.code === 'overtime') e.box12TT += l.amountCents || 0;
     w2.set(w.userId, e);
   }
   const nec = new Map();

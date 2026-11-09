@@ -32,8 +32,9 @@ const FED_2026 = {
   ssRatePct: 6.2, ssWageBaseCents: 18450000,                 // Pub 15 (2026) §9
   medicareRatePct: 1.45, addlMedicareRatePct: 0.9, addlMedicareThresholdCents: 20000000,
   futaNetRatePct: 0.6, futaWageBaseCents: 700000,            // Pub 15 (2026) §14; GA not on the 2026 potential credit-reduction list
-  // UNCONFIRMED: the 1099-NEC reporting threshold rose to $2,000 for payments
-  // after 2025 under P.L. 119-21. Check before year-end.
+  // CONFIRMED 2026-11-09: the 1099-NEC threshold is $2,000 for payments after
+  // 2025 (P.L. 119-21), indexed for inflation from 2027. IRS Pub 15 (2026);
+  // Instructions for Forms 1099-MISC and 1099-NEC (Rev. December 2026), box 1a.
   necThresholdCents: 200000
 };
 
@@ -53,7 +54,7 @@ const GA_2026 = {
 
 const SEEDS = Object.freeze([
   { key: 'federal-2026', year: 2026, jurisdiction: 'federal', data: FED_2026,
-    source: 'IRS Pub 15-T (2026) percentage method tables + Worksheet 1A; IRS Pub 15 (2026) Social Security wage base $184,500, Medicare, FUTA. 1099-NEC $2,000 threshold UNCONFIRMED.' },
+    source: 'IRS Pub 15-T (2026) percentage method tables + Worksheet 1A; IRS Pub 15 (2026) Social Security wage base $184,500, Medicare, FUTA. 1099-NEC $2,000 threshold confirmed (Instructions for Forms 1099-MISC and 1099-NEC, Rev. December 2026).' },
   { key: 'GA-2026', year: 2026, jurisdiction: 'GA', data: GA_2026,
     source: 'Georgia DOR Employer\'s Withholding Tax Guide 2026 (revised Sept 2026), Tables E and F: 4.99% from May 11, 2026. Form G-4 rev. 06/03/26. GA DOL wage base $9,500.' }
 ]);
@@ -85,6 +86,24 @@ function validateTable(b) {
 
 // Boot: add any shipped table not yet in the store, STAGED. Never touches a
 // table already there, so an owner's approval is never undone.
+/**
+ * A seed's wording can be corrected after it shipped (a source confirmed, say).
+ * Only a STAGED row nobody has approved takes the new source text and data;
+ * an approved or retired row is the record of what was approved and is never
+ * rewritten. Returns the rows to replace, or [].
+ */
+function refreshStagedSeeds(existing) {
+  const bySeed = new Map(SEEDS.map(s => [s.key, s]));
+  const out = [];
+  for (const t of existing || []) {
+    const s = t && t.seedKey && bySeed.get(t.seedKey);
+    if (!s || t.status !== 'staged') continue;
+    if (t.source === s.source && JSON.stringify(t.data) === JSON.stringify(s.data)) continue;
+    out.push({ ...t, source: s.source, data: s.data });
+  }
+  return out;
+}
+
 function seedRows(existing, { uuid, at }) {
   const have = new Set((existing || []).map(t => t.seedKey).filter(Boolean));
   const add = SEEDS.filter(s => !have.has(s.key)).map(s => ({
@@ -94,4 +113,4 @@ function seedRows(existing, { uuid, at }) {
   return add;
 }
 
-module.exports = { FED_2026, GA_2026, SEEDS, validateTable, seedRows };
+module.exports = { FED_2026, GA_2026, SEEDS, validateTable, seedRows, refreshStagedSeeds };
