@@ -79,7 +79,8 @@
     var here = currentArea(areas, window.location);
     var bar = el('nav', { 'class': 'gfc-sn', 'aria-label': 'Staff areas' });
     var inner = el('div', { 'class': 'gfc-sn-in' });
-    var hub = el('a', { 'class': 'gfc-sn-hub', href: HUB });
+    // Back to the hub lands on the area you are in, not the top of the page.
+    var hub = el('a', { 'class': 'gfc-sn-hub', href: here ? HUB + '#area-' + here.id : HUB });
     hub.appendChild(el('img', { src: '/brand/logo-mark-transparent.png', alt: '' }));
     hub.appendChild(el('span', { 'class': 'gfc-sn-hubt' }, 'Portal Hub'));
     hub.setAttribute('aria-label', 'Portal Hub');
@@ -94,6 +95,7 @@
       panel.appendChild(el('h3', {}, a.name));
       (a.links || []).forEach(function (l) {
         var link = el('a', { href: l.path }, l.name);
+        link.addEventListener('click', function () { try { sessionStorage.setItem('gfc_hub_area', a.id); } catch (e) { /* private mode */ } });
         if (l.path === herePath || (l.path === window.location.pathname && !window.location.search)) link.className = 'gfc-sn-on';
         panel.appendChild(link);
       });
