@@ -1695,6 +1695,12 @@ const scanAndQueueNotifications = async () => {
     // owner controls.
     await sendDueVisitReminders();
 
+    // ── Staff onboarding and credentialing (2026-11-09) ───────────────────
+    // Her daily digest, the office's credential milestones and the Monday
+    // roll-up. It rides this scanner rather than a timer of its own: unlike a
+    // to-do, none of it names a minute, so the scan is finer than the promise.
+    await onboardingRouter.notices.sweepOnboardingNotices();
+
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
@@ -3040,10 +3046,15 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
 // steps and the office completes or verifies the rest. The office half is
 // gated on admin-or-manager rather than clinical write, so a provider never
 // verifies her own licence or opens her own service line.
-app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+const onboardingRouter = onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
   drive: googledrive,
-  detectFileType: (buf) => detectFileType(buf)
-}));
+  detectFileType: (buf) => detectFileType(buf),
+  // Read LAZILY: `notify` is built further down this file, so passing it by
+  // value here would read the temporal dead zone.
+  notify: () => notify,
+  getAppBaseUrl
+});
+app.use(onboardingRouter);
 // My GFC: a staff member's own documents, policies and the Drive folders the
 // office assigned to their role or to them by name.
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,

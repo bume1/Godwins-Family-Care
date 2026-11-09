@@ -22,6 +22,9 @@ const multer = require('multer');
 const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
 const accountTypes = require('../accountTypes');
+const practiceTime = require('../public/gfc-time');  // Georgia's clock, never the container's
+const links = require('../appLinks');            // the ONE place that answers "where does this person go?"
+const N = require('../onboarding/notices');      // who is told, when, and what goes in one envelope
 
 // Who is onboarded on which chapter. Clinicians on C; the admin team on F;
 // the liaison on G, which carries F's screening and paperwork (owner, 2026-11-08). The office can change it in Setup.
@@ -310,6 +313,68 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.status(status).json({ error: err.message, code: err.code || 'ONBOARDING_ERROR', outstanding: err.outstanding, missing: err.missing });
   }
 
+  // ---- email (2026-11-09) --------------------------------------------------
+  //
+  // Owner: "make sure email notifications updates accordingly. Esp for new
+  // employees who need onboarding or credentialing reminders." Everything
+  // below was computed and shown on a screen and emailed to nobody.
+  //
+  // THE NOTIFIER IS READ LAZILY. It is built far below where this router is
+  // registered in server.js, so taking it by value here would read the
+  // temporal dead zone. A MISSING NOTIFIER IS LOUD, never a silent skip:
+  // "nothing was emailed" and "nobody needed emailing" are different facts.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : deps.notify;
+    if (!n) console.error('[ONB] no notifier injected — staff were NOT emailed');
+    return n || null;
+  };
+  const baseUrl = () => (typeof deps.getAppBaseUrl === 'function' ? deps.getAppBaseUrl() : Promise.resolve(''));
+  const myCta = async () => `${await baseUrl()}${links.myOnboardingFor()}`;
+  const officeCta = async () => `${await baseUrl()}${links.staffOnboardingFor()}`;
+  // The office is an admin or a manager — the same `isOffice` the gate uses,
+  // so a role narrowed there narrows who is emailed on the next send.
+  const officeRecipients = async () => (await getUsers()).filter(u =>
+    u && u.email && isOffice(u) && u.accountStatus !== 'inactive');
+  const userById = async (userId) => (await getUsers()).find(u => String(u.id) === String(userId)) || null;
+
+  // She submitted a step and the item now waits on the office.
+  async function maybeNotifySubmitted(rec, item, actor) {
+    try {
+      if (actor.isOffice) return;                 // the office does not notify itself
+      const n = notifier(); if (!n) return;
+      const track = await buildFor(rec, 'office');
+      const row = (track.items || []).find(i => i.id === item.id);
+      if (!row || row.status !== T.STATUS.SUBMITTED) return;
+      const cta = await officeCta();
+      for (const u of await officeRecipients()) {
+        await n.staffItemSubmitted({ user: u, staffName: rec.userName || 'A staff member', itemTitle: row.title, ctaUrl: cta, actorId: actor.id });
+      }
+    } catch (e) { console.error('[ONB] submitted notice failed (non-fatal):', e.message); }
+  }
+
+  // The office sent a step back. THE REASON IS WHY THIS EXISTS: the route
+  // requires one and was storing it where only a screen could show it.
+  async function notifyReturned(rec, item, reason, byName) {
+    try {
+      const n = notifier(); if (!n) return;
+      const her = await userById(rec.userId);
+      if (!her || !her.email) return;
+      await n.staffOnboardingReturned({ user: her, itemTitle: item.title, reason: reason || null, returnedByName: byName || null, ctaUrl: await myCta() });
+    } catch (e) { console.error('[ONB] return notice failed (non-fatal):', e.message); }
+  }
+
+  // Her track has just been opened.
+  async function notifyStarted(rec) {
+    try {
+      const n = notifier(); if (!n) return;
+      const her = await userById(rec.userId);
+      if (!her || !her.email) return;
+      const track = await buildFor(rec, 'new_hire');
+      const ch = (track.chapter && track.chapter.label) || null;
+      await n.staffOnboardingStarted({ user: her, chapterLabel: ch, waitingCount: (track.counts || {}).waitingOnHer || 0, ctaUrl: await myCta() });
+    } catch (e) { console.error('[ONB] start notice failed (non-fatal):', e.message); }
+  }
+
   async function doStep(req, res, rec, actor) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
@@ -320,6 +385,7 @@ module.exports = function createOnboardingRoutes(deps) {
       await save(rec);
       await event({ userId: rec.userId, type: 'step', itemId: item.id, step: Number(req.params.index), byId: actor.id, byName: actor.name, onBehalf: actor.isOffice && item.steps[Number(req.params.index)].actor === 'NEW_HIRE' });
       await logActivity(req.user.id, req.user.name, 'onboarding_step', 'onboarding', rec.userId, { itemId: item.id, step: Number(req.params.index) });
+      await maybeNotifySubmitted(rec, item, actor);
       return res.json({ ok: true });
     } catch (e) { return send(res, e); }
   }
@@ -772,6 +838,10 @@ module.exports = function createOnboardingRoutes(deps) {
   // Starts onboarding (creates the record) or changes what she will cover.
   router.put('/api/onboarding/admin/people/:userId/inputs', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res, { create: true }); if (!rec) return;
+    // `save` stamps updatedAt, so its absence means this record is being
+    // created right now — i.e. her onboarding is being opened for the first
+    // time, which is the one moment the welcome email belongs.
+    const isNew = !rec.updatedAt;
     const before = rec.inputs;
     // The chapter: what the office chose, else what the record already has,
     // else what the person's account type implies.
@@ -780,6 +850,7 @@ module.exports = function createOnboardingRoutes(deps) {
     rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
+    if (isNew) await notifyStarted(rec);
     return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/steps/:index', authenticateToken, requireOffice, async (req, res) => {
@@ -795,6 +866,7 @@ module.exports = function createOnboardingRoutes(deps) {
         T.returnStep(item, rec.items[item.id], (req.body || {}).step, officeActorOf(req), (req.body || {}).reason, nowIso()));
       await save(rec);
       await event({ userId: rec.userId, type: 'returned', itemId: item.id, byId: req.user.id, byName: req.user.name });
+      await notifyReturned(rec, item, (req.body || {}).reason, req.user.name || req.user.email);
       return res.json({ ok: true });
     } catch (e) { return send(res, e); }
   });
@@ -1012,6 +1084,107 @@ module.exports = function createOnboardingRoutes(deps) {
     const m = moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.remove(e, 'files', req.params.fileId, officeActor(req), nowIso()), { action: 'file_removed' });
   });
+
+  // ---- the daily and weekly sweep (2026-11-09) -----------------------------
+  //
+  // It rides the notification scanner that already runs rather than a timer of
+  // its own. That is the opposite call to the to-do reminders, and the reason
+  // is the precision each one needs: a to-do names its own MINUTE, so a
+  // 30-minute scan is a broken promise there. Onboarding is a morning digest
+  // and a Monday roll-up, so the scanner's cadence is finer than the promise
+  // and the keys below hold each notice to one.
+  //
+  // Judged on GEORGIA'S date and hour, never the container's: UTC is already
+  // tomorrow for four hours of every evening, so a 9am send would fire at 4am
+  // and a Monday roll-up would go out on Sunday night.
+  // Takes the date and the hour so a caller can state them, the same shape
+  // `renewals` and `notices` have. Defaults to GEORGIA'S clock, which is what
+  // the scanner uses; a test that had to run at 9am Eastern to mean anything
+  // would be a test that mostly means nothing.
+  async function sweepOnboardingNotices({ today: todayIn, hourEt: hourIn } = {}) {
+    try {
+      const n = notifier(); if (!n) return { sent: 0, reason: 'no notifier' };
+      const parts = practiceTime.zonedParts(new Date());
+      const todayYmd = todayIn || (parts && parts.isoDate) || null;
+      const hourEt = Number.isFinite(hourIn) ? hourIn : (parts ? parts.hour : null);
+      if (!todayYmd || !N.sendHourReached(hourEt)) return { sent: 0, reason: 'before the send hour' };
+
+      const rows = await all();
+      const users = await getUsers();
+      const office = await officeRecipients();
+      const myUrl = await myCta();
+      const officeUrl = await officeCta();
+      let sent = 0;
+
+      // ---- 1. HER daily digest, and the office's credential milestones ----
+      const overview = [];
+      for (const rec of rows) {
+        const her = users.find(u => String(u.id) === String(rec.userId)) || null;
+        let track;
+        try { track = await buildFor(rec, 'office'); } catch (e) { console.error('[ONB] track failed for', rec.userId, e.message); continue; }
+        const digest = N.digestFor(track);
+
+        // ONE EMAIL A DAY, and never an empty one: a daily email that says
+        // "nothing to do" is how a daily email stops being read.
+        if (her && her.email && digest.total > 0) {
+          const out = await n.staffOnboardingDigest({
+            user: her, digest, ctaUrl: myUrl, dedupeId: N.digestKey(rec.userId, todayYmd)
+          });
+          sent += out.notified || 0;
+        }
+
+        // The office hears about each credential at its own milestones, so a
+        // licence 30 days out is announced once at 30 and again at 14 rather
+        // than every morning in between.
+        for (const cred of digest.expiring) {
+          const milestone = N.officeMilestone(cred.daysLeft);
+          if (milestone === null) continue;
+          // Once lapsed the key carries the DATE as well, so a stop-work
+          // condition is repeated daily instead of announced once.
+          const key = N.expiryKey(rec.userId, cred.id, milestone === 0 ? `0:${todayYmd}` : milestone);
+          for (const u of office) {
+            const out = await n.staffCredentialExpiring({
+              user: u, staffName: rec.userName || (her && her.name) || 'A staff member', staffUserId: rec.userId,
+              credential: cred, milestone, ctaUrl: officeUrl, dedupeId: key
+            });
+            sent += out.notified || 0;
+          }
+        }
+
+        overview.push({
+          userId: rec.userId, name: rec.userName || (her && her.name) || null,
+          startDate: (rec.inputs || {}).startDate || null,
+          waitingOnHer: (track.counts || {}).waitingOnHer || 0,
+          waitingOnOffice: (track.items || []).filter(i => i.next && !i.next.hers && i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE).length,
+          renewalsDue: (track.counts || {}).renewalsDue || 0,
+          expired: (track.items || []).filter(i => i.status === T.STATUS.EXPIRED).length
+        });
+      }
+
+      // ---- 2. the office's weekly roll-up ---------------------------------
+      if (N.isWeeklyDay(todayYmd) && office.length) {
+        const notStarted = users.filter(u => (u.hasClinicalAccess || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(u)))
+          && u.accountStatus !== 'inactive' && !rows.some(r => String(r.userId) === String(u.id)))
+          .map(u => ({ userId: u.id, name: u.name || u.email }));
+        const rollup = N.weeklyFor(overview, todayYmd, notStarted);
+        if (rollup.total > 0) {
+          for (const u of office) {
+            const out = await n.staffOnboardingWeekly({ user: u, rollup, ctaUrl: officeUrl, dedupeId: N.weeklyKey(u.id, todayYmd) });
+            sent += out.notified || 0;
+          }
+        }
+      }
+
+      if (sent) console.log(`[ONB] Queued ${sent} onboarding/credentialing notice(s) for ${todayYmd}.`);
+      return { sent };
+    } catch (err) {
+      console.error('[ONB] onboarding notice sweep failed (non-fatal):', err.message);
+      return { sent: 0, reason: err.message };
+    }
+  }
+
+  // Exposed for the scanner, the way messaging exposes its SMS drain.
+  router.notices = { sweepOnboardingNotices };
 
   return router;
 };
