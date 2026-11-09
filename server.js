@@ -4983,6 +4983,12 @@ app.post('/api/users/:userId/mfa/reset', authenticateToken, requireAdmin, async 
     await db.set('users', users); invalidateUsersCache();
     const revoked = await sessions.revokeAllForUser(users[idx].id, 'mfa_reset_by_admin');
     await logActivity(req.user.id, req.user.name || req.user.email, 'mfa_reset', 'user', users[idx].id, { targetEmail: users[idx].email, hadEnrollment: had, sessionsRevoked: revoked });
+    // Their authenticator is gone and every session with it, and nothing told
+    // them (audit, 2026-11-09). sendPasswordChangedEmail is the precedent.
+    await notify.accountAccessChanged({
+      user: users[idx], change: 'mfa_reset', byName: req.user.name || req.user.email,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+    });
     res.json({ ok: true, hadEnrollment: had, sessionsRevoked: revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -4990,6 +4996,13 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
   try {
     const revoked = await sessions.revokeAllForUser(req.params.userId, 'revoked_by_admin');
     await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
+    const signedOut = (await getUsers()).find(u => u && u.id === req.params.userId);
+    if (signedOut) {
+      await notify.accountAccessChanged({
+        user: signedOut, change: 'sessions_revoked', byName: req.user.name || req.user.email,
+        ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+      });
+    }
     res.json({ ok: true, revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -5010,6 +5023,16 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    // Snapshotted BEFORE anything is written. A person whose access changes is
+    // told about it (audit, 2026-11-09), and the only way to know it changed
+    // is to hold what it was. A shallow read of users[idx] afterwards would
+    // compare the row to itself — the aliasing trap this repo has paid for.
+    const accessBefore = {
+      accountStatus: users[idx].accountStatus || 'active',
+      role: users[idx].role,
+      accountType: accountTypes.accountTypeOf(users[idx]),
+      clinicalRole: users[idx].clinicalRole || null
+    };
 
     // A patient's account stays a patient (owner, 2026-10-20). Changing it to
     // Family or anything else hides their care team, schedule and records,
@@ -5314,6 +5337,27 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
         fields: Object.keys(req.body || {}).filter(k => req.body[k] !== undefined && k !== 'password')
       });
     }
+    // Deactivation and a change of role or clinical authority are the person's
+    // to know about. One notice each, from the snapshot taken before the
+    // write, and never to somebody editing their own account.
+    if (users[idx].id !== req.user.id) {
+      const nowStatus = users[idx].accountStatus || 'active';
+      if (accessBefore.accountStatus !== 'inactive' && nowStatus === 'inactive') {
+        await notify.accountAccessChanged({
+          user: users[idx], change: 'deactivated', byName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+        });
+      } else if (nowStatus !== 'inactive' && (
+        accessBefore.role !== users[idx].role ||
+        accessBefore.accountType !== accountTypes.accountTypeOf(users[idx]) ||
+        accessBefore.clinicalRole !== (users[idx].clinicalRole || null))) {
+        await notify.accountAccessChanged({
+          user: users[idx], change: 'role_changed', byName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+        });
+      }
+    }
+
     // A manager's or coordinator's money fields were held by guardUserWrite.
     const financial = await raiseFinancialRequests(req, users[idx], req.heldFinancial, (req.body || {}).financialChangeReason);
 
@@ -10987,6 +11031,26 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     await db.set('users', users);
     invalidateUsersCache();
 
+    // The plan is written and held for signatures, and nobody was told
+    // (audit, 2026-11-09). The client signs theirs in the portal; an IHPC
+    // plan is additionally held for a provider's co-signature, and the
+    // providers are resolved HERE rather than inside the notifier, which must
+    // not restate the clinical role vocabulary.
+    await notify.carePlanAwaitingCoSign({
+      client, version: plan.version, authorName: req.user.name || req.user.email, actorId: req.user.id
+    });
+    if (pendingProviderCoSign) {
+      const providers = users.filter(u => u && u.email && u.accountStatus !== 'inactive'
+        && clinicalRoles.resolveClinicalRole(u) === 'provider');
+      for (const prov of providers) {
+        await notify.carePlanAwaitingProviderCoSign({
+          provider: prov, client, version: plan.version,
+          authorName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
+
     // OpenEMR-side record: authored care-plan PDF into patient Documents
     // (structured CarePlan resources are read-only on OpenEMR 7.0.4 — the
     // approved transport deviation; the final signed PDF follows at co-sign).
@@ -11086,6 +11150,17 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
+    // The author was blocked on this signature and was not told it landed
+    // (audit, 2026-11-09). Never to the signer themselves.
+    if (plan.authoredById && plan.authoredById !== req.user.id) {
+      const author = users.find(u => u && u.id === plan.authoredById);
+      if (author) {
+        await notify.carePlanProviderCoSigned({
+          user: author, client, version: plan.version, providerName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
     // If the client has already co-signed, the signed PDF stored and filed
     // then shows the provider line as pending. Issue it again with all three
     // signatures. Best-effort: a storage failure never voids the signature.
@@ -11268,6 +11343,9 @@ app.post('/api/clinical/patients/:clientId/activate', authenticateToken, require
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_activated', 'client', client.id, {});
+    // The PHC arm emails on approval; this one said "ACTIVATED" to a screen
+    // and nobody else (audit, 2026-11-09).
+    await notify.clinicalEnrollmentActivated({ client, actorId: req.user.id });
     res.json({ message: 'IHPC enrollment ACTIVATED', activatedAt: at });
   } catch (error) {
     console.error('Clinical activate error:', error);
@@ -15018,6 +15096,19 @@ const internalReferralStep = (apply, verb) => async (req, res) => {
     await logActivity(req.user.id, req.user.name || req.user.email, `internal_referral_${verb}`, 'client', client.id, {
       orderId: order.id, orderReference: order.orderReference, completionNoted: verb === 'completed'
     });
+    // "The referring clinician can read your note on the order" is to say
+    // they find out by looking (audit, 2026-11-09). Now they are told.
+    const referrerId = (order.orderingClinician || {}).id;
+    if (referrerId && referrerId !== req.user.id) {
+      const referrer = (await getUsers()).find(u => u && u.id === referrerId);
+      if (referrer) {
+        await notify.referralStepTaken({
+          user: referrer, step: verb, colleagueName: req.user.name || req.user.email,
+          specialty: (applied.order.referral || {}).specialty || null, orderId: order.id,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
     res.json({
       message: verb === 'accepted' ? 'Accepted. Complete it with a note when you are done.' : 'Completed. The referring clinician can read your note on the order.',
       order: orderReq.publicOrder(applied.order)
@@ -15820,6 +15911,20 @@ const receiveClinicalResult = async (req, res, { order, rows, idx, client }) => 
         subject: notice.subject, heading: notice.heading, body: notice.body,
         ctaLabel: notice.ctaLabel, ctaUrl: appLinks.PATHS.CLINICAL
       }, { relatedEntityId: result.id });
+    }
+  }
+
+  // An ABNORMAL result sat in the inbox with nobody emailed (audit,
+  // 2026-11-09). Like the critical notice above, it carries no patient, no
+  // value and no interpretation: the builder is handed none of them.
+  if (result.interpretation === 'abnormal' && result.routeTo && result.routeTo.userId) {
+    const users = await getUsers();
+    const to = users.find(u => u && u.id === result.routeTo.userId);
+    if (to) {
+      await notify.abnormalResultWaiting({
+        user: to, resultId: result.id,
+        ctaPath: appLinks.PATHS.CLINICAL, actorId: req.user.id
+      });
     }
   }
 
@@ -18016,6 +18121,16 @@ app.post('/api/webhooks/stripe', async (req, res) => {
     await db.set('patient_invoices', rows);
     await logActivity('stripe', 'Stripe', 'invoice_paid_online', 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
     qbo.invoicePaid(t.inv).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
+    // They paid money and got nothing back (audit, 2026-11-09). The amount
+    // rides only where the transport can carry it.
+    const payer = (await getUsers()).find(u => u && u.id === t.inv.clientId);
+    if (payer) {
+      await notify.paymentReceived({
+        client: payer, invoiceId: t.inv.id,
+        amountLabel: Number.isFinite(Number(t.inv.totalCents)) ? `$${(Number(t.inv.totalCents) / 100).toFixed(2)}` : null,
+        actorId: 'stripe'
+      });
+    }
     res.json({ received: true });
   } catch (error) {
     console.error('Stripe webhook error:', error);
@@ -24567,6 +24682,19 @@ app.put('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/share', authent
     await db.set('client_document_uploads', uploads);
     await logActivity(req.user.id, req.user.name || req.user.email, shared ? 'client_document_shared' : 'client_document_unshared',
       'document', req.params.clientId, { uploadId: uploads[i].id, kind: uploads[i].kind || null });
+    // Sharing makes it readable in the portal. They were never told it was
+    // there, so it sat unread behind a tab (audit, 2026-11-09). Unsharing is
+    // deliberately silent: there is nothing for them to do about it.
+    if (shared) {
+      const owner = (await getUsers()).find(u => u && u.id === req.params.clientId);
+      if (owner) {
+        await notify.documentSharedToPortal({
+          client: owner, uploadId: uploads[i].id,
+          label: uploads[i].label || uploads[i].fileName || uploads[i].kind,
+          sharedByName: req.user.name || req.user.email, actorId: req.user.id
+        });
+      }
+    }
     res.json({ id: uploads[i].id, sharedWithPatient: shared });
   } catch (error) {
     console.error('Share client document error:', error);

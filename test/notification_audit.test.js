@@ -358,6 +358,309 @@ test('a thrown dependency never propagates out of a notice', async () => {
 });
 
 // ===========================================================================
+// TIER 2 — somebody blocked or affected and not told
+// ===========================================================================
+
+test('B1 a cancelled shift tells the holder, with the reason', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.shiftCancelled({
+    user: CAREGIVER, when: 'Tue, Nov 11 at 9:00 AM', clientName: 'Ada Bell',
+    reason: 'The family is away that week.', ctaUrl: 'https://x.test/caregiver#schedule', shiftId: 's1'
+  });
+  const q = h.to('mo@example.com')[0];
+  assert.match(q.body, /You do not need to go/);
+  assert.match(q.body, /family is away/);
+  assert.match(q.body, /Why it was cancelled/i);
+  assert.strictEqual(q.phi, true, 'it names the client');
+});
+
+test('B1 on an uncovered transport it names neither the client nor the reason', async () => {
+  const h = harness({ baaCovered: false });
+  await h.notifier.shiftCancelled({ user: CAREGIVER, when: 'Tue, Nov 11 at 9:00 AM', clientName: 'Ada Bell', reason: 'away', shiftId: 's1', ctaUrl: 'https://x.test/c' });
+  const all = bothHalves(h.to('mo@example.com')[0]);
+  assert.ok(!/Ada Bell/.test(all));
+  assert.ok(!/away/.test(all));
+});
+
+test('B1 the client is told, and a POA is told WHOSE visit it was', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.caregiverVisitCancelled({ clientId: 'c1', when: 'Tue, Nov 11 at 9:00 AM', shiftId: 's1' });
+  assert.match(h.to('ada@example.com')[0].body, /^Hi Ada[\s\S]*Your caregiver visit on Tue/m,
+    'the client reads "Your caregiver visit"');
+  assert.match(h.to('ruth@example.com')[0].body, /Ada Bell's caregiver visit on Tue/,
+    'the POA is told whose visit it is — the opening phrase has to be one the rewrite reaches');
+  assert.strictEqual(h.to('ken@example.com').length, 0, 'non-POA family are never emailed');
+});
+
+test('B1 the office reason is never forwarded to the client', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.caregiverVisitCancelled({ clientId: 'c1', when: 'Tue, Nov 11', shiftId: 's1' });
+  const all = bothHalves(h.to('ada@example.com')[0]);
+  assert.ok(!/staffing|illness|payment/i.test(all),
+    'why the office cancelled is internal; the notice offers to arrange cover instead');
+  assert.match(all, /arrange cover/i);
+});
+
+test('B2 a declined claim tells the caregiver it went elsewhere', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.shiftClaimDeclined({
+    user: CAREGIVER, when: 'Wed, Nov 12 at 1:00 PM', clientName: 'Ada Bell',
+    reason: 'Someone closer took it.', ctaUrl: 'https://x.test/c', shiftId: 's2'
+  });
+  const q = h.to('mo@example.com')[0];
+  assert.match(q.body, /gone to another caregiver/i);
+  assert.match(q.body, /nothing against you/i, 'a decline that reads as a judgement stops people asking');
+  assert.match(q.body, /Someone closer/);
+});
+
+test('B3 a coverage request reaches the office and says nothing is scheduled yet', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.coverageRequested({
+    client: CLIENT, requestedByName: 'Ruth Bell', when: '2026-11-11 09:00–13:00',
+    note: 'Ada needs help with breakfast.', requestId: 'r1', ctaUrl: 'https://x.test/scheduling'
+  });
+  assert.ok(h.queued.length >= 1);
+  assert.match(h.queued[0].body, /Nothing is scheduled until/i,
+    'asking is not the same as having cover, and the office should not read it as booked');
+  assert.match(h.queued[0].body, /breakfast/);
+  assert.strictEqual(h.to('ada@example.com').length, 0, 'the client is not emailed their own request back');
+});
+
+test('B4 typed-in hours and a correction are different sentences', async () => {
+  const added = harness({ baaCovered: true });
+  await added.notifier.timeLogChanged({ user: CAREGIVER, when: 'Mon, Nov 10', clientName: 'Ada Bell', reason: 'Phone died', created: true, ctaUrl: 'https://x.test/p', logId: 't1' });
+  assert.match(added.to('mo@example.com')[0].subject, /added/i);
+
+  const fixed = harness({ baaCovered: true });
+  await fixed.notifier.timeLogChanged({ user: CAREGIVER, when: 'Mon, Nov 10', clientName: 'Ada Bell', reason: 'Clocked out late', created: false, ctaUrl: 'https://x.test/p', logId: 't1' });
+  assert.match(fixed.to('mo@example.com')[0].subject, /corrected/i);
+  assert.match(fixed.to('mo@example.com')[0].body, /tell the office/i,
+    'their pay record changed, so the notice has to give them a way to dispute it');
+});
+
+test('B5 the client and POA are told a care plan is waiting on them', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.carePlanAwaitingCoSign({ client: CLIENT, version: 2, authorName: 'Bethel Godwins' });
+  assert.strictEqual(h.to('ada@example.com').length, 1);
+  assert.strictEqual(h.to('ruth@example.com').length, 1);
+  assert.strictEqual(h.to('ken@example.com').length, 0);
+  assert.match(h.to('ada@example.com')[0].body, /Bethel Godwins/);
+  assert.match(h.to('ada@example.com')[0].body, /Tell us if anything in it is wrong before you sign/i,
+    'signing is consent, so the notice says they can object first');
+});
+
+test('B5 the provider holding the co-signature is told, and named no patient on an open transport', async () => {
+  const covered = harness({ baaCovered: true });
+  await covered.notifier.carePlanAwaitingProviderCoSign({ provider: RN, client: CLIENT, version: 2, authorName: 'Nia Hall', ctaUrl: 'https://x.test/clinical' });
+  assert.match(covered.to('bethel@godwinsfamilycarellc.com')[0].body, /Ada Bell/);
+  assert.match(covered.to('bethel@godwinsfamilycarellc.com')[0].body, /not complete until you sign/i);
+
+  const open = harness({ baaCovered: false });
+  await open.notifier.carePlanAwaitingProviderCoSign({ provider: RN, client: CLIENT, version: 2, authorName: 'Nia Hall', ctaUrl: 'https://x.test/clinical' });
+  assert.ok(!/Ada Bell/.test(bothHalves(open.to('bethel@godwinsfamilycarellc.com')[0])));
+});
+
+test('B6 the author who was blocked on a co-signature is told it landed', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.carePlanProviderCoSigned({ user: RN, client: CLIENT, version: 2, providerName: 'Dr Okafor', ctaUrl: 'https://x.test/clinical' });
+  const q = h.to('bethel@godwinsfamilycarellc.com')[0];
+  assert.match(q.body, /Dr Okafor/);
+  assert.match(q.body, /complete and filed/i);
+});
+
+test('B7 a referral accepted and a referral completed are different news', async () => {
+  const a = harness({ baaCovered: true });
+  await a.notifier.referralStepTaken({ user: RN, step: 'accepted', colleagueName: 'Courtney Hale', specialty: 'behavioral health', orderId: 'o1', ctaUrl: 'https://x.test/c' });
+  assert.strictEqual(a.queued[0].type, 'referral_accepted');
+  assert.match(a.queued[0].body, /hear again when it is completed/i);
+
+  const c = harness({ baaCovered: true });
+  await c.notifier.referralStepTaken({ user: RN, step: 'completed', colleagueName: 'Courtney Hale', specialty: 'behavioral health', orderId: 'o1', ctaUrl: 'https://x.test/c' });
+  assert.strictEqual(c.queued[0].type, 'referral_completed');
+  assert.match(c.queued[0].body, /note is on the order/i);
+});
+
+test('B7 no other referral step sends anything, and no patient is ever named', async () => {
+  const h = harness({ baaCovered: true });
+  for (const step of ['ordered', 'cancelled', 'sent', undefined]) {
+    const out = await h.notifier.referralStepTaken({ user: RN, step, orderId: 'o1' });
+    assert.strictEqual(out.notified, 0, `no notice for "${step}"`);
+  }
+  assert.strictEqual(h.queued.length, 0);
+  const named = harness({ baaCovered: true });
+  await named.notifier.referralStepTaken({ user: RN, step: 'completed', colleagueName: 'Courtney Hale', orderId: 'o1', ctaUrl: 'https://x.test/c' });
+  assert.ok(!/Ada/.test(bothHalves(named.queued[0])), 'a hand-off between colleagues is not a clinical summary');
+});
+
+test('B8 an abnormal result pages the clinician and is handed no patient at all', async () => {
+  const h = harness({ baaCovered: false });
+  await h.notifier.abnormalResultWaiting({ user: RN, resultId: 'r1', ctaPath: '/clinical' });
+  const q = h.to('bethel@godwinsfamilycarellc.com')[0];
+  assert.match(q.subject, /abnormal result is waiting/i);
+  assert.match(q.body, /two business days/i, 'it says what happens if it is left');
+  assert.strictEqual(q.phi, false, 'nothing about a patient reaches it, so it sends on any transport');
+  assert.match(q.ctaUrl, /^https?:\/\//, 'it builds an absolute link from the base URL itself');
+});
+
+test('B9 a payment receipt carries the amount only where the transport can take it', async () => {
+  const covered = harness({ baaCovered: true });
+  await covered.notifier.paymentReceived({ client: CLIENT, invoiceId: 'i1', amountLabel: '$40.00' });
+  assert.match(covered.to('ada@example.com')[0].body, /\$40\.00/);
+  assert.strictEqual(covered.to('ruth@example.com').length, 1, 'a POA manages the money');
+
+  const open = harness({ baaCovered: false });
+  await open.notifier.paymentReceived({ client: CLIENT, invoiceId: 'i1', amountLabel: '$40.00' });
+  assert.ok(!/\$40\.00/.test(bothHalves(open.to('ada@example.com')[0])));
+  assert.match(bothHalves(open.to('ada@example.com')[0]), /settled/i, 'it still says the statement is settled');
+});
+
+test('B10 clinical enrollment activation reaches the patient and their POA', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.clinicalEnrollmentActivated({ client: CLIENT });
+  assert.strictEqual(h.to('ada@example.com').length, 1);
+  assert.strictEqual(h.to('ruth@example.com').length, 1);
+  assert.strictEqual(h.to('ken@example.com').length, 0);
+  assert.match(h.to('ada@example.com')[0].body, /clinician will be in touch/i);
+});
+
+test('B11 each kind of access change has its own wording, and an unknown kind sends nothing', async () => {
+  const seen = new Set();
+  for (const change of ['mfa_reset', 'sessions_revoked', 'deactivated', 'role_changed']) {
+    const h = harness();
+    const out = await h.notifier.accountAccessChanged({ user: CAREGIVER, change, byName: 'GFC Admin', ctaUrl: 'https://x.test/login' });
+    assert.strictEqual(out.notified, 1, change);
+    const q = h.to('mo@example.com')[0];
+    assert.ok(!seen.has(q.subject), `${change} has wording of its own`);
+    seen.add(q.subject);
+    assert.match(q.body, /Changed by GFC Admin|GFC Admin/, `${change} says who did it`);
+    assert.strictEqual(q.phi, false, 'about their own account, not a patient record');
+  }
+  const h = harness();
+  const out = await h.notifier.accountAccessChanged({ user: CAREGIVER, change: 'promoted', byName: 'x' });
+  assert.strictEqual(out.notified, 0);
+  assert.strictEqual(h.queued.length, 0, 'an unknown change invents no wording');
+});
+
+test('B11 the two that lock somebody out tell them to call the office', async () => {
+  for (const change of ['mfa_reset', 'sessions_revoked', 'deactivated']) {
+    const h = harness();
+    await h.notifier.accountAccessChanged({ user: CAREGIVER, change, ctaUrl: 'https://x.test/login' });
+    assert.match(h.to('mo@example.com')[0].body, /call the office/i, `${change} gives them a way back in`);
+  }
+});
+
+test('B12 a shared document is announced, named only on a covered transport', async () => {
+  const covered = harness({ baaCovered: true });
+  await covered.notifier.documentSharedToPortal({ client: CLIENT, label: 'Visit summary', sharedByName: 'GFC Admin', uploadId: 'u1' });
+  assert.match(covered.to('ada@example.com')[0].body, /Visit summary/);
+  assert.strictEqual(covered.to('ruth@example.com').length, 1);
+
+  const open = harness({ baaCovered: false });
+  await open.notifier.documentSharedToPortal({ client: CLIENT, label: 'Visit summary', uploadId: 'u1' });
+  assert.ok(!/Visit summary/.test(bothHalves(open.to('ada@example.com')[0])));
+});
+
+test('every tier-2 notice renders both halves and declares its PHI marking', async () => {
+  const calls = [
+    ['shiftCancelled', { user: CAREGIVER, when: 'W', clientName: 'A', reason: 'r', shiftId: 's', ctaUrl: 'https://x.test/a' }],
+    ['caregiverVisitCancelled', { clientId: 'c1', when: 'W', shiftId: 's' }],
+    ['shiftClaimDeclined', { user: CAREGIVER, when: 'W', clientName: 'A', shiftId: 's', ctaUrl: 'https://x.test/a' }],
+    ['coverageRequested', { client: CLIENT, requestedByName: 'R', when: 'W', requestId: 'r', ctaUrl: 'https://x.test/a' }],
+    ['timeLogChanged', { user: CAREGIVER, when: 'W', reason: 'r', created: true, logId: 't', ctaUrl: 'https://x.test/a' }],
+    ['carePlanAwaitingCoSign', { client: CLIENT, version: 1, authorName: 'N' }],
+    ['carePlanAwaitingProviderCoSign', { provider: RN, client: CLIENT, version: 1, ctaUrl: 'https://x.test/a' }],
+    ['carePlanProviderCoSigned', { user: RN, client: CLIENT, version: 1, ctaUrl: 'https://x.test/a' }],
+    ['referralStepTaken', { user: RN, step: 'completed', orderId: 'o', ctaUrl: 'https://x.test/a' }],
+    ['abnormalResultWaiting', { user: RN, resultId: 'r', ctaPath: '/clinical' }],
+    ['paymentReceived', { client: CLIENT, invoiceId: 'i' }],
+    ['clinicalEnrollmentActivated', { client: CLIENT }],
+    ['accountAccessChanged', { user: CAREGIVER, change: 'role_changed', ctaUrl: 'https://x.test/a' }],
+    ['documentSharedToPortal', { client: CLIENT, label: 'L', uploadId: 'u' }]
+  ];
+  for (const [name, args] of calls) {
+    const h = harness({ baaCovered: true });
+    assert.strictEqual(typeof h.notifier[name], 'function', `${name} is exported`);
+    await h.notifier[name](args);
+    assert.ok(h.queued.length >= 1, `${name} queues something`);
+    for (const q of h.queued) {
+      assert.ok(q.subject && q.body && q.htmlBody, `${name} renders both halves`);
+      assert.match(q.htmlBody, /Godwins/, `${name} carries the house chrome`);
+      assert.strictEqual(typeof q.phi, 'boolean', `${name} declares whether it is PHI`);
+      assert.ok(q.relatedEntityId, `${name} carries a dedupe key`);
+    }
+  }
+});
+
+// ---- wiring guards for tier 2 ---------------------------------------------
+
+test('cancelling one shift tells the holder and the client', () => {
+  const s = stripLineComments(src('routes/scheduling.js'));
+  assert.match(s, /const notifyCancelled = async/, 'the pair lives in one helper');
+  assert.match(s, /notice\.shiftCancelled\(/);
+  assert.match(s, /notice\.caregiverVisitCancelled\(/);
+  assert.match(s, /\n\s+await notifyCancelled\(beforeRow, rows\[idx\], reason, req\.user\);/,
+    'called unconditionally on the not-in-progress branch, not behind a further condition');
+  assert.match(s, /new Date\(shift\.start\)\.getTime\(\) > Date\.now\(\)[\s\S]{0,200}caregiverVisitCancelled/,
+    'the CLIENT hears only about a visit still to come');
+});
+
+test('a declined claim reads the claimant BEFORE the release clears them', () => {
+  const s = stripLineComments(src('routes/scheduling.js'));
+  const claim = s.indexOf('const claimant = result.shift && result.shift.caregiver_id;');
+  const release = s.indexOf('await releaseCaregiver(result.rows, req.params.id, declineReason);');
+  assert.ok(claim !== -1 && release !== -1);
+  assert.ok(claim < release, 'reading it afterwards would leave nobody to tell');
+});
+
+test('the time-log notice is NOT in the shared writer, which would double-send', () => {
+  const s = stripLineComments(src('routes/scheduling.js'));
+  const writer = s.indexOf('const applyTimeLogEdit');
+  const writerEnd = s.indexOf('router.put(\'/api/scheduling/time-logs/:id\'');
+  assert.ok(writer !== -1 && writerEnd > writer);
+  assert.ok(!/timeLogChanged/.test(s.slice(writer, writerEnd)),
+    'an APPROVED adjustment request comes through the same writer and already emails');
+  assert.strictEqual((s.match(/notice\.timeLogChanged\(/g) || []).length, 2,
+    'exactly two call sites: the typed entry and the direct admin correction');
+});
+
+test('a document share notifies only when it is being shared', () => {
+  const s = stripLineComments(src('server.js'));
+  assert.match(s, /if \(shared\) \{[\s\S]{0,400}?notify\.documentSharedToPortal/,
+    'unsharing is silent: there is nothing for the patient to do about it');
+});
+
+test('the access-change notice reads a snapshot taken before the write', () => {
+  const s = stripLineComments(src('server.js'));
+  const snap = s.indexOf('const accessBefore = {');
+  const write = s.indexOf("await db.set('users', users);", snap);
+  const notice = s.indexOf('change: \'role_changed\'', snap);
+  assert.ok(snap !== -1 && write > snap && notice > write,
+    'a shallow read after the write would compare the row to itself');
+  assert.match(s, /users\[idx\]\.id !== req\.user\.id/, 'and nobody is emailed about editing their own account');
+});
+
+test('an abnormal result pages the ordering clinician from the filing route', () => {
+  const s = stripLineComments(src('server.js'));
+  assert.match(s, /result\.interpretation === 'abnormal'[\s\S]{0,400}?notify\.abnormalResultWaiting/);
+  assert.match(s, /ctaPath: appLinks\.PATHS\.CLINICAL/,
+    'a PATH, because this route is lifted out of server.js by a test where getAppBaseUrl is not in scope');
+});
+
+test('the care-plan provider set is resolved in server.js, not in the notifier', () => {
+  const s = stripLineComments(src('server.js'));
+  assert.match(s, /clinicalRoles\.resolveClinicalRole\(u\) === 'provider'[\s\S]{0,400}?carePlanAwaitingProviderCoSign/);
+  assert.ok(!/'provider'/.test(stripLineComments(src('notifications.js')).split('carePlanAwaitingProviderCoSign')[1] || ''),
+    'notifications.js must not restate the clinical role vocabulary');
+});
+
+test('a co-signature notice is never sent to the person who signed', () => {
+  const s = stripLineComments(src('server.js'));
+  assert.match(s, /plan\.authoredById !== req\.user\.id[\s\S]{0,400}?carePlanProviderCoSigned/);
+  assert.match(s, /referrerId !== req\.user\.id[\s\S]{0,400}?referralStepTaken/,
+    'nor to a clinician who accepted their own referral');
+});
+
+// ===========================================================================
 // Build enforcement — the wiring, not the wording
 // ===========================================================================
 

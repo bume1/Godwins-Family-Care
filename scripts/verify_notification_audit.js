@@ -150,10 +150,55 @@ const PW = 'Probe12345!';
       !pk.some(n => n.recipientEmail === caregiver.email), 'caregiver was emailed');
   }
 
+  // ── C2. An admin changes somebody's access ─────────────────────────────
+  console.log("\nC2. Access changes (the person was never told)");
+  const mfa = await call('POST', `/api/users/${caregiver.id}/mfa/reset`, admin, {});
+  ok('the authenticator reset is accepted', mfa.status === 200, mfa.body);
+  const mfaN = await of('account_mfa_reset');
+  ok('the person is emailed', mfaN.some(nn => nn.recipientEmail === caregiver.email), mfaN.map(nn => nn.recipientEmail));
+  ok('and told how to get back in', mfaN.some(nn => /call the office/i.test(bodyOf(nn))), 'no way back in named');
+
+  const rev = await call('POST', `/api/users/${caregiver.id}/sessions/revoke`, admin, {});
+  ok('the sign-out-everywhere is accepted', rev.status === 200, rev.body);
+  ok('the person is emailed about that too',
+    (await of('account_sessions_revoked')).some(nn => nn.recipientEmail === caregiver.email), 'not told');
+
+  const roleChange = await call('PUT', `/api/users/${caregiver.id}`, admin, { licenseLevel: 'lpn', clinicalRole: 'rn' });
+  if (roleChange.status !== 200) {
+    skip('a role change emails the person', `the edit was refused (${roleChange.status} ${(roleChange.body || {}).code || ''}); covered by test B11`);
+  } else {
+    const rc = await of('account_role_changed');
+    ok('a role change emails the person', rc.some(nn => nn.recipientEmail === caregiver.email), rc.map(nn => nn.recipientEmail));
+  }
+  ok('nobody else is emailed about another account changing',
+    !(await rows()).some(nn => /^account_/.test(String(nn.type || '')) && nn.recipientEmail === ADMIN_EMAIL),
+    'an admin was emailed about somebody else');
+
+  // ── C3. A family asks for cover ────────────────────────────────────────
+  console.log('\nC3. A coverage request (the admin queue was poll-only)');
+  const clientAcct = await mk('Ada Probe', 'client', { practiceName: `Ada Probe ${STAMP} (TEST DATA)` });
+  if (!clientAcct.token) {
+    skip('a coverage request reaches the office', 'the client account could not sign in here; covered by test B3');
+  } else {
+    const ask = await call('POST', '/api/scheduling/shift-requests', clientAcct.token, {
+      date: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10), start: '09:00', end: '13:00',
+      careNeeds: `Probe request ${STAMP}`
+    });
+    if (ask.status !== 200) {
+      skip('a coverage request reaches the office', `the request was refused (${ask.status} ${(ask.body || {}).code || ''}); covered by test B3`);
+    } else {
+      const cov = await of('coverage_requested');
+      ok('a coverage request reaches the office', cov.length >= 1, cov.length);
+      ok('and says nothing is scheduled yet', cov.some(nn => /Nothing is scheduled/i.test(bodyOf(nn))), bodyOf(cov[0] || {}));
+      ok('the family is not emailed their own request back',
+        !cov.some(nn => nn.recipientEmail === clientAcct.email), 'the asker was emailed');
+    }
+  }
+
   // ── D. Who is never emailed ─────────────────────────────────────────────
   console.log('\nD. Who is never emailed by these');
   const staffOnly = (await rows()).filter(n => n && ['feedback_submitted', 'password_reset_requested',
-    'self_signup_verified', 'family_invite_requested', 'caregiver_packet_submitted'].includes(n.type));
+    'self_signup_verified', 'family_invite_requested', 'caregiver_packet_submitted', 'coverage_requested'].includes(n.type));
   const roster = (await call('GET', '/api/users', admin)).body || [];
   const byEmail = new Map((Array.isArray(roster) ? roster : []).map(u => [u.email, u]));
   ok('no office notice reached a client or a family account',
@@ -167,6 +212,15 @@ const PW = 'Probe12345!';
   // ── E. What this environment cannot reach ───────────────────────────────
   console.log('\nE. Out of reach from here, and where each is proven instead');
   skip('a returned caregiver document', 'needs a stored document, which needs Drive — test/notification_audit.test.js A2 renders it');
+  skip('a cancelled shift', 'needs a posted shift against an enrolled client and a cleared caregiver — covered by B1');
+  skip('a declined claim', 'needs a claimed shift — covered by B2');
+  skip('an admin time-log entry', 'needs a schedulable caregiver and a client with coordinates — covered by B4');
+  skip('a care plan waiting on a signature', 'needs an authored plan — covered by B5');
+  skip('a referral accepted or completed', 'needs an OpenEMR encounter — covered by B7');
+  skip('an abnormal result', 'needs an order and a filed document — covered by B8');
+  skip('a Stripe payment', 'needs a signed Stripe webhook — covered by B9');
+  skip('clinical enrollment activation', 'needs the full IHPC checklist complete — covered by B10');
+  skip('a document shared to the portal', 'needs a client upload in Drive — covered by B12');
   skip('a closed incident', 'needs a visit log against a cleared shift — covered by A3');
   skip('a removed client document', 'needs a client upload in Drive — covered by A4');
   skip('a rejected contractor invoice', 'needs a contractor payroll profile and a submitted invoice — covered by A5');

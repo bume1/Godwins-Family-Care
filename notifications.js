@@ -1674,6 +1674,413 @@ function createNotifier(deps) {
     }
   }
 
+  // ==========================================================================
+  // TIER 2 OF THE 2026-11-09 AUDIT — somebody is blocked, or affected, and
+  // was not told. Each of these had a suitable notice already built beside it
+  // and simply was not wired to the event.
+  // ==========================================================================
+
+  // ---- B1. A future shift is cancelled -------------------------------------
+  // The largest gap in the app. Bulk-remove emailed; cancelling ONE shift told
+  // the holder only when it was already in progress, and told the client
+  // nothing at all, ever.
+  async function shiftCancelled({ user, when, clientName, reason, ctaUrl, actorId, shiftId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const detail = transportAllowsDetail();
+      return { notified: await send({
+        type: 'shift_cancelled', user,
+        subject: detail ? `Shift cancelled — ${when}` : 'A shift has been cancelled',
+        headline: 'A shift has been cancelled',
+        paragraphs: detail
+          ? [`Your ${when} shift${clientName ? ` for ${clientName}` : ''} has been cancelled. You do not need to go.`,
+             'Your schedule in the app is up to date.']
+          : ['One of your shifts has been cancelled. Open the app to see which one.',
+             'For privacy we do not put visit details in email.'],
+        callout: detail ? (reason || null) : null,
+        calloutLabel: detail && reason ? 'Why it was cancelled' : null,
+        ctaUrl, ctaLabel: 'Open my schedule',
+        relatedEntityId: `${shiftId}:cancelled`, relatedEntityType: 'shift',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[SHIFT] cancel notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // The client's half. Opens with "Your caregiver visit" so the POA rewrite
+  // reaches it — the alternation is ordered and the longer phrases come first,
+  // which is the bug this wording exists to stay on the right side of.
+  async function caregiverVisitCancelled({ clientId, when, shiftId, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId,
+        type: 'caregiver_visit_cancelled',
+        subject: detail ? `Your caregiver visit on ${when} is cancelled` : 'A caregiver visit has been cancelled',
+        headline: 'A caregiver visit has been cancelled',
+        paragraphs: detail
+          ? [`Your caregiver visit on ${when} has been cancelled.`,
+             'Call the office if you need somebody that day and we will arrange cover.']
+          : ['One of your caregiver visits has been cancelled. Sign in to your portal to see which one.',
+             'For privacy we do not put visit details in email.'],
+        // The office's reason for cancelling is internal and is deliberately
+        // not forwarded: it can name staffing, illness or a payment question.
+        actorId, entityId: `${shiftId}:cancelled-client`, entityType: 'shift'
+      });
+    } catch (e) {
+      console.error('[SHIFT] client cancel notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B2. The office declined a caregiver's claim -------------------------
+  // They put their hand up for work and heard nothing back.
+  async function shiftClaimDeclined({ user, when, clientName, reason, ctaUrl, actorId, shiftId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const detail = transportAllowsDetail();
+      return { notified: await send({
+        type: 'shift_claim_declined', user,
+        subject: 'A shift you asked for went to somebody else',
+        headline: 'That shift went to somebody else',
+        paragraphs: detail
+          ? [`The ${when} shift${clientName ? ` for ${clientName}` : ''} has gone to another caregiver.`,
+             'It is nothing against you. Open the app for the shifts still going.']
+          : ['A shift you asked for has gone to another caregiver. Open the app for the ones still going.'],
+        callout: detail ? (reason || null) : null,
+        calloutLabel: detail && reason ? 'What the office said' : null,
+        ctaUrl, ctaLabel: 'See open shifts',
+        relatedEntityId: `${shiftId}:claim-declined`, relatedEntityType: 'shift',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[SHIFT] claim-declined notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B3. A client or POA asked for cover ---------------------------------
+  // The request wrote a row and the admin queue was poll-only, so asking for
+  // care depended on somebody opening a screen.
+  async function coverageRequested({ client, requestedByName, when, note, requestId, ctaUrl, actorId }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const detail = transportAllowsDetail();
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'coverage_requested', user: u,
+          subject: 'A family has asked for cover',
+          headline: 'A family has asked for cover',
+          paragraphs: detail
+            ? [`${requestedByName || 'A client'} asked for a caregiver${client && client.name ? ` for ${client.name}` : ''}${when ? ` on ${when}` : ''}.`,
+               'Nothing is scheduled until somebody posts or assigns a shift.']
+            : ['A client has asked for a caregiver visit. Open the board to post or assign it.',
+               'Nothing is scheduled until somebody does.'],
+          callout: detail ? (note || null) : null,
+          calloutLabel: detail && note ? 'What they asked for' : null,
+          ctaUrl, ctaLabel: 'Open the shift board',
+          relatedEntityId: `shiftreq:${requestId}`, relatedEntityType: 'shift_request',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[SHIFT] coverage-request notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B4. An admin typed in or corrected somebody's hours ----------------
+  // The approval path emails both ways. A direct edit changed what a person's
+  // timesheet says about a day they worked and told them nothing.
+  async function timeLogChanged({ user, when, clientName, reason, created, ctaUrl, actorId, logId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const detail = transportAllowsDetail();
+      return { notified: await send({
+        type: 'time_log_changed', user,
+        subject: created ? 'Hours have been added to your timesheet' : 'Your recorded hours have been corrected',
+        headline: created ? 'Hours have been added for you' : 'Your recorded hours have been corrected',
+        paragraphs: detail
+          ? [created
+              ? `The office has recorded hours for your ${when} visit${clientName ? ` with ${clientName}` : ''}.`
+              : `The office has corrected the hours recorded for your ${when} visit${clientName ? ` with ${clientName}` : ''}.`,
+             'Check your pay screen, and tell the office straight away if that does not match the time you worked.']
+          : [created
+              ? 'The office has recorded hours on your timesheet. Open your pay screen to check them.'
+              : 'The office has corrected hours on your timesheet. Open your pay screen to check them.',
+             'Tell the office straight away if they do not match the time you worked.'],
+        callout: detail ? (reason || null) : null,
+        calloutLabel: detail && reason ? 'Reason given' : null,
+        ctaUrl, ctaLabel: 'Open my hours',
+        relatedEntityId: `tlog:${logId}:${created ? 'created' : 'edited'}`, relatedEntityType: 'time_log',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[SHIFT] time-log notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B5. A care plan is waiting on a signature --------------------------
+  async function carePlanAwaitingCoSign({ client, version, authorName, actorId }) {
+    try {
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'care_plan_awaiting_cosign',
+        subject: 'Your care plan is ready to sign',
+        headline: 'Your care plan is ready for your signature',
+        paragraphs: [
+          `${authorName || 'Your nurse'} has written your plan of care. It sets out what we will do, how often, and what we are working towards.`,
+          'Read it in your portal and sign it there. Tell us if anything in it is wrong before you sign.'
+        ],
+        actorId, entityId: `${client.id}:careplan:v${version}:await`, entityType: 'care_plan'
+      });
+    } catch (e) {
+      console.error('[PLAN] awaiting-cosign notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // The provider whose signature the plan is held for. An IHPC plan is not
+  // complete without it, and nothing told them it existed.
+  async function carePlanAwaitingProviderCoSign({ provider, client, version, authorName, ctaUrl, actorId }) {
+    try {
+      if (!provider || !provider.email) return { notified: 0, reason: 'no provider with an email address' };
+      const detail = transportAllowsDetail();
+      return { notified: await send({
+        type: 'care_plan_awaiting_provider', user: provider,
+        subject: 'A care plan is waiting for your signature',
+        headline: 'A care plan is waiting for your signature',
+        paragraphs: detail
+          ? [`${authorName || 'A nurse'} has authored a plan of care for ${client && client.name ? client.name : 'a patient'} and it is held for your co-signature.`,
+             'The plan is not complete until you sign it.']
+          : ['A plan of care is held for your co-signature. Open the workspace to sign it.',
+             'For privacy we do not name the patient in email.'],
+        ctaUrl, ctaLabel: 'Open the care plan',
+        relatedEntityId: `careplan:${client && client.id}:v${version}:provider`, relatedEntityType: 'care_plan',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[PLAN] provider-cosign notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B6. The provider signed it, so the author is unblocked -------------
+  async function carePlanProviderCoSigned({ user, client, version, providerName, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const detail = transportAllowsDetail();
+      return { notified: await send({
+        type: 'care_plan_provider_cosigned', user,
+        subject: 'A care plan you wrote has been signed off',
+        headline: 'Your care plan has been signed off',
+        paragraphs: detail
+          ? [`${providerName || 'The provider'} has co-signed the plan of care you wrote for ${client && client.name ? client.name : 'your patient'}.`,
+             'It is complete and filed.']
+          : ['A plan of care you wrote has been co-signed and is complete.',
+             'For privacy we do not name the patient in email.'],
+        ctaUrl, ctaLabel: 'Open the care plan',
+        relatedEntityId: `careplan:${client && client.id}:v${version}:cosigned`, relatedEntityType: 'care_plan',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[PLAN] cosigned notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B7. An internal referral moved ------------------------------------
+  // The route's own reply said the referrer "can read your note on the order",
+  // which is to say they find out by looking.
+  async function referralStepTaken({ user, step, colleagueName, specialty, orderId, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      if (!['accepted', 'completed'].includes(step)) return { notified: 0, reason: `no notice for step "${step}"` };
+      const detail = transportAllowsDetail();
+      const done = step === 'completed';
+      return { notified: await send({
+        type: done ? 'referral_completed' : 'referral_accepted', user,
+        // No patient in the subject, and none in the body either: an order
+        // reference is enough to find it, and this is a hand-off between
+        // colleagues rather than a clinical summary.
+        subject: done ? 'A referral you placed has been completed' : 'A referral you placed has been accepted',
+        headline: done ? 'Your referral has been completed' : 'Your referral has been accepted',
+        paragraphs: detail
+          ? [`${colleagueName || 'A colleague'} has ${done ? 'completed' : 'accepted'} the${specialty ? ` ${specialty}` : ''} referral you placed.`,
+             done ? 'Their note is on the order in the workspace.' : 'You will hear again when it is completed.']
+          : [`A referral you placed has been ${done ? 'completed' : 'accepted'}. Open the workspace to read it.`,
+             'For privacy we do not put patient details in email.'],
+        ctaUrl, ctaLabel: 'Open the order',
+        relatedEntityId: `order:${orderId}:${step}`, relatedEntityType: 'clinical_order',
+        actorId, phi: detail
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ORDER] referral-step notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B8. An abnormal result is waiting ---------------------------------
+  // Only a CRITICAL result paged anybody. An abnormal one sat in the inbox.
+  // Like the critical notice, this builder is handed NO patient and no result:
+  // a notice that cannot be given one cannot leak one, which is the strongest
+  // guarantee available and the reason the critical notice is shaped this way.
+  // Takes a PATH and builds the absolute link from the base URL it already
+  // has, rather than being handed a finished one. The route that files a
+  // result is lifted out of server.js and run by test/patient_publish.test.js,
+  // where `getAppBaseUrl` is not in scope; appLinks is. So the path crosses
+  // the boundary and the URL is built here.
+  async function abnormalResultWaiting({ user, ctaPath, resultId, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const ctaUrl = `${await getAppBaseUrl()}${ctaPath || '/clinical'}`;
+      return { notified: await send({
+        type: 'abnormal_result_waiting', user,
+        subject: 'An abnormal result is waiting for you',
+        headline: 'An abnormal result is waiting for you',
+        paragraphs: [
+          'A result marked abnormal has been filed against an order of yours and is waiting in your Results inbox.',
+          'It needs acknowledging with a note saying what is being done. The office is told if it is still unanswered after two business days.'
+        ],
+        ctaUrl, ctaLabel: 'Open my results',
+        relatedEntityId: `result:${resultId}:abnormal`, relatedEntityType: 'clinical_result',
+        // No patient, no value, no interpretation reaches this email.
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[RESULT] abnormal notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B9. A payment went through ----------------------------------------
+  // Somebody paid money and got nothing back. The amount rides only where the
+  // transport can carry it, because what a patient was charged is theirs.
+  async function paymentReceived({ client, invoiceId, amountLabel, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'payment_received',
+        subject: 'Thank you — your payment has gone through',
+        headline: 'Your payment has gone through',
+        paragraphs: detail
+          ? [`We have received your payment${amountLabel ? ` of ${amountLabel}` : ''}. Your statement is settled.`,
+             'Your statements and payment history are in your portal.']
+          : ['We have received your payment and your statement is settled.',
+             'Your statements are in your portal.'],
+        actorId, entityId: `invoice:${invoiceId}:paid`, entityType: 'patient_invoice'
+      });
+    } catch (e) {
+      console.error('[BILLING] payment notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B10. Clinical enrollment was activated ----------------------------
+  // The PHC arm emails on approval. The clinical arm said "IHPC enrollment
+  // ACTIVATED" to a screen and nobody else.
+  async function clinicalEnrollmentActivated({ client, actorId }) {
+    try {
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'clinical_enrollment_activated',
+        subject: 'You are enrolled for in-home medical care',
+        headline: 'You are enrolled for in-home medical care',
+        paragraphs: [
+          'Everything we needed is on file and your in-home primary care is active. Your clinician will be in touch about your visits.',
+          'Your visits, your plan of care and your records are in your portal.'
+        ],
+        actorId, entityId: `${client.id}:ihpc-enrolled`, entityType: 'client'
+      });
+    } catch (e) {
+      console.error('[ENROLL] clinical activation notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B11. An admin changed somebody's access ---------------------------
+  // The precedent is the password-changed confirmation: a change to how
+  // somebody signs in, or to what they may do, is theirs to know about.
+  const ACCESS_CHANGES = Object.freeze({
+    mfa_reset: {
+      subject: 'Your authenticator has been reset',
+      headline: 'Your authenticator has been reset',
+      lines: ['An administrator has reset the authenticator app on your account, so you will set it up again the next time you sign in.',
+              'You have also been signed out everywhere. If you did not ask for this, call the office right away.']
+    },
+    sessions_revoked: {
+      subject: 'You have been signed out everywhere',
+      headline: 'You have been signed out everywhere',
+      lines: ['An administrator has signed your account out on every device. Signing in again is all that is needed.',
+              'If you did not ask for this, call the office right away.']
+    },
+    deactivated: {
+      subject: 'Your GFC account has been turned off',
+      headline: 'Your account has been turned off',
+      lines: ['An administrator has deactivated your GFC account, so you will not be able to sign in.',
+              'If that is not what you expected, call the office.']
+    },
+    role_changed: {
+      subject: 'What you can do in the GFC app has changed',
+      headline: 'Your access has changed',
+      lines: ['An administrator has changed your role, so what you can see and do in the app has changed.',
+              'Sign in to see your screens as they are now. Call the office if something you need has gone.']
+    }
+  });
+  async function accountAccessChanged({ user, change, byName, ctaUrl, actorId }) {
+    try {
+      if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
+      const copy = ACCESS_CHANGES[change];
+      if (!copy) return { notified: 0, reason: `no notice for change "${change}"` };
+      return { notified: await send({
+        type: `account_${change}`, user,
+        subject: copy.subject, headline: copy.headline,
+        paragraphs: copy.lines,
+        callout: byName ? `Changed by ${byName}.` : null,
+        calloutLabel: byName ? 'Who changed it' : null,
+        ctaUrl, ctaLabel: 'Open the app',
+        relatedEntityId: `access:${user.id}:${change}:${distinctMoment()}`, relatedEntityType: 'account',
+        // About the recipient's own account, not a patient's record.
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[ACCOUNT] access-change notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- B12. A document was shared to the portal --------------------------
+  // Sharing makes a document readable by the patient. They were never told it
+  // was there, so it sat unread behind a tab.
+  async function documentSharedToPortal({ client, label, sharedByName, uploadId, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'document_shared',
+        subject: 'A document has been added to your portal',
+        headline: 'A new document is in your portal',
+        paragraphs: detail
+          ? [`${sharedByName || 'Our office'} has put "${label || 'a document'}" in your portal for you to read.`,
+             'You can open it any time from Documents.']
+          : ['A new document is in your portal for you to read. Sign in to open it.',
+             'For privacy we do not name documents in email.'],
+        actorId, entityId: `upload:${uploadId}:shared`, entityType: 'client_document'
+      });
+    } catch (e) {
+      console.error('[PHC] document-shared notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
     // who hears about a client: the client and the POA of THAT client
     clientSideRecipients, ctaForRecipient,
@@ -1698,7 +2105,12 @@ function createNotifier(deps) {
     // gaps closed by the 2026-11-09 notification audit
     caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,
     clientDocumentRemoved, contractorInvoiceDecided,
-    passwordResetRequested, selfSignupVerified, familyInviteRequested, feedbackSubmitted
+    passwordResetRequested, selfSignupVerified, familyInviteRequested, feedbackSubmitted,
+    // tier 2 of the same audit: somebody blocked or affected and not told
+    shiftCancelled, caregiverVisitCancelled, shiftClaimDeclined, coverageRequested,
+    timeLogChanged, carePlanAwaitingCoSign, carePlanAwaitingProviderCoSign,
+    carePlanProviderCoSigned, referralStepTaken, abnormalResultWaiting,
+    paymentReceived, clinicalEnrollmentActivated, accountAccessChanged, documentSharedToPortal
   };
 }
 

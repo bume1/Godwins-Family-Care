@@ -85,11 +85,11 @@ The caregiver document route's own comment has always read *"the caregiver is to
 
 ---
 
-## 3. Not fixed here: the twelve where somebody is blocked and not told
+## 3. Also fixed: the twelve where somebody was blocked and not told
 
-Each has a suitable notice already built that is simply not wired. Recommended next, in this order.
+Every one of these had a suitable notice built beside it and no wire to the event.
 
-| # | What happens | Who should hear | Note |
+| # | What happens | Who hears now | Note |
 |---|---|---|---|
 | G18 | **A future shift is cancelled** | the caregiver **and** the client and POA | the largest gap in the app. Bulk-remove emails; single-cancel does not. The holder is told only if the shift was already in progress |
 | G19 | A caregiver's claim is declined | the caregiver who claimed it | `shift_change_declined` is the right shape |
@@ -103,6 +103,25 @@ Each has a suitable notice already built that is simply not wired. Recommended n
 | G47/49/50 | An admin resets MFA, deactivates an account, or changes a role or clinical authority | the person | `sendPasswordChangedEmail` is the precedent for exactly this |
 | G23 | An admin creates or edits a time log | the caregiver whose hours changed | the approval path emails; the direct edit does not |
 | G31 | A document is shared to a patient's portal | the client and POA | they are never told it is there |
+
+### Decisions inside these twelve, worth not undoing
+
+- **A cancelled shift has two audiences and two rules.** The person who held it is told whatever the date, because it is their work and their pay. The **client is told only about a visit still to come**, since "your visit is cancelled" is false about one that already happened. The office's reason reaches the caregiver and **never the client**: it can name staffing, illness or a payment question. The client's notice offers to arrange cover instead.
+- **The client's cancellation opens with "Your caregiver visit"** so the POA rewrite reaches it. That rewrite matches the opening words and the alternation is ordered, which has already caused one real bug. Any reworded opening has to stay on the right side of it, and the editable-copy work replaces the mechanism entirely.
+- **A declined claim says it is nothing against them.** A decline that reads as a judgement stops people putting their hand up.
+- **The time-log notice is deliberately NOT inside `applyTimeLogEdit`.** That shared writer is also the path an approved adjustment request comes through, and that path already emails. Putting it in the writer would send two emails for one correction. Two call sites, build-enforced.
+- **A declined claim reads the claimant before the release**, which clears the person. Reading it afterwards would leave nobody to tell, and a test pins the order.
+- **An abnormal result pages the ordering clinician and is handed no patient, no value and no interpretation** — the same shape as the critical notice, because a builder that cannot be given a patient cannot leak one. A test asserts the exact argument set.
+- **The abnormal notice takes a PATH and builds its own absolute link.** The filing route is lifted out of `server.js` and run by `test/patient_publish.test.js`, where `getAppBaseUrl` is not in scope. The path crosses the boundary; the URL is built in the notifier.
+- **The care-plan provider set is resolved in `server.js`**, never in the notifier, which must not restate the clinical role vocabulary.
+- **Nobody is told about their own action.** Not the provider who co-signed, not the clinician who accepted their own referral, not an admin editing their own account.
+- **Access changes read a snapshot taken before the write.** A shallow read afterwards compares the row to itself, which is the aliasing trap this repo has paid for before.
+- **Unsharing a document is silent.** There is nothing for the patient to do about it.
+- **An unknown kind of access change, and any referral step that is not accepted or completed, send nothing.** Neither invents wording for a state nobody designed.
+
+### One deliberate omission inside this tier
+
+The audit noted that a Stripe payment tells neither the patient nor the office. The **patient receipt is built**; the office notice is not. Payments are visible on the billing screen, which the office works daily, and an email per payment is the kind of traffic that teaches people to stop reading email. Say the word if you want it.
 
 ---
 
@@ -144,16 +163,16 @@ Real gaps, but wiring them all would create mail that trains people to ignore ma
 
 ## Verified
 
-- `test/notification_audit.test.js`: **31 tests, 14 of 14 mutations caught.** Every assertion renders the notice and reads the delivered subject and body back.
+- `test/notification_audit.test.js`: **58 tests, 34 of 34 mutations caught** (14 on tier 1, 20 on tier 2). Every assertion renders the notice and reads the delivered subject and body back.
 - `test/welcome_packet.test.js`: the harness was **repointed, not patched to pass.** It now builds the real notifier, and the assertion reads a recipient address rather than checking the queue was called.
-- Full suite **3612, 0 failing** (1 skipped, pre-existing).
-- `scripts/verify_notification_audit.js`: **21 passed, 0 failed, 7 reported as SKIPPED** over real HTTP. The welcome-packet notice is driven end to end — a caregiver submits, the office is emailed, and every row carries a recipient address, which had never once happened. The seven skips need Drive, an EMR encounter or a hashed token this environment cannot present, and each names the test that covers it.
+- Full suite **3612, 0 failing** (1 skipped, pre-existing). `test/patient_publish.test.js` was **repointed, not patched to pass**: its "ZERO notices at filing" rule is about the PATIENT, and an abnormal result now pages the CLINICIAN at filing, so the assertions name the patient-facing notices explicitly and a new one proves the clinician paging.
+- `scripts/verify_notification_audit.js`: **31 passed, 0 failed, 16 reported as SKIPPED** over real HTTP, and every skip names the test that covers it. The welcome-packet notice is driven end to end — a caregiver submits, the office is emailed, and every row carries a recipient address, which had never once happened. The seven skips need Drive, an EMR encounter or a hashed token this environment cannot present, and each names the test that covers it.
 - The probe asserts the PHI gate **in whichever direction the deployment is in**: with no transport configured a sandbox is not BAA-covered, so it proves the free text and the requester's address are ABSENT. Asserting only the detailed case would fail on a correct app; asserting only the vague case would pass on a leak.
 - Two of my own guards failed on their first run and both are recorded rather than quietly fixed: a test scanned my own explanatory comment for the word it was forbidding (*strip comments before any source scan*, the house rule pointed at my own test), and the dedupe-key test caught a genuine `Date.now()` collision in code I had just written.
 
 ## Open for the owner
 
-1. **The twelve in §3**, which is the next piece of work. The cancelled shift is the one to do first.
-2. **The fifty-two in §4**, with a recommendation against each. Pick any you want wired.
+1. **The fifty-two in §4**, with a recommendation against each. Pick any you want wired.
+2. **The office half of the Stripe receipt**, deliberately left out above.
 3. **The queue bypass in §5.**
 4. **The editable template library**, which is the other half of the original ask and is a larger piece: roughly 70 emails, of which 8 are editable today and 2 of those drive a live GFC email.

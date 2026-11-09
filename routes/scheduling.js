@@ -586,6 +586,20 @@ module.exports = function createSchedulingRoutes(deps) {
       await logActivity(req.user.id, row.requested_by_name, 'shift_requested', 'shift_request', row.id,
         { clientId: client.id, date: row.date, enrollmentStatus: row.client_enrollment_status });
 
+      // The admin queue was poll-only, so asking for care depended on
+      // somebody opening a screen (audit, 2026-11-09).
+      try {
+        const notice = notifier();
+        if (notice) {
+          await notice.coverageRequested({
+            client, requestedByName: row.requested_by_name,
+            when: `${row.date} ${row.start}–${row.end}`,
+            note: row.care_needs || null, requestId: row.id,
+            ctaUrl: links.PATHS.SCHEDULING, actorId: req.user.id
+          });
+        }
+      } catch (e) { console.error('[SHIFT] coverage-request notice failed (non-fatal):', e.message); }
+
       res.json({ shiftRequest: row });
     } catch (error) {
       console.error('Shift request error:', error);
@@ -1773,7 +1787,25 @@ module.exports = function createSchedulingRoutes(deps) {
           : null
       });
       if (result.error) return res.status(result.error.status).json(result.error.body);
-      await releaseCaregiver(result.rows, req.params.id, String((req.body || {}).reason || '').trim());
+      // Captured BEFORE the release: releaseCaregiver clears the person, so
+      // reading it afterwards would leave nobody to tell.
+      const claimant = result.shift && result.shift.caregiver_id;
+      const declineReason = String((req.body || {}).reason || '').trim();
+      await releaseCaregiver(result.rows, req.params.id, declineReason);
+      // They put their hand up for work and heard nothing back (audit, 2026-11-09).
+      try {
+        const notice = notifier();
+        if (notice && claimant) {
+          const who = (await getUsers()).find(u => u && u.id === claimant);
+          if (who) {
+            await notice.shiftClaimDeclined({
+              user: who, when: time.fmtDateTime(result.shift.start),
+              clientName: result.shift.client_name || null, reason: declineReason,
+              ctaUrl: links.shiftFor(), actorId: req.user.id, shiftId: req.params.id
+            });
+          }
+        }
+      } catch (e) { console.error('[SHIFT] claim-declined notice failed (non-fatal):', e.message); }
       res.json({ shift: publicShift((await readRows('shifts')).find(r => r.id === req.params.id)) });
     } catch (error) {
       console.error('Shift decline-claim error:', error);
@@ -1971,6 +2003,35 @@ module.exports = function createSchedulingRoutes(deps) {
   // The caregiver is standing in the client's home with their clock stopped
   // from under them, so they are told at once — and told their hours are kept,
   // because that is the first thing anybody worries about.
+  // A cancelled shift that had not started. Two audiences, two rules: the
+  // person who held it is told whatever the date, because it is their work and
+  // their pay; the CLIENT is told only about a visit still to come, since
+  // "your visit is cancelled" is false about one that already happened.
+  const notifyCancelled = async (before, shift, reason, actor) => {
+    try {
+      const notice = notifier();
+      if (!notice) return;
+      const when = time.fmtDateTime(shift.start);
+      const holderId = (before && before.caregiver_id) || shift.caregiver_id || shift.released_from_id || null;
+      if (holderId) {
+        const holder = (await getUsers()).find(u => u && u.id === holderId);
+        if (holder) {
+          await notice.shiftCancelled({
+            user: holder, when, clientName: shift.client_name || null, reason,
+            ctaUrl: links.shiftFor(), actorId: actor.id, shiftId: shift.id
+          });
+        }
+      }
+      if (new Date(shift.start).getTime() > Date.now()) {
+        await notice.caregiverVisitCancelled({
+          clientId: shift.client_id, when, shiftId: shift.id, actorId: actor.id
+        });
+      }
+    } catch (e) {
+      console.error('[SHIFT] cancel notices failed (non-fatal):', e.message);
+    }
+  };
+
   const notifyOfficeEnded = async (shift, log, reason, actor) => {
     if (!shift.caregiver_id) return;
     const holder = await freshUser(shift.caregiver_id);
@@ -2011,6 +2072,11 @@ module.exports = function createSchedulingRoutes(deps) {
       if (wasInProgress) {
         endedLog = await endOfficeVisit({ shift: rows[idx], reason, actor: req.user });
         await notifyOfficeEnded(rows[idx], endedLog, reason, req.user);
+      } else {
+        // ⚠️ THE LARGEST GAP THE 2026-11-09 AUDIT FOUND. Bulk-remove emails;
+        // cancelling ONE shift told the holder only when it was already in
+        // progress, and told the client nothing at all, ever.
+        await notifyCancelled(beforeRow, rows[idx], reason, req.user);
       }
 
       res.json({
@@ -2838,6 +2904,18 @@ module.exports = function createSchedulingRoutes(deps) {
         clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at, reason
       });
 
+      // Their timesheet changed and they were not told (audit, 2026-11-09).
+      try {
+        const notice = notifier();
+        if (notice) {
+          await notice.timeLogChanged({
+            user: caregiver, when: time.fmtDateTime(row.clock_in_at),
+            clientName: row.client_name || null, reason, created: true,
+            ctaUrl: links.payFor(caregiver), actorId: req.user.id, logId: row.id
+          });
+        }
+      } catch (e) { console.error('[SHIFT] time-log notice failed (non-fatal):', e.message); }
+
       res.json({ timeLog: publicTimeLog(row), message: 'Hours entered and flagged as a manual entry.' });
     } catch (error) {
       console.error('Manual time-log entry error:', error);
@@ -2941,6 +3019,24 @@ module.exports = function createSchedulingRoutes(deps) {
 
       await logActivity(req.user.id, log.edited_by_name, 'time_log_edited', 'time_log', log.id,
         { reason: log.edit_reason, before, after, caregiverId: log.caregiver_id, shiftId: log.shift_id });
+
+      // Deliberately HERE and not inside applyTimeLogEdit, which is also the
+      // writer an APPROVED adjustment request comes through — and that path
+      // already emails `time_adjustment_decided`. Putting it in the shared
+      // writer would send two emails for one correction.
+      try {
+        const notice = notifier();
+        if (notice) {
+          const who = (await getUsers()).find(u => u && u.id === log.caregiver_id);
+          if (who) {
+            await notice.timeLogChanged({
+              user: who, when: time.fmtDateTime(log.clock_in_at),
+              clientName: log.client_name || null, reason: log.edit_reason, created: false,
+              ctaUrl: links.payFor(who), actorId: req.user.id, logId: log.id
+            });
+          }
+        }
+      } catch (e) { console.error('[SHIFT] time-log edit notice failed (non-fatal):', e.message); }
 
       res.json({ timeLog: publicTimeLog(log), before, after });
     } catch (error) {
