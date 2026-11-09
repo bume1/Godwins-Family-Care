@@ -116,7 +116,20 @@ function createSourceLoader({ drive, db, now = () => new Date().toISOString() })
     };
   }
 
-  return { load, manualState, checks, _cache: cache };
+  /**
+   * Every written SOP's text, read live from Set 1. `ids` is the set of
+   * procedures the document actually contains, so the Training Library can
+   * tell a written SOP from one the catalog only names. On a failed read,
+   * `ids` is null: unknown, never "missing".
+   */
+  async function sops() {
+    const s = await load('CLINICAL_SOPS_SET1');
+    if (!s.ok) return { ok: false, code: s.code, reason: s.reason, ids: null, sections: {} };
+    const sections = P.sopSections(s.lines);
+    return { ok: true, version: s.version || null, ids: new Set(Object.keys(sections)), sections, fileId: s.fileId };
+  }
+
+  return { load, manualState, checks, sops, _cache: cache };
 }
 
 module.exports = { createSourceLoader, VERSIONS_COLLECTION };

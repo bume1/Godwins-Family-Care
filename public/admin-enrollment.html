@@ -28,7 +28,7 @@
       theme: {
         extend: {
           colors: {
-            primary: { 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
             accent: '#C9A44A',
             success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
             warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706' },
@@ -42,11 +42,11 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     * { font-family: 'DM Sans', system-ui, sans-serif; }
-    body { background: #f8fafc; }
+    body { background: #FAF7F2; }  /* the My GFC cream (owner, 2026-11-09) */
     .card { background: white; border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.04); }
     .chip { border-radius: 999px; padding: 6px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; border: 1.5px solid transparent; transition: all .15s; white-space: nowrap; }
     .chip.active { background: #033D50; color: white; }
@@ -73,6 +73,10 @@
   <script src="/session-guard.js"></script>
   <script src="/staff-nav.js"></script>
   <script src="/mfa-step.js"></script>
+  <!-- The spreadsheet export, the same library the Admin Hub uses. -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <!-- Client and family accounts: one shared copy (owner, 2026-11-09). -->
+  <script type="text/babel" src="/client-account-ui.js"></script>
 </head>
 <body class="min-h-screen">
   <div id="root"></div>
@@ -410,7 +414,7 @@
       );
     };
 
-    const ListView = ({ user, onOpen, onAddOffline }) => {
+    const ListView = ({ user, onOpen, accounts }) => {
       const [filter, setFilter] = useState('all');
       const [sort, setSort] = useState('submitted_desc');
       const [q, setQ] = useState('');
@@ -429,23 +433,6 @@
 
       return (
         <div>
-          <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-            <div>
-              <h1 className="font-serif text-3xl text-primary-500 font-semibold">Clients &amp; Patients</h1>
-              <p className="text-sm text-gray-500 mt-1">Review intake, request follow-up, and approve enrollment.</p>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Clinical charts: read-only for case managers (Session 4.3 scoped read) */}
-              {user && (user.role === 'admin' || user.role === 'caseManager' || user.hasClinicalAccess) && (
-                <a className="btn btn-primary" href="/clinical" style={{ textDecoration: 'none' }}>Clinical charts{user.role === 'caseManager' ? ' (read-only)' : ''}</a>
-              )}
-              {canManageRole(user) && (
-                <button className="btn btn-gold" onClick={onAddOffline}>+ Add offline-onboarded patient</button>
-              )}
-            </div>
-          </div>
-
-          <SignupPanel user={user} onCreated={load} />
 
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
             <div className="flex gap-2 flex-wrap">
@@ -473,19 +460,27 @@
               <table className="list w-full">
                 <thead>
                   <tr>
-                    <th>Name</th><th>DOB</th><th>Service line</th><th>Care tier</th>
+                    <th>Name</th>{accounts && <th>Login</th>}<th>DOB</th><th>Service line</th><th>Care tier</th>
                     <th>Status</th><th>Completion</th><th>Submitted</th><th>Source</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {loading && <tr><td colSpan="8" className="text-center text-gray-400 py-10">Loading…</td></tr>}
-                  {!loading && data.clients.length === 0 && <tr><td colSpan="8" className="text-center text-gray-400 py-10">No submissions match this filter.</td></tr>}
+                  {loading && <tr><td colSpan={accounts ? 9 : 8} className="text-center text-gray-400 py-10">Loading…</td></tr>}
+                  {!loading && data.clients.length === 0 && <tr><td colSpan={accounts ? 9 : 8} className="text-center text-gray-400 py-10">No submissions match this filter.</td></tr>}
                   {!loading && data.clients.map(c => (
                     <tr key={c.id} onClick={() => onOpen(c.id)}>
                       <td className="font-medium text-primary-500">
                         {c.name}
                         {c.pendingApprovals > 0 && <span className="badge bg-warning-50 text-warning-600 ml-2">Awaiting approval</span>}
                       </td>
+                      {accounts && (() => {
+                        const a = accounts.find(u => String(u.id) === String(c.id));
+                        return <td>{!a ? '—' : <React.Fragment>
+                          <div className="text-xs text-gray-600">{a.noLogin ? 'POA signs in' : a.email}</div>
+                          {a.accountStatus === 'inactive' && <span className="badge bg-danger-50 text-danger-600">Inactive</span>}
+                          {a.emailUnsubscribed && <span className="badge bg-warning-50 text-warning-600 ml-1">Unsubscribed</span>}
+                        </React.Fragment>}</td>;
+                      })()}
                       <td>{c.dob || '—'}</td>
                       <td>{c.serviceLine || '—'}</td>
                       <td>{c.careTierLabel || '—'}</td>
@@ -519,8 +514,8 @@
     };
 
     // ── Detail view ───────────────────────────────────────────────────
-    const Section = ({ title, children }) => (
-      <div className="card p-5 mb-4">
+    const Section = ({ title, children, id }) => (
+      <div id={id} className="card p-5 mb-4" style={{ scrollMarginTop: 64 }}>
         <h3 className="font-semibold text-primary-500 mb-3 text-sm uppercase tracking-wide">{title}</h3>
         {children}
       </div>
@@ -2170,7 +2165,7 @@
       );
     };
 
-    const DetailView = ({ clientId, user, onBack }) => {
+    const DetailView = ({ clientId, user, onBack, people }) => {
       // THREE answers, because the API gives three shapes of "may write here",
       // and each is asked once so no control can drift from the route behind
       // it. A screen that offers what the server will refuse is worse than a
@@ -2246,7 +2241,6 @@
 
       return (
         <div>
-          <button className="btn btn-ghost mb-4" onClick={onBack}>← Back to list</button>
           <div className="flex items-start justify-between flex-wrap gap-4 mb-6">
             <div>
               <h1 className="font-serif text-3xl text-primary-500 font-semibold">{client.name}</h1>
@@ -2292,6 +2286,40 @@
             </div>
           </div>
 
+          {/* ONE CLIENT, ONE RECORD (owner, 2026-11-09): the account, the care
+              team and family sit on the record with the enrollment, where User
+              Management used to hold them on a separate screen. */}
+          {(() => {
+            const CA = window.GFCClientAccount;
+            const office = !!(CA && CA.isOffice(user) && people && people.users);
+            const acct = office ? people.users.find(u => String(u.id) === String(clientId)) : null;
+            const jump = (id) => { const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+            const menu = [acct && ['cl-account', 'Account & Login'], acct && ['cl-careteam', 'Care Team'], ['cl-family', 'Family & Contacts'],
+              ['cl-enrollment', 'Enrollment'], ['cl-consents', 'Consents'], ['cl-documents', 'Documents'], ['cl-history', 'Care History']].filter(Boolean);
+            return (
+              <React.Fragment>
+                <nav aria-label="Sections of this record" className="flex flex-wrap gap-2 mb-4">
+                  {menu.map(([id, label]) => <button key={id} type="button" className="chip" onClick={() => jump(id)}>{label}</button>)}
+                </nav>
+                {acct && (
+                  <Section id="cl-account" title="Account & Login">
+                    <CA.ClientAccountSection token={getToken()} client={acct} users={people.users} projects={people.projects} me={user}
+                      onChanged={() => { people.reload(); load(); }} onDeleted={onBack} />
+                  </Section>
+                )}
+                {acct && (
+                  <Section id="cl-careteam" title="Care Team">
+                    <CA.CareTeamSection client={acct} users={people.users} onChanged={people.reload} />
+                  </Section>
+                )}
+                <Section id="cl-family" title="Family & Contacts">
+                  {acct && <CA.FamilySection token={getToken()} client={acct} users={people.users} me={user} onChanged={people.reload} onAddNew={people.onAddFamily} />}
+                  <div className={acct ? 'mt-4' : ''}><FamilyInvites clientId={clientId} isAdmin={canManageRole(user)} /></div>
+                </Section>
+                <div id="cl-enrollment" style={{ scrollMarginTop: 64 }} />
+              </React.Fragment>
+            );
+          })()}
           {decisionMsg && <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-2 mb-4">{decisionMsg}</div>}
           <ChangeRequests client={client} onDecided={(m) => { setDecisionMsg(m || ''); load(); }} />
 
@@ -2479,7 +2507,7 @@
 
           {/* Visit logs, concerns and incidents live with the client they are
               about (owner, 2026-11-09). */}
-          <Section title="Care History">
+          <Section id="cl-history" title="Care History">
             <CareHistory clientId={clientId} />
           </Section>
 
@@ -2533,7 +2561,7 @@
               ) : <span className="text-sm text-gray-400">Not on file — set it under Enrollment submission → Edit submission</span>}
             </Section>
 
-            <Section title="Consents">
+            <Section id="cl-consents" title="Consents">
               {downloadErr && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{downloadErr}</div>}
               {client.consents.filter(c => c.outstanding).length === 0 && (
                 <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-2 mb-3">Every required consent is signed.</div>
@@ -2627,10 +2655,7 @@
             </Section>
 
             <div className="lg:col-span-2">
-              <DocumentExchange clientId={clientId} canEdit={canEdit} isAdmin={canManageRole(user)} />
-            </div>
-            <div className="lg:col-span-2">
-              <FamilyInvites clientId={clientId} isAdmin={canManageRole(user)} />
+              <div id="cl-documents" style={{ scrollMarginTop: 64 }}><DocumentExchange clientId={clientId} canEdit={canEdit} isAdmin={canManageRole(user)} /></div>
             </div>
             {user && (user.role === 'admin' || user.isManager) && (
               <div className="lg:col-span-2">
@@ -2754,7 +2779,6 @@
 
       return (
         <div>
-          <button className="btn btn-ghost mb-4" onClick={onCancel}>← Back to list</button>
           <h1 className="font-serif text-3xl text-primary-500 font-semibold mb-1">Add offline-onboarded patient</h1>
           <p className="text-sm text-gray-500 mb-2">Keyed from the paper packet. The sections below run in the same order as the Client Information Face Sheet, so you can work straight down it.</p>
           {registry.reviewBanner && <p className="text-xs text-gray-400 mb-6">{registry.reviewBanner}</p>}
@@ -2949,13 +2973,61 @@
     };
 
     // ── App shell ─────────────────────────────────────────────────────
+    // ── App shell: THE CLIENTS AREA (owner, 2026-11-09) ────────────────
+    // One standalone page for clients: the list, family contacts, sign-ups
+    // and reset requests, and each client as one record (account, care team,
+    // family, enrollment, consents, documents). The address carries where you
+    // are (?client=, ?family=, ?tab=), so going back lands there.
+    const TABS = [['clients', 'Clients'], ['family', 'Family & Contacts'], ['signups', 'Sign-ups'], ['resets', 'Password Resets']];
+    const viewFromUrl = () => {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get('client')) return { page: 'detail', id: p.get('client') };
+      if (p.get('family')) return { page: 'family', id: p.get('family') };
+      return { page: 'list' };
+    };
+    const tabFromUrl = () => { const t = new URLSearchParams(window.location.search).get('tab'); return TABS.some(([k]) => k === t) ? t : 'clients'; };
+    const urlFor = (view, tab) => {
+      const p = new URLSearchParams();
+      if (view.page === 'detail') p.set('client', view.id);
+      else if (view.page === 'family') p.set('family', view.id);
+      else if (view.page === 'list' && tab !== 'clients') p.set('tab', tab);
+      const q = p.toString();
+      return `${window.location.pathname}${q ? `?${q}` : ''}`;
+    };
+
     const App = () => {
       const [token, setToken] = useState(getToken);
       const [user, setUser] = useState(getStoredUser);
-      const [view, setView] = useState(() => {
-        const deepLinkId = new URLSearchParams(window.location.search).get('client');
-        return deepLinkId ? { page: 'detail', id: deepLinkId } : { page: 'list' };
-      });
+      const [view, setViewRaw] = useState(viewFromUrl);
+      const [tab, setTabRaw] = useState(tabFromUrl);
+      const [flash, setFlash] = useState('');
+      const [people, setPeople] = useState({ users: null, projects: [], portals: [], fin: [] });
+      const CA = window.GFCClientAccount;
+      const office = !!(user && CA && CA.isOffice(user));
+      const superAdmin = !!(user && user.role === 'admin');
+
+      const go = (v, t) => {
+        const nextTab = t || tab;
+        setViewRaw(v); setTabRaw(nextTab);
+        try { window.history.pushState(null, '', urlFor(v, nextTab)); } catch (e) { /* ok */ }
+        window.scrollTo(0, 0);
+      };
+      useEffect(() => {
+        const onPop = () => { setViewRaw(viewFromUrl()); setTabRaw(tabFromUrl()); };
+        window.addEventListener('popstate', onPop);
+        return () => window.removeEventListener('popstate', onPop);
+      }, []);
+
+      // Accounts are the office's (admin, manager, care coordinator): the
+      // user list is gated the same way on the server.
+      const reload = useCallback(async () => {
+        if (!office) return;
+        const get = (p) => authedFetch(p).catch(() => null);
+        const [users, projects, portals, fin] = await Promise.all([get('/api/users'), get('/api/projects'), get('/api/client-portals'), get('/api/users/financial-change-requests?status=pending')]);
+        setPeople({ users: Array.isArray(users) ? users : [], projects: Array.isArray(projects) ? projects : [], portals: Array.isArray(portals) ? portals : [],
+          fin: Array.isArray(fin) ? fin : ((fin && fin.requests) || []) });
+      }, [office]);
+      useEffect(() => { reload(); }, [reload, token]);
 
       if (!token || !user) return <LoginScreen onLogin={(t, u) => { setToken(t); setUser(u); }} />;
       if (!isStaff(user)) {
@@ -2963,23 +3035,77 @@
           <div className="min-h-screen flex items-center justify-center px-4">
             <div className="card p-8 max-w-sm text-center">
               <h1 className="font-serif text-xl text-primary-500 font-semibold mb-2">Access restricted</h1>
-              <p className="text-sm text-gray-500">This area is for enrollment staff (admin, clinical, or case manager roles) only.</p>
+              <p className="text-sm text-gray-500">This area is for the care team (admin, clinical, or case manager roles) only.</p>
             </div>
           </div>
         );
       }
+      const users = people.users || [];
+      const clientSide = (id) => users.some(u => String(u.id) === String(id) && ['client', 'family'].includes(u.role));
+      const shared = Object.assign({}, people, { reload, onAddFamily: (clientId) => go({ page: 'addFamily', clientId }) });
+      const opened = (id, msg) => { setFlash(msg || ''); reload(); if (id) go({ page: 'detail', id }); else go({ page: 'list' }); };
+      const tabs = TABS.filter(([k]) => (k === 'resets' ? superAdmin : k === 'family' ? office : true));
 
       return (
         <div className="max-w-6xl mx-auto px-4 lg:px-8 py-8">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+            <div>
+              <h1 className="font-serif text-3xl text-primary-500 font-semibold">Clients &amp; Patients</h1>
+              <p className="text-sm text-gray-500 mt-1">Every client: account, care team, family, enrollment, consents and documents.</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {(user.role === 'admin' || user.role === 'caseManager' || user.hasClinicalAccess) && (
+                <a className="btn btn-ghost" href="/clinical" style={{ textDecoration: 'none' }}>Clinical charts{user.role === 'caseManager' ? ' (read-only)' : ''}</a>
+              )}
+              {office && <button className="btn btn-primary" onClick={() => go({ page: 'addClient' })}>+ Add Client</button>}
+              {canManageRole(user) && <button className="btn btn-gold" onClick={() => go({ page: 'offline' })}>+ Full Face Sheet</button>}
+              {office && <button className="btn btn-ghost" onClick={() => go({ page: 'addFamily', clientId: null })}>+ Add Family Contact</button>}
+              {office && <button className="btn btn-ghost" onClick={() => CA.exportClients(users)}>Export</button>}
+              {superAdmin && <button className="btn btn-ghost" onClick={async () => { const r = await CA.bulkResetClients(getToken()); if (r) setFlash(r.error ? `Error: ${r.error}` : (r.message || 'Done.')); }}>Bulk Reset</button>}
+            </div>
+          </div>
+
+          {flash && <div className={`text-sm rounded-lg px-4 py-2 mb-4 ${/^Error/.test(flash) ? 'bg-danger-50 text-danger-600' : 'bg-success-50 text-success-600'}`}>{flash}</div>}
+          {office && people.users && (
+            <div className="space-y-3 mb-4">
+              <CA.FinancialChangeQueue token={getToken()} requests={(people.fin || []).filter(r => clientSide(r.userId))} canDecide={superAdmin} onChanged={reload} />
+              {superAdmin && <CA.PossiblePoaLogins token={getToken()} users={users} onOpen={(id) => go({ page: 'detail', id })} />}
+            </div>
+          )}
+
           {view.page === 'list' && (
-            <ListView user={user} onOpen={id => setView({ page: 'detail', id })} onAddOffline={() => setView({ page: 'offline' })} />
+            <React.Fragment>
+              <div className="flex gap-2 flex-wrap mb-4" role="tablist">
+                {tabs.map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} className={`chip ${tab === k ? 'active' : ''}`} onClick={() => go({ page: 'list' }, k)}>{l}</button>)}
+              </div>
+              {tab === 'clients' && <ListView user={user} accounts={people.users} onOpen={id => go({ page: 'detail', id })} />}
+              {tab === 'family' && office && <CA.FamilyList users={users} onEdit={id => go({ page: 'family', id })} onOpenClient={id => go({ page: 'detail', id })} />}
+              {tab === 'signups' && <SignupPanel user={user} onCreated={reload} />}
+              {tab === 'resets' && superAdmin && <CA.ResetRequests token={getToken()} users={users} />}
+            </React.Fragment>
           )}
-          {view.page === 'detail' && (
-            <DetailView clientId={view.id} user={user} onBack={() => setView({ page: 'list' })} />
-          )}
+          {view.page !== 'list' && <button className="btn btn-ghost mb-4" onClick={() => go({ page: 'list' })}>← All Clients</button>}
+          {view.page === 'detail' && <DetailView key={view.id} clientId={view.id} user={user} people={shared} onBack={() => go({ page: 'list' })} />}
           {view.page === 'offline' && (
-            <OfflineOnboardForm onCancel={() => setView({ page: 'list' })} onDone={id => setView({ page: 'detail', id })} />
+            <OfflineOnboardForm onCancel={() => go({ page: 'list' })} onDone={id => { reload(); go({ page: 'detail', id }); }} />
           )}
+          {view.page === 'addClient' && office && (people.users
+            ? <CA.AddClientForm token={getToken()} users={users} portals={people.portals} onCreated={opened} onCancel={() => go({ page: 'list' })}
+                onOpenClient={id => go({ page: 'detail', id })} onOpenFamily={id => go({ page: 'family', id })} />
+            : <div className="text-center text-gray-400 py-16">Loading…</div>)}
+          {view.page === 'addFamily' && office && (people.users
+            ? <CA.AddFamilyForm token={getToken()} users={users} presetClientId={view.clientId}
+                onCreated={(id, msg) => { setFlash(msg || 'Family contact created.'); reload(); go(view.clientId ? { page: 'detail', id: view.clientId } : { page: 'list' }, view.clientId ? undefined : 'family'); }}
+                onCancel={() => go(view.clientId ? { page: 'detail', id: view.clientId } : { page: 'list' })}
+                onOpenClient={id => go({ page: 'detail', id })} onOpenFamily={id => go({ page: 'family', id })} />
+            : <div className="text-center text-gray-400 py-16">Loading…</div>)}
+          {view.page === 'family' && office && (() => {
+            const fam = users.find(u => String(u.id) === String(view.id));
+            if (!people.users) return <div className="text-center text-gray-400 py-16">Loading…</div>;
+            if (!fam) return <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3">That family contact was not found.</div>;
+            return <CA.FamilyEditor key={fam.id} token={getToken()} family={fam} users={users} me={user} onChanged={reload}
+              onClose={() => go({ page: 'list' }, 'family')} onDeleted={() => { setFlash('Contact deleted.'); reload(); go({ page: 'list' }, 'family'); }} />;
+          })()}
         </div>
       );
     };

@@ -313,9 +313,16 @@ test('5. an addendum republishes the visit with the addendum on it', async () =>
   assert.equal(s.visits[0].note.addenda.length, 1);
 });
 test('5b. the addendum and co-signature routes republish an already-published visit', () => {
+  // The addendum's side effects live in ONE writer since 2026-11-09, shared by
+  // the Addendum button and an order added after signing. The rule moved with
+  // the code: the route must call it, and it must republish.
   const addenda = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda'");
-  assert.match(addenda, /if \(ctx\.record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(ctx, \{ addenda:/);
-  assert.match(addenda, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/, 'the portal fields are written fresh, not from the stale copy');
+  assert.match(addenda, /await recordEncounterAddendum\(ctx, built\.addendum/, 'the Addendum route goes through the shared writer');
+  const start = server.indexOf('const recordEncounterAddendum = async');
+  assert.ok(start > 0, 'the shared addendum writer exists');
+  const helper = server.slice(start, server.indexOf('\n};\n', start));
+  assert.match(helper, /if \(ctx\.record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(ctx, \{ addenda:/);
+  assert.match(helper, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/, 'the portal fields are written fresh, not from the stale copy');
   const cosigs = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures'");
   assert.match(cosigs, /if \(record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(/);
   assert.match(cosigs, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/);

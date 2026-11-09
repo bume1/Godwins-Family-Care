@@ -18,6 +18,11 @@
 //      fields, and Send Referral posts an internal referral.
 //   D. An LMSW sees "+ Record Order" for a referral only, with no outside
 //      providers and no New Provider.
+//   E. The chart's Orders tab places an order without opening a visit: Add To
+//      Visit defaults to the draft, a signed visit offers only its signed
+//      diagnoses and asks for after-signing, every form carries one submit
+//      key, Referrals opens on a referral, and a view-only viewer gets no
+//      button.
 //
 // The API is stubbed; orders are built by the REAL orderRequisitions module and
 // what each viewer may do comes from the REAL clinicalRoles module, the way the
@@ -120,6 +125,22 @@ const ENCOUNTER = (viewer) => ({
   prescriber: null, billingNpiUsed: null, sectionsOnly: false
 });
 
+// New Order from the chart (2026-11-09): where an order can go, as the
+// server's orders list answers it. Null leaves the list as it was before.
+let PLACEMENT = null;
+const placementFor = (viewer, targets) => ({
+  canPlace: roles.canClinicalWrite(viewer) && (roles.can(viewer, roles.CAPABILITIES.ORDER_DIRECT) || roles.canRefer(viewer, 'internal')),
+  canOrderDirect: roles.can(viewer, roles.CAPABILITIES.ORDER_DIRECT),
+  canRefer: roles.canRefer(viewer, 'internal') || roles.canRefer(viewer, 'external'),
+  requireStandingOrder: !roles.can(viewer, roles.CAPABILITIES.ORDER_DIRECT), linked: true,
+  targets, defaultEncounterUuid: targets.length ? targets[0].encounterUuid : null, emptyReason: targets.length ? null : 'NO_VISITS',
+  orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, documentOrderTypes: orderReq.DOCUMENT_ORDER_TYPES
+});
+const TWO_VISITS = [
+  { encounterUuid: 'e-1', date: '2026-10-12', visitLabel: 'Follow-up', reason: 'Follow-up', signed: false, afterSigning: false, diagnoses: DX },
+  { encounterUuid: 'e-2', date: '2026-10-01', visitLabel: 'Acute / Sick', reason: 'Cough', signed: true, afterSigning: true, signedAt: AT, diagnoses: [{ code: 'J20.9', description: 'Acute bronchitis' }] }
+];
+
 const run = async (viewer, startPath, scenario) => {
   const posted = [];
   const srv = http.createServer((req, res) => {
@@ -162,7 +183,8 @@ const run = async (viewer, startPath, scenario) => {
       orders: [internal, external].map(o => forViewer(o, viewer)), destinationFields: orderReq.destinationFormFields(),
       destinationEditableStatuses: orderReq.DESTINATION_EDITABLE_STATUSES, noteMax: 2000,
       sendChannels: orderReq.SEND_CHANNELS, sendChannelLabels: orderReq.SEND_CHANNEL_LABELS, defaultSendChannel: orderReq.DEFAULT_SEND_CHANNEL,
-      faxSendChannels: orderReq.FAX_SEND_CHANNELS, resultInterpretations: ['normal', 'abnormal', 'critical']
+      faxSendChannels: orderReq.FAX_SEND_CHANNELS, resultInterpretations: ['normal', 'abnormal', 'critical'],
+      ...(PLACEMENT ? { placement: PLACEMENT(viewer) } : {})
     });
     if (p.endsWith('/results')) return json({ results: [RESULT] });
     if (p.endsWith('/encounters/e-1')) return json(ENCOUNTER(viewer));
@@ -309,6 +331,61 @@ const run = async (viewer, startPath, scenario) => {
     ok('D5 they are told who refers out', /You refer within the team\. A provider or an LCSW refers to outside practices\./.test(await page.locator('body').innerText()));
     const vals = await referTo.locator('option').evaluateAll(os => os.map(o => o.value));
     ok('D6 they are not offered themselves', !vals.includes(`team:${CASE_MANAGER.id}`), JSON.stringify(vals));
+  });
+
+  // ── E. New Order from the chart's Orders tab (2026-11-09) ────────────────
+  console.log('\nE. a provider places an order from the Orders tab');
+  const openOrders = async (page) => {
+    await page.locator('button:has-text("Patients"), a:has-text("Patients")').first().click();
+    await page.waitForTimeout(300);
+    await page.locator(`text=${PATIENT.name}`).first().click();
+    await page.waitForTimeout(500);
+    await page.locator('.tabbtn:text-is("Orders")').first().click();
+  };
+  PLACEMENT = (viewer) => placementFor(viewer, TWO_VISITS);
+  await run(PROVIDER, '/clinical', async (page, posted) => {
+    await openOrders(page);
+    await page.waitForSelector('button:text-is("+ New Order")', { timeout: 15000 });
+    ok('E1 the Orders tab offers + New Order', true);
+    await page.locator('button:text-is("+ New Order")').first().click();
+    const visitSel = page.locator('select').filter({ has: page.locator('option[value="e-2"]') }).first();
+    ok('E2 Add To Visit defaults to the open draft', await visitSel.inputValue() === 'e-1');
+    const opts = await visitSel.locator('option').evaluateAll(os => os.map(o => o.textContent));
+    ok('E3 each visit is named, with Draft or Signed', /Follow-up · Draft/.test(opts[0]) && /Acute \/ Sick · Signed/.test(opts[1]), JSON.stringify(opts));
+    await page.locator('label:has-text("Tests / studies") textarea, :text("Tests / studies") + textarea').first().fill('CBC');
+    await page.locator('button:text-is("Record Order")').first().click();
+    await page.waitForTimeout(300);
+    const first = posted.find(x => /\/encounters\/e-1\/orders$/.test(x.path));
+    ok('E4 it posts to the draft visit with a submit key and no after-signing flag', !!first && typeof first.body.idempotencyKey === 'string' && first.body.idempotencyKey.length > 8 && !('afterSigning' in first.body) && JSON.stringify(first.body.tests) === '["CBC"]', JSON.stringify(first && first.body));
+    ok('E5 the result is shown and the form closes', /Saved/.test(await page.locator('body').innerText()) && await page.locator('button:text-is("+ New Order")').count() === 1);
+    await page.locator('button:text-is("+ New Order")').first().click();
+    await page.locator('select').filter({ has: page.locator('option[value="e-2"]') }).first().selectOption('e-2');
+    const body = await page.locator('body').innerText();
+    ok('E6 a signed visit says the order becomes an addendum', /This visit is signed\. The order is added to the note as an addendum/.test(body));
+    ok('E7 only the signed visit\'s diagnoses are offered', await page.locator('button.chip:text-is("J20.9")').count() === 1 && await page.locator('button.chip:text-is("F32.9")').count() === 0);
+    await page.locator('label:has-text("Tests / studies") textarea, :text("Tests / studies") + textarea').first().fill('Chest X-ray');
+    await page.locator('button:text-is("Record Order")').first().click();
+    await page.waitForTimeout(300);
+    const second = posted.find(x => /\/encounters\/e-2\/orders$/.test(x.path));
+    ok('E8 it posts to the signed visit asking for after-signing, linked to J20.9', !!second && second.body.afterSigning === true && JSON.stringify(second.body.diagnosisCodes) === '["J20.9"]', JSON.stringify(second && second.body));
+    ok('E9 a new form carries a new submit key', !!second && second.body.idempotencyKey !== first.body.idempotencyKey);
+    await page.locator('button:text-is("Referrals")').first().click();
+    await page.waitForSelector('button:text-is("+ New Referral")', { timeout: 10000 });
+    await page.locator('button:text-is("+ New Referral")').first().click();
+    const typeSel = page.locator('select').filter({ has: page.locator('option[value="referral"]') }).first();
+    ok('E10 the Referrals filter opens the form on a referral', await typeSel.inputValue() === 'referral');
+  });
+  const VIEWER = { id: 'u-view', name: 'Vera Hill', role: 'user', isManager: true, clinicalRole: 'readOnly', hasClinicalAccess: false };
+  await run(VIEWER, '/clinical', async (page) => {
+    await openOrders(page);
+    await page.waitForSelector('text=Referred to Courtney Hale inside the team', { timeout: 15000 });
+    ok('E11 a view-only viewer reads the orders and is offered no New Order', await page.locator('button:has-text("New Order")').count() === 0);
+  });
+  PLACEMENT = (viewer) => placementFor(viewer, []);
+  await run(PROVIDER, '/clinical', async (page) => {
+    await openOrders(page);
+    await page.locator('button:text-is("+ New Order")').first().click();
+    ok('E12 with no visit yet, it says to start one', /No visit on this chart yet\. An order belongs to a visit/.test(await page.locator('body').innerText()));
   });
 
   console.log(`\n${pass} passed, ${fails.length} failed`);

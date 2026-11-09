@@ -560,9 +560,13 @@ test('hub: managers and coordinators sign in to User Management and nothing else
   for (const b of ['pendingTypeReview', 'pendingRoleReview', 'missingPatientFacingCredential']) {
     assert.match(hub, new RegExp(`\\{isSuperAdmin && ${b}\\.length > 0 &&`), b);
   }
-  // The list of types they manage matches the server's.
+  // What they see here is the staff part of what they manage: caregivers.
+  // The client and family accounts they also manage are on /clients
+  // (owner, 2026-11-09: User Management is internal staff only).
   const m = /const OFFICE_MANAGED_TYPES = (\[[^\]]+\])/.exec(hub);
-  assert.deepStrictEqual(JSON.parse(m[1].replace(/'/g, '"')).sort(), [...accountTypes.OFFICE_MANAGEABLE_TYPES].sort());
+  const shown = JSON.parse(m[1].replace(/'/g, '"'));
+  assert.deepStrictEqual(shown, ['caregiver']);
+  assert.deepStrictEqual([...accountTypes.OFFICE_MANAGEABLE_TYPES].filter(t => !['client', 'family'].includes(t)), shown);
 });
 
 test('hub: the rest of the Admin Hub API stays Super Admin only', () => {

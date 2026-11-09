@@ -92,7 +92,9 @@ const ACTORS = Object.freeze({
   PAYROLL_FINANCE_OFFICER: 'PAYROLL_FINANCE_OFFICER',
   DELEGATING_PHYSICIAN: 'DELEGATING_PHYSICIAN',
   SUPERVISOR: 'SUPERVISOR',
-  READINESS_OWNER: 'READINESS_OWNER'
+  READINESS_OWNER: 'READINESS_OWNER',
+  // The office as a whole, on a task the office added itself.
+  OFFICE: 'OFFICE'
 });
 const ACTOR_LABELS = Object.freeze({
   NEW_HIRE: 'New hire',
@@ -102,7 +104,8 @@ const ACTOR_LABELS = Object.freeze({
   PAYROLL_FINANCE_OFFICER: 'Payroll and Finance Officer',
   DELEGATING_PHYSICIAN: 'Delegating physician',
   SUPERVISOR: 'Supervisor',
-  READINESS_OWNER: 'Named readiness owner'
+  READINESS_OWNER: 'Named readiness owner',
+  OFFICE: 'GFC office'
 });
 const OFFICE_ACTORS = Object.freeze(Object.values(ACTORS).filter(a => a !== 'NEW_HIRE'));
 
@@ -116,7 +119,8 @@ const ACTIONS = Object.freeze({
   RECORD: 'RECORD',           // the office records a fact or a determination
   PROVISION: 'PROVISION',     // the office switches something on
   EXECUTE: 'EXECUTE',         // the office (or physician) executes an instrument
-  OBSERVE: 'OBSERVE'          // a named person observes and signs off
+  OBSERVE: 'OBSERVE',         // a named person observes and signs off
+  REVIEW: 'REVIEW'            // the office reviews a task it added (no primary source)
 });
 
 // A step's completion. An item whose first step is hers and whose second is a
