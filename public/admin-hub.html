@@ -29,7 +29,7 @@
       theme: {
         extend: {
           colors: {
-            primary: { 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
             accent: '#C9A44A',
             surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7' },
             success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
@@ -1559,6 +1559,73 @@
       );
     };
 
+    // Anyone's completed welcome packet, caregiver or staff, read-only, with the
+    // signed PDF (owner, 2026-11-09). Answers are shown in the packet's own
+    // labels, served by the server; nothing here restates a question.
+    const WelcomePacketSection = ({ token, userId, userName }) => {
+      const [p, setP] = React.useState(null);
+      const [err, setErr] = React.useState('');
+      React.useEffect(() => {
+        let live = true; setP(null); setErr('');
+        fetch(`/api/my/admin/welcome/${userId}`, { headers: { Authorization: `Bearer ${token}` } })
+          .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || 'Could not load the welcome packet.'); return d; }))
+          .then(d => { if (live) setP(d); }).catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [token, userId]);
+      const show = (f, v) => {
+        if (v == null || v === '' || (Array.isArray(v) && !v.length)) return '—';
+        if (f.type === 'single') return (f.options.find(o => o.value === v) || {}).label || v;
+        if (f.type === 'multi') return v.map(x => (f.options.find(o => o.value === x) || {}).label || x).join(', ');
+        if (f.type === 'grid') return Object.entries(v).map(([r, cols]) => `${(f.rows.find(x => x.value === r) || {}).label || r}: ${cols.map(c => (f.columns.find(x => x.value === c) || {}).label || c).join(', ')}`).join(' | ') || '—';
+        if (f.type === 'rows') return v.map(row => f.rowFields.map(rf => row[rf.id] || '—').join(' · ')).join(' / ');
+        return String(v);
+      };
+      const openPdf = async () => {
+        try {
+          const res = await fetch(`/api/my/admin/welcome/${userId}/signed.pdf`, { headers: { Authorization: `Bearer ${token}` } });
+          if (!res.ok) throw new Error('That packet could not be opened.');
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(await res.blob()); a.download = `GFC Welcome Packet - ${userName || 'staff'}.pdf`; a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        } catch (e) { setErr(e.message); }
+      };
+      const label = { submitted: 'Signed', in_progress: 'In progress', not_started: 'Not started' };
+      return (
+        <div className="border-t pt-4">
+          <h3 className="font-medium text-gray-800 mb-1">Welcome Packet</h3>
+          {err && <p className="text-sm text-red-600">{err}</p>}
+          {!err && !p && <p className="text-sm text-gray-500">Loading…</p>}
+          {p && (
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                {label[p.status] || p.status}{p.signedAt ? ` · ${new Date(p.signedAt).toLocaleDateString('en-US')}` : ''}
+                {p.kind === 'caregiver' ? ' · caregiver welcome packet' : ''}
+              </p>
+              {p.status === 'submitted' && (
+                <button type="button" onClick={openPdf} className="mb-3 px-3 py-1.5 text-sm rounded-lg bg-primary text-white">Open Completed Packet</button>
+              )}
+              {p.status !== 'not_started' && (
+                <details className="text-sm">
+                  <summary className="cursor-pointer text-primary mb-2">Answers</summary>
+                  {/* The staff packet's availability is its step 3, so it sits in number order. */}
+                  {p.sections.concat(p.kind === 'staff' ? [{ id: 'staff_availability', number: 3, title: 'Availability', fields: [] }] : [])
+                    .sort((a, b) => a.number - b.number).map(sec => (
+                    <div key={sec.id} className="mb-2">
+                      <p className="font-medium text-gray-700">{sec.number}. {sec.title}</p>
+                      {sec.fields.map(f => <p key={f.id} className="text-gray-600"><span className="text-gray-500">{/[?:]$/.test(f.label) ? f.label : `${f.label}:`}</span> {show(f, p.data[f.id])}</p>)}
+                      {sec.id === 'staff_availability' && (p.availability
+                        ? <p className="text-gray-600">From {p.availability.effectiveFrom}: {(p.availability.windows || []).map(w => `${w.day} ${w.start}–${w.end}`).join(', ') || '—'}</p>
+                        : <p className="text-gray-500">None on file.</p>)}
+                    </div>
+                  ))}
+                </details>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // ── THE STAFF RECORD (owner, 2026-11-09) ───────────────────────────────
     // Every employee opens as one full-page record in User Management, laid
     // out like the client view in Enrollment, so nothing about a person is
@@ -1585,6 +1652,7 @@
       srIsCaregiver(u) && { id: 'sr-pay', label: 'Pay' },
       { id: 'sr-documents', label: 'Documents' },
       { id: 'sr-onboarding', label: 'Onboarding & Clearance' },
+      { id: 'sr-welcome', label: 'Welcome Packet' },
       srIsCaregiver(u) && { id: 'sr-activity', label: 'Activity' },
       isSuperAdmin && { id: 'sr-recovery', label: 'Account Recovery' }
     ].filter(Boolean);
@@ -3370,6 +3438,9 @@
                     </div>
                   )}
 
+                  {editingUser && !['client', 'family'].includes(formData.role) && (
+                    <div id="sr-welcome"><WelcomePacketSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
+                  )}
                   {editingUser && !['client', 'family'].includes(formData.role) && (
                     <div id="sr-bio"><StaffBioSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
                   )}

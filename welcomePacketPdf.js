@@ -394,10 +394,15 @@ async function generateFillableWelcomePacketPDF(prefill = {}) {
  * to reopen and retype; a correction is a new signature on a changed document,
  * which is the rule the consent copies already follow.
  */
-async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist = []) {
+// `opts` (owner, 2026-11-09): the staff welcome packet renders through this
+// same function, with its own sections, title and extra blocks (availability),
+// so both packets come out in one format.
+async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist = [], opts = {}) {
   const data = (packet && packet.data) || {};
+  const sections = opts.sections || wp.PACKET_SECTIONS;
+  const docTitle = opts.title || 'COMPLETED CAREGIVER WELCOME PACKET';
   const pdf = await PDFDocument.create();
-  pdf.setTitle('Godwins Family Care - Completed Caregiver Welcome Packet');
+  pdf.setTitle(`Godwins Family Care - ${docTitle.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())}`);
   const fonts = {
     regular: await pdf.embedFont(StandardFonts.Helvetica),
     bold: await pdf.embedFont(StandardFonts.HelveticaBold)
@@ -405,7 +410,7 @@ async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist 
   const w = createWriter(pdf, fonts);
 
   w.newPage();
-  drawHeader(w.state.page, fonts, 'COMPLETED CAREGIVER WELCOME PACKET');
+  drawHeader(w.state.page, fonts, docTitle);
   w.state.y = PAGE_H - 112;
 
   const who = [data.firstName, data.lastName].filter(Boolean).join(' ') || caregiver.name || 'Caregiver';
@@ -450,7 +455,15 @@ async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist 
     }
   };
 
-  for (const section of wp.PACKET_SECTIONS) {
+  // Extra blocks (the staff packet's availability) slot in by number.
+  const extras = (opts.extraSections || []).slice();
+  const drawExtra = (x) => {
+    sectionHeading(w, fonts, x.number || '', x.title);
+    for (const line of (x.lines.length ? x.lines : ['—'])) { w.space(16); w.text(String(line), { size: 9, gap: 3, indent: 6 }); }
+    w.state.y -= 3;
+  };
+  for (const section of sections) {
+    while (extras.length && extras[0].number && extras[0].number < section.number) drawExtra(extras.shift());
     sectionHeading(w, fonts, section.number, section.title);
     for (const field of section.fields) {
       w.space(22);
@@ -459,6 +472,7 @@ async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist 
       w.state.y -= 3;
     }
   }
+  extras.forEach(drawExtra);
 
   // The checklist AS IT STOOD at signing. It is a snapshot, not a live state —
   // labelled as one, because a document that looks current and is not is worse

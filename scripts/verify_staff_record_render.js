@@ -55,6 +55,9 @@ const API = {
     outstanding: [{ title: 'Fingerprinting', waitingOn: 'us' }], office: [{ kind: 'fingerprinting', title: 'Fingerprinting', required: true, officeStatus: 'scheduled' }] },
     officeItems: [{ kind: 'fingerprinting' }], officeStatuses: ['not_started', 'scheduled', 'done'] }),
   '/api/caregiver/documents': () => ({ documents: [{ id: 'd1', caregiverId: 'c1', kindLabel: 'Timesheet', fileName: 'week.pdf', status: 'received', uploadedAt: '2026-11-02' }] }),
+  // The Welcome Packet section (#276) reads this; a packet not started yet.
+  '/api/my/admin/welcome/c1': () => ({ status: 'not_started', kind: 'caregiver', sections: [] }),
+  '/api/my/admin/welcome/r1': () => ({ status: 'not_started', kind: 'staff', sections: [] }),
   '/api/caregiver/documents/kinds': () => ({ kinds: [{ kind: 'timesheet', label: 'Timesheet' }] }),
   '/api/caregiver/visit-logs': () => ({ visitLogs: [visitLog] }),
   '/api/caregiver/escalations': () => ({ escalations: [escalation] }),
@@ -104,7 +107,7 @@ const PAGES = { '/admin': 'admin-hub.html', '/caregiver': 'caregiver.html' };
     }, [user]);
     const page = await ctx.newPage();
     const errors = [];
-    page.on('pageerror', e => errors.push(e.message));
+    page.on('pageerror', e => errors.push(e.message)); page.on('console', m => { if (process.env.PROBE_CONSOLE && m.type() === 'error') console.log('CONSOLE', m.text()); });
     await page.goto(base + pathname, { waitUntil: 'networkidle' });
     await page.waitForTimeout(1200);
     return { page, ctx, errors };
@@ -119,8 +122,8 @@ const PAGES = { '/admin': 'admin-hub.html', '/caregiver': 'caregiver.html' };
     ok(`${label}: header names the person`, t.includes('Cara Giver') && t.includes('← User Management'));
     ok(`${label}: glance chips`, t.includes('Onboarding 75%') && t.includes('Not cleared for shifts') && t.includes('1 document to review'), t.slice(0, 400));
     const menu = await page.$$eval('.sr-menu button', bs => bs.map(b => b.textContent));
-    ok(`${label}: caregiver sections`, JSON.stringify(menu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Pay', 'Documents', 'Onboarding & Clearance', 'Activity', 'Account Recovery']), JSON.stringify(menu));
-    for (const id of ['sr-account', 'sr-credentials', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-bio', 'sr-activity', 'sr-recovery']) {
+    ok(`${label}: caregiver sections`, JSON.stringify(menu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Pay', 'Documents', 'Onboarding & Clearance', 'Welcome Packet', 'Activity', 'Account Recovery']), JSON.stringify(menu));
+    for (const id of ['sr-account', 'sr-credentials', 'sr-bio', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-welcome', 'sr-activity', 'sr-recovery']) {
       ok(`${label}: #${id} is on the page`, !!(await page.$(`#${id}`)));
     }
     ok(`${label}: documents and what they signed`, t.includes('week.pdf') && t.includes('Caregiver welcome packet'));
@@ -136,7 +139,7 @@ const PAGES = { '/admin': 'admin-hub.html', '/caregiver': 'caregiver.html' };
     ({ page, ctx, errors } = await open('/admin?view=users&person=r1', ADMIN, size));
     t = await text(page);
     const rnMenu = await page.$$eval('.sr-menu button', bs => bs.map(b => b.textContent));
-    ok(`${label}: nurse sections`, JSON.stringify(rnMenu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Documents', 'Onboarding & Clearance', 'Account Recovery']), JSON.stringify(rnMenu));
+    ok(`${label}: nurse sections`, JSON.stringify(rnMenu) === JSON.stringify(['Account & Role', 'Credentials', 'Bio & Headshot', 'Documents', 'Onboarding & Clearance', 'Welcome Packet', 'Account Recovery']), JSON.stringify(rnMenu));
     ok(`${label}: nurse record has no caregiver-only parts`, !t.includes('Welcome Packet & Clearance') && !t.includes('Cleared for shifts'));
     ok(`${label}: nurse's signed policy`, t.includes('Field Addendum'));
     ok(`${label}: no page errors (nurse record)`, errors.length === 0, errors.join(' | '));
