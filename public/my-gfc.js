@@ -131,7 +131,7 @@ const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-US', { mont
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: TZ }) : '');
 
 const KIND_LABELS = { timesheet: 'Timesheet', visit_note: 'Signed visit note', mileage: 'Mileage or expense', certification: 'Certification',
-  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', other: 'Other' };
+  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', signed_document: 'Signed document', other: 'Other' };
 const STATUS_PILL = { accepted: ['mg-ok', 'Accepted'], received: ['mg-wait', 'With the office'], rejected: ['mg-bad', 'Sent back'] };
 
 function Section({ title, sub, children, right }) {
@@ -660,7 +660,9 @@ function useStaffData() {
     }).catch(e => setFatal(e.code === 'STAFF_PORTAL_STAFF_ONLY' ? 'My GFC is for GFC staff.' : e.message));
   }, [loadFolders]);
   const reloadProfile = useCallback(() => call('/api/my/profile').then(setProfile).catch(() => {}), []);
-  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, err, setErr, loadFolders, reloadProfile };
+  // A document signed here files a copy; the list below shows it at once.
+  const reloadDocs = useCallback(() => call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)), []);
+  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, err, setErr, loadFolders, reloadProfile, reloadDocs };
 }
 
 // The tiles on Home that lead to the staff sections.
@@ -688,6 +690,8 @@ function StaffView({ view, data }) {
   if (view === 'documents') {
     return (
       <div>
+        {/* Documents the office sent to sign or acknowledge (owner, 2026-11-09). */}
+        {window.GFCDocSign && <Section title="Waiting on You" sub="Documents the office sent you to read and sign or acknowledge. Your copy files below."><window.GFCDocSign.WaitingOnYou onChanged={data.reloadDocs} /></Section>}
         <Section title="What You Signed" sub="Policies and forms you signed, with the version and date."><Signed signed={signed} onError={setErr} /></Section>
         <Section title="Files on Record" sub="Everything on file for you, whether you sent it or the office filed it."><Documents docs={docs} onError={setErr} /></Section>
       </div>

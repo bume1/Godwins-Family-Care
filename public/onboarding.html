@@ -121,6 +121,8 @@
 <div id="root"></div>
 <script src="/session-guard.js"></script>
 <script src="/staff-nav.js"></script>
+<script type="text/babel" src="/welcome-packet-ui.js"></script>
+<script type="text/babel" src="/document-sign-ui.js"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 
@@ -478,7 +480,10 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
   };
   // A verification never comes before what it verifies (the server refuses
   // it), so its form appears only once the step before it is done.
-  const canAct = (s) => !s.done && (office || s.hers) && !(s.action === 'VERIFY' && s.index > 0 && !item.steps[s.index - 1].done);
+  const canAct = (s) => !s.done && (office || s.hers) && !(s.action === 'VERIFY' && s.index > 0 && !item.steps[s.index - 1].done)
+    // A document step is recorded only by signing it, never by Mark Done.
+    && !(item.document && s.index === 0);
+  const DocSign = window.GFCDocSign;
   return (
     <>
       <div className="drawer-bg" onClick={onClose} />
@@ -503,6 +508,25 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.notApplicable && <div className="note">Marked not applicable by {item.notApplicable.byName}: {item.notApplicable.reason}</div>}
         {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
 
+        {/* A document the office sent with this task (owner, 2026-11-09). She
+            opens it and signs or acknowledges it here; the copy files to her
+            Documents and this task completes. */}
+        {item.document && (
+          <div style={{ margin: '6px 0 12px' }}>
+            <label className="f">{item.document.action === 'sign' ? 'Document to sign' : 'Document to acknowledge'}</label>
+            {viewerIsSubject && DocSign && <DocSign.WaitingOnYou only={item.document.sendId} onChanged={onChanged}
+              emptyText="This document has been withdrawn by the office." />}
+            {!viewerIsSubject && DocSign && (
+              <div className="line-card">
+                <b>{item.document.title}</b>
+                <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)', margin: '4px 0 8px' }}>
+                  {item.steps[0] && item.steps[0].done ? `${item.document.action === 'sign' ? 'Signed' : 'Acknowledged'} ${fmtDate(item.steps[0].at)}. The copy is in their Documents.` : `Waiting on ${subject || 'them'} to ${item.document.action === 'sign' ? 'sign' : 'acknowledge'} it. Only they can.`}
+                </div>
+                <button className="btn sm ghost" onClick={() => DocSign.openPdf(`/api/my/document-sends/${encodeURIComponent(item.document.sendId)}/file`, `${item.document.title}.pdf`).catch(e => setErr(e.message))}>Open Document</button>
+              </div>
+            )}
+          </div>
+        )}
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to acknowledge</label>
@@ -763,15 +787,30 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
 // One person, or everyone onboarding under a chapter, now and later. She marks
 // it done; if the office ticks "reviews it", it is complete once reviewed.
 const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
-  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', review: false, askForFile: false });
+  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', review: false, askForFile: false, withDoc: false, docAction: 'sign' });
+  const [docFile, setDocFile] = useState(null);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
   const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
   const chapterLabel = (id) => ((chapters || []).find(c => c[0] === id) || [id, id])[1];
   const save = async () => {
     setBusy(true); setErr('');
     try {
-      await call('/api/onboarding/admin/custom-tasks', { method: 'POST', body: { title: f.title, details: f.details, review: f.review, askForFile: f.askForFile,
-        scope: f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter } } });
+      const scope = f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter };
+      // A document goes out first, to the same people, and the task carries it.
+      let send = null;
+      if (f.withDoc) {
+        const fd = new FormData();
+        fd.append('file', docFile); fd.append('title', f.title.trim()); fd.append('note', f.details || ''); fd.append('action', f.docAction);
+        fd.append('scope', JSON.stringify(scope));
+        send = (await call('/api/my/admin/document-sends', { method: 'POST', body: fd })).send;
+      }
+      try {
+        await call('/api/onboarding/admin/custom-tasks', { method: 'POST', body: { title: f.title, details: f.details, review: f.review, askForFile: f.askForFile,
+          scope, documentSendId: send ? send.id : undefined } });
+      } catch (e) {
+        if (send) await call(`/api/my/admin/document-sends/${encodeURIComponent(send.id)}`, { method: 'DELETE' }).catch(() => {});
+        throw e;
+      }
       await onAdded();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -791,10 +830,19 @@ const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
         </select>
       )}
       <label style={{ display: 'block', fontSize: 14, marginTop: 10 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.review} onChange={e => set('review', e.target.checked)} /> Office reviews it after it is marked done</label>
-      <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.askForFile} onChange={e => set('askForFile', e.target.checked)} /> Ask them to attach a file</label>
+      <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.askForFile} disabled={f.withDoc} onChange={e => set('askForFile', e.target.checked)} /> Ask them to attach a file</label>
+      <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.withDoc} onChange={e => setF(Object.assign({}, f, { withDoc: e.target.checked, askForFile: false }))} /> Send a document for them to sign or acknowledge</label>
+      {f.withDoc && (
+        <div style={{ margin: '6px 0 0 22px' }}>
+          <input type="file" accept="application/pdf,.pdf" onChange={e => setDocFile(e.target.files[0] || null)} />
+          <label style={{ display: 'block', fontSize: 14, marginTop: 6 }}><input type="radio" style={{ width: 'auto' }} checked={f.docAction === 'sign'} onChange={() => set('docAction', 'sign')} /> They sign it</label>
+          <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={f.docAction === 'acknowledge'} onChange={() => set('docAction', 'acknowledge')} /> They acknowledge they read it</label>
+          <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>A PDF. They sign it alone; the task is done when they do, and their copy files to their Documents.</div>
+        </div>
+      )}
       {err && <div className="err">{err}</div>}
       <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-        <button className="btn sm" disabled={busy || !f.title.trim() || (f.who === 'chapter' && !f.chapter)} onClick={save}>{busy ? 'Adding…' : 'Add Task'}</button>
+        <button className="btn sm" disabled={busy || !f.title.trim() || (f.who === 'chapter' && !f.chapter) || (f.withDoc && !docFile)} onClick={save}>{busy ? 'Adding…' : 'Add Task'}</button>
         <button className="btn sm ghost" disabled={busy} onClick={onCancel}>Cancel</button>
       </div>
     </div>
@@ -817,7 +865,7 @@ const CustomTaskList = () => {
       {d && d.tasks.length === 0 && !adding && <div className="note">No tasks added yet. Add one here for everyone of a type, or from a person's checklist for just them.</div>}
       {d && d.tasks.map(t => (
         <div key={t.id} className="item" style={{ cursor: 'default' }}>
-          <div className="t"><b>{t.title}</b><div className="meta">{t.scopeLabel}{t.review ? ' · Office reviews' : ''}{t.askForFile ? ' · File requested' : ''} · Added by {t.createdByName}</div></div>
+          <div className="t"><b>{t.title}</b><div className="meta">{t.scopeLabel}{t.review ? ' · Office reviews' : ''}{t.askForFile ? ' · File requested' : ''}{t.documentSendId ? (t.documentAction === 'sign' ? ' · Document to sign' : ' · Document to acknowledge') : ''} · Added by {t.createdByName}</div></div>
           <button className="btn sm ghost" onClick={() => remove(t)}>Remove</button>
         </div>
       ))}

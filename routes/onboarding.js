@@ -802,7 +802,14 @@ module.exports = function createOnboardingRoutes(deps) {
     } else {
       return res.status(400).json({ error: 'Choose who gets this task: one person, or everyone of a type.', code: 'TASK_SCOPE_REQUIRED' });
     }
+    // A task can carry a document the office already sent (owner, 2026-11-09).
+    let send = null;
+    if (b.documentSendId) {
+      send = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(b.documentSendId) && !x.removedAt);
+      if (!send) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'TASK_DOCUMENT_UNKNOWN' });
+    }
     const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope,
+      documentSendId: send ? send.id : null, documentAction: send ? send.action : null,
       review: !!b.review, askForFile: !!b.askForFile, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
       createdAt: nowIso(), removedAt: null };
     const rows = await customTasks(); rows.push(task); await db.set(CUSTOM, rows);

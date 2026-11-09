@@ -140,3 +140,27 @@ test('the forty-hour program reads a license level in any case, and says why it 
   assert.strictEqual(T.normalizeInputs({ chapter: 'A', fortyHourRoute: true }).fortyHourRoute, true);
   assert.strictEqual(T.normalizeInputs({ chapter: 'C' }).fortyHourReason, null);
 });
+
+// A task can carry a document the office sent (owner, 2026-11-09): its step
+// is a Sign, done only by signing, never by Mark Done.
+test('a task carrying a sent document: refused when unknown, signed only through the document', async () => {
+  const h = await mount();
+  try {
+    await h.call('admin', 'PUT', '/api/onboarding/admin/people/li1/inputs', { chapter: 'G' });
+    let r = await h.call('admin', 'POST', '/api/onboarding/admin/custom-tasks', { title: 'Agreement', scope: { userId: 'li1' }, documentSendId: 'send_none' });
+    assert.strictEqual(r.body.code, 'TASK_DOCUMENT_UNKNOWN');
+    h.store.staff_document_sends = [{ id: 'send_1', title: 'Agreement', action: 'sign', scope: { userId: 'li1' } }];
+    r = await h.call('admin', 'POST', '/api/onboarding/admin/custom-tasks', { title: 'Agreement', scope: { userId: 'li1' }, documentSendId: 'send_1' });
+    assert.strictEqual(r.status, 200);
+    const task = h.store.onboarding_custom_tasks[0];
+    assert.strictEqual(task.documentSendId, 'send_1');
+    assert.strictEqual(task.documentAction, 'sign');
+    const item = customOf((await h.call('li1', 'GET', '/api/onboarding/me')).body.track)[0];
+    assert.deepStrictEqual(item.document, { sendId: 'send_1', action: 'sign', title: 'Agreement' });
+    assert.strictEqual(item.steps[0].action, 'SIGN');
+    // Mark Done is refused for her own document step.
+    const done = await h.call('li1', 'POST', `/api/onboarding/me/items/${item.id}/steps/0`, {});
+    assert.notStrictEqual(done.status, 200);
+    assert.strictEqual(done.body.code, 'DOCUMENT_SIGN_ROUTE');
+  } finally { h.close(); }
+});

@@ -163,6 +163,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'staff_profiles', phi: false, owner: 'staff-portal', note: 'per staff member: website title, bio, headshot Drive pointer' },
   { key: 'staff_welcome_packets', phi: false, owner: 'staff-portal', note: 'staff welcome packet (non-caregiver roles): profile answers + signature image' },
   { key: 'onboarding_custom_tasks', phi: false, owner: 'onboarding', note: 'tasks an admin or manager added to one person or to a chapter; removed tasks kept with who and when' },
+  { key: 'staff_document_sends', phi: false, owner: 'staff-portal', note: 'documents the office sent staff to acknowledge or sign: title, scope, the stored PDF id and its SHA-256; withdrawn sends kept' },
+  { key: 'staff_document_signings', phi: false, owner: 'staff-portal', note: 'one row per person who acknowledged or signed a sent document: printed name, time, hashed IP, the filed copy id' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'onboarding_training_materials', phi: false, owner: 'onboarding', note: 'per module: links and files the office added as training material (Drive ids stay server-side)' },
