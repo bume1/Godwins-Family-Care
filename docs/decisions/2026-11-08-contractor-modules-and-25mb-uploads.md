@@ -28,3 +28,8 @@
 ## Verified
 - 6 mutations, all caught.
 - Full suite 3338 pass, 0 fail.
+
+## Addendum 2026-11-09: HIPAA on CareScout for contracted clinicians
+- **The new item.** `D.6.04` "HIPAA training on CareScout" sits in Systems & Standards. She completes the course on CareScout and uploads the certificate. The credentialing owner then verifies it. It renews yearly.
+- **The D.2 guard still bars training items.** D.6.04 is the one exception, allowed by name: non-clinical, proven by her certificate, and never observed.
+- **TRN-005 (privacy and security in GFC systems) is still on the contractor list.** Remove it if CareScout replaces it.

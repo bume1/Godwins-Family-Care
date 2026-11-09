@@ -153,6 +153,16 @@ const ITEMS = Object.freeze([
     classifications: [], classificationNote: NO_CLASS },
   { id: 'D.6.03', phase: 'D.6', title: 'Service line documentation requirements', ref: P('D.6'),
     steps: [step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED), step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  // Owner, 2026-11-09: a contracted clinician completes GFC's HIPAA training
+  // on CareScout and uploads the certificate. A certificate from an outside
+  // course is evidence of a standard met, not clinical instruction (D.2).
+  // Renewed every year.
+  { id: 'D.6.04', phase: 'D.6', title: 'HIPAA training on CareScout', ref: null,
+    addedBy: 'Owner addition, 2026-11-09: Playbook v3.0 Chapter D does not list it.',
+    repeats: 'annually',
+    elements: ['Complete the GFC HIPAA course on CareScout', 'Upload the completion certificate'],
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
     classifications: [], classificationNote: NO_CLASS }
 ].map(it => Object.freeze(Object.assign({ chapter: 'D' }, it))));
 
