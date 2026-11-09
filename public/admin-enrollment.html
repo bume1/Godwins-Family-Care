@@ -1603,8 +1603,8 @@
         <Section title="Clinical enrollment sequence (IHPC)">
           <div className="flex items-center justify-between mb-3">
             <p className="text-xs text-gray-500 max-w-md">
-              A separate gate from Approve enrollment, above — this one tracks readiness for the
-              medical (IHPC) side specifically and unlocks nothing else on this page.
+              Payer, records, NPA and consents must be done before Approve enrollment. The first visit
+              and the co-signed care plan come after, and Activate needs all six.
             </p>
             {data.activated
               ? <span className="badge bg-success-50 text-success-600 shrink-0">ACTIVATED {new Date(data.activatedAt).toLocaleDateString()}</span>
@@ -2329,6 +2329,7 @@
               <ul className="list-disc ml-5 mt-1">
                 {(approveErr.missingConsents || []).map(m => <li key={m}>{m}</li>)}
                 {(approveErr.missingFields || []).map(m => <li key={m}>{m}</li>)}
+                {(approveErr.missingClinicalSteps || []).map(m => <li key={m}>Clinical enrollment: {m}</li>)}
               </ul>
               {/* The override, offered only after the refusal. Enrolling is what
                   unlocks scheduling now, so an urgent start needs a documented
@@ -2365,6 +2366,7 @@
               <ul className="list-disc ml-5 mt-1">
                 {(client.enrollmentApproval.override.missingConsents || []).map(m => <li key={m}>{m}</li>)}
                 {(client.enrollmentApproval.override.missingFields || []).map(m => <li key={m}>{m}</li>)}
+                {(client.enrollmentApproval.override.missingClinicalSteps || []).map(m => <li key={m}>Clinical enrollment: {m}</li>)}
               </ul>
             </div>
           )}
