@@ -62,8 +62,21 @@ const CERTIFIED_LEVELS = Object.freeze(['cna', 'lpn']);
 const classOf = (r) => (['COMPANION', 'PCA', 'NURSING'].includes(r.caregiverClass) ? r.caregiverClass
   : (r.chapter === 'A' && LEVEL_CLASS[r.licenseLevel]) || null);
 
+function fortyHourReason(r) {
+  if (r.chapter !== 'A') return null;
+  const cls = classOf(r);
+  if (r.holdsCareCertificate === true) return 'Off: her welcome packet says she holds a PCA, CNA, HHA or nursing certificate.';
+  if (CERTIFIED_LEVELS.includes(r.licenseLevel)) return `Off: her account's license level is ${r.licenseLevel.toUpperCase()}, which is already certified.`;
+  if (cls === 'NURSING') return 'Off: she is classed as licensed nursing.';
+  if (r.fortyHourRoute === true) return 'On: ticked below.';
+  if (cls === 'PCA') return r.caregiverClass ? 'On: classed as a PCA with no certificate on file.' : 'On: her account\'s license level is PCA and no certificate is on file.';
+  if (cls === 'COMPANION') return 'Off: she is classed as a companion. Choose PCA above, or tick the box below, if she will qualify as a PCA here.';
+  return 'Off: no license level on her account and no class chosen. Set her license level to PCA in User Management, choose PCA above, or tick the box below.';
+}
+
 function normalizeInputs(raw) {
-  const r = raw || {};
+  // A license level typed or stored as "PCA" reads the same as "pca".
+  const r = Object.assign({}, raw || {}, raw && raw.licenseLevel ? { licenseLevel: String(raw.licenseLevel).trim().toLowerCase() } : {});
   const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
   const serviceLines = Array.from(new Set(arr(r.serviceLines).filter(s => SERVICE_LINES.includes(s))));
   const workState = String(r.workState || 'GA').trim().toUpperCase().slice(0, 2) || 'GA';
@@ -103,6 +116,9 @@ function normalizeInputs(raw) {
     // ticked). The office can still tick it for anyone else it applies to.
     fortyHourRoute: (r.fortyHourRoute === true || (r.chapter === 'A' && classOf(r) === 'PCA'))
       && !(r.holdsCareCertificate === true || CERTIFIED_LEVELS.includes(r.licenseLevel)) && classOf(r) !== 'NURSING',
+    // Why the forty-hour program is on or off, in words, so the office never
+    // has to guess (owner report, 2026-11-09: it did not show and nothing said why).
+    fortyHourReason: fortyHourReason(r),
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }

@@ -130,3 +130,13 @@ test('the page offers it to the office: Add a Task on a person and on the overvi
   assert.match(page, /Office reviews it after it is marked done/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'dataMigration.js'), 'utf8'), /key: 'onboarding_custom_tasks', phi: false/);
 });
+
+test('the forty-hour program reads a license level in any case, and says why it is on or off', () => {
+  const on = T.normalizeInputs({ chapter: 'A', licenseLevel: 'PCA' });
+  assert.strictEqual(on.fortyHourRoute, true);
+  assert.match(on.fortyHourReason, /^On:/);
+  assert.match(T.normalizeInputs({ chapter: 'A', licenseLevel: 'pca', holdsCareCertificate: true }).fortyHourReason, /welcome packet/);
+  assert.match(T.normalizeInputs({ chapter: 'A' }).fortyHourReason, /no license level/);
+  assert.strictEqual(T.normalizeInputs({ chapter: 'A', fortyHourRoute: true }).fortyHourRoute, true);
+  assert.strictEqual(T.normalizeInputs({ chapter: 'C' }).fortyHourReason, null);
+});

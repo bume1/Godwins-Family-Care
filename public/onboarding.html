@@ -852,6 +852,7 @@ const Setup = ({ userId, inputs, onSaved }) => {
         </select>
         <label className="f">Their situation</label>
         {['drives', 'fortyHourRoute'].map(k => <div key={k}>{flag(k)}</div>)}
+        {f.fortyHourReason && <div className="note"><b>Forty-hour PCA program:</b> {f.fortyHourReason}</div>}
         {f.holdsCareCertificate && <div className="note">Her welcome packet says she holds a PCA, CNA, HHA or nursing certificate, so the forty-hour program does not apply. She takes the remaining training only.</div>}
       </> : f.chapter === 'H' ? <>
         <label className="f">The placement</label>
