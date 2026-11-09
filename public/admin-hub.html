@@ -3785,19 +3785,25 @@
                             </div>
                           </td>
                           <td className="px-4 py-4 text-center">
-                            <span className={`inline-block px-3 py-1 text-xs rounded-full font-medium text-center ${
-                              user.role === 'admin' ? 'bg-purple-100 text-purple-700' :
-                              user.isManager ? 'bg-indigo-100 text-indigo-700' :
-                              user.role === 'client' ? 'bg-blue-100 text-blue-700' :
-                              user.role === 'vendor' ? 'bg-green-100 text-green-700' :
-                              user.role === 'caseManager' ? 'bg-teal-100 text-teal-700' :
-                              user.role === 'family' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
+                            <span className={`inline-block px-3 py-1 text-xs rounded-full font-medium text-center whitespace-nowrap ${
+                              user.accountType === 'admin' ? 'bg-purple-100 text-purple-700' :
+                              (user.accountType === 'manager' || user.accountType === 'coordinator') ? 'bg-indigo-100 text-indigo-700' :
+                              ['provider', 'rn', 'lcsw', 'lmsw'].includes(user.accountType) ? 'bg-teal-100 text-teal-700' :
+                              user.accountType === 'caregiver' ? 'bg-green-100 text-green-700' :
+                              user.accountType === 'client' ? 'bg-blue-100 text-blue-700' :
+                              user.accountType === 'family' ? 'bg-yellow-100 text-yellow-700' :
+                              user.accountType ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-800'
                             }`}>{accountTypeLabel(user)}</span>
                           </td>
                           <td className="px-4 py-4">
                             <div className="flex flex-wrap gap-1 justify-center">
-                              {/* "Impl" badge hidden with the dormant tracker (strip-list §7) */}
-                              <span className={`px-2 py-0.5 text-xs rounded ${user.role === 'client' || user.role === 'admin' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}`} title="Client Portal">Client</span>
+                              {/* What this person can open, from the server (accountTypes.accessSummaryFor):
+                                  the same landing and hub areas they actually get. It used to be a lab-era
+                                  "Client" badge on every row (owner, 2026-11-09). */}
+                              {(user.accessSummary || []).length
+                                ? user.accessSummary.map(a => (
+                                  <span key={a} className="px-2 py-0.5 text-xs rounded bg-blue-50 text-blue-700 whitespace-nowrap">{a}</span>))
+                                : <span className="px-2 py-0.5 text-xs rounded bg-gray-100 text-gray-500 whitespace-nowrap">No access yet</span>}
                             </div>
                           </td>
                           <td className="px-4 py-4 text-xs text-gray-500">

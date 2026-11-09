@@ -164,6 +164,24 @@ function accountTypeOf(u) {
   return deriveType(u);
 }
 
+// The name of this account's role as people see it (the Portal Hub badge and
+// its account card). Read from the ONE account type, so the hub can never call
+// a provider a "Team Member" or a caregiver a "Vendor" again (owner,
+// 2026-11-09: "make sure roles on the portal hub match their actual roles").
+// A caregiver carries their licence level; an account with no type says so
+// rather than guessing, since that one needs an admin to choose.
+const CAREGIVER_LEVEL_LABELS = Object.freeze({ sitter: 'Sitter', pca: 'PCA', cna: 'CNA', lpn: 'LPN' });
+function accountTypeLabel(u) {
+  const type = accountTypeOf(u);
+  if (!type) return 'Account type not set';
+  const def = ACCOUNT_TYPES.find(t => t.value === type);
+  if (type === TYPES.CAREGIVER) {
+    const lvl = CAREGIVER_LEVEL_LABELS[String((u && u.licenseLevel) || '').toLowerCase()];
+    return lvl ? `Caregiver (${lvl})` : 'Caregiver';
+  }
+  return def.label;
+}
+
 // Does a stored record already carry exactly what its type sets?
 function isConsistent(u) {
   const type = accountTypeOf(u);
@@ -265,6 +283,29 @@ function hubAreasFor(u) {
   if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, INCIDENT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
   else if (office) add('adminCompliance', 'Admin & Compliance', [INCIDENT_LOG]);
   return areas;
+}
+
+// What this account can open, in a few words, for the ROLE / PORTAL ACCESS
+// column of User Management (owner, 2026-11-09). It used to show a lab-era
+// "Client" badge on every row. Read from the same landing and hub areas the
+// person actually gets, so the list cannot drift from what they see.
+const LANDING_NAMES = Object.freeze({ '/portal': 'Patient portal', '/caregiver': 'Caregiver app', '/my': 'My GFC' });
+function accessSummaryFor(u) {
+  const landing = landingFor(u);
+  if (landing) return [LANDING_NAMES[landing.replace(/^\/portal\/.*/, '/portal')] || landing];
+  const areas = hubAreasFor(u).map(a => a.name);
+  if (areas.length) return ['Portal Hub'].concat(areas.filter(n => n !== 'My GFC'));
+  return [];
+}
+
+// Does the 2026 clinical-role migration's guess still need an admin? Only for
+// a clinician account whose type nobody has chosen. A Super Admin, manager or
+// coordinator gets their access from the account type, so a guessed clinical
+// role on their record decides nothing and is not worth a banner; nor is one
+// on an account whose type an admin has saved.
+function clinicalRoleNeedsConfirming(u) {
+  return !!(u && u.clinicalRoleAutoAssigned && !isValidType(u.accountType) &&
+    CLINICIAN_TYPES.includes(accountTypeOf(u)));
 }
 
 // Every link the hub offers this account, flat, in area order.
@@ -419,7 +460,7 @@ module.exports = {
   TYPES, ACCOUNT_TYPES, ALL_TYPES, isValidType,
   MANAGER_CLINICAL_ACCESS, DEFAULT_MANAGER_CLINICAL_ACCESS, isValidManagerAccess,
   CLINICIAN_TYPES, LEGACY_FLAGS,
-  fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
+  fieldsFor, deriveType, accountTypeOf, accountTypeLabel, accessSummaryFor, clinicalRoleNeedsConfirming, managerAccessOf, isConsistent,
   landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
