@@ -205,8 +205,12 @@ module.exports = function createStaffPortalRoutes(deps) {
   //   signed  — what they signed: policy acknowledgments at a version, and a
   //             caregiver's welcome packet and in-app attestations
   // Our ids only; never a Drive id.
-  router.get('/api/my/documents', authenticateToken, requireStaff, async (req, res) => {
-    const me = String(req.user.id);
+  // Everything on file for one staff member: their uploaded documents and
+  // every policy, packet and attestation they signed. ONE function, read by
+  // the person's own My GFC and by the office's view of their staff record
+  // (owner, 2026-11-09), so the two can never show different files.
+  const documentsFor = async (person) => {
+    const me = String(person.id);
     const files = ((await db.get('caregiver_documents')) || [])
       .filter(r => String(r.caregiver_id) === me && !r.deleted_at)
       .sort((a, b) => String(b.uploaded_at).localeCompare(String(a.uploaded_at)))
@@ -228,7 +232,7 @@ module.exports = function createStaffPortalRoutes(deps) {
           current: String(a.version) === String(def.version), links: def.driveFileIds.map(viewUrl) });
       }
     }
-    if (audienceOf(req.user) === 'caregiver') {
+    if (audienceOf(person) === 'caregiver') {
       const packet = ((await db.get('welcome_packets')) || []).find(p => p && String(p.caregiver_id) === me);
       if (packet && packet.signed_at) {
         signed.push({ id: 'packet', title: 'Caregiver welcome packet', signedAt: packet.signed_at, pdf: 'packet' });
@@ -238,7 +242,22 @@ module.exports = function createStaffPortalRoutes(deps) {
       }
     }
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
-    return res.json({ documents: files, signed });
+    return { documents: files, signed };
+  };
+
+  router.get('/api/my/documents', authenticateToken, requireStaff, async (req, res) => {
+    return res.json(await documentsFor(req.user));
+  });
+
+  // The office's read of one staff member's documents, for their record in
+  // User Management. The admin team only (admin, manager, care coordinator);
+  // a client or family account is not staff and reads as unknown. Files open
+  // through GET /api/caregiver/documents/:id/file, which is the office's too.
+  router.get('/api/my/admin/people/:userId/documents', authenticateToken, requireAdmin, async (req, res) => {
+    const person = (await getUsers()).find(u => String(u.id) === String(req.params.userId) && audienceOf(u));
+    if (!person) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'staff_record_documents_read', 'user', person.id, {});
+    return res.json(await documentsFor(person));
   });
   router.get('/api/my/documents/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const row = ((await db.get('caregiver_documents')) || []).find(r => r.id === req.params.id);

@@ -1023,7 +1023,10 @@ const Mine = ({ viewer, track, onChanged }) => {
 
 // ---- the shell ---------------------------------------------------------------
 const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
-  const [view, setView] = useState('overview'); const [person, setPerson] = useState(null);
+  // ?person=<id> opens straight to one person: the staff record in User
+  // Management links here for the full checklist (owner, 2026-11-09).
+  const linked = (() => { try { return new URLSearchParams(window.location.search).get('person'); } catch (e) { return null; } })();
+  const [view, setView] = useState(linked ? 'person' : 'overview'); const [person, setPerson] = useState(linked || null);
   const open = (id) => { setPerson(id); setView('person'); };
   return (
     <div className="shell">

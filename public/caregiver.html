@@ -1353,7 +1353,81 @@ const OnboardingCard = ({ me, onChanged }) => {
   );
 };
 
-const MoreTab = ({ visitLogs, queued, me }) => (
+// ── WHAT YOU FILED, IN FULL (owner, 2026-11-09) ──────────────────────────
+// A caregiver used to see a visit log only at the moment they sent it, and a
+// concern only while it was open. Every visit log now opens to the whole log
+// as filed (the labelled sections the server builds, cg.describeVisitLog), and
+// every concern they raised stays listed with where it got to and what was
+// said. Read-only: a filed log is never edited.
+const FiledBlock = ({ title, children }) => (
+  <div style={{ marginTop: 10 }}>
+    <div className="mu" style={{ fontWeight: 600, marginBottom: 3 }}>{title}</div>
+    {children}
+  </div>
+);
+const FiledVisitLog = ({ d }) => {
+  if (!d) return <div className="mu" style={{ marginTop: 8 }}>The full log could not be shown.</div>;
+  const has = (a) => Array.isArray(a) && a.length > 0;
+  const empty = !has(d.tasks) && !has(d.measurements) && !has(d.narratives) && !has(d.patientCondition)
+    && !has(d.safetyConcerns) && !has(d.standingInstructionsAcknowledged) && !d.satisfaction;
+  return (
+    <div style={{ borderTop: '1px solid var(--line, #E1D9C9)', marginTop: 10, paddingTop: 4 }}>
+      {has(d.tasks) && <FiledBlock title="Care provided">{d.tasks.map((t, i) => (
+        <div className="mu" key={i}>{t.done ? '✓' : '✗'} {t.label}{t.done ? '' : ' (not done)'}{t.note ? ` — ${t.note}` : ''}</div>
+      ))}</FiledBlock>}
+      {has(d.measurements) && <FiledBlock title="Measurements"><div className="mu">{d.measurements.map(m => `${m.label} ${m.value}`).join(' · ')}</div></FiledBlock>}
+      {(has(d.patientCondition) || d.satisfaction) && <FiledBlock title="How the client was"><div className="mu">
+        {has(d.patientCondition) ? d.patientCondition.join(', ') : ''}{has(d.patientCondition) && d.satisfaction ? ' · ' : ''}{d.satisfaction ? `Client ${String(d.satisfaction).toLowerCase()}` : ''}
+      </div></FiledBlock>}
+      {has(d.safetyConcerns) && <FiledBlock title="Safety concerns raised"><div className="mu">{d.safetyConcerns.join(', ')}</div></FiledBlock>}
+      {has(d.standingInstructionsAcknowledged) && <FiledBlock title="Standing instructions acknowledged"><div className="mu">{d.standingInstructionsAcknowledged.join(' · ')}</div></FiledBlock>}
+      {has(d.narratives) && d.narratives.map((n, i) => <FiledBlock title={n.label} key={i}><div className="mu" style={{ whiteSpace: 'pre-wrap' }}>{n.value}</div></FiledBlock>)}
+      {empty && <div className="mu" style={{ marginTop: 8 }}>No care detail was recorded on this log.</div>}
+    </div>
+  );
+};
+const MyVisitLogRow = ({ v }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <b>{v.visitType} · {v.visitDate}{v.clientName ? ` · ${v.clientName}` : ''}</b>
+      <div className="mu">
+        {titleize(v.status)}
+        {v.submittedOffline ? ' · filed offline' : ''}
+        {v.reviews && v.reviews.length > 0 ? ` · ${v.reviews.length} review note${v.reviews.length > 1 ? 's' : ''}` : ''}
+      </div>
+      {v.reviews && v.reviews.map(r => (
+        <div className="note ok" key={r.id} style={{ marginTop: 8 }}>
+          <i className="ti ti-message-2"></i>
+          <span><b>{r.byName}</b><span>{r.note}</span></span>
+        </div>
+      ))}
+      <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => setOpen(!open)}>{open ? 'Hide Full Log' : 'View Full Log'}</button>
+      {open && <FiledVisitLog d={v.detail} />}
+    </div>
+  );
+};
+const MyConcernRow = ({ e }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <EscalationRow e={e} />
+      <button className="btn ghost sm" style={{ margin: '0 0 10px' }} onClick={() => setOpen(!open)}>{open ? 'Hide Details' : 'View Details'}</button>
+      {open && (
+        <div style={{ margin: '0 0 12px' }}>
+          <FiledBlock title="What you reported"><div className="mu" style={{ whiteSpace: 'pre-wrap' }}>{e.description || 'No description was given.'}</div></FiledBlock>
+          {(e.trail || []).length > 0 && <FiledBlock title="What happened since">
+            {e.trail.map((t, i) => (
+              <div className="mu" key={i}>{titleize(t.status)} · {fmtDate(t.at)}{t.byName ? ` · ${t.byName}` : ''}{t.note ? ` — ${t.note}` : ''}</div>
+            ))}
+          </FiledBlock>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MoreTab = ({ visitLogs, escalations, queued, me }) => (
   <div>
     <h2 className="pg">Logs & Messages</h2>
     <p className="sub">Your visit logs, messages and help.</p>
@@ -1366,22 +1440,15 @@ const MoreTab = ({ visitLogs, queued, me }) => (
       )}
       {visitLogs.length === 0
         ? <Empty icon="clipboard">Nothing filed yet.</Empty>
-        : visitLogs.slice(0, 25).map(v => (
-          <div className="row" style={{ display: 'block' }} key={v.id}>
-            <b>{v.visitType} · {v.visitDate}</b>
-            <div className="mu">
-              {titleize(v.status)}
-              {v.submittedOffline ? ' · filed offline' : ''}
-              {v.reviews && v.reviews.length > 0 ? ` · ${v.reviews.length} review note${v.reviews.length > 1 ? 's' : ''}` : ''}
-            </div>
-            {v.reviews && v.reviews.map(r => (
-              <div className="note ok" key={r.id} style={{ marginTop: 8 }}>
-                <i className="ti ti-message-2"></i>
-                <span><b>{r.byName}</b><span>{r.note}</span></span>
-              </div>
-            ))}
-          </div>
-        ))}
+        : visitLogs.slice(0, 50).map(v => <MyVisitLogRow key={v.id} v={v} />)}
+    </div>
+
+    <div className="card">
+      <h3>Concerns I Raised</h3>
+      <p className="mu" style={{ marginTop: 0 }}>Every concern you flagged, open or resolved, and what was done about it.</p>
+      {(escalations || []).length === 0
+        ? <Empty icon="flag">You have not raised a concern.</Empty>
+        : escalations.map(e => <MyConcernRow key={e.id} e={e} />)}
     </div>
 
     {/* Shifts, the open pool, availability and time history all live in the
@@ -2383,7 +2450,7 @@ const App = () => {
           <p className="sub">Your documents, policies, pay and account.</p>
           <window.MyGFC.StaffTiles data={staff} go={go} only={['onboarding', 'documents', 'policies', 'folders', 'hours', 'account']} />
         </div>
-        <MoreTab visitLogs={visitLogs} queued={queued} me={me} />
+        <MoreTab visitLogs={visitLogs} escalations={escalations} queued={queued} me={me} />
         <button className="btn ghost mg-phone-only" onClick={logout}><i className="ti ti-logout"></i> Sign Out</button>
       </div>
     );
