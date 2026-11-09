@@ -23,12 +23,15 @@ const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
 const accountTypes = require('../accountTypes');
 
-// Who is onboarded on which chapter. Clinicians on C; the admin team and the
-// liaison on F (owner, 2026-11-08). The office can change it in Setup.
-const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
+// Who is onboarded on which chapter. Clinicians on C; the admin team on F;
+// the liaison on G, which carries F's screening and paperwork (owner, 2026-11-08). The office can change it in Setup.
+const ONBOARDED_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison', 'caregiver']);
 const defaultChapterFor = (u) => {
   const t = accountTypes.accountTypeOf(u);
   if (t === 'rn') return 'B';   // the registered nurse chapter (owner, 2026-11-08)
+  if (t === 'liaison') return 'G';
+  // Caregivers: Chapter A, read through their welcome packet.
+  if (t === 'caregiver') return 'A';
   // A contracted NP or PA (1099) is Chapter D, never C: running a contractor
   // through the employee chapter is what D.2 warns converts the classification.
   if (t === 'provider' && u && u.employmentType === '1099') return 'D';
@@ -37,13 +40,17 @@ const defaultChapterFor = (u) => {
   return (['provider', 'lcsw', 'lmsw'].includes(t) || (u && u.hasClinicalAccess && !u.isManager)) ? 'C' : 'F';
 };
 const CHAPTER_CHOICES = Object.freeze([
+  { id: 'A', label: 'Caregiver, employed (companion, PCA or licensed nursing)' },
   { id: 'B', label: 'Registered nurse, employed (private home care)' },
   { id: 'C', label: 'Clinician (NP, MD, PA), employed' },
   { id: 'D', label: 'Clinician (NP, PA), contracted only (1099)' },
   { id: 'E', label: 'Clinician, hybrid: employed (W-2) and contracted for exams (1099)' },
-  { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination, business development, liaison)' }
+  { id: 'F', label: 'Admin team and non-clinical staff (office, clinical operations, care coordination)' },
+  { id: 'G', label: 'Community Care Liaison (remote business development)' }
 ]);
 const C = require('../onboarding/chapterC');
+const wpRepo = require('../welcomePacketRepository');
+const CC = require('../onboarding/caregiverCourses');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
@@ -57,12 +64,20 @@ const RECORDS = 'onboarding_records';
 const EVENTS = 'onboarding_events';
 const REVIEWS = 'onboarding_module_reviews';
 const LEGACY = 'clinician_onboarding';
-const MAX_BYTES = 15 * 1024 * 1024;
+// Fallback only; the live ceiling is config.STAFF_DOCUMENT_MAX_SIZE (25 MB).
+const MAX_BYTES = 25 * 1024 * 1024;
 
 module.exports = function createOnboardingRoutes(deps) {
   const { db, config, logActivity, getUsers, authenticateToken, drive, detectFileType, uuidv4 } = deps;
   const router = express.Router();
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BYTES } });
+  const STAFF_MAX = (config && config.STAFF_DOCUMENT_MAX_SIZE) || MAX_BYTES;
+  const multerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: STAFF_MAX } });
+  // An oversized file is refused with the limit named, never a bare 500.
+  const upload = { single: (field) => (req, res, next) => multerUpload.single(field)(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: `File exceeds the ${Math.round(STAFF_MAX / (1024 * 1024))} MB limit.`, code: 'DOC_TOO_LARGE' });
+    return next(err);
+  }) };
   const loader = deps.sourceLoader || createSourceLoader({ drive, db });
   const nowIso = () => new Date().toISOString();
   const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -111,13 +126,34 @@ module.exports = function createOnboardingRoutes(deps) {
     try { return await loader.manualState(); } catch (e) { return { ok: false, reason: e.message, changeLog: VF.SEEDED_CHANGES.slice() }; }
   }
 
+  // Chapter A reads the caregiver's welcome packet checklist, derived the
+  // same way the caregiver app and the scheduling gate derive it. Never
+  // stored here: a stored copy goes stale the moment a document is accepted.
+  const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
+  async function packetFor(rec) {
+    if (!rec || !rec.inputs || rec.inputs.chapter !== 'A') return { rows: undefined, certified: false };
+    const id = String(rec.userId);
+    const packet = ((await db.get('welcome_packets')) || []).find(r => r && String(r.caregiver_id) === id) || null;
+    const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === id);
+    const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === id);
+    const held = ((packet || {}).data || {}).certifications;
+    return {
+      rows: wpRepo.buildChecklist((packet || {}).data, docs, (packet || {}).office, atts),
+      certified: Array.isArray(held) && held.some(c => CARE_CERTIFICATES.includes(c))
+    };
+  }
+  // Her inputs with what the packet says about her certificates.
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified) });
+
   async function buildFor(rec, audience) {
     const m = await manual();
+    const pk = await packetFor(rec);
     const track = T.buildTrack({
-      inputs: rec.inputs, record: rec, today: today(), audience,
+      inputs: withPacketFacts(rec.inputs, pk), record: rec, today: today(), audience,
       manualVersion: m.ok ? m.currentVersion : '2.2',
       moduleReviews: await reviews(),
-      legacy: await legacyFor(rec.userId)
+      legacy: await legacyFor(rec.userId),
+      packetRows: pk.rows
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -230,7 +266,7 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
     const prepared = staffDocs.prepareStaffDocument({
       buffer: req.file.buffer, fileName: req.file.originalname, detectFileType,
-      maxBytes: (config && config.MAX_FILE_SIZE) || MAX_BYTES, keyPrefix: item.id
+      maxBytes: STAFF_MAX, keyPrefix: item.id
     });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
     let stored;
@@ -275,6 +311,74 @@ module.exports = function createOnboardingRoutes(deps) {
     await save(rec);
     await event({ userId: rec.userId, type: 'file', itemId: item.id, byId: actor.id, byName: actor.name, onBehalf: actor.isOffice });
     return res.json({ ok: true });
+  }
+
+  // ---- Care Courses certificates (Chapter A, owner 2026-11-09) --------------
+  // One certificate per course, stored like every other onboarding file. The
+  // cycle is 'initial' for the 40-hour program, the calendar year for the
+  // annual training. A certificate is evidence on upload; the office can send
+  // one back with a reason, which reopens that course.
+  function courseOf(req, res, rec) {
+    if (!rec.inputs || rec.inputs.chapter !== 'A') { res.status(409).json({ error: 'Care Courses training is part of caregiver onboarding.', code: 'COURSES_NOT_ON_TRACK' }); return null; }
+    const course = CC.findCourse(req.params.collectionId, req.params.courseId);
+    if (!course) { res.status(404).json({ error: 'Unknown course.', code: 'COURSE_UNKNOWN' }); return null; }
+    const cycle = CC.cycleFor(req.params.collectionId, today());
+    return { course, cycle, col: CC.COLLECTIONS[req.params.collectionId] };
+  }
+  async function doCourseCert(req, res, rec, actor) {
+    const c = courseOf(req, res, rec); if (!c) return;
+    if (!req.file) return res.status(400).json({ error: 'Choose the certificate file.', code: 'NO_FILE' });
+    const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: STAFF_MAX, keyPrefix: c.course.id });
+    if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    let stored;
+    try {
+      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter('A'),
+        staffFolders.personFolderName(rec.userName, rec.userId), prepared.safeName, req.file.buffer, prepared.mime);
+    } catch (err) {
+      return res.status(502).json({ error: 'We could not store that file. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(err).reason : null });
+    }
+    const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const docRows = (await db.get('caregiver_documents')) || [];
+    docRows.push(staffDocs.buildStaffDocumentRow({
+      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind: 'training_certificate',
+      fileName: req.file.originalname || prepared.safeName, storedName: prepared.safeName, mime: prepared.mime,
+      sizeBytes: req.file.buffer.length, driveFileId: stored.fileId || stored.id || null, driveUrl: stored.webViewLink || null,
+      note: `Certificate: ${c.course.title} (${c.col.title}, ${c.cycle})`, status: 'received',
+      uploadedById: req.user.id, uploadedByName: req.user.name || req.user.email, uploadedByOffice: actor.isOffice,
+      extra: { course_collection: c.col.id, course_id: c.course.id, course_cycle: c.cycle }
+    }));
+    await db.set('caregiver_documents', docRows);
+    rec.courseCerts = rec.courseCerts || {};
+    rec.courseCerts[c.col.id] = rec.courseCerts[c.col.id] || {};
+    rec.courseCerts[c.col.id][c.cycle] = rec.courseCerts[c.col.id][c.cycle] || {};
+    const prev = rec.courseCerts[c.col.id][c.cycle][c.course.id] || {};
+    rec.courseCerts[c.col.id][c.cycle][c.course.id] = {
+      at: nowIso(), returned: null, history: prev.returned ? (prev.history || []).concat([prev.returned]) : (prev.history || []),
+      files: (prev.files || []).concat([{
+        id: uuidv4(), name: trim(req.file.originalname || prepared.safeName, 200), driveFileId: stored.fileId || stored.id || null,
+        documentId: docId, mime: prepared.mime, uploadedAt: nowIso(), uploadedById: req.user.id,
+        uploadedByName: req.user.name || req.user.email, filedBy: actor.isOffice ? 'OFFICE_ON_BEHALF' : 'SELF'
+      }])
+    };
+    await save(rec);
+    await event({ userId: rec.userId, type: 'course_certificate', collection: c.col.id, courseId: c.course.id, cycle: c.cycle, byId: actor.id, byName: actor.name, onBehalf: actor.isOffice });
+    return res.json({ ok: true });
+  }
+  async function doCourseDownload(req, res, rec) {
+    const byCycle = ((rec.courseCerts || {})[req.params.collectionId]) || {};
+    const f = [].concat(...Object.values(byCycle).map(cy => ((cy[req.params.courseId] || {}).files || []))).find(x => x.id === req.params.fileId);
+    if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    try {
+      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { courseId: req.params.courseId, fileId: f.id });
+      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
+      return res.send(buf);
+    } catch (e) {
+      return res.status(502).json({ error: 'That file could not be opened.', code: 'FILE_UNREADABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(e).reason : null });
+    }
   }
 
   async function doDownload(req, res, rec) {
@@ -347,6 +451,14 @@ module.exports = function createOnboardingRoutes(deps) {
     const rec = await myRecord(req, res); if (!rec) return;
     return doDownload(req, res, rec);
   });
+  router.post('/api/onboarding/me/courses/:collectionId/:courseId/certificate', authenticateToken, requireStaff, upload.single('file'), async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doCourseCert(req, res, rec, actorOf(req));
+  });
+  router.get('/api/onboarding/me/courses/:collectionId/:courseId/certificate/:fileId', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doCourseDownload(req, res, rec);
+  });
   router.post('/api/onboarding/me/items/:itemId/notes', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
     return doNote(req, res, rec);
@@ -391,8 +503,10 @@ module.exports = function createOnboardingRoutes(deps) {
     const users = await getUsers();
     const m = await manual();
     const revs = await reviews();
+    const packets = {};
+    for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const people = rows.map(rec => {
-      const t = T.buildTrack({ inputs: rec.inputs, record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs });
+      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows });
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
@@ -459,7 +573,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     return res.json({ ok: true });
@@ -530,6 +644,27 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/admin/people/:userId/items/:itemId/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
     return doDownload(req, res, rec);
+  });
+  router.post('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/certificate', authenticateToken, requireOffice, upload.single('file'), async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doCourseCert(req, res, rec, officeActorOf(req));
+  });
+  router.get('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/certificate/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doCourseDownload(req, res, rec);
+  });
+  // Send a certificate back (wrong course, unreadable): the course reopens.
+  router.post('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/return', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const c = courseOf(req, res, rec); if (!c) return;
+    const reason = trim((req.body || {}).reason, 500);
+    if (!reason) return res.status(400).json({ error: 'Say why it is being sent back.', code: 'RETURN_REASON_REQUIRED' });
+    const row = ((((rec.courseCerts || {})[c.col.id] || {})[c.cycle]) || {})[c.course.id];
+    if (!row || !(row.files || []).length) return res.status(404).json({ error: 'No certificate on file for this course.', code: 'CERT_NONE' });
+    row.returned = { at: nowIso(), byName: req.user.name || req.user.email, reason };
+    await save(rec);
+    await event({ userId: rec.userId, type: 'course_certificate_returned', collection: c.col.id, courseId: c.course.id, cycle: c.cycle, byId: req.user.id, byName: req.user.name, reason });
+    return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/notes', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;

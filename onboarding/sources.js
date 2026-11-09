@@ -74,6 +74,17 @@ const SOURCES = Object.freeze({
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '3.1'
   }),
+  // Playbook G.1: issued during systems provisioning; holds the daily
+  // workflow, weekly structure and check-in agenda. Not duplicated here.
+  LIAISON_PLAYBOOK: Object.freeze({
+    key: 'LIAISON_PLAYBOOK',
+    title: 'Community Care Liaison Playbook',
+    docNumber: 'GFC-CCL',
+    driveFileId: '1bwdUxRntw89l0RlKgHkCkYGqWqQb-7XS',
+    mimeType: 'application/pdf',
+    folder: 'Liaison',
+    transcribedFromVersion: '2.5'
+  }),
   ADMIN_MANUAL: Object.freeze({
     key: 'ADMIN_MANUAL',
     title: 'Administrative and Business Operations Policies and Procedures',

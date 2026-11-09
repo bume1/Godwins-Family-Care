@@ -34,20 +34,42 @@ test('D.2 / D.8: no Employee Handbook, no Code of Conduct, no I-9 or W-4', () =>
 });
 
 test('D.2: no training, competency, orientation, probation or scheduling item', () => {
-  D.ITEMS.forEach(it => assert.doesNotMatch(it.title, /train|competenc|orientation|probation|schedul|shift/i, it.id));
+  // The one named exception is non-clinical training the owner chose, proven
+  // by a certificate she submits (HIPAA on CareScout). It may not be observed.
+  const NON_CLINICAL = ['D.6.04'];
+  D.ITEMS.filter(it => !NON_CLINICAL.includes(it.id)).forEach(it => assert.doesNotMatch(it.title, /train|competenc|orientation|probation|schedul|shift/i, it.id));
+  NON_CLINICAL.forEach(id => {
+    const it = D.ITEMS.find(x => x.id === id);
+    assert.doesNotMatch(it.title, /clinical|competenc|skill|orientation|probation/i, id);
+    assert.ok(it.steps.some(s => s.actor === 'NEW_HIRE' && s.action === 'SUBMIT'), `${id} is proven by her certificate`);
+  });
   D.ITEMS.forEach(it => it.steps.forEach(s => assert.notStrictEqual(s.action, 'OBSERVE', `${it.id} supervises her practice`)));
 });
 
-test('a D track carries no Training Library modules and its service lines open without them', () => {
+test('a D track carries only its named non-clinical modules, in D.6, and its service lines open without them', () => {
   const t = T.buildTrack({ inputs: D_INPUTS, record: {}, audience: 'office' });
   assert.strictEqual(t.chapter.id, 'D');
-  assert.strictEqual(t.modules.length, 0);
-  t.phases.forEach(p => assert.strictEqual(p.requiredModules.length, 0, p.id));
+  const named = D.TRAINING.map(x => x.id);
+  assert.ok(t.modules.length > 0);
+  t.modules.forEach(m => { assert.ok(named.includes(m.id), `${m.id} is not on D's list`); assert.strictEqual(m.phase, 'D.6', m.id); });
+  t.phases.filter(p => p.id !== 'D.6').forEach(p => assert.strictEqual(p.requiredModules.length, 0, p.id));
+  assert.deepStrictEqual(t.phases.find(p => p.id === 'D.6').requiredModules.sort(), t.modules.map(m => m.id).sort());
   assert.deepStrictEqual(t.determinations.map(d => d.id).sort(), ['BEHAVIORAL', 'IME', 'INSURED', 'PRIVATE_PAY']);
   t.determinations.forEach(d => { assert.strictEqual(d.requiredModules.length, 0, d.id); assert.strictEqual(d.eligible, true, d.id); });
   // The same lines under C do wait on modules, so the difference is the chapter.
   const c = T.buildTrack({ inputs: Object.assign({}, D_INPUTS, { chapter: 'C' }), record: {}, audience: 'office' });
   assert.ok(c.determinations.some(d => d.requiredModules.length > 0));
+});
+
+test('D.2: every contractor module is non-clinical — signed off as attestation, certificate or none, never observed or countersigned', () => {
+  const { MODULES } = require('../onboarding/modules');
+  D.TRAINING.forEach(t => {
+    const m = MODULES.find(x => x.id === t.id);
+    assert.ok(m, `${t.id} is not in the Training Library`);
+    assert.ok(['ATTEST', 'CERTIFICATE', 'NONE'].includes(m.signoff), `${t.id} signs off as ${m.signoff}`);
+    (m.unlocksAfter || []).forEach(u => assert.ok(D.TRAINING.some(x => x.id === u), `${t.id} waits on ${u}, which a contractor never gets`));
+  });
+  assert.deepStrictEqual(D.TRAINING.map(x => x.id).sort(), ['TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-008', 'TRN-101', 'TRN-103', 'TRN-205']);
 });
 
 test('a D readiness determination opens on the C.8 conditions with no training recorded', () => {
@@ -99,9 +121,19 @@ test('a contracted provider defaults to D, and the record is stamped 1099', () =
   assert.match(src, /CHAPTER\.relationship\) \|\| 'W2' \}\);/);
 });
 
-test('the page offers D, hides the Training tab for it, and names it Contracted (1099)', () => {
+test('the page offers D, shows its Training tab, and names it Contracted (1099)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(src, /\['D', 'Clinician \(NP, PA\), contracted only \(1099\)'\]/);
-  assert.match(src, /k === 'training' \? \['C', 'E'\]\.includes\(t\.chapter\.id\)/);
+  assert.match(src, /k === 'training' \? \(\['C', 'D', 'E'\]\.includes\(t\.chapter\.id\)/);
   assert.match(src, /Contracted \(1099\)/);
+});
+
+test('a contracted clinician takes the Care Courses HIPAA module, uploads the certificate, and renews it yearly', () => {
+  const it = D.ITEMS.find(x => x.id === 'D.6.04');
+  assert.ok(it && it.phase === 'D.6');
+  assert.match(it.title, /HIPAA/);
+  assert.strictEqual(it.link.url, 'https://www.care-courses.com/company/qj5dz/module-detail');
+  assert.strictEqual(it.repeats, 'annually');
+  assert.deepStrictEqual(it.steps.map(s => [s.actor, s.action]), [['NEW_HIRE', 'SUBMIT'], ['CREDENTIALING_OWNER', 'VERIFY']]);
+  assert.ok(T.composeChecklist({ chapter: 'D' }).some(x => x.id === 'D.6.04'));
 });
