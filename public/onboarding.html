@@ -225,7 +225,64 @@ const PATHS = {
   expiry: (w, i) => w.office ? `/api/onboarding/admin/people/${w.userId}/items/${i}/expiry` : `/api/onboarding/me/items/${i}/expiry`,
   renew: (w, i) => w.office ? `/api/onboarding/admin/people/${w.userId}/items/${i}/renew` : `/api/onboarding/me/items/${i}/renew`,
   recheck: (w, m) => w.office ? `/api/onboarding/admin/people/${w.userId}/modules/${m}/recheck` : `/api/onboarding/me/modules/${m}/recheck`,
-  recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`
+  recurring: (w, r) => `/api/onboarding/admin/people/${w.userId}/recurring/${r}`,
+  courseCert: (w, col, c) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate` : `/api/onboarding/me/courses/${col}/${c}/certificate`,
+  courseCertFile: (w, col, c, f) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate/${f}` : `/api/onboarding/me/courses/${col}/${c}/certificate/${f}`,
+  courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`
+};
+
+// ---- Care Courses training (caregivers, owner 2026-11-09) --------------------
+// Care Courses has no link to a single video, so each collection links its
+// page; each course is proven by its certificate, uploaded here.
+const CourseCollection = ({ col, base, office, onChanged }) => {
+  const [busy, setBusy] = useState(''); const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
+  const send = async (courseId, file) => {
+    if (!file) return;
+    setBusy(courseId); setErr(''); setMsg('');
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      await call(PATHS.courseCert(base, col.id, courseId), { method: 'POST', body: fd });
+      setMsg('Certificate received.'); await onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  const sendBack = async (courseId) => {
+    const reason = window.prompt('Why is this certificate being sent back?');
+    if (!reason) return;
+    try { await call(PATHS.courseReturn(base, col.id, courseId), { method: 'POST', body: { reason } }); await onChanged(); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card">
+      <div className="card-h"><h3 style={{ margin: 0 }}>{col.title}</h3><span>{col.hoursDone} of {col.totalHours} hours · {col.coursesDone} of {col.coursesTotal} courses</span></div>
+      <div className="bar"><span style={{ width: `${Math.round((col.hoursDone / col.totalHours) * 100)}%` }} /></div>
+      <p style={{ fontSize: 14, margin: '10px 0' }}>
+        Take each course on Care Courses, then upload its certificate of completion here.
+        {col.beforeClientHours ? ` The first ${col.beforeClientHours} hours are needed before you serve a client; the rest within ${col.withinMonths} months.` : ` This is your ${col.cycle} annual training.`}
+      </p>
+      {col.beforeClientHours && <div className={col.readyForClients ? 'ok' : 'note'}>{col.readyForClients ? `${col.beforeClientHours} hours done: ready to serve clients on this requirement.` : `${col.beforeClientHours - col.hoursDone > 0 ? (col.beforeClientHours - col.hoursDone) : 0} more hours before serving clients.`}</div>}
+      <a className="btn gold sm" href={col.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />Open the Courses</a>
+      {err && <div className="err">{err}</div>}{msg && <div className="ok">{msg}</div>}
+      <div style={{ marginTop: 10 }}>
+        {col.courses.map(c => (
+          <div key={c.id} className="item" style={{ cursor: 'default', alignItems: 'flex-start' }}>
+            <span className="dot" style={{ width: 22, height: 22, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: c.done ? 'var(--green)' : '#fff', color: '#fff', border: c.done ? 'none' : '1.5px solid #9AA5AB', flex: 'none' }}>{c.done && <i className="ti ti-check" />}</span>
+            <div className="t" style={{ flex: 1 }}>
+              <b>{c.title}</b>
+              <div className="meta">{c.hours} {c.hours === 1 ? 'hour' : 'hours'}{c.done ? ` · certificate on file ${fmtDate(c.at)}` : ''}</div>
+              {c.returned && <div className="err" style={{ marginTop: 4 }}>Sent back: {c.returned.reason}</div>}
+              {c.files.map(f => <div key={f.id} style={{ fontSize: 13 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.courseCertFile(base, col.id, c.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a></div>)}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <label className="btn ghost sm" style={{ cursor: 'pointer' }}>
+                {busy === c.id ? 'Uploading…' : (c.done ? 'Replace' : 'Upload Certificate')}
+                <input type="file" accept="application/pdf,image/jpeg,image/png" style={{ display: 'none' }} disabled={!!busy} onChange={e => send(c.id, e.target.files[0])} />
+              </label>
+              {office && c.done && <button className="btn ghost sm" onClick={() => sendBack(c.id)}>Send Back</button>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 };
 
 // ---- renewals and re-checks (both views) ------------------------------------
@@ -592,7 +649,7 @@ const Person = ({ userId, onBack }) => {
           {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']]
             // Credentialing and readiness are the clinician chapters'. A contracted
             // clinician (D) gets only the non-clinical modules her chapter names.
-            .filter(([k]) => k === 'training' ? ['C', 'D', 'E'].includes(t.chapter.id) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
+            .filter(([k]) => k === 'training' ? (['C', 'D', 'E'].includes(t.chapter.id) || (t.trainingCourses || []).length > 0) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
             <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}
         </div>
       </div>
@@ -638,7 +695,8 @@ const Person = ({ userId, onBack }) => {
         </div>
       )}
       {tab === 'readiness' && <div className="card"><div className="card-h"><h2>Ready to See Patients</h2></div><Readiness track={t} base={base} office onChanged={load} /></div>}
-      {tab === 'training' && (
+      {tab === 'training' && (t.trainingCourses || []).map(col => <CourseCollection key={col.id} col={col} base={base} office onChanged={load} />)}
+      {tab === 'training' && t.modules.length > 0 && (
         <div className="card"><div className="card-h"><h2>Training</h2><span>{t.modules.filter(m => m.complete).length} of {t.modules.length} complete</span></div>
           {t.phases.filter(p => t.modules.some(m => m.phase === p.id)).map(p => (
             <div key={p.id}><h3 style={{ margin: '10px 0 6px' }}>Phase {p.number} · {p.label}</h3>
@@ -898,9 +956,10 @@ const Mine = ({ viewer, track, onChanged }) => {
       </>}
       {tab === 'training' && <>
         <h2 style={{ marginBottom: 10 }}>Your Training</h2>
+        {(t.trainingCourses || []).map(col => <CourseCollection key={col.id} col={col} base={base} office={false} onChanged={onChanged} />)}
         <Rechecks track={t} base={base} onChanged={onChanged} />
         {t.checks && !t.checks.ok && <div className="note">Some check questions could not be loaded just now.</div>}
-        {t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
+        {t.modules.length > 0 && t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
         {t.modules.filter(m => !m.complete).slice(0, 8).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
         {t.modules.filter(m => m.complete).length > 0 && <><h3 style={{ margin: '14px 0 6px' }}>Completed</h3>{t.modules.filter(m => m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</>}
       </>}
@@ -913,7 +972,7 @@ const Mine = ({ viewer, track, onChanged }) => {
           </div>))}
       </>}
       <div className="bottom">
-        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0).map(([k, l, ic]) =>
+        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0 || (t.trainingCourses || []).length > 0).map(([k, l, ic]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><i className={`ti ${ic}`} />{l}</button>)}
       </div>
       {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} />}

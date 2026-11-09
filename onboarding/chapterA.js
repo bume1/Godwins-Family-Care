@@ -152,6 +152,9 @@ const ITEMS = Object.freeze([
     ] },
   { id: 'A.6.07', phase: 'A.6', title: 'Forty-hour training program', ref: P('A.6'),
     when: { fortyHourRoute: true },
+    // Taken on Care Courses (owner, 2026-11-09): done when every course in
+    // the 40-hour collection has its certificate on file.
+    courses: 'PCA_40',
     elements: ['Twenty hours before serving any client', 'Twenty more within six months of the start of training', 'Directing nurse named in the training record'],
     steps: [step(A.SUPERVISOR, X.RECORD, INFERRED)],
     classifications: [cls('Regulatory', 'Forty-hour training program', A2)] },
@@ -205,7 +208,9 @@ const RECURRING = Object.freeze([
   { id: 'A.10.R3', interval: 'Every ninety-two or one hundred twenty-two days', days: null, event: 'PER_RESIDENCE', owner: [A.SUPERVISOR],
     requirement: 'Supervisory visit per residence: 92 days for personal care tasks, 122 for companion or sitter tasks, from initial service',
     classification: cls('Regulatory', 'Every ninety-two or one hundred twenty-two days', A10) },
-  { id: 'A.10.R4', interval: 'Annually', days: 365, owner: [A.CLINICAL_DIRECTOR],
+  // Completed through the Care Courses annual collection; finishing the
+  // year's seven certificates records it done (owner, 2026-11-09).
+  { id: 'A.10.R4', interval: 'Annually', days: 365, owner: [A.CLINICAL_DIRECTOR], courses: 'ANNUAL_8',
     requirement: 'Minimum eight clock hours of training, beginning after the first year',
     classification: cls('Regulatory', 'Annually', A10) },
   { id: 'A.10.R5', interval: 'Annually', days: 365, owner: [A.CREDENTIALING_OWNER],

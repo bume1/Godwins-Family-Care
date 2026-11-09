@@ -441,6 +441,21 @@ function openDetermination(detId, inputs, record, body, actor, flags, now) {
 // `legacy` is { items, titles }: a #260 record's item states and the old
 // titles. Shown as evidence on the matching item; it never completes one.
 const R = require('./renewals');
+const CC = require('./caregiverCourses');
+
+// A recurring duty taken as a course collection (A.10.R4) is recorded done
+// by the latest year whose every certificate is on file, never by hand only.
+function recWithCourseDuties(ch, rec) {
+  const extra = {};
+  ch.RECURRING.filter(r => r.courses).forEach(r => {
+    const byCycle = (rec.courseCerts || {})[r.courses] || {};
+    const done = Object.keys(byCycle).map(cy => CC.progress(r.courses, byCycle[cy], cy)).filter(p => p.complete && p.completedOn)
+      .map(p => p.completedOn).sort().pop();
+    const hand = ((rec.recurring || {})[r.id] || {}).lastDoneOn;
+    if (done && (!hand || done > hand)) extra[r.id] = Object.assign({}, (rec.recurring || {})[r.id] || {}, { lastDoneOn: done, byName: 'Care Courses certificates' });
+  });
+  return Object.keys(extra).length ? Object.assign({}, rec, { recurring: Object.assign({}, rec.recurring || {}, extra) }) : rec;
+}
 
 function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows } = {}) {
   const i = normalizeInputs(inputs);
@@ -458,6 +473,11 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     // A completed item whose document has expired reads Renewal Due.
     const expiry = R.expiryOf(it.id, st, today || new Date());
     let status = itemStatus(it, st, today, packetRows);
+    // An item taken as a course collection is done only when every course
+    // has its certificate (and any step is recorded).
+    const courseProgress = it.courses ? CC.progress(it.courses, ((rec.courseCerts || {})[it.courses] || {})[CC.cycleFor(it.courses, ymd(today || new Date().toISOString()))], CC.cycleFor(it.courses, ymd(today || new Date().toISOString()))) : null;
+    if (courseProgress && !courseProgress.complete && status === STATUS.COMPLETE) status = STATUS.IN_PROGRESS;
+    if (courseProgress && !courseProgress.complete && status === STATUS.NOT_STARTED && courseProgress.coursesDone) status = STATUS.IN_PROGRESS;
     const packet = packetEvidence(it, packetRows);
     // Waiting on her when her packet entry is still missing or sent back.
     const packetWaitsOnHer = !!(packet && packet.some(r => r.hers && r.required && ['missing', 'rejected'].includes(r.status)));
@@ -483,7 +503,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
         return out;
       }),
       next: ns ? { index: ns.index, actor: ns.actor, actorLabel: V.ACTOR_LABELS[ns.actor], hers: ns.actor === ACTORS.NEW_HIRE } : null,
-      waitingOnHer: !!((packetWaitsOnHer || (ns && ns.actor === ACTORS.NEW_HIRE)) && status !== STATUS.COMPLETE && status !== STATUS.NOT_APPLICABLE),
+      courses: courseProgress ? { id: courseProgress.id, hoursDone: courseProgress.hoursDone, totalHours: courseProgress.totalHours } : null,
+      waitingOnHer: !!((packetWaitsOnHer || (courseProgress && !courseProgress.complete) || (ns && ns.actor === ACTORS.NEW_HIRE)) && status !== STATUS.COMPLETE && status !== STATUS.NOT_APPLICABLE),
       packet,
       returned: st && st.returned ? st.returned : null,
       acknowledgments: ackStatus(it, st),
@@ -540,8 +561,18 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const determinations = ch.DETERMINATIONS.filter(d => i.serviceLines.includes(d.id))
     .map(d => determinationStatus(d, i, rec, flags));
 
+  // Care Courses collections this person takes (Chapter A): the 40-hour
+  // program on that route, and the current year's annual training.
+  const todayYmd = ymd(today || new Date().toISOString());
+  const trainingCourses = ch.CHAPTER.id !== 'A' ? [] : ['PCA_40', 'ANNUAL_8']
+    .filter(id => id !== 'PCA_40' || i.fortyHourRoute)
+    .map(id => {
+      const cycle = CC.cycleFor(id, todayYmd);
+      return CC.progress(id, ((rec.courseCerts || {})[id] || {})[cycle], cycle);
+    });
+
   const out = {
-    chapter: ch.CHAPTER, inputs: i, lanes: lanesOf(i),
+    chapter: ch.CHAPTER, inputs: i, lanes: lanesOf(i), trainingCourses,
     phases, items, modules, determinations,
     recurring: ch.RECURRING.filter(r => matchesWhen(r.when, i)).map(r => ({
       id: r.id, interval: r.interval, requirement: r.requirement,
@@ -553,7 +584,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     renewals: {
       items: items.filter(x => x.expiry).map(x => ({ id: x.id, title: x.title, status: x.status, expiry: x.expiry, renewals: x.renewals,
         hers: !!(x.next ? x.next.hers : true) })),
-      recurring: R.recurringFor(ch.RECURRING.filter(r => matchesWhen(r.when, i)), rec, i.startDate, today || new Date()),
+      recurring: R.recurringFor(ch.RECURRING.filter(r => matchesWhen(r.when, i)), recWithCourseDuties(ch, rec), i.startDate, today || new Date()),
       basis: office ? R.EXPIRING_BASIS : undefined
     },
     counts: {

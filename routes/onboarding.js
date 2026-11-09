@@ -50,6 +50,7 @@ const CHAPTER_CHOICES = Object.freeze([
 ]);
 const C = require('../onboarding/chapterC');
 const wpRepo = require('../welcomePacketRepository');
+const CC = require('../onboarding/caregiverCourses');
 const { MODULES, findModule } = require('../onboarding/modules');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
@@ -304,6 +305,74 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true });
   }
 
+  // ---- Care Courses certificates (Chapter A, owner 2026-11-09) --------------
+  // One certificate per course, stored like every other onboarding file. The
+  // cycle is 'initial' for the 40-hour program, the calendar year for the
+  // annual training. A certificate is evidence on upload; the office can send
+  // one back with a reason, which reopens that course.
+  function courseOf(req, res, rec) {
+    if (!rec.inputs || rec.inputs.chapter !== 'A') { res.status(409).json({ error: 'Care Courses training is part of caregiver onboarding.', code: 'COURSES_NOT_ON_TRACK' }); return null; }
+    const course = CC.findCourse(req.params.collectionId, req.params.courseId);
+    if (!course) { res.status(404).json({ error: 'Unknown course.', code: 'COURSE_UNKNOWN' }); return null; }
+    const cycle = CC.cycleFor(req.params.collectionId, today());
+    return { course, cycle, col: CC.COLLECTIONS[req.params.collectionId] };
+  }
+  async function doCourseCert(req, res, rec, actor) {
+    const c = courseOf(req, res, rec); if (!c) return;
+    if (!req.file) return res.status(400).json({ error: 'Choose the certificate file.', code: 'NO_FILE' });
+    const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: STAFF_MAX, keyPrefix: c.course.id });
+    if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    let stored;
+    try {
+      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter('A'),
+        staffFolders.personFolderName(rec.userName, rec.userId), prepared.safeName, req.file.buffer, prepared.mime);
+    } catch (err) {
+      return res.status(502).json({ error: 'We could not store that file. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(err).reason : null });
+    }
+    const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const docRows = (await db.get('caregiver_documents')) || [];
+    docRows.push(staffDocs.buildStaffDocumentRow({
+      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind: 'training_certificate',
+      fileName: req.file.originalname || prepared.safeName, storedName: prepared.safeName, mime: prepared.mime,
+      sizeBytes: req.file.buffer.length, driveFileId: stored.fileId || stored.id || null, driveUrl: stored.webViewLink || null,
+      note: `Certificate: ${c.course.title} (${c.col.title}, ${c.cycle})`, status: 'received',
+      uploadedById: req.user.id, uploadedByName: req.user.name || req.user.email, uploadedByOffice: actor.isOffice,
+      extra: { course_collection: c.col.id, course_id: c.course.id, course_cycle: c.cycle }
+    }));
+    await db.set('caregiver_documents', docRows);
+    rec.courseCerts = rec.courseCerts || {};
+    rec.courseCerts[c.col.id] = rec.courseCerts[c.col.id] || {};
+    rec.courseCerts[c.col.id][c.cycle] = rec.courseCerts[c.col.id][c.cycle] || {};
+    const prev = rec.courseCerts[c.col.id][c.cycle][c.course.id] || {};
+    rec.courseCerts[c.col.id][c.cycle][c.course.id] = {
+      at: nowIso(), returned: null, history: prev.returned ? (prev.history || []).concat([prev.returned]) : (prev.history || []),
+      files: (prev.files || []).concat([{
+        id: uuidv4(), name: trim(req.file.originalname || prepared.safeName, 200), driveFileId: stored.fileId || stored.id || null,
+        documentId: docId, mime: prepared.mime, uploadedAt: nowIso(), uploadedById: req.user.id,
+        uploadedByName: req.user.name || req.user.email, filedBy: actor.isOffice ? 'OFFICE_ON_BEHALF' : 'SELF'
+      }])
+    };
+    await save(rec);
+    await event({ userId: rec.userId, type: 'course_certificate', collection: c.col.id, courseId: c.course.id, cycle: c.cycle, byId: actor.id, byName: actor.name, onBehalf: actor.isOffice });
+    return res.json({ ok: true });
+  }
+  async function doCourseDownload(req, res, rec) {
+    const byCycle = ((rec.courseCerts || {})[req.params.collectionId]) || {};
+    const f = [].concat(...Object.values(byCycle).map(cy => ((cy[req.params.courseId] || {}).files || []))).find(x => x.id === req.params.fileId);
+    if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    try {
+      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { courseId: req.params.courseId, fileId: f.id });
+      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
+      return res.send(buf);
+    } catch (e) {
+      return res.status(502).json({ error: 'That file could not be opened.', code: 'FILE_UNREADABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(e).reason : null });
+    }
+  }
+
   async function doDownload(req, res, rec) {
     const st = (rec.items || {})[req.params.itemId] || {};
     const f = (st.files || []).find(x => x.id === req.params.fileId);
@@ -373,6 +442,14 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/me/items/:itemId/files/:fileId', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
     return doDownload(req, res, rec);
+  });
+  router.post('/api/onboarding/me/courses/:collectionId/:courseId/certificate', authenticateToken, requireStaff, upload.single('file'), async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doCourseCert(req, res, rec, actorOf(req));
+  });
+  router.get('/api/onboarding/me/courses/:collectionId/:courseId/certificate/:fileId', authenticateToken, requireStaff, async (req, res) => {
+    const rec = await myRecord(req, res); if (!rec) return;
+    return doCourseDownload(req, res, rec);
   });
   router.post('/api/onboarding/me/items/:itemId/notes', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
@@ -559,6 +636,27 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/admin/people/:userId/items/:itemId/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
     return doDownload(req, res, rec);
+  });
+  router.post('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/certificate', authenticateToken, requireOffice, upload.single('file'), async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doCourseCert(req, res, rec, officeActorOf(req));
+  });
+  router.get('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/certificate/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    return doCourseDownload(req, res, rec);
+  });
+  // Send a certificate back (wrong course, unreadable): the course reopens.
+  router.post('/api/onboarding/admin/people/:userId/courses/:collectionId/:courseId/return', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const c = courseOf(req, res, rec); if (!c) return;
+    const reason = trim((req.body || {}).reason, 500);
+    if (!reason) return res.status(400).json({ error: 'Say why it is being sent back.', code: 'RETURN_REASON_REQUIRED' });
+    const row = ((((rec.courseCerts || {})[c.col.id] || {})[c.cycle]) || {})[c.course.id];
+    if (!row || !(row.files || []).length) return res.status(404).json({ error: 'No certificate on file for this course.', code: 'CERT_NONE' });
+    row.returned = { at: nowIso(), byName: req.user.name || req.user.email, reason };
+    await save(rec);
+    await event({ userId: rec.userId, type: 'course_certificate_returned', collection: c.col.id, courseId: c.course.id, cycle: c.cycle, byId: req.user.id, byName: req.user.name, reason });
+    return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/notes', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
