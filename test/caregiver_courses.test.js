@@ -112,7 +112,7 @@ test('every caregiver takes the HIPAA and Introduction to Dementia Care modules,
 test('the certificate fact comes from the welcome packet, never from the Setup form', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
   assert.match(src, /const CARE_CERTIFICATES = \['pca', 'cna', 'hha', 'lpn', 'rn'\];/);
-  assert.match(src, /\{ chapter, holdsCareCertificate: false, licenseLevel: null \}/);
+  assert.match(src, /\{ chapter, holdsCareCertificate: false, licenseLevel: null, careCoordinator: false \}/);
   assert.match(src, /inputs: withPacketFacts\(rec\.inputs, pk\)/);
 });
 
