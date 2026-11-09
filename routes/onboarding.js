@@ -240,7 +240,9 @@ module.exports = function createOnboardingRoutes(deps) {
       // welcome packet writes, never copied. Opened through doDownload.
       if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
       it.notes = st.notes || [];
-      it.sourceUrl = it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
+      // The Playbook is the office's working document (owner, 2026-11-09):
+      // its link goes to admins and managers only, never to the person onboarding.
+      it.sourceUrl = audience === 'office' && it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
     });
     // Material per module. Staff see only ready / not ready; a module with no
     // material is not available to them, whoever's turn it would otherwise be.

@@ -36,6 +36,7 @@ const ALL_ACKS = Object.freeze(Object.values(Object.values(CHAPTERS).reduce((acc
 const { MODULES } = require('./modules');
 const VF = require('./versionFlags');
 const { carryOver } = require('./legacy260');
+const DESC = require('./descriptions');
 
 const { ACTORS, ACTIONS, FILED_BY } = V;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -600,7 +601,11 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || [],
-      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined
+      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined,
+      // What the item is, in words (owner, 2026-11-09). Where the words came
+      // from is the office's to know, not the new hire's.
+      description: (DESC.descriptionFor(it.id) || {}).text || null,
+      descriptionSource: office ? ((DESC.descriptionFor(it.id) || {}).source || null) : undefined
     };
   });
 

@@ -490,7 +490,15 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0', flexWrap: 'wrap' }}>
           <Pill status={item.status} /><Turn item={item} subjectName={subject} viewerIsSubject={viewerIsSubject} /><Chips item={item} />
         </div>
-        {item.classificationNote && office && <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>{item.classificationNote}</div>}
+        {/* What this item is, for everyone (owner, 2026-11-09). Where the
+            words came from, and the Playbook bookkeeping note, are the office's. */}
+        {item.description && <p className="desc" style={{ fontSize: 14.5, lineHeight: 1.55, margin: '4px 0 10px' }}>{item.description}</p>}
+        {office && (item.descriptionSource || item.classificationNote) && (
+          <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>
+            {item.descriptionSource && <span>{({ PLAYBOOK: 'From the Onboarding Playbook.', PLAYBOOK_ADAPTED: 'Adapted from the Onboarding Playbook.', DRAFTED: 'Drafted for review: not in the Onboarding Playbook.' })[item.descriptionSource]} </span>}
+            {item.classificationNote}
+          </div>
+        )}
         {item.returned && <div className="err"><b>Returned:</b> {item.returned.reason}</div>}
         {item.notApplicable && <div className="note">Marked not applicable by {item.notApplicable.byName}: {item.notApplicable.reason}</div>}
         {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
@@ -631,7 +639,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             }}>Remove Task</button>
           </div>
         )}
-        {item.sourceUrl && <div style={{ marginTop: 14, fontSize: 12.5 }}><a href={item.sourceUrl} target="_blank" rel="noopener">Source: Onboarding Playbook</a></div>}
+        {office && item.sourceUrl && <div style={{ marginTop: 14, fontSize: 12.5 }}><a href={item.sourceUrl} target="_blank" rel="noopener">Source: Onboarding Playbook</a></div>}
       </div>
     </>
   );
@@ -1110,6 +1118,7 @@ const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
   const files = item.files || [];
   return (
     <div className="tasks">
+      {item.description && <div className="desc1" style={{ color: 'var(--mut)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', marginBottom: 4 }}>{item.description}</div>}
       {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
       {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
       {(item.elements || []).length > 0 && <><H>{item.custom ? 'Details' : 'What is checked'}</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
@@ -1122,7 +1131,8 @@ const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
 const ItemRow = ({ i, onOpen, expanded }) => (
   <div className="item" onClick={() => onOpen(i.id)} style={expanded ? { alignItems: 'flex-start' } : undefined}>
     <Dot status={i.status} /><div className="t"><b>{i.title}</b>{i.status === 'SUBMITTED' && <div className="meta">With the office</div>}{i.returned && <div className="meta" style={{ color: 'var(--red)' }}>{i.returned.reason}</div>}
-      {expanded && <ItemTasks item={i} viewerIsSubject office={false} />}</div>
+      {expanded ? <ItemTasks item={i} viewerIsSubject office={false} />
+        : i.description && <div className="meta" style={{ color: 'var(--mut)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{i.description}</div>}</div>
     <i className="ti ti-chevron-right" />
   </div>
 );
