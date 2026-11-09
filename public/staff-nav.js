@@ -51,7 +51,9 @@
     '.gfc-sn a,.gfc-sn button{font:inherit;color:#fff;text-decoration:none;background:none;border:0;cursor:pointer;margin:0;width:auto}' +
     '.gfc-sn-hub{display:inline-flex;align-items:center;gap:8px;font-weight:700;padding:6px 10px;border-radius:9px}' +
     '.gfc-sn-hub:hover,.gfc-sn-menu:hover{background:rgba(255,255,255,.12)}' +
-    '.gfc-sn-hub img{height:22px;width:22px;border-radius:5px;background:#fff;padding:2px}' +
+    // The full-color heart mark (cropped from the full-color logo), on a
+    // white tile. The older logo-mark files are pale watermarks.
+    '.gfc-sn-hub .gfc-sn-mark{display:inline-block;height:24px;width:24px;border-radius:6px;background:#fff url(/brand/logo-mark-color-transparent.png) center/18px no-repeat}' +
     '.gfc-sn-here{color:#E9D9A8;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}' +
     '.gfc-sn-sp{flex:1}' +
     '.gfc-sn-menu{display:inline-flex;align-items:center;gap:6px;font-weight:600;padding:6px 10px;border-radius:9px;border:1px solid rgba(255,255,255,.3)!important}' +
@@ -80,7 +82,7 @@
     var bar = el('nav', { 'class': 'gfc-sn', 'aria-label': 'Staff areas' });
     var inner = el('div', { 'class': 'gfc-sn-in' });
     var hub = el('a', { 'class': 'gfc-sn-hub', href: HUB });
-    hub.appendChild(el('img', { src: '/brand/logo-mark-transparent.png', alt: '' }));
+    hub.appendChild(el('span', { 'class': 'gfc-sn-mark', 'aria-hidden': 'true' }));
     hub.appendChild(el('span', { 'class': 'gfc-sn-hubt' }, 'Portal Hub'));
     hub.setAttribute('aria-label', 'Portal Hub');
     inner.appendChild(hub);
