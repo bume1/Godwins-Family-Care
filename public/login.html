@@ -28,7 +28,7 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <link rel="stylesheet" href="/css/gfc-tokens.css">
   <link rel="stylesheet" href="/css/gfc-auth.css">
   <style>
@@ -671,10 +671,15 @@
       // means the hub. A user object saved before this change has no
       // `landing`, so it falls back to the same rule.
       const directDestination = (u) => {
-        if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
+        if (!u) return null;
         // The sidebar's "Portal Hub" button (owner, 2026-11-09) comes here on
         // purpose, so it stays on the hub rather than bouncing straight back.
+        // That is also how someone skips the welcome packet below.
         if (new URLSearchParams(window.location.search).get('hub') === '1') return null;
+        // An unsigned welcome packet comes first for EVERY staff member, the
+        // Super Admin included (owner, 2026-11-09). The server decides it.
+        if (u.landing === '/my#welcome') return u.landing;
+        if (u.role === 'admin') return null; // Super Admin keeps the hub
         if (Object.prototype.hasOwnProperty.call(u, 'landing')) return u.landing || null;
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
         // Every internal staff member lands on the hub (owner, 2026-11-09).

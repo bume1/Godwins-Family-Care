@@ -13,7 +13,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <style>
     :root{--navy:#033D50;--navy-deep:#022A38;--navy-soft:#0A4F66;--gold:#C9A44A;--gold-light:#F5CD85;--gold-pale:#F1E2BE;
       --cream:#FAF7F2;--cream-warm:#F2EBDD;--ink:#1B2A33;--mut:#4F6470;--line:#E1D9C9;--green:#3F7A5C;--red:#B5462E;--amber:#C98A1A;--grey:#9AA5AB}
@@ -23,15 +23,16 @@
     h1{font-size:34px} h2{font-size:24px} h3{font-size:20px}
     a{color:var(--navy)}
     button{font-family:inherit}
-    /* The sidebar navy is painted on the whole row, so it runs the full height of a long page. */
-    .shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh;background:linear-gradient(90deg,var(--navy) 230px,transparent 230px)}
-    .side{background:var(--navy);color:#fff;padding:18px 12px;position:sticky;top:0;height:100vh}
+    /* The white sidebar (the My GFC look, owner 2026-11-09) is painted on the
+       whole row, edge included, so it runs the full height of a long page. */
+    .shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh;background:linear-gradient(90deg,#fff 229px,#ECE4D6 229px,#ECE4D6 230px,transparent 230px)}
+    .side{background:#fff;color:var(--navy);padding:18px 12px;position:sticky;top:0;height:100vh}
     .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 18px}
-    .brand img{width:38px;height:38px}
-    .brand b{font-family:'Cormorant Garamond',serif;font-size:19px;line-height:1.05;color:#fff}
-    .nav button{display:flex;gap:12px;align-items:center;width:100%;background:none;border:0;color:#fff;padding:11px 12px;border-radius:10px;font-size:15px;cursor:pointer;text-align:left}
-    .nav button.on{background:#9A7A33}
-    .nav button:hover:not(.on){background:var(--navy-soft)}
+    .brand img{height:46px;width:auto}
+    .brand b{font-family:'Cormorant Garamond',serif;font-size:19px;line-height:1.05;color:var(--navy)}
+    .nav button{display:flex;gap:12px;align-items:center;width:100%;background:none;border:0;color:var(--navy);font-weight:600;padding:11px 12px;border-radius:12px;font-size:15px;cursor:pointer;text-align:left}
+    .nav button.on{background:#C9A44A;color:#fff}
+    .nav button:hover:not(.on){background:#F6EFE2}
     .nav i{font-size:20px}
     .main{padding:22px 28px 60px;max-width:1400px}
     .top{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:18px;flex-wrap:wrap}
@@ -113,7 +114,7 @@
     .bottom button{background:none;border:0;display:flex;flex-direction:column;align-items:center;font-size:12px;color:var(--mut);cursor:pointer;min-width:64px;min-height:44px}
     .bottom button.on{color:#A97E2B} .bottom i{font-size:22px}
     @media (max-width:1100px){.grid2{grid-template-columns:1fr}.phases{grid-template-columns:repeat(3,1fr)}}
-    @media (max-width:820px){.shell{grid-template-columns:1fr;background:none}.side{position:static;height:auto;display:flex;align-items:center;gap:6px;overflow-x:auto;padding:10px}.brand{padding:0 6px 0 0}.brand b{display:none}.nav{display:flex;gap:4px}.nav button{white-space:nowrap;padding:8px 10px}.main{padding:16px}.phases{grid-template-columns:repeat(2,1fr)}.hide-sm{display:none}}
+    @media (max-width:820px){.shell{grid-template-columns:1fr;background:none}.side{position:static;height:auto;border-bottom:1px solid #ECE4D6;display:flex;align-items:center;gap:6px;overflow-x:auto;padding:10px}.brand{padding:0 6px 0 0}.brand img{height:30px}.nav{display:flex;gap:4px}.nav button{white-space:nowrap;padding:8px 10px}.main{padding:16px}.phases{grid-template-columns:repeat(2,1fr)}.hide-sm{display:none}}
   </style>
 </head>
 <body>
@@ -486,11 +487,13 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             </label>
           </div>
         )}
-        {item.link && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
+        {item.link && !(item.id === 'WELCOME' && office) && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
           <div><label className="f">From the welcome packet</label>
-            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen.</div>
+            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>{item.id === 'WELCOME'
+              ? (office ? 'This ticks itself when they sign their welcome packet in My GFC. Their staff record in User Management shows the signed packet.' : 'This ticks itself when you sign your welcome packet in My GFC.')
+              : "These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
               <li key={r.kind}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b></li>
             ))}</ul></div>
@@ -519,6 +522,9 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
 
+        {/* The welcome packet step is read from the packet itself, so it takes
+            no notes and cannot be marked not applicable (owner, 2026-11-09). */}
+        {item.id !== 'WELCOME' && <>
         <label className="f">Notes</label>
         {item.notes.map(n => <div key={n.id} style={{ fontSize: 14, padding: '4px 0', borderBottom: '1px solid #F1ECE1' }}><b>{n.byName}</b> <span style={{ color: 'var(--mut)', fontSize: 12 }}>{fmtDate(n.at)}</span><div>{n.text}</div></div>)}
         <textarea rows={2} placeholder="Add a note" value={note} onChange={e => setNote(e.target.value)} style={{ marginTop: 6 }} />
@@ -533,6 +539,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             </div>
           </div>
         )}
+        </>}
         {office && item.custom && (
           <div style={{ marginTop: 16 }}>
             <label className="f">Added by GFC</label>
@@ -1036,7 +1043,7 @@ const Mine = ({ viewer, track, onChanged }) => {
   return (
     <div className="me">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-        <img src="/brand/logo-mark-transparent.png" alt="" style={{ width: 34, height: 34 }} />
+        <img src="/brand/logo-mark-color-transparent.png" alt="" style={{ width: 34, height: 34 }} />
         <b style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 20, color: 'var(--navy)' }}>Godwins Family Care</b>
       </div>
       {tab === 'home' && <>
@@ -1121,7 +1128,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand"><img src="/brand/logo-mark-white-transparent.png" alt="" /><b>Godwins<br />Family Care</b></div>
+        <div className="brand"><img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" /></div>
         <nav className="nav">
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>

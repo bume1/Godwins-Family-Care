@@ -49,7 +49,7 @@
       }
     }
   </script>
-  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
   <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     /* The Admin Hub wears the My GFC frame (owner, 2026-11-09): the same
@@ -1656,11 +1656,12 @@
     const staffRecordSections = (u, isSuperAdmin) => [
       { id: 'sr-account', label: 'Account & Role' },
       (srIsCaregiver(u) || srIsClinical(u) || (u && u.role === 'user')) && { id: 'sr-credentials', label: 'Credentials' },
+      // Bio sits right before Pay (owner, 2026-11-09).
+      { id: 'sr-bio', label: 'Bio & Headshot' },
       srIsCaregiver(u) && { id: 'sr-pay', label: 'Pay' },
       { id: 'sr-documents', label: 'Documents' },
       { id: 'sr-onboarding', label: 'Onboarding & Clearance' },
       { id: 'sr-welcome', label: 'Welcome Packet' },
-      { id: 'sr-bio', label: 'Bio & Headshot' },
       srIsCaregiver(u) && { id: 'sr-activity', label: 'Activity' },
       isSuperAdmin && { id: 'sr-recovery', label: 'Account Recovery' }
     ].filter(Boolean);
@@ -1863,7 +1864,7 @@
         <div className="space-y-2">
           {row('visit logs filed', d.logs, '/caregivers')}
           {row('concerns raised (escalations)', d.escalations, '/caregivers')}
-          {row('incident reports', d.incidents, '/caregivers')}
+          {row('incident reports', d.incidents, '/incidents')}
         </div>
       );
     };

@@ -3736,6 +3736,20 @@ const issueSession = async (user, req, { surface, mfaVerified }) => {
   return token;
 };
 
+// Has this staff member (not a caregiver) yet to sign their welcome packet?
+// Read straight from the store the My GFC packet writes (staff_welcome_packets,
+// routes/staffPortal.js). Never true for a caregiver, client or family account,
+// and a read that fails is treated as "not pending", so a storage hiccup can
+// never send someone somewhere other than their usual landing.
+const STAFF_WELCOME_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']);
+const staffWelcomePending = async (user) => {
+  try {
+    if (!user || !STAFF_WELCOME_TYPES.includes(accountTypes.accountTypeOf(user))) return false;
+    const row = ((await db.get('staff_welcome_packets')) || []).find(p => p && String(p.user_id) === String(user.id));
+    return !row || row.status !== 'submitted';
+  } catch (e) { return false; }
+};
+
 const finishLogin = async ({ user, req, surface, userResponse }) => {
   const needsMfa = config.MFA_ENFORCE && mfa.mfaRequiredFor(user, config.MFA_REQUIRED_ROLES);
   if (!needsMfa) {
@@ -4014,6 +4028,13 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
     const userResponse = loginProfileFor(user);
+    // THE WELCOME PACKET COMES FIRST (owner, 2026-11-09). Until a staff member
+    // has signed theirs, signing in opens it (My GFC → Welcome Packet) instead
+    // of their usual landing. Everyone, existing staff included. It is the
+    // first screen, not a lock: the Portal Hub button takes them on, and the
+    // next sign-in brings them back to it until it is signed. Caregivers have
+    // their own packet in the caregiver app, which already opens on it.
+    if (await staffWelcomePending(user)) userResponse.landing = appLinks.PATHS.STAFF_WELCOME;
     // Include client-specific fields
     if (user.role === config.ROLES.CLIENT) {
       userResponse.practiceName = user.practiceName;

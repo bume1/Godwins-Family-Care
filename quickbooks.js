@@ -41,6 +41,10 @@ const ACCOUNTS = Object.freeze({
   gaWh: 'Payroll Liabilities: GA Withholding',
   futa: 'Payroll Liabilities: FUTA',
   suta: 'Payroll Liabilities: GA SUTA',
+  // States after Georgia (Texas first): one account each for withholding and
+  // unemployment; the journal line names the state.
+  stateWh: 'Payroll Liabilities: Other State Withholding',
+  stateSuta: 'Payroll Liabilities: Other State SUTA',
   wagesHomeCare: 'Wages: Home Care',
   wagesClinical: 'Wages: Clinical',
   taxExpense: 'Payroll Tax Expense',
@@ -70,7 +74,9 @@ function journalForRun(run, ids) {
   const t = run.totals;
   const wages = { home_care: 0, clinical: 0 };
   for (const w of run.workers) if (w.pay) wages[w.wageAccount === 'home_care' ? 'home_care' : 'clinical'] += w.pay.grossCents + (w.pay.reimbursementsCents || 0);
-  const employerTax = t.employerSocialSecurityCents + t.employerMedicareCents + t.futaCents + (t.gaSutaCents || 0);
+  const employerTax = t.employerSocialSecurityCents + t.employerMedicareCents + t.futaCents + (t.gaSutaCents || 0) + (t.stateSutaCents || 0);
+  // Georgia first, then each other state, on the other-state accounts.
+  const other = Object.entries(t.byState || {}).sort((a, b) => a[0].localeCompare(b[0]));
   const lines = [
     wages.home_care && line(ids.wagesHomeCare, wages.home_care, 'Debit', 'Gross wages, home care'),
     wages.clinical && line(ids.wagesClinical, wages.clinical, 'Debit', 'Gross wages, clinical'),
@@ -80,7 +86,11 @@ function journalForRun(run, ids) {
     line(ids.fica, t.socialSecurityCents + t.medicareCents + t.employerSocialSecurityCents + t.employerMedicareCents, 'Credit', 'Social Security and Medicare, employee and employer'),
     t.georgiaCents && line(ids.gaWh, t.georgiaCents, 'Credit', 'Georgia income tax withheld'),
     t.futaCents && line(ids.futa, t.futaCents, 'Credit', 'FUTA'),
-    t.gaSutaCents && line(ids.suta, t.gaSutaCents, 'Credit', 'Georgia unemployment')
+    t.gaSutaCents && line(ids.suta, t.gaSutaCents, 'Credit', 'Georgia unemployment'),
+    ...other.flatMap(([st, b]) => [
+      b.withheldCents && line(ids.stateWh, b.withheldCents, 'Credit', `${st} income tax withheld`),
+      b.sutaCents && line(ids.stateSuta, b.sutaCents, 'Credit', `${st} unemployment`)
+    ])
   ].filter(Boolean);
   const dr = lines.filter(l => l.JournalEntryLineDetail.PostingType === 'Debit').reduce((a, l) => a + Math.round(l.Amount * 100), 0);
   const cr = lines.filter(l => l.JournalEntryLineDetail.PostingType === 'Credit').reduce((a, l) => a + Math.round(l.Amount * 100), 0);
@@ -108,6 +118,8 @@ function taxSplit(pay, runs) {
   if (type === 'ga_withholding') return [{ account: 'gaWh', amountCents: pay.amountCents }];
   if (type === 'futa') return [{ account: 'futa', amountCents: pay.amountCents }];
   if (type === 'ga_suta') return [{ account: 'suta', amountCents: pay.amountCents }];
+  if (/^[a-z]{2}_suta$/.test(type)) return [{ account: 'stateSuta', amountCents: pay.amountCents }];
+  if (/^[a-z]{2}_withholding$/.test(type)) return [{ account: 'stateWh', amountCents: pay.amountCents }];
   // A 941 deposit pays federal withholding and FICA together. Split it in the
   // proportion the runs owed, the remainder on FICA so the cents add up.
   let fed = 0, fica = 0;

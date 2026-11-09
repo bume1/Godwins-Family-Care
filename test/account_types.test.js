@@ -97,7 +97,7 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
     ['clients', ['clients']],
     ['clinical', ['clinical', 'ime']],
     ['billing', ['billing']],
-    ['adminCompliance', ['admin', 'audit', 'service', 'clientPortalAdmin']]
+    ['adminCompliance', ['admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']]
   ]);
   assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
     ['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']);
@@ -125,7 +125,7 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'clients', 'clinical', 'ime', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
+    'clients', 'clinical', 'ime', 'billing', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -135,9 +135,10 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
   // 'people' holds User Management, the one part of the Admin Hub open to
   // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
   const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'clients'];
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'ime', 'billing']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'ime', 'billing'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'ime', 'billing'],
+  // The Incident Log is theirs too (owner, 2026-11-09), alone in Admin & Compliance.
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'ime', 'billing', 'incidents']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'ime', 'billing', 'incidents'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'ime', 'billing', 'incidents'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
@@ -204,10 +205,10 @@ test('the Billing module is its own page on its own route, behind the billing ga
   assert.equal(pred({ ...at.fieldsFor('provider') }), false);
 });
 
-test('Caregiver Management and Caregiver Scheduling sit in People for now (owner, 2026-11-09)', () => {
+test('Home Care Oversight and Caregiver Scheduling sit in People for now (owner, 2026-11-09)', () => {
   const people = at.hubAreasFor(at.fieldsFor('manager')).find(a => a.id === 'people');
   assert.deepEqual(people.links.filter(l => l.path === '/caregivers' || l.path === '/scheduling').map(c => [c.name, c.path]),
-    [['Caregiver Management', '/caregivers'], ['Caregiver Scheduling', '/scheduling']]);
+    [['Home Care Oversight', '/caregivers'], ['Caregiver Scheduling', '/scheduling']]);
 });
 
 // ---- The boot migration ------------------------------------------------

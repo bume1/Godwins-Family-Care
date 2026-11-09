@@ -63,7 +63,9 @@ test('her door: she sees her track only once the office starts it, and is told w
   h.as(NP);
   me = await h.call('GET', '/api/onboarding/me');
   assert.strictEqual(me.data.started, true);
-  assert.strictEqual(me.data.track.items[0].steps[0].actorBasis, undefined, 'the internal basis never reaches her');
+  // Step 1 is the welcome packet (2026-11-09), which has no steps of its own.
+  assert.strictEqual(me.data.track.items[0].id, 'WELCOME');
+  assert.strictEqual(me.data.track.items.find(x => x.steps.length).steps[0].actorBasis, undefined, 'the internal basis never reaches her');
   assert.deepStrictEqual(me.data.track.checks.byModule, {}, 'check questions are OFF for staff by default');
   h.as(OFFICE);
   await h.call('PUT', '/api/onboarding/admin/settings', { checkQuestionsForStaff: true });
@@ -247,4 +249,31 @@ test('a registered nurse is onboarded on Chapter B: PHC P&P 3.1, clearance befor
   // An RN account starts on Chapter B without anybody choosing it.
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');
   assert.match(src, /if \(t === 'rn'\) return 'B';/);
+});
+
+test('step 1 is the welcome packet: it ticks itself from the signed packet and cannot be ticked by hand', async (t) => {
+  const h = await mount(t);
+  await startHer(h);
+  h.as(NP);
+  let w = (await h.call('GET', '/api/onboarding/me')).data.track.items[0];
+  assert.strictEqual(w.id, 'WELCOME');
+  assert.strictEqual(w.status, 'NOT_STARTED');
+  assert.strictEqual(w.waitingOnHer, true);
+  assert.deepStrictEqual(w.steps, []);
+  // No door ticks it: there is no catalog item behind it.
+  assert.strictEqual((await h.call('POST', `/api/onboarding/me/items/WELCOME/steps/0`, {})).status, 404);
+  h.as(OFFICE);
+  assert.strictEqual((await h.call('POST', `/api/onboarding/admin/people/${NP.id}/items/WELCOME/not-applicable`, { reason: 'x' })).status, 404);
+  // Started but not signed is still hers to do.
+  h.store.staff_welcome_packets = [{ user_id: NP.id, status: 'in_progress' }];
+  h.as(NP);
+  w = (await h.call('GET', '/api/onboarding/me')).data.track.items[0];
+  assert.notStrictEqual(w.status, 'COMPLETE');
+  h.store.staff_welcome_packets = [{ user_id: NP.id, status: 'submitted', signed_at: '2026-11-09T12:00:00Z' }];
+  w = (await h.call('GET', '/api/onboarding/me')).data.track.items[0];
+  assert.strictEqual(w.status, 'COMPLETE');
+  assert.strictEqual(w.waitingOnHer, false);
+  // Someone else's signed packet never counts for her.
+  h.store.staff_welcome_packets = [{ user_id: 'someone-else', status: 'submitted' }];
+  assert.strictEqual((await h.call('GET', '/api/onboarding/me')).data.track.items[0].status, 'NOT_STARTED');
 });

@@ -1,4 +1,5 @@
 'use strict';
+const { stateName } = require('./payrollTaxTables');
 // ============================================================================
 // payrollCalendar.js — what GFC owes the tax agencies, when, and the figures
 // each quarterly and year-end filing needs (spec v1 "Tax deposits, filings
@@ -36,7 +37,10 @@ function semiweeklyDue(payDate) {
   let x = addDays(payDate, 1); while (dow(x) !== 5) x = addDays(x, 1); return x;
 }
 
-const AGENCIES = Object.freeze({ IRS: 'IRS (EFTPS)', GA_DOR: 'Georgia DOR (Georgia Tax Center)', GA_DOL: 'Georgia DOL (employer portal)' });
+const AGENCIES = Object.freeze({ IRS: 'IRS (EFTPS)', GA_DOR: 'Georgia DOR (Georgia Tax Center)', GA_DOL: 'Georgia DOL (employer portal)', TX_TWC: 'Texas Workforce Commission (Unemployment Tax Services)' });
+// Another state's agencies: named for that state until it has its own entry.
+const agencyLabel = (agency) => AGENCIES[agency] || (/^([A-Z]{2})_(DOR|UI)$/.test(agency)
+  ? `${stateName(agency.slice(0, 2))} ${agency.endsWith('_DOR') ? 'revenue department' : 'unemployment agency'}` : agency);
 
 /**
  * Every tax liability one approved run creates. Amounts in cents.
@@ -54,6 +58,16 @@ function liabilitiesForRun(run, settings) {
     { agency: 'IRS', type: 'futa', label: 'Federal unemployment (FUTA)', amountCents: t.futaCents, dueDate: nextBusinessDay(quarterDue(pay)), quarter: quarterKey(pay) },
     { agency: 'GA_DOL', type: 'ga_suta', label: 'Georgia unemployment (DOL-4N)', amountCents: t.gaSutaCents || 0, dueDate: nextBusinessDay(quarterDue(pay)), quarter: quarterKey(pay) }
   ];
+  // Every other state, after Georgia. Unemployment is quarterly, due the last
+  // day of the month after the quarter (Texas's C-3 and most states). State
+  // withholding follows the schedule the owner set for that state.
+  for (const [st, b] of Object.entries(t.byState || {}).sort((a, c) => a[0].localeCompare(c[0]))) {
+    const conf = (settings.states || {})[st] || {};
+    out.push({ agency: st === 'TX' ? 'TX_TWC' : `${st}_UI`, type: `${st.toLowerCase()}_suta`, label: `${stateName(st)} unemployment (quarterly report)`, amountCents: b.sutaCents || 0, dueDate: nextBusinessDay(quarterDue(pay)), quarter: quarterKey(pay) });
+    const whDue = conf.withholdingFrequency === 'quarterly' ? quarterDue(pay) : conf.withholdingFrequency === 'semiweekly' ? semiweeklyDue(pay) : fifteenthAfter(pay);
+    out.push({ agency: `${st}_DOR`, type: `${st.toLowerCase()}_withholding`, label: `${stateName(st)} income tax withheld`, amountCents: b.withheldCents || 0, dueDate: nextBusinessDay(whDue),
+      note: conf.withholdingFrequency ? null : `Check ${stateName(st)}'s deposit schedule and set it in Settings.` });
+  }
   return out.filter(l => l.amountCents > 0).map(l => ({ ...l, runId: run.id, payDate: pay }));
 }
 
@@ -66,9 +80,11 @@ function calendar(runs, payments, settings) {
   const groups = new Map();
   for (const r of runs || []) {
     if (!r || r.status === 'draft') continue;
+    // History imported from Gusto: Gusto made those deposits.
+    if (r.source === 'gusto') continue;
     for (const l of liabilitiesForRun(r, settings)) {
       const key = `${l.type}:${l.dueDate}`;
-      const g = groups.get(key) || { key, agency: l.agency, agencyLabel: AGENCIES[l.agency], type: l.type, label: l.label, dueDate: l.dueDate, quarter: l.quarter || null, amountCents: 0, runIds: [] };
+      const g = groups.get(key) || { key, agency: l.agency, agencyLabel: agencyLabel(l.agency), type: l.type, label: l.label, dueDate: l.dueDate, quarter: l.quarter || null, amountCents: 0, runIds: [] };
       g.amountCents += l.amountCents; g.runIds.push(l.runId);
       groups.set(key, g);
     }
@@ -112,7 +128,10 @@ function filings(year) {
  * The figures for Form 941, G-7 and DOL-4N for one quarter, from approved
  * runs whose pay date falls in it. Laid out by form line.
  */
-function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents }) {
+// The state a paid worker worked in on that run: Georgia unless recorded.
+const stateOf = (w) => (w.pay && w.pay.workState) || w.workState || (w.imported && w.imported.workState) || 'GA';
+
+function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents, stateWageBases }) {
   const inQ = (runs || []).filter(r => r && r.status !== 'draft' && r.period && r.period.payDate.startsWith(String(year)) && quarterOf(r.period.payDate) === Number(quarter))
     .sort((a, b) => a.period.payDate.localeCompare(b.period.payDate));
   const people = new Set();
@@ -124,6 +143,7 @@ function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents }) {
   }
   const ytd = new Map(ytdBefore);
   const perEmployee = new Map();
+  const other = {};      // every state but Georgia: its own unemployment report
   for (const r of inQ) {
     const m = +r.period.payDate.slice(5, 7);
     months[m] = months[m] || { federalLiabilityCents: 0, gaWithheldCents: 0 };
@@ -138,6 +158,13 @@ function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents }) {
       ytd.set(w.userId, before + g);
       months[m].federalLiabilityCents += w.pay.taxes.federal + w.pay.taxes.socialSecurity + w.pay.taxes.medicare + w.pay.employer.socialSecurity + w.pay.employer.medicare;
       months[m].gaWithheldCents += w.pay.taxes.georgia;
+      const st = stateOf(w);
+      if (st !== 'GA') {
+        const o = other[st] || (other[st] = { state: st, name: stateName(st), totalWagesCents: 0, taxableWagesCents: 0, withheldCents: 0, employees: new Set() });
+        o.totalWagesCents += g; o.withheldCents += w.pay.taxes.state || 0; o.employees.add(w.userId);
+        o.taxableWagesCents += Math.max(0, Math.min(g, ((stateWageBases || {})[st] || 0) - before));
+        continue;     // never on Georgia's DOL-4N
+      }
       const pe = perEmployee.get(w.userId) || { userId: w.userId, name: w.name, wagesCents: 0, sutaTaxableCents: 0 };
       pe.wagesCents += g;
       pe.sutaTaxableCents += Math.max(0, Math.min(g, (sutaWageBaseCents || 0) - before));
@@ -157,7 +184,8 @@ function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents }) {
       line16_monthlyLiabilityCents: [1, 2, 3].map(i => (months[(Number(quarter) - 1) * 3 + i] || {}).federalLiabilityCents || 0)
     },
     formG7: { monthlyWithheldCents: [1, 2, 3].map(i => (months[(Number(quarter) - 1) * 3 + i] || {}).gaWithheldCents || 0), totalWithheldCents: gaWh },
-    formDOL4N: { totalWagesCents: wages, excessWagesCents: wages - sutaTaxable, taxableWagesCents: sutaTaxable, employees: [...perEmployee.values()] }
+    formDOL4N: (() => { const ga = [...perEmployee.values()].reduce((a, p) => a + p.wagesCents, 0); return { totalWagesCents: ga, excessWagesCents: ga - sutaTaxable, taxableWagesCents: sutaTaxable, employees: [...perEmployee.values()] }; })(),
+    otherStates: Object.values(other).sort((a, b) => a.state.localeCompare(b.state)).map(o => ({ ...o, employees: o.employees.size, excessWagesCents: o.totalWagesCents - o.taxableWagesCents }))
   };
 }
 
@@ -165,18 +193,23 @@ function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents }) {
  * Year-end figures: W-2 boxes per employee and 1099-NEC box 1 per contractor
  * at or above the year's reporting threshold.
  */
-function yearEnd(runs, contractorPayments, { year, fed }) {
+function yearEnd(runs, contractorPayments, { year, fed, incomeTaxStates }) {
   const w2 = new Map();
   const yr = (runs || []).filter(r => r && r.status !== 'draft' && r.period && r.period.payDate.startsWith(String(year)))
     .sort((a, b) => a.period.payDate.localeCompare(b.period.payDate));
   for (const r of yr) for (const w of r.workers || []) {
     if (!w.pay) continue;
-    const e = w2.get(w.userId) || { userId: w.userId, name: w.name, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, box12TT: 0, box16: 0, box17: 0 };
+    const e = w2.get(w.userId) || { userId: w.userId, name: w.name, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, box12TT: 0, box16: 0, box17: 0, stateCode: 'GA' };
+    // Boxes 15-17: Georgia, or the state they worked in. A state with no
+    // income tax (Texas) reports no state wages on the W-2.
+    const st = stateOf(w);
+    e.stateCode = st;
     const before = e.box5;
     e.box1 += w.pay.grossCents; e.box2 += w.pay.taxes.federal;
     e.box3 += Math.max(0, Math.min(w.pay.grossCents, fed.ssWageBaseCents - before));
     e.box4 += w.pay.taxes.socialSecurity; e.box5 += w.pay.grossCents; e.box6 += w.pay.taxes.medicare;
-    e.box16 += w.pay.grossCents; e.box17 += w.pay.taxes.georgia;
+    if (st === 'GA') { e.box16 += w.pay.grossCents; e.box17 += w.pay.taxes.georgia; }
+    else if ((incomeTaxStates || []).includes(st) || (w.pay.taxes.state || 0) > 0) { e.box16 += w.pay.grossCents; e.box17 += w.pay.taxes.state || 0; }
     // Box 12 code TT (new for 2026): qualified overtime, which is only the
     // premium half; the overtime earnings line is already exactly that.
     for (const l of w.earnings || []) if (l.code === 'overtime') e.box12TT += l.amountCents || 0;

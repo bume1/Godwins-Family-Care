@@ -58,7 +58,8 @@ A run refuses anyone missing a W-4, G-4, SSN, I-9 or pay method, and names what 
 3. **Project Settings:** set the time zone to **America/New_York**, then add two script properties:
    - `GFC_APP_URL` = `https://app.godwinsfamilycarellc.com`
    - `GFC_PAYROLL_KEY` = the same value as `PAYROLL_INGEST_KEY` in the app's environment
-4. In the editor, pick **installPayrollTriggers** and press Run. Approve the permissions Google asks for. Running it again is safe.
+4. In the editor, pick **installPayrollTriggers** and press Run. Approve the permissions Google asks for. Running it again is safe, and it removes the old rev 1 reminder trigger.
+5. On the **Triggers** page (clock icon), set each trigger's failure notification to **Notify me immediately**, so a broken job is never silent.
 
 **`scripts/payroll_paystubs.gs` is optional.** Pay stubs from an in-app run are made by the app and need no script. That file is only for stubs from a payroll run done somewhere else (for example, a period you ran before switching). If you need it, add it as a second file in the same project; it uses the same two properties.
 
@@ -71,7 +72,8 @@ What it does on its own:
 | Payment reminder | Daily 8 AM | Approved runs past their send-by date remind you to send PNC payments. |
 | Tax reminders | Daily 9 AM | Deposits and filings due within your lead time. |
 | QuickBooks sync | Nightly 2 AM | Retries anything that failed to post. |
-| W-2 / 1099 reminders | Daily 10 AM, Jan 20 to Feb 15 | Anyone who has not opened an electronic W-2 or 1099 gets one reminder; you hear about paper copies not yet marked mailed. |
+| W-2 / 1099 build | Jan 2 | The year's W-2s and 1099s are built and you are emailed what is ready and what is missing. Nothing is released. |
+| W-2 / 1099 reminders | Jan 20 | Anyone who has not opened an electronic form gets one reminder; you hear about paper copies not yet mailed, or forms not released. |
 | Tax source watch | Weekly (daily in Dec and Jan) | When an IRS or Georgia source changes, you get an email to review and stage new rates. |
 
 **None of these approves, pays or switches on anything.** Those stay your clicks in the app.
@@ -82,7 +84,7 @@ What it does on its own:
 2. In QuickBooks, create these accounts first. The app names any that are missing.
    - PNC Business Checking (Bank)
    - Payroll Clearing
-   - Payroll Liabilities: Federal Withholding, FICA, GA Withholding, FUTA and GA SUTA (each an Other Current Liability)
+   - Payroll Liabilities: Federal Withholding, FICA, GA Withholding, FUTA, GA SUTA, Other State Withholding and Other State SUTA (each an Other Current Liability). The last two carry Texas and any later state; each journal line names the state.
    - Wages: Home Care, and Wages: Clinical (Expense)
    - Payroll Tax Expense, and Contract Labor (Expense)
    - Income: Private Home Care (Income)
@@ -129,3 +131,31 @@ Run one pay period both ways, in Gusto and in the app, and compare every stub li
 **Box 12 TT** is the overtime premium (the "half" of time-and-a-half) the app already pays. Employees may deduct it on their own return. Georgia asks for it on 2026 W-2s too.
 
 **1099-NEC** goes to each contractor paid **$2,000 or more** in the year (up from $600, for payments after 2025).
+
+## 10. Bringing past pay over from Gusto (Payroll → Runs → Import Past Pay From Gusto)
+
+1. In Gusto: **Reports → Payroll Journal**, this year, export CSV.
+2. In the app, choose the file and press **Preview**. It shows each matched person, their pay dates and total, anyone it could not match, and anyone who works outside Georgia.
+3. Press **Import**. Each matched person gets their past pay stubs in My GFC (no emails go out). Their year-to-date counts toward this year's Social Security, FUTA and Georgia unemployment limits. Hours already in the app for those pay periods are locked, so an app run never pays them again.
+
+Good to know:
+- People are matched to accounts by name. Someone with no account, or two accounts with the same name, is listed and skipped. Fix the account, then import again. Re-importing the same file replaces the same pay dates; it never doubles them.
+- Gusto's corrections (a reversal plus a new line) are netted; a pay date that nets to nothing is dropped.
+- Gusto made the tax deposits for its pay dates, so they never appear as deposits the app says you owe.
+- The file itself is not kept anywhere.
+- **Anyone who works outside Georgia** (for example, a Texas address) is blocked from app runs. The app withholds Georgia tax only, so keep paying them outside the app until their state is added.
+
+## 11. Other states (Georgia first, then Texas)
+
+Georgia is the main state and works exactly as before. Texas ships as the second state. Any other state is added the same way when you hire there.
+
+**To pay someone who works in Texas:**
+1. **Payroll → Tax Tables:** approve the staged **Texas 2026** table. Texas has no state income tax; the table carries Texas unemployment on the first $9,000 of each person's wages.
+2. **Payroll → Settings → Other states:** enter GFC's Texas unemployment rate from the TWC notice, and the TWC account number.
+3. **Payroll → People:** set them to **Works in: Texas**. (The Gusto import sets this for you from their Gusto work address.)
+
+They are then paid in the app with no Georgia tax and no G-4. Their Texas unemployment shows on the Taxes calendar, due to the Texas Workforce Commission the last day of the month after each quarter. Their W-2 has no state wages in boxes 15 to 17, and they are left off Georgia's DOL-4N and G-1003. Mark the Texas new hire report from their People row.
+
+**Another state later:** stage that state's table under Tax Tables (choose the state, paste its figures, approve), set GFC's rate and account under Settings → Other states, and set the person's work state. If the state taxes wages, the person signs that state's withholding certificate in My GFC → Pay Setup before they can be paid. Until all of that is done, the run names what is missing and does not pay them.
+
+**QuickBooks:** create **Payroll Liabilities: Other State Withholding** and **Payroll Liabilities: Other State SUTA**. Each journal line names the state.
