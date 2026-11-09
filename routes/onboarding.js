@@ -160,7 +160,10 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!rec.inputs || rec.inputs.chapter !== 'A') {
       const sp = ((await db.get('staff_welcome_packets')) || []).find(r => r && String(r.user_id) === String(rec.userId)) || null;
       const signed = !!(sp && sp.status === 'submitted');
-      return { rows: [{ kind: 'staff_welcome', item: 'WELCOME', title: 'Welcome packet', required: true, source: 'gfc_sign',
+      // A care coordinator gets the clinical scope items (owner, 2026-11-09):
+      // read from their account, like a caregiver's license level.
+      const who = ((await getUsers()) || []).find(x => String(x.id) === String(rec.userId)) || {};
+      return { careCoordinator: accountTypes.accountTypeOf(who) === 'coordinator', rows: [{ kind: 'staff_welcome', item: 'WELCOME', title: 'Welcome packet', required: true, source: 'gfc_sign',
         status: signed ? 'complete' : 'missing', signedAt: signed ? (sp.signed_at || null) : null }],
         certified: false, licenseLevel: null };
     }
@@ -195,7 +198,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // Her inputs with what the packet says about her certificates.
   // Her license level is read from her account, like her certificates from
   // her packet: facts about her, never typed into Setup.
-  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null });
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null, careCoordinator: !!(pk && pk.careCoordinator) });
 
   // ---- training material (owner, 2026-11-09) --------------------------------
   // What each module teaches from: a written SOP read live from Drive, or
@@ -847,7 +850,7 @@ module.exports = function createOnboardingRoutes(deps) {
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null, careCoordinator: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     if (isNew) await notifyStarted(rec);

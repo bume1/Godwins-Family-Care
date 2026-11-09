@@ -119,6 +119,9 @@ function normalizeInputs(raw) {
     // Why the forty-hour program is on or off, in words, so the office never
     // has to guess (owner report, 2026-11-09: it did not show and nothing said why).
     fortyHourReason: fortyHourReason(r),
+    // A care coordinator gets the clinical scope items (owner, 2026-11-09).
+    // Read from their account by the server, never set in Setup.
+    careCoordinator: r.careCoordinator === true,
     startDate: isYmd(r.startDate) ? r.startDate : null
   };
 }
@@ -149,6 +152,7 @@ function matchesWhen(when, inputs) {
   if (when.directsTraining === true && !inputs.directsTraining) return false;
   if (when.baaRequired === true && !inputs.baaRequired) return false;
   if (when.fortyHourRoute === true && !inputs.fortyHourRoute) return false;
+  if (when.careCoordinator === true && !inputs.careCoordinator) return false;
   // An element tied to a class shows when that class is set, or when none is
   // set yet (the office sees every route until it records which applies).
   if (when.caregiverClass && inputs.caregiverClass && when.caregiverClass !== inputs.caregiverClass) return false;
