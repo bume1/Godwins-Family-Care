@@ -82,6 +82,9 @@
     .item .dot{width:22px;height:22px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px}
     .item .t{flex:1;min-width:0} .item .t b{font-weight:500}
     .item .meta{font-size:12.5px;color:var(--mut)}
+    .tasks{margin-top:6px;font-size:13px;color:var(--mut);line-height:1.6;overflow-wrap:anywhere}
+    .tasks .th{font-size:11px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--navy);margin-top:6px}
+    .tasks .th:first-child{margin-top:0} .tasks i{font-size:14px;vertical-align:-2px}
     .grid2{display:grid;grid-template-columns:1.6fr 1fr;gap:16px}
     .drawer-bg{position:fixed;inset:0;background:rgba(2,42,56,.35);z-index:20}
     .drawer{position:fixed;top:0;right:0;bottom:0;width:min(520px,100vw);background:#fff;z-index:21;padding:22px;overflow:auto;box-shadow:-8px 0 30px rgba(0,0,0,.12)}
@@ -169,6 +172,12 @@ const STATUS = {
 const ACTION_WORD = { SUBMIT: 'Sends', SIGN: 'Signs', ACKNOWLEDGE: 'Acknowledges', COMPLETE: 'Completes', VERIFY: 'Verifies',
   RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off' };
 const done = (s) => s === 'COMPLETE' || s === 'NOT_APPLICABLE';
+// Who does a step, in one wording for the side panel and the list alike.
+const stepWho = (s, subjectName, viewerIsSubject) => (s.hers ? (viewerIsSubject ? 'You' : (subjectName || 'New hire')) : s.actorLabel);
+// "You sends" reads wrong: the second person takes the bare verb.
+const YOU_WORD = { SUBMIT: 'send', SIGN: 'sign', ACKNOWLEDGE: 'acknowledge', COMPLETE: 'complete', VERIFY: 'verify',
+  RECORD: 'record', PROVISION: 'set up', EXECUTE: 'issue', OBSERVE: 'observe and sign off' };
+const stepVerb = (s, viewerIsSubject) => (s.hers && viewerIsSubject ? YOU_WORD[s.action] : ACTION_WORD[s.action].toLowerCase());
 
 const Pill = ({ status }) => <span className={`pill p-${status}`}>{STATUS[status] ? STATUS[status].label : status}</span>;
 
@@ -432,7 +441,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             <div className="steps">
               {item.steps.map(s => (
                 <div key={s.index} className={`step ${s.done ? 'done' : ''}`}>
-                  <div><b>{s.hers ? (viewerIsSubject ? 'You' : (subject || 'New hire')) : s.actorLabel}</b> {ACTION_WORD[s.action].toLowerCase()}</div>
+                  <div><b>{stepWho(s, subject, viewerIsSubject)}</b> {stepVerb(s, viewerIsSubject)}</div>
                   {s.done && <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>
                     {fmtDate(s.at)} · {s.filedBy === 'OFFICE_ON_BEHALF' ? (viewerIsSubject ? `Filed by ${s.byName} for you` : `Filed by ${s.byName} on her behalf`) : s.byName}
                     {s.source && ` · Checked: ${s.source} on ${fmtDate(s.verifiedOn)}`}
@@ -672,9 +681,10 @@ const Person = ({ userId, onBack }) => {
             {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}</div>
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
-            <div key={i.id} className="item" onClick={() => setOpenItem(i.id)}>
+            <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
               <Dot status={i.status} />
-              <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div></div>
+              <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div>
+                <ItemTasks item={i} subjectName={String(t.person.name || '').split(' ')[0]} viewerIsSubject={false} office /></div>
               <Chips item={i} />
               <Turn item={i} subjectName={t.person.name} viewerIsSubject={false} />
               <Pill status={i.status} />
@@ -879,9 +889,29 @@ const Library = () => {
 
 // One row of her checklist. At module scope: a component declared inside
 // another is a new identity every render and remounts.
-const ItemRow = ({ i, onOpen }) => (
-  <div className="item" onClick={() => onOpen(i.id)}>
-    <Dot status={i.status} /><div className="t"><b>{i.title}</b>{i.status === 'SUBMITTED' && <div className="meta">With the office</div>}{i.returned && <div className="meta" style={{ color: 'var(--red)' }}>{i.returned.reason}</div>}</div>
+// The item's tasks as sub-bullets under its title (owner, 2026-11-09): who
+// does each step, the documents to sign, what is checked, and the files on
+// record. Read-only; clicking the item still opens the panel to act.
+const Tick = ({ on }) => <i className={`ti ${on ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: on ? 'var(--green)' : '#9AA5AB' }} />;
+const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
+  const H = ({ children }) => (office ? <div className="th">{children}</div> : null);
+  const steps = item.acknowledgments ? [] : item.steps;
+  const files = item.files || [];
+  return (
+    <div className="tasks">
+      {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
+      {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
+      {(item.elements || []).length > 0 && <><H>What is checked</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
+      {item.courses && <div><Tick on={item.courses.hoursDone >= item.courses.totalHours} /> {item.courses.hoursDone} of {item.courses.totalHours} hours of courses</div>}
+      {files.length > 0 && <><H>On file</H>{files.map(f => <div key={f.id}><i className="ti ti-file-text" /> {f.name}{f.status === 'received' ? ' (with the office for review)' : ''}</div>)}</>}
+    </div>
+  );
+};
+
+const ItemRow = ({ i, onOpen, expanded }) => (
+  <div className="item" onClick={() => onOpen(i.id)} style={expanded ? { alignItems: 'flex-start' } : undefined}>
+    <Dot status={i.status} /><div className="t"><b>{i.title}</b>{i.status === 'SUBMITTED' && <div className="meta">With the office</div>}{i.returned && <div className="meta" style={{ color: 'var(--red)' }}>{i.returned.reason}</div>}
+      {expanded && <ItemTasks item={i} viewerIsSubject office={false} />}</div>
     <i className="ti ti-chevron-right" />
   </div>
 );
@@ -959,7 +989,7 @@ const Mine = ({ viewer, track, onChanged }) => {
               {isOpen && <div className="acc-b">
                 {its.length === 0 && ph.readiness && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
                 {its.length === 0 && !ph.readiness && <div className="note">Nothing here for you to do.</div>}
-                {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} />)}
+                {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} expanded />)}
               </div>}
             </div>
           );
