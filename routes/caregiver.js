@@ -107,6 +107,11 @@ module.exports = function createCaregiverRoutes(deps) {
   // competencies, the Feed. Read by ACCOUNT TYPE (accountTypes.js), never by
   // `role`, because a coordinator is stored as `role: 'user'`.
   const isCaregiverOffice = (u) => accountTypes.isHomeCareOffice(u);
+  // An employee of any kind: an account type that is not a client or family.
+  const isStaffAccount = (u) => {
+    const t = accountTypes.accountTypeOf(u);
+    return !!t && t !== 'client' && t !== 'family';
+  };
 
   const requireCaregiverOffice = (req, res, next) => {
     if (isCaregiverOffice(req.user)) return next();
@@ -1029,6 +1034,8 @@ module.exports = function createCaregiverRoutes(deps) {
     id: e.id,
     clientId: e.client_id,
     clientName: e.client_name,
+    // Who raised it, so a caregiver's staff record can list their own.
+    caregiverId: e.caregiver_id,
     caregiverName: e.caregiver_name,
     visitLogId: e.visit_log_id,
     concernType: e.concern_type,
@@ -1183,11 +1190,15 @@ module.exports = function createCaregiverRoutes(deps) {
           return res.status(400).json({ error: 'Say which caregiver this belongs to.', code: 'CAREGIVER_ID_REQUIRED' });
         }
         const users = await getUsers();
-        me = users.find(u => u.id === caregiverId && cg.isCaregiver(u)) || null;
+        // ANY staff member, not only a caregiver (owner, 2026-11-09): every
+        // employee's record in User Management files their documents here,
+        // and this store already holds clinicians' onboarding files. A client
+        // or family account is never staff and is refused.
+        me = users.find(u => u.id === caregiverId && isStaffAccount(u)) || null;
       } else {
         me = await freshCaregiver(req);
       }
-      if (!me) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
+      if (!me) return res.status(404).json({ error: isOffice ? 'Staff member not found.' : 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
 
       const safeName = prepared.safeName;
       let stored;

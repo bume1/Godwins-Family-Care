@@ -56,7 +56,8 @@ test('both routes now have a caller, and the tab renders it', () => {
     'nothing sets an office item');
   assert.match(code, /method: 'PUT'/, 'the office-item call must be a PUT');
   // A component nothing renders is the same defect one layer in.
-  assert.match(code, /\{ id: 'onboarding', label: 'Onboarding'/, 'no tab');
+  // Relabelled "Not Yet Cleared" when it became a queue (owner, 2026-11-09).
+  assert.match(code, /\{ id: 'onboarding', label: 'Not Yet Cleared'/, 'no tab');
   assert.match(code, /\{tab === 'onboarding' && <Onboarding setErr=\{setErr\} setOk=\{setOk\} \/>\}/, 'the tab renders nothing');
 });
 
@@ -122,13 +123,15 @@ test('a refusal shows the route\'s own sentence', () => {
 });
 
 test('the queue carries no PHI: counts and onboarding state only', () => {
-  const i = ROUTE.indexOf("router.get('/api/caregiver/admin/welcome-packets'");
-  assert.ok(i > 0, 'the queue route moved');
+  // The row is built by queueRowFor, shared by the queue and the one-person
+  // read (2026-11-09), so that is what is scanned.
+  const i = ROUTE.indexOf('const queueRowFor = async (caregiver) => {');
+  assert.ok(i > 0, 'the queue row builder moved');
   // Comments STRIPPED before the scan: the route's own comment says it serves
   // no address, and matching that prose failed a correct route. Sixth time
   // this repo has paid for a scan that cannot tell code from prose about it,
   // and this one was a test of mine.
-  const route = strip(ROUTE.slice(i, ROUTE.indexOf('\n  });', i)));
+  const route = strip(ROUTE.slice(i, ROUTE.indexOf('\n  };', i)));
   assert.ok(route.length > 300, `the queue slice looks wrong (${route.length} chars)`);
   // A queue is a glance. The packet holds a date of birth, a home address and
   // a signature image; none of it belongs on a list.
