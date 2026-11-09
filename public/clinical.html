@@ -4074,7 +4074,16 @@
                   <span>
                     {day.totals.miles != null
                       ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
-                      : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
+                      // No miles has three causes, and only one of them is
+                      // missing coordinates. A one-visit day has no leg to
+                      // measure at all, and it used to read "no address
+                      // coordinates" for a patient who had them (owner
+                      // report, 2026-11-09).
+                      : day.totals.unplaceableStops > 0
+                        ? <span className="text-amber-700">Distances unavailable — {day.totals.unplaceableStops} {day.totals.unplaceableStops === 1 ? 'stop has' : 'stops have'} no address coordinates</span>
+                        : day.totals.visits > 0
+                          ? <span className="text-stone-500">No drive between stops to measure</span>
+                          : null}
                   </span>
                   <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
                   {day.ime && day.ime.totals.exams > 0 && (

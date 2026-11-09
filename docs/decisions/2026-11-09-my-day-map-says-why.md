@@ -23,3 +23,6 @@ So an admin who had set coordinates was told to set them again. Video visits wer
 - Still no map tiles (unchanged). A street map remains an owner decision.
 
 Verified: new test in `test/clinical_workspace_412.test.js`; full suite 3582 pass, 0 fail; rendered in Chromium.
+
+## Follow-up: one-visit day (2026-11-09)
+A day with one visit has no leg to measure, so miles is null. The footer read that as "Distances unavailable — no address coordinates" even when the patient had them. It now warns about coordinates only when a stop has none, and otherwise says there is no drive between stops to measure.

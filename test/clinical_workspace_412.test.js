@@ -1359,6 +1359,24 @@ test('a visit pointing at a duplicate client record says the coordinates are on 
   assert.match(serverCode, /clients: Array\.from\(clientsById\.values\(\)\)/);
 });
 
+test('a one-visit day with coordinates is not reported as missing coordinates', () => {
+  // One stop has no leg, so miles is null. That is not the same fact as a stop
+  // with no coordinates (owner report, 2026-11-09).
+  const myDayOne = myDay.buildMyDay({
+    date: '2026-11-09',
+    appointments: [{ eid: '1', clientId: 'c1', date: '2026-11-09', startTime: '18:00' }],
+    clientsById: new Map([['c1', { id: 'c1', name: 'One', address: { lat: 33.6, lng: -84.3 } }]]),
+    timingsByEid: new Map(), signedEids: new Set(), unsignedEarlier: [], openTasks: 0, blocks: [],
+    homeVisitFields: [], startCoords: null, videoByEid: new Map(), imeExams: []
+  });
+  assert.strictEqual(myDayOne.totals.miles, null);
+  assert.strictEqual(myDayOne.totals.unplaceableStops, 0);
+  const i = pageCode.indexOf('Distances unavailable');
+  const block = pageCode.slice(i - 400, i + 600);
+  assert.match(block, /unplaceableStops > 0\s*\?/, 'the coordinates warning shows only when a stop has none');
+  assert.match(block, /No drive between stops to measure/);
+});
+
 test('the map sends no coordinates to a tile provider, because there is no tile provider', () => {
   // A tile provider would receive the coordinates of every patient's home on
   // every render — a disclosure of where people live, to a third party with no
