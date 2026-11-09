@@ -208,7 +208,7 @@ test('the Billing module is its own page on its own route, behind the billing ga
 test('Home Care Oversight and Caregiver Scheduling sit in People for now (owner, 2026-11-09)', () => {
   const people = at.hubAreasFor(at.fieldsFor('manager')).find(a => a.id === 'people');
   assert.deepEqual(people.links.filter(l => l.path === '/caregivers' || l.path === '/scheduling').map(c => [c.name, c.path]),
-    [['Home Care Oversight', '/caregivers'], ['Caregiver Scheduling', '/scheduling']]);
+    [['Home Care Oversight', '/caregivers'], ['Staff Scheduling', '/scheduling']]);
 });
 
 // ---- The boot migration ------------------------------------------------

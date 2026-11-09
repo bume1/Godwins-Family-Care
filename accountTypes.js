@@ -210,8 +210,8 @@ const STAFF_ONBOARDING = link('onboarding', 'Staff Onboarding', '/onboarding', '
 // what is waiting on the office, each row opening the record it belongs to.
 const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Home Care Oversight', '/caregivers',
   'What is waiting on the office: concerns, visit logs to review, incidents, documents and clearance');
-const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
-  'Shifts, availability, time tracking, payroll and client locations');
+const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Staff Scheduling', '/scheduling',
+  'Shifts for caregivers and staff (providers are on the EHR calendar), availability, time logs and client locations');
 // Renamed from Enrollment (owner, 2026-11-09): it is the client's whole
 // record now, care history included. Enrollment status is a section inside.
 const ENROLLMENT = link('enrollment', 'Clients & Patients', '/admin/enrollment', 'Each client\'s record: intake, consents, documents, care plan and care history');

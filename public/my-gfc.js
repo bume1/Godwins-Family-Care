@@ -705,7 +705,7 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
-        {!profile.isCaregiver && profile.employmentType === 'W2' && <Section title="Time Clock" sub="Clock in when you start work and out when you stop."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
         {!profile.isCaregiver && <Section title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}

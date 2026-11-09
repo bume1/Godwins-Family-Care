@@ -29,6 +29,8 @@ const onboardingGate = require('../caregiverOnboardingGate');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
 const accountTypes = require('../accountTypes');
+const ptax = require('../payrollTax');
+const pprof = require('../payrollProfiles');
 // The office number. ORG in public/consent-text.js is the single source — it is
 // what prints into executed consent documents, so a refusal that tells a
 // caregiver to call cannot give a different number from the paperwork.
@@ -231,6 +233,26 @@ module.exports = function createSchedulingRoutes(deps) {
   const requireW2Staff = (req, res, next) => (isW2Staff(req.user) ? next()
     : res.status(403).json({ error: req.user && req.user.employmentType === '1099' ? 'Contractors record hours on their own platform, not here.' : 'This clock is for W-2 staff without shifts. Ask the office to set your employment type.', code: 'STAFF_CLOCK_W2_ONLY' }));
   const requireSchedulableOrStaff = (req, res, next) => (isW2Staff(req.user) ? next() : requireSchedulable(req, res, next));
+
+  // ---- Staff shifts (owner, 2026-11-09) ------------------------------------
+  // Everyone but providers is scheduled here. A staff shift names a role and
+  // is assigned to one person who holds it (their account type). A 1099
+  // contractor is never given one: contractors keep their own time.
+  const isStaffShiftWorker = (u) => !!u && !!sched.STAFF_SHIFT_ROLES[accountTypes.accountTypeOf(u)]
+    && u.accountStatus !== 'inactive' && u.employmentType !== '1099';
+  const isShiftWorker = (u) => isSchedulable(u) || isStaffShiftWorker(u);
+  const requireShiftWorker = (req, res, next) => (isStaffShiftWorker(req.user) ? next() : requireSchedulable(req, res, next));
+  const staffShiftRefusal = (person, shift) => {
+    const role = sched.staffRoleOf(shift);
+    const label = sched.staffRoleLabel(role);
+    if (!person) return 'Pick who works this shift.';
+    if (person.accountStatus === 'inactive') return `${person.name} is inactive.`;
+    if (accountTypes.accountTypeOf(person) !== role) return `${person.name} is not a${/^[AEIOU]/.test(label) ? 'n' : ''} ${label}. A ${label} shift goes to someone in that role.`;
+    if (person.employmentType === '1099') return `${person.name} is a contractor (1099). Contractors keep their own time and are not scheduled here.`;
+    return null;
+  };
+  // What a shift is, in words: the client for a visit, the role for office time.
+  const shiftWhat = (r) => r.client_name || `${sched.staffRoleLabel(sched.staffRoleOf(r)) || 'staff'} shift`;
   // Playbook F.6, the compensation gate: an out-of-state employee records no
   // hours until payroll can pay lawfully in their work state.
   const compensationGate = async (u) => {
@@ -608,17 +630,24 @@ module.exports = function createSchedulingRoutes(deps) {
       const { valid, errors, clean } = sched.validateShift(req.body);
       if (!valid) return res.status(400).json({ error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
 
-      const client = await loadClient(clean.clientId);
-      if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
+      const staffRole = clean.staffRole;
+      const client = clean.clientId ? await loadClient(clean.clientId) : null;
+      if (clean.clientId && !client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
-      const shiftOverride = gateScheduling(req, res, client);
+      const shiftOverride = client ? gateScheduling(req, res, client) : null;
       if (shiftOverride === false) return;
 
       const assignToId = String((req.body || {}).assignToCaregiverId || '').trim();
       let assignee = null;
+      if (staffRole && !assignToId) {
+        return res.status(400).json({ error: `Pick the ${sched.staffRoleLabel(staffRole)} who works this shift.`, code: 'STAFF_SHIFT_NEEDS_PERSON' });
+      }
       if (assignToId) {
         assignee = await freshUser(assignToId);
-        if (!assignee || !isSchedulable(assignee)) {
+        if (staffRole) {
+          const why = staffShiftRefusal(assignee, { staff_role: staffRole });
+          if (why) return res.status(400).json({ error: why, code: 'STAFF_SHIFT_WRONG_PERSON' });
+        } else if (!assignee || !isSchedulable(assignee)) {
           return res.status(400).json({ error: 'Pick a caregiver with a license level on file.', code: 'CAREGIVER_INVALID' });
         }
       }
@@ -626,15 +655,16 @@ module.exports = function createSchedulingRoutes(deps) {
       const rows = await readRows('shifts');
       const row = {
         id: uuidv4(),
-        client_id: client.id,
-        client_name: client.name,
+        client_id: client ? client.id : null,
+        client_name: client ? client.name : null,
+        staff_role: staffRole || null,
         caregiver_id: null,
         caregiver_name: null,
         start: clean.start,
         end: clean.end,
         required_license_level: clean.requiredLicenseLevel,
         pool_visibility: clean.poolVisibility,
-        care_tier: clean.careTier || client.careTier || null,
+        care_tier: clean.careTier || (client && client.careTier) || null,
         notes: clean.notes,
         // The rate an admin set when RELEASING this shift (owner request,
         // 2026-09-13). Optional: left null, each caregiver's own per-client or
@@ -656,7 +686,7 @@ module.exports = function createSchedulingRoutes(deps) {
       };
 
       if (assignee) {
-        if (!sched.isEligibleForShift(assignee, row, client)) {
+        if (!staffRole && !sched.isEligibleForShift(assignee, row, client)) {
           return res.status(409).json({
             error: `${assignee.name} cannot take that shift.`, code: 'SHIFT_NOT_ELIGIBLE',
             reason: sched.eligibilityReason(assignee, row, client)
@@ -692,7 +722,7 @@ module.exports = function createSchedulingRoutes(deps) {
 
       await logActivity(req.user.id, row.created_by_name, 'shift_posted', 'shift', row.id,
         {
-          clientId: client.id, start: row.start,
+          clientId: client ? client.id : null, staffRole: staffRole || null, start: row.start,
           requiredLicenseLevel: row.required_license_level,
           openToAllLevels: sched.isOpenToAllLevels(row),
           assignedTo: assignee ? assignee.id : null,
@@ -703,12 +733,12 @@ module.exports = function createSchedulingRoutes(deps) {
 
       if (assignee) {
         await logActivity(req.user.id, row.created_by_name, 'shift_assigned', 'shift', row.id,
-          { clientId: client.id, caregiverId: assignee.id, postedDirectly: true });
+          { clientId: client ? client.id : null, caregiverId: assignee.id, postedDirectly: true });
         if (assignee.email) {
           await queueNotification('shift_assigned', assignee.id, assignee.email, assignee.name,
             {
-              subject: `New shift offered — ${row.client_name}`,
-              body: `You have been offered the ${time.fmtDateTime(row.start)} shift for ${row.client_name}. Accept or decline it in your schedule.`,
+              subject: `New shift offered — ${shiftWhat(row)}`,
+              body: `You have been offered the ${time.fmtDateTime(row.start)} ${row.client_name ? `shift for ${row.client_name}` : shiftWhat(row)}. Accept or decline it in your schedule.`,
               ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
             },
             { relatedEntityId: row.id, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -718,7 +748,9 @@ module.exports = function createSchedulingRoutes(deps) {
       res.json({
         shift: publicShift(row),
         message: assignee
-          ? `Shift offered to ${assignee.name}. It is theirs once they accept; a decline puts it back in the open pool.`
+          ? (staffRole
+            ? `Shift offered to ${assignee.name}. It is theirs once they accept; if they decline, assign someone else.`
+            : `Shift offered to ${assignee.name}. It is theirs once they accept; a decline puts it back in the open pool.`)
           : (sched.isOpenToAllLevels(row)
             ? 'Shift posted to the open pool, open to all license levels.'
             : `Shift posted to the open pool — ${sched.shiftLevelLabel(row)}.`)
@@ -808,7 +840,8 @@ module.exports = function createSchedulingRoutes(deps) {
     if (after.caregiver_id) {
       const holder = await freshUser(after.caregiver_id);
       const client = await loadClient(after.client_id);
-      if (holder && !sched.isEligibleForShift(holder, after, client)) {
+      const holderOk = sched.isStaffShift(after) ? !staffShiftRefusal(holder, after) : sched.isEligibleForShift(holder, after, client);
+      if (holder && !holderOk) {
         return ERR(409, {
           error: `${holder.name} could not hold the shift as edited.`,
           code: 'SHIFT_HOLDER_INELIGIBLE',
@@ -1018,6 +1051,8 @@ module.exports = function createSchedulingRoutes(deps) {
   router.post('/api/scheduling/shifts/bulk', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const body = req.body || {};
+      // Staff shifts go to a named person one at a time (owner, 2026-11-09).
+      if (body.staffRole) return res.status(400).json({ error: 'Post staff shifts one at a time, each to the person working it.', code: 'STAFF_SHIFT_NOT_BULK' });
       const expanded = sched.expandRecurrence(body);
       if (!expanded.valid) {
         return res.status(400).json({ error: 'Some details need correcting.', code: 'RECURRENCE_INVALID', errors: expanded.errors });
@@ -1485,7 +1520,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // ONLY their own shifts. A caregiver cannot read another caregiver's shifts.
   router.get('/api/scheduling/shifts', authenticateToken, async (req, res) => {
     try {
-      if (!isScheduleManager(req.user) && !isSchedulable(req.user) && !isW2Staff(req.user)) {
+      if (!isScheduleManager(req.user) && !isShiftWorker(req.user) && !isW2Staff(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shifts');
@@ -1510,7 +1545,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const changeRequests = await readRows('shift_change_requests');
       const page = mine.slice(0, 500).map((r) => {
         const out = publicShift(r);
-        out.visitLogFiled = r.status === 'in_progress'
+        out.visitLogFiled = sched.isStaffShift(r) ? null : r.status === 'in_progress'
           ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
               String(v.caregiver_id) === String(r.caregiver_id) &&
               String(v.client_id) === String(r.client_id))
@@ -1751,16 +1786,19 @@ module.exports = function createSchedulingRoutes(deps) {
     try {
       const caregiverId = String((req.body || {}).caregiverId || '');
       const caregiver = await freshUser(caregiverId);
-      if (!caregiver || !isSchedulable(caregiver)) {
-        return res.status(400).json({ error: 'Pick a caregiver with a license level on file.', code: 'CAREGIVER_INVALID' });
-      }
-
       const shiftsAll = await readRows('shifts');
       const target = shiftsAll.find(r => r && r.id === req.params.id);
       if (!target) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
+      const staffShift = sched.isStaffShift(target);
+      if (staffShift) {
+        const why = staffShiftRefusal(caregiver, target);
+        if (why) return res.status(400).json({ error: why, code: 'STAFF_SHIFT_WRONG_PERSON' });
+      } else if (!caregiver || !isSchedulable(caregiver)) {
+        return res.status(400).json({ error: 'Pick a caregiver with a license level on file.', code: 'CAREGIVER_INVALID' });
+      }
 
-      const client = await loadClient(target.client_id);
-      if (!sched.isEligibleForShift(caregiver, target, client)) {
+      const client = target.client_id ? await loadClient(target.client_id) : null;
+      if (!staffShift && !sched.isEligibleForShift(caregiver, target, client)) {
         return res.status(409).json({
           error: `${caregiver.name} cannot take that shift.`, code: 'SHIFT_NOT_ELIGIBLE',
           reason: sched.eligibilityReason(caregiver, target, client)
@@ -1769,8 +1807,9 @@ module.exports = function createSchedulingRoutes(deps) {
       // Cleared to work? An admin MAY go ahead anyway, with a reason, and the
       // reason plus the state it overrode are stamped on the shift — frozen,
       // because recomputing it later would erase the override the moment the
-      // missing document was accepted.
-      const cleared = await checkCaregiverCleared(caregiver, req);
+      // missing document was accepted. (The caregiver welcome packet; staff
+      // are cleared through their own onboarding.)
+      const cleared = staffShift ? { ok: true } : await checkCaregiverCleared(caregiver, req);
       if (!cleared.ok) {
         return res.status(cleared.status).json({
           error: cleared.message, code: cleared.code,
@@ -1800,8 +1839,8 @@ module.exports = function createSchedulingRoutes(deps) {
       if (caregiver.email) {
         await queueNotification('shift_assigned', caregiver.id, caregiver.email, caregiver.name,
           {
-            subject: `New shift offered — ${rows[idx].client_name}`,
-            body: `You have been offered the ${time.fmtDateTime(rows[idx].start)} shift for ${rows[idx].client_name}. Accept or decline it in your schedule.`,
+            subject: `New shift offered — ${shiftWhat(rows[idx])}`,
+            body: `You have been offered the ${time.fmtDateTime(rows[idx].start)} ${rows[idx].client_name ? `shift for ${rows[idx].client_name}` : shiftWhat(rows[idx])}. Accept or decline it in your schedule.`,
             ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
           },
           { relatedEntityId: rows[idx].id, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -1815,7 +1854,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // Caregiver accepts an assignment → confirmed.
-  router.post('/api/scheduling/shifts/:id/accept', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/accept', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const result = await moveShift({
         shiftId: req.params.id, to: 'confirmed', actor: req.user,
@@ -1839,7 +1878,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // Caregiver declines an assignment → the shift RETURNS TO THE OPEN POOL.
-  router.post('/api/scheduling/shifts/:id/decline', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/decline', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const result = await moveShift({
         shiftId: req.params.id, to: 'open', actor: req.user,
@@ -1859,8 +1898,10 @@ module.exports = function createSchedulingRoutes(deps) {
       for (const admin of (await getUsers()).filter(u => u.role === ROLES.ADMIN && u.email)) {
         await queueNotification('shift_declined', admin.id, admin.email, admin.name,
           {
-            subject: `Shift declined — back in the open pool`,
-            body: `${req.user.name} declined the ${time.fmtDateTime(result.shift.start)} shift for ${result.shift.client_name}. It is open again.`,
+            subject: sched.isStaffShift(result.shift) ? `Shift declined — assign someone else` : `Shift declined — back in the open pool`,
+            body: sched.isStaffShift(result.shift)
+              ? `${req.user.name} declined the ${time.fmtDateTime(result.shift.start)} ${shiftWhat(result.shift)}. Assign another ${sched.staffRoleLabel(sched.staffRoleOf(result.shift))}.`
+              : `${req.user.name} declined the ${time.fmtDateTime(result.shift.start)} shift for ${result.shift.client_name}. It is open again.`,
             ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
           },
           { relatedEntityId: `${result.shift.id}:declined`, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -1904,7 +1945,7 @@ module.exports = function createSchedulingRoutes(deps) {
     // caregiver, this client. A log filed by somebody else never counts as this
     // visit being documented.
     const visitLogs = await readRows('caregiver_visit_logs');
-    const documented = visitLogs.some(v =>
+    const documented = sched.isStaffShift(shift) || visitLogs.some(v =>
       v && String(v.shift_id) === String(shift.id) &&
       String(v.caregiver_id) === String(open.caregiver_id) &&
       String(v.client_id) === String(shift.client_id));
@@ -2053,7 +2094,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // POST …/shifts/:id/change-request — the caregiver holding it asks.
-  router.post('/api/scheduling/shifts/:id/change-request', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/change-request', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const shifts = await readRows('shifts');
       const shift = shifts.find(r => r && r.id === req.params.id);
@@ -2155,7 +2196,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // GET …/change-requests — a caregiver sees their own; a manager sees them all.
   router.get('/api/scheduling/change-requests', authenticateToken, async (req, res) => {
     try {
-      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isShiftWorker(req.user)) {
         return res.status(403).json({ error: 'Caregiver or scheduling access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shift_change_requests');
@@ -2384,7 +2425,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // POST …/change-requests/:id/withdraw — the caregiver changes their mind.
   // Their own request only: sorting itself out before anyone acts is the best
   // outcome, and it should not need an admin to clear the queue.
-  router.post('/api/scheduling/change-requests/:id/withdraw', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/change-requests/:id/withdraw', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const found = await loadPendingRequest(req.params.id);
       if (found.error) return res.status(found.error.status).json(found.error.body);
@@ -2436,7 +2477,7 @@ module.exports = function createSchedulingRoutes(deps) {
 
   // POST /api/scheduling/shifts/:id/clock-in — only on a CONFIRMED shift.
   // An out-of-geofence clock-in SUCCEEDS and is flagged; it is never blocked.
-  router.post('/api/scheduling/shifts/:id/clock-in', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/clock-in', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const rows = await readRows('shifts');
       const idx = rows.findIndex(r => r && r.id === req.params.id);
@@ -2473,19 +2514,34 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
-      const client = await loadClient(shift.client_id);
+      const staffShift = sched.isStaffShift(shift);
+      if (staffShift) {
+        const gate = await compensationGate(req.user);
+        if (gate) return res.status(409).json({ error: gate, code: 'COMPENSATION_GATE' });
+      }
+      const logs = await readRows('time_logs');
+      // ONE CLOCK AT A TIME. Someone on the staff clock cannot also start a
+      // shift clock, and a staff shift cannot start over any open clock: two
+      // open clocks are the same hours paid twice. (A caregiver's overlapping
+      // shifts are already refused when the shift is taken.)
+      if (logs.some(l => l && String(l.caregiver_id) === String(req.user.id) && !l.clock_out_at && (staffShift || !l.shift_id))) {
+        return res.status(409).json({ error: 'You are already clocked in. Clock out first.', code: 'ALREADY_CLOCKED_IN' });
+      }
+      const client = shift.client_id ? await loadClient(shift.client_id) : null;
       const gps = normalizeGps((req.body || {}).gps);
       const { flags, geo } = sched.clockInFlags({ shift, client, gps, at });
 
-      const logs = await readRows('time_logs');
       const row = {
         id: uuidv4(),
         shift_id: shift.id,
-        client_id: shift.client_id,
-        client_name: shift.client_name,
+        client_id: shift.client_id || null,
+        client_name: shift.client_name || null,
+        // A staff shift is paid like any W-2 staff time (the payroll profile's
+        // rate) and is never a client invoice line, even on a client visit.
+        ...(staffShift ? { kind: 'staff', staff_role: sched.staffRoleOf(shift) } : {}),
         caregiver_id: req.user.id,
         caregiver_name: req.user.name || req.user.email,
-        license_level: req.user.licenseLevel || null,
+        license_level: staffShift ? null : (req.user.licenseLevel || null),
         scheduled_start: shift.start,
         scheduled_end: shift.end,
         clock_in_at: at,
@@ -2535,7 +2591,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const gate = await compensationGate(u);
       if (gate) return res.status(409).json({ error: gate, code: 'COMPENSATION_GATE' });
       const logs = await readRows('time_logs');
-      if (logs.some(l => l && l.caregiver_id === u.id && !l.shift_id && !l.clock_out_at)) {
+      if (logs.some(l => l && l.caregiver_id === u.id && !l.clock_out_at)) {
         return res.status(409).json({ error: 'You are already clocked in.', code: 'ALREADY_CLOCKED_IN' });
       }
       const at = nowIso();
@@ -2574,7 +2630,7 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  router.post('/api/scheduling/shifts/:id/clock-out', authenticateToken, requireSchedulable, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/clock-out', authenticateToken, requireShiftWorker, async (req, res) => {
     try {
       const rows = await readRows('shifts');
       const idx = rows.findIndex(r => r && r.id === req.params.id);
@@ -2600,8 +2656,10 @@ module.exports = function createSchedulingRoutes(deps) {
       // It has to be THIS caregiver's log for THIS client on THIS shift.
       // Matching the shift id alone would let a log filed by someone else, or
       // for another client, satisfy a gate that was never theirs to satisfy.
-      const visitLogs = await readRows('caregiver_visit_logs');
-      const documented = visitLogs.some(v =>
+      // A staff shift has no caregiver visit log: clinical work is documented
+      // in the EHR, and office time has nothing to document.
+      const visitLogs = sched.isStaffShift(shift) ? [] : await readRows('caregiver_visit_logs');
+      const documented = sched.isStaffShift(shift) || visitLogs.some(v =>
         v && String(v.shift_id) === String(shift.id) &&
         String(v.caregiver_id) === String(req.user.id) &&
         String(v.client_id) === String(shift.client_id));
@@ -2614,7 +2672,7 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
-      const client = await loadClient(shift.client_id);
+      const client = shift.client_id ? await loadClient(shift.client_id) : null;
       const at = nowIso();
       const gps = normalizeGps((req.body || {}).gps);
       const { flags, geo } = sched.clockOutFlags({ shift, client, gps, at });
@@ -2646,7 +2704,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // GET /api/scheduling/time-logs — a caregiver sees THEIR OWN history only.
   router.get('/api/scheduling/time-logs', authenticateToken, async (req, res) => {
     try {
-      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isShiftWorker(req.user) && !isW2Staff(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const logs = await readRows('time_logs');
@@ -3213,6 +3271,19 @@ module.exports = function createSchedulingRoutes(deps) {
     const usersById = new Map(allUsers.map(u => [u.id, u]));
     const shiftRows = await readRows('shifts');
     const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
+    // What payroll itself reads, so this file and a payroll run cannot
+    // disagree: the pay settings (two schedules), each person's payroll
+    // profile (staff are paid at its rate), and the runs that paid a row.
+    const payrollSettings = { ...ptax.DEFAULT_SETTINGS, ...((await db.get('payroll_settings')) || {}) };
+    const payrollProfiles = (await db.get('payroll_profiles')) || {};
+    const profileOf = (uid) => payrollProfiles[String(uid)] || pprof.defaultProfile(usersById.get(uid) || { id: uid });
+    const runsById = new Map(((await db.get('payroll_runs')) || []).filter(r => r && r.id).map(r => [r.id, r]));
+    const isStaffRow = (l) => l.kind === 'staff' || (!l.shift_id && !l.client_id);
+    const staffRate = (p) => {
+      if (p && p.payType === 'salary') return { rate: null, source: 'salary (clocked time is covered)' };
+      if (p && p.hourlyRateCents > 0) return { rate: p.hourlyRateCents / 100, source: 'payroll profile' };
+      return { rate: null, source: 'not set' };
+    };
 
     // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
     // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
@@ -3227,13 +3298,19 @@ module.exports = function createSchedulingRoutes(deps) {
 
     return logs.map(l => {
       const shiftDate = sched.exportRowDate(l);
-      const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
-      // Shift rate → this caregiver's rate for this client → their base rate.
-      const resolved = cg.resolvePayRate(
+      const staffRow = isStaffRow(l);
+      const profile = profileOf(l.caregiver_id);
+      const schedule = pprof.scheduleFor(profile);
+      const period = shiftDate ? ptax.periodFor(shiftDate, payrollSettings, schedule) : { start: '', end: '' };
+      // Staff time: the payroll profile's rate, as a payroll run pays it.
+      // Caregiver time: shift rate → this caregiver's rate for this client →
+      // their base rate.
+      const resolved = staffRow ? staffRate(profile) : cg.resolvePayRate(
         usersById.get(l.caregiver_id),
         l.client_id,
         shiftsById.get(l.shift_id)
       );
+      const run = l.payroll_run_id ? runsById.get(l.payroll_run_id) : null;
       const hoursNum = sched.minutesToHours(l.total_minutes);
       // An unset rate prints EMPTY, never 0.00 — a blank cell is a question
       // for whoever runs payroll; a zero is an answer, and the wrong one.
@@ -3249,12 +3326,13 @@ module.exports = function createSchedulingRoutes(deps) {
         rowKey: l.id || `shift:${l.shift_id}`,
         caregiverId: l.caregiver_id,
         payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
-        payRateSource: resolved.rate === null ? 'not set' : resolved.source,
+        payRateSource: resolved.rate === null ? (staffRow ? resolved.source : 'not set') : resolved.source,
         grossPay: gross,
         caregiverName: l.caregiver_name,
         // Caregiver (clocked on a client shift) or W-2 staff (no shift).
-        workerType: l.kind === 'staff' || !l.shift_id && !l.client_id ? 'W-2 staff' : 'Caregiver',
-        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+        workerType: staffRow ? 'W-2 staff' : 'Caregiver',
+        licenseLevel: l.staff_role ? sched.staffRoleLabel(l.staff_role) || l.staff_role
+          : (l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : ''),
         clientName: l.client_name,
         shiftDate: sched.csvDate(l.clock_in_at || l.scheduled_start),
         scheduledStart: sched.csvTime(l.scheduled_start, shiftDate),
@@ -3270,7 +3348,9 @@ module.exports = function createSchedulingRoutes(deps) {
         source: l.no_time_log ? 'No time recorded' : (l.entered_manually ? 'Manual entry' : 'Clocked'),
         enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
         payPeriodStart: period.start,
-        payPeriodEnd: period.end
+        payPeriodEnd: period.end,
+        paySchedule: ptax.PAY_SCHEDULES[schedule] ? `${ptax.PAY_SCHEDULES[schedule].label} (${period.frequency === 'weekly' ? 'weekly' : 'every two weeks'})` : '',
+        payrollRun: run ? `${run.status === 'paid' ? 'Paid' : 'Approved'} · pay date ${run.period && run.period.payDate}` : (l.payroll_run_id ? 'Paid' : '')
       };
     });
   };
@@ -3542,6 +3622,13 @@ module.exports = function createSchedulingRoutes(deps) {
           accountStatus: u.accountStatus || 'active',
           isClinician: !!u.hasClinicalAccess
         })),
+        // Everyone else scheduled here (owner, 2026-11-09), by role.
+        // Providers are not listed: they are on the EHR's clinical calendar.
+        staff: users.filter(isStaffShiftWorker).map(u => ({
+          id: u.id, name: u.name, role: accountTypes.accountTypeOf(u),
+          roleLabel: sched.staffRoleLabel(accountTypes.accountTypeOf(u))
+        })).sort((a, b) => String(a.name).localeCompare(String(b.name))),
+        staffRoles: Object.entries(sched.STAFF_SHIFT_ROLES).map(([key, v]) => ({ key, label: v.label, clientVisits: v.clientVisits })),
         clients: users.filter(u => u.role === ROLES.CLIENT).map(u => ({
           id: u.id, name: u.name, careTier: u.careTier || null,
           geofenceRadiusMeters: sched.geofenceRadiusFor(u),
@@ -3656,6 +3743,8 @@ module.exports = function createSchedulingRoutes(deps) {
 
   const publicShift = (r) => r && ({
     id: r.id, clientId: r.client_id, clientName: r.client_name,
+    // A staff shift names its role; a caregiver shift has none.
+    staffRole: r.staff_role || null, staffRoleLabel: sched.staffRoleLabel(r.staff_role) || null,
     caregiverId: r.caregiver_id, caregiverName: r.caregiver_name,
     start: r.start, end: r.end,
     requiredLicenseLevel: r.required_license_level,
@@ -3700,6 +3789,7 @@ module.exports = function createSchedulingRoutes(deps) {
 
   const publicTimeLog = (l) => ({
     id: l.id, shiftId: l.shift_id, clientName: l.client_name,
+    kind: l.kind || (l.shift_id ? 'shift' : 'staff'), staffRole: l.staff_role || null,
     caregiverId: l.caregiver_id, caregiverName: l.caregiver_name,
     scheduledStart: l.scheduled_start, scheduledEnd: l.scheduled_end,
     clockInAt: l.clock_in_at, clockOutAt: l.clock_out_at,

@@ -542,6 +542,39 @@ module.exports = function createPayrollRoutes(deps) {
     res.json({ run });
   });
 
+  // The run's register (owner, 2026-11-09: "ensure all exports match the
+  // data recorded in app"). Built from the run itself, never recomputed, so
+  // every figure is exactly what the run, the pay stubs and QuickBooks carry,
+  // and the TOTAL row is the run's own totals. No SSN or bank number.
+  router.get('/api/payroll/admin/runs/:id/register.csv', authenticateToken, requireAdmin, async (req, res) => {
+    const run = (await rows(RUNS)).find(r => r.id === req.params.id);
+    if (!run) return res.status(404).json({ error: 'Run not found.' });
+    const d = (c) => (Number(c || 0) / 100).toFixed(2);
+    const h = (m) => (Number(m || 0) / 60).toFixed(2);
+    const q = (v) => { const t = String(v === null || v === undefined ? '' : v); return /^[=+\-@]/.test(t) ? `"'${t.replace(/"/g, '""')}"` : `"${t.replace(/"/g, '""')}"`; };
+    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Missing Paperwork'];
+    const lines = [head.map(q).join(',')];
+    for (const w of run.workers || []) {
+      const reg = (w.earnings || []).find(e => e.code === 'regular'), ot = (w.earnings || []).find(e => e.code === 'overtime');
+      const p = w.pay;
+      const pay = (run.payments || {})[w.userId];
+      lines.push([q(w.name), q((p && p.workState) || w.workState || 'GA'), h(reg && reg.minutes), h(ot && ot.minutes),
+        p ? d(p.grossCents) : '', p ? d(p.taxes.federal) : '', p ? d(p.taxes.socialSecurity) : '', p ? d(p.taxes.medicare) : '',
+        p ? d((p.taxes.georgia || 0) + (p.taxes.state || 0)) : '', p ? d(p.netCents) : '', p ? d(p.reimbursementsCents) : '',
+        p ? d(p.employer.socialSecurity) : '', p ? d(p.employer.medicare) : '', p ? d(p.employer.futa) : '',
+        p ? d((p.employer.gaSuta || 0) + (p.employer.stateSuta || 0)) : '',
+        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q((w.missing || []).join('; '))].join(','));
+    }
+    const t = run.totals || {};
+    lines.push([q('TOTAL'), q(''), '', '', d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
+      d((t.georgiaCents || 0) + (t.stateWithholdingCents || 0)), d(t.netCents), d(t.reimbursementsCents),
+      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q('')].join(','));
+    await logActivity(req.user.id, req.user.name, 'payroll_register_exported', 'payroll_run', run.id, { period: run.period && run.period.start });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `payroll_register_${(run.period && run.period.payDate) || run.id}.csv`));
+    res.send(lines.join('\r\n') + '\r\n');
+  });
+
   router.post('/api/payroll/admin/runs/:id/adjustments', authenticateToken, requireAdmin, async (req, res) => {
     const runs = await rows(RUNS);
     const i = runs.findIndex(r => r.id === req.params.id);

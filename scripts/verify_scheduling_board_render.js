@@ -183,7 +183,11 @@ const posted = [];   // every POST body the page sends
     if (url.pathname.endsWith('/caregivers')) // `clients` is NOT optional: the tab strip counts the ones with no
       // coordinates. A fake missing what production supplies exercises a
       // different function — the probe's first run proved it by crashing here.
-      body.json = { caregivers: [], clients: [], access: payViewMode
+      body.json = { caregivers: [], clients: [{ id: 'c1', name: 'Margaret Whitfield', hasCoordinates: true }],
+        // Staff shifts by role (2026-11-09): who the office can assign, by role.
+        staff: [{ id: 'rn1', name: 'Rae Nurse', role: 'rn', roleLabel: 'RN' }, { id: 'co1', name: 'Cory Coordinator', role: 'coordinator', roleLabel: 'Care Coordinator' }],
+        staffRoles: [{ key: 'rn', label: 'RN', clientVisits: true }, { key: 'coordinator', label: 'Care Coordinator', clientVisits: false }],
+        access: payViewMode
         // A manager READS the sheets on screen; the Super Admin downloads
         // them instead, so an admin never renders the tables at all.
         ? { manageSchedule: true, managePay: false, manageLocations: false, viewPay: true, exportPay: false }
@@ -418,6 +422,23 @@ const posted = [];   // every POST body the page sends
   ok('J12 and the corrected row is the only one carrying a correction stamp',
     (await cellAt(0, payHeaders.indexOf('Corrected By'))) === 'GFC Admin'
     && (await cellAt(1, payHeaders.indexOf('Corrected By'))) === '');
+
+  // --- K. A staff shift goes to one person in the role ----------------------
+  console.log('\n— K. Staff shift by role');
+  await page.click('button:has-text("Post a shift")');
+  await page.click('button:has-text("Staff Shift")');
+  await page.locator('label:has-text("Role") + select').selectOption('rn');
+  const people = await page.locator('label:has-text("Who works it") + select option').allTextContents();
+  ok('K1 the person list is only that role', people.includes('Rae Nurse') && !people.includes('Cory Coordinator'), people.join(', '));
+  const visitOpts = await page.locator('label:has-text("Client visit") + select option').allTextContents();
+  ok('K2 an RN shift can be office time or a client visit', visitOpts[0] === 'Office time, no client' && visitOpts.includes('Margaret Whitfield'), visitOpts.join(', '));
+  await page.locator('label:has-text("Who works it") + select').selectOption('rn1');
+  await page.click('button:has-text("Post Staff Shift")');
+  await page.waitForTimeout(200);
+  const staffSent = posted.filter(p => p.path === '/api/scheduling/shifts').pop();
+  ok('K3 it posts the role and the person, and no licence level', !!staffSent && staffSent.body.staffRole === 'rn' && staffSent.body.assignToCaregiverId === 'rn1' && staffSent.body.clientId === null && staffSent.body.requiredLicenseLevel === undefined, JSON.stringify(staffSent && staffSent.body));
+  await page.locator('label:has-text("Role") + select').selectOption('coordinator');
+  ok('K4 an office role has no client box', (await page.locator('label:has-text("Client visit")').count()) === 0);
 
   ok('G1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
 

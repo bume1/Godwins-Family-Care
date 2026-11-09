@@ -590,11 +590,14 @@ test('a caregiver cannot approve or decline — that is the office\'s call', asy
   } finally { h.close(); }
 });
 
-test('a case manager reaches none of it', async () => {
+test('a case manager reaches only their own requests, and cannot ask about someone else\'s shift', async () => {
+  // Since 2026-11-09 an LMSW / case manager is scheduled here too (staff
+  // shifts by role), so the list opens to them, scoped to their own rows.
   const h = harness({ shifts: [CONFIRMED()] });
   try {
+    await h.call(...ask({ kind: 'drop', reason: 'x' }));
     const list = await h.call('GET', '/api/scheduling/change-requests', undefined, 'cm-1');
-    assert.strictEqual(list.status, 403);
+    assert.ok(list.status === 403 || (list.status === 200 && list.body.requests.length === 0), 'never someone else\'s request');
     const asked = await h.call(...ask({ kind: 'drop', reason: 'x' }, 'cm-1'));
     assert.strictEqual(asked.status === 200, false);
   } finally { h.close(); }

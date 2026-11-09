@@ -206,7 +206,11 @@
     var tabs = state.onlyTabs ? state.onlyTabs.map(function (id) {
       return { id: id, label: ({ clock: 'Time clock', time: 'My hours', availability: 'Availability' })[id] || id };
     }) : state.staffOnly ? [
+      // Staff shifts by role (owner, 2026-11-09): the shifts the office
+      // assigns them, to accept and clock in on, beside the plain clock.
       { id: 'clock', label: 'Time clock' },
+      { id: 'schedule', label: 'My shifts' },
+      { id: 'offers', label: 'Offers' + (state.offers.length ? ' (' + state.offers.length + ')' : '') },
       { id: 'time', label: 'My hours' }
     ] : [
       { id: 'schedule', label: 'My schedule' },
@@ -254,7 +258,7 @@
       var tooEarly = !running && !isNaN(opens.getTime()) && Date.now() < opens.getTime();
       return '<div class="grow" style="display:block">' +
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
-        '<div class="gmu">' + esc(s.clientName || '') + (s.careTier ? ' · ' + esc(s.careTier) : '') + '</div>' +
+        '<div class="gmu">' + esc(s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '')) + (s.careTier ? ' · ' + esc(s.careTier) : '') + '</div>' +
         '<div class="gmu"><span class="gchip ' + (running ? 'on' : 'ok') + '">' + esc(titleize(s.status)) + '</span></div>' +
         (tooEarly
           ? '<div class="gmu">Clock in opens at ' + esc(T ? T.fmtTime(opens) : '') + '.</div>'
@@ -390,7 +394,7 @@
     return '<div class="gcard"><h3>Offered to you</h3>' + state.offers.map(function (s) {
       return '<div class="grow" style="display:block">' +
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
-        '<div class="gmu">' + esc(s.clientName || '') + '</div>' +
+        '<div class="gmu">' + esc(s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '')) + '</div>' +
         (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
         // An offer at the wrong time is where a change is cheapest to ask
         // about: the alternative is declining outright, and then the office
@@ -440,7 +444,7 @@
         var can = s.claimable !== false;
         return '<div class="grow' + (can ? '' : ' gblocked') + '" style="display:block">' +
           '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
-          '<div class="gmu">' + esc(s.clientName || '') +
+          '<div class="gmu">' + esc(s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '')) +
             (s.levelRequirementLabel ? ' · ' + esc(s.levelRequirementLabel) : '') + '</div>' +
           // Only a rate POSTED on the shift by an admin — identical for everyone
           // eligible, so it says nothing about any other caregiver's pay. A
@@ -774,9 +778,16 @@
       });
     }
     if (state.staffOnly) {
-      return api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; }).then(function (r) {
-        state.timeLogs = r.timeLogs || [];
-        state.totalHours = r.totalHours;
+      return Promise.all([
+        api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; }),
+        api(state, '/api/scheduling/shifts').catch(function () { return { shifts: [] }; }),
+        api(state, '/api/scheduling/change-requests').catch(function () { return { requests: [] }; })
+      ]).then(function (r) {
+        state.timeLogs = r[0].timeLogs || [];
+        state.totalHours = r[0].totalHours;
+        state.mine = r[1].shifts || [];
+        state.offers = state.mine.filter(function (s) { return s.status === 'assigned'; });
+        state.changeRequests = (r[2] && r[2].requests) || [];
         state.loading = false;
         render(state);
       });

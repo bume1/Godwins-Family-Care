@@ -156,6 +156,7 @@ const RunDetail = ({ id, onBack, reload }) => {
             })}</tbody>
           </table>
         </div>
+        <div className="mt-3"><button className="btn ghost" onClick={() => download(`/api/payroll/admin/runs/${enc(id)}/register.csv`, `payroll-register-${run.period.payDate}.csv`, setErr)}>Download Register CSV</button></div>
         <p className="text-[12.5px] text-stone-500 mt-3">Employer taxes: Social Security {usd(t.employerSocialSecurityCents)}, Medicare {usd(t.employerMedicareCents)}, FUTA {usd(t.futaCents)}, Georgia unemployment {usd(t.gaSutaCents)}{Object.entries(t.byState || {}).map(([st, b]) => `, ${stName(st)} unemployment ${usd(b.sutaCents)}`).join('')}.</p>
         {run.skippedItems && run.skippedItems.length > 0 && <Warn><b>Not paid, needs fixing:</b><ul className="list-disc pl-5">{run.skippedItems.map((s, i) => <li key={i}>{s.reason} ({s.ref})</li>)}</ul></Warn>}
         {run.status === 'draft' && (

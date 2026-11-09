@@ -459,3 +459,31 @@ test('Pay Setup lists pay and tax paperwork only, grouped, and hiring paperwork 
   assert.ok(!/offer: 'offer'|handbook: 'handbook'/.test(page));
   assert.match(page, /'Tax forms' : 'Getting paid'/);
 });
+
+test('the run register CSV is the run: each line from the run, and its TOTAL row equals the run\'s totals', async () => {
+  const store = new Map();
+  const { app } = harness('own', store);
+  store.set('time_logs', [log('a', '2026-11-02', 480), { ...log('z', '2026-11-03', 600), caregiver_id: 'cg2' }]);
+  store.set('payroll_settings', { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5, gaSutaRatePct: 2.7 });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  store.set('payroll_profiles', { cg1: cgProfile, cg2: { ...cgProfile, userId: 'cg2' } });
+  const runId = (await req(app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' })).body.run.id;
+  await req(app, 'POST', `/api/payroll/admin/runs/${runId}/approve`);
+  const run = store.get('payroll_runs').find(r => r.id === runId);
+  const srv = app.listen(0);
+  let text;
+  try { text = await (await fetch(`http://127.0.0.1:${srv.address().port}/api/payroll/admin/runs/${runId}/register.csv`)).text(); } finally { srv.close(); }
+  const rowsOut = text.trim().split('\r\n').map(l => l.match(/("([^"]|"")*"|[^,]*)(,|$)/g).map(c => c.replace(/,$/, '').replace(/^"|"$/g, '')));
+  const head = rowsOut[0], body = rowsOut.slice(1, -1), total = rowsOut[rowsOut.length - 1];
+  const col = (name) => head.indexOf(name);
+  assert.equal(body.length, run.workers.length);
+  for (const name of ['Gross', 'Net Pay', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax']) {
+    const sum = body.reduce((t, r) => t + Math.round(Number(r[col(name)]) * 100), 0);
+    assert.equal(Math.round(Number(total[col(name)]) * 100), sum, `${name}: the lines add up to the total`);
+  }
+  assert.equal(total[col('Gross')], (run.totals.grossCents / 100).toFixed(2));
+  assert.equal(total[col('Net Pay')], (run.totals.netCents / 100).toFixed(2));
+  const pat = body.find(r => r[0] === 'Pat Care');
+  assert.equal(pat[col('Regular Hours')], '8.00');
+  assert.ok(!/\b\d{9}\b/.test(text), 'no SSN or account number');
+});
