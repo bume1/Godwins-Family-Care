@@ -67,3 +67,12 @@
   - a quick client was added and opened
   - the old address redirected with its deep link
   - no page errors
+
+## Follow-up: User Management is internal staff only (owner, same day)
+- Client and family accounts no longer appear in User Management at all, under any filter, rather than appearing as rows that link out.
+- The same holds for its count, its export and its Password Resets tab. A manager or coordinator sees caregivers there.
+- Bulk Reset there resets staff only. The server's `'users'` type now leaves out family as well as clients. Clients and family are reset from the Clients page.
+- The full user list is still loaded, because the caregiver and liaison client pickers read it. Only what the page shows is filtered.
+- Verified:
+  - 7 of 7 mutations caught
+  - in Chromium against the real server, no client or family row under any filter, and the count matches the staff accounts

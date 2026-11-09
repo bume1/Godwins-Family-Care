@@ -150,8 +150,14 @@
     // Admin's; the server still refuses what they may not do.
     const HUB_OFFICE_TYPES = ['manager', 'coordinator'];
     const isHubOffice = (u) => !!u && u.role !== 'admin' && HUB_OFFICE_TYPES.includes(u.accountType);
-    // The account types a manager or coordinator manages (accountTypes.js E1).
-    const OFFICE_MANAGED_TYPES = ['caregiver', 'client', 'family'];
+    // USER MANAGEMENT IS INTERNAL STAFF ONLY (owner, 2026-11-09). Client and
+    // family accounts live in the Clients area (/clients) and never appear
+    // here. The full user list is still loaded, because the caregiver and
+    // liaison client pickers read it; only what this page SHOWS is staff.
+    const isStaffAccount = (u) => !!u && !['client', 'family'].includes(u.role);
+    // What a manager or coordinator sees here: caregivers (accountTypes.js E1;
+    // the client and family accounts they also manage are on /clients).
+    const OFFICE_MANAGED_TYPES = ['caregiver'];
 
     const api = {
       adminLogin: (email, password) =>
@@ -2171,7 +2177,7 @@
       const [activeTab, setActiveTab] = useState('list');
       const [saving, setSaving] = useState(false);
       const [showBulkReset, setShowBulkReset] = useState(false);
-      const [bulkResetType, setBulkResetType] = useState('all');
+      const [bulkResetType, setBulkResetType] = useState('users');
       const [bulkResetResults, setBulkResetResults] = useState(null);
       const [bulkResetLoading, setBulkResetLoading] = useState(false);
       const logoInputRef = useRef(null);
@@ -2628,7 +2634,7 @@
       };
 
       const handleBulkReset = async () => {
-        if (!confirm(`Are you sure you want to reset passwords for ${bulkResetType === 'all' ? 'ALL non-admin users' : bulkResetType === 'clients' ? 'all CLIENT users' : 'all TEAM MEMBER users'}? They will be required to change their password on next login.`)) return;
+        if (!confirm(`Are you sure you want to reset passwords for ${'all staff (not admins, clients or family)'}? They will be required to change their password on next login.`)) return;
         setBulkResetLoading(true);
         setBulkResetResults(null);
         try {
@@ -2661,7 +2667,7 @@
         const getRoleDisplay = (user) => accountTypeLabel(user);
 
         const clientNameById = new Map(users.filter(u => u.role === 'client').map(u => [u.id, u.name]));
-        const exportData = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).map(user => ({
+        const exportData = users.filter(isStaffAccount).filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).map(user => ({
           'Name': user.name || '',
           'Email': user.email || '',
           'Account Type': getRoleDisplay(user),
@@ -2719,12 +2725,13 @@
         XLSX.writeFile(wb, filename);
       };
 
-      const filteredUsers = users.filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).filter(user => {
+      // Reset requests from staff only; client and family ones are on /clients.
+      const staffResets = passwordResets.filter(r => isStaffAccount(users.find(u => u.id === r.userId)));
+      const filteredUsers = users.filter(isStaffAccount).filter(user => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(user.accountType)).filter(user => {
         // String(): one record with a malformed name must not blank the whole list.
         const q = String(searchTerm || '').toLowerCase();
         const matchesSearch = String(user.name || '').toLowerCase().includes(q) || String(user.email || '').toLowerCase().includes(q);
-        const isClientSide = user.role === 'client' || user.role === 'family';
-        const matchesRole = roleFilter === 'all' || (roleFilter === 'staff' ? !isClientSide : roleFilter === 'clients' ? isClientSide : user.role === roleFilter);
+        const matchesRole = roleFilter === 'all' || roleFilter === 'staff' || user.role === roleFilter;
         return matchesSearch && matchesRole;
       });
 
@@ -2839,10 +2846,10 @@
             {/* Tabs */}
             <div className="mt-4 flex gap-2 border-b">
               <button onClick={() => setActiveTab('list')} className={`px-4 py-2 font-medium ${activeTab === 'list' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
-                Users ({isSuperAdmin ? users.length : users.filter(u => OFFICE_MANAGED_TYPES.includes(u.accountType)).length})
+                Users ({users.filter(isStaffAccount).filter(u => isSuperAdmin || OFFICE_MANAGED_TYPES.includes(u.accountType)).length})
               </button>
               {isSuperAdmin && <button onClick={() => setActiveTab('resets')} className={`px-4 py-2 font-medium ${activeTab === 'resets' ? 'border-b-2 border-primary text-primary' : 'text-gray-500'}`}>
-                Password Resets {passwordResets.length > 0 && <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{passwordResets.length}</span>}
+                Password Resets {staffResets.length > 0 && <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{staffResets.length}</span>}
               </button>}
             </div>
 
@@ -2868,9 +2875,9 @@
           {activeTab === 'resets' && (
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-lg font-bold text-accent mb-4 flex items-center gap-2">{Icons.key} Password Reset Requests</h2>
-              {passwordResets.length > 0 ? (
+              {staffResets.length > 0 ? (
                 <div className="space-y-3">
-                  {passwordResets.map(req => {
+                  {staffResets.map(req => {
                     const user = users.find(u => u.id === req.userId);
                     return (
                       <div key={req.id} className="flex justify-between items-center p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -3664,9 +3671,7 @@
                         <label className="block text-sm font-medium text-gray-700 mb-2">Select User Type</label>
                         <select value={bulkResetType} onChange={(e) => setBulkResetType(e.target.value)}
                           className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary">
-                          <option value="all">All Users (excludes admins)</option>
-                          <option value="clients">Clients Only</option>
-                          <option value="users">Team Members Only (non-clients)</option>
+                          <option value="users">All staff (excludes admins; clients and family are reset from Clients)</option>
                         </select>
                       </div>
 

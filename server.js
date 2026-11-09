@@ -31051,7 +31051,9 @@ app.post('/api/admin/bulk-password-reset', authenticateToken, requireAdmin, asyn
       if (userType === 'clients' && user.role !== config.ROLES.CLIENT) {
         continue;
       }
-      if (userType === 'users' && user.role === config.ROLES.CLIENT) {
+      // 'users' is staff: never a client, and never a family contact (owner,
+      // 2026-11-09: clients and family are reset from the Clients area).
+      if (userType === 'users' && (user.role === config.ROLES.CLIENT || user.role === 'family')) {
         continue;
       }
       if (userType === 'specific' && (!specificUserIds || !specificUserIds.includes(user.id))) {

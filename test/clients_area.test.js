@@ -82,3 +82,15 @@ test('the address carries where you are, so back lands there', () => {
   assert.match(PAGE, /window\.addEventListener\('popstate', onPop\)/);
   assert.match(PAGE, /<nav aria-label="Sections of this record"/);
 });
+
+test('User Management shows internal staff only: no client or family account anywhere on it', () => {
+  assert.match(HUB, /const isStaffAccount = \(u\) => !!u && !\['client', 'family'\]\.includes\(u\.role\);/);
+  assert.match(HUB, /const filteredUsers = users\.filter\(isStaffAccount\)/, 'the list');
+  assert.match(HUB, /Users \(\{users\.filter\(isStaffAccount\)/, 'the count');
+  assert.match(HUB, /const exportData = users\.filter\(isStaffAccount\)/, 'the export');
+  assert.match(HUB, /const staffResets = passwordResets\.filter\(r => isStaffAccount\(users\.find\(u => u\.id === r\.userId\)\)\);/, 'the reset requests');
+  assert.match(HUB, /\{staffResets\.map\(req =>/);
+  assert.ok(!/<option value="clients">Clients Only<\/option>/.test(HUB), 'bulk reset has no clients option here');
+  assert.match(HUB, /useState\('users'\);/);
+  assert.match(read('server.js'), /if \(userType === 'users' && \(user\.role === config\.ROLES\.CLIENT \|\| user\.role === 'family'\)\) \{/);
+});

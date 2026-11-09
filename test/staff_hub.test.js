@@ -92,7 +92,7 @@ test('User Management is our team; the old clients filter goes to the Clients ar
   const hub = read('public/admin-hub.html');
   assert.match(hub, /if \(g === 'clients'\) \{ window\.location\.replace\('\/clients'\); return 'all'; \}/);
   assert.match(hub, /return g === 'staff' \? g : 'all';/);
-  assert.match(hub, /roleFilter === 'staff' \? !isClientSide : roleFilter === 'clients' \? isClientSide/);
+  assert.match(hub, /const matchesRole = roleFilter === 'all' \|\| roleFilter === 'staff' \|\| user\.role === roleFilter;/);
 });
 
 test('Independent Medical Examinations is its own area under Clinical (owner, 2026-11-09)', () => {
