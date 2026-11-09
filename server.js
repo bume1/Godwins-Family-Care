@@ -3837,6 +3837,7 @@ const loginProfileFor = (user) => {
     clinicalRole: clinicalRoles.resolveClinicalRole(user),
     landing: accountTypes.landingFor(user),
     hubTiles: accountTypes.hubTilesFor(user),
+    hubAreas: accountTypes.hubAreasFor(user),
     assignedProjects: user.assignedProjects || [],
     assignedClients: user.assignedClients || [],
     // GFC role fields — the login page's directDestination() routes on
@@ -3853,6 +3854,23 @@ const loginProfileFor = (user) => {
     requirePasswordChange: user.requirePasswordChange || false
   };
 };
+
+// The Portal Hub's areas for whoever is asking (owner, 2026-11-09), read from
+// the FRESH user record so a type changed this morning shows on the next load.
+// The hub (login.html) and the shared staff bar (staff-nav.js) both read this,
+// so neither page decides who sees what. An account with no hub areas (a
+// client, a family contact) gets an empty list, never a 403: the bar simply
+// does not draw.
+app.get('/api/staff/hub', authenticateToken, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const me = users.find(u => String(u.id) === String(req.user.id)) || req.user;
+    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me) });
+  } catch (err) {
+    console.error('Staff hub read failed:', err.message);
+    return res.status(500).json({ error: 'The Portal Hub could not be loaded.', code: 'STAFF_HUB_UNAVAILABLE' });
+  }
+});
 
 // Where their OWN sign-in would send them (accountTypes.landingFor), so a
 // manager lands on their Portal Hub, not the Clinical Workspace. `null` means

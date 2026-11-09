@@ -72,9 +72,10 @@ test('licensed clinicians keep their credential and no manager flag', () => {
 
 // ---- Where each lands and what the hub shows ---------------------------
 
-test('Provider, RN, LCSW and LMSW / Case Manager land on /clinical', () => {
+// Owner, 2026-11-09: the Portal Hub is the front door for ALL internal staff.
+test('Provider, RN, LCSW and LMSW / Case Manager land on the hub', () => {
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) {
-    assert.equal(at.landingFor({ ...at.fieldsFor(t) }), '/clinical', t);
+    assert.equal(at.landingFor({ ...at.fieldsFor(t) }), null, t);
   }
 });
 
@@ -87,9 +88,44 @@ test('the Super Admin, a manager and a care coordinator land on the hub', () => 
 });
 
 const ids = (u) => at.hubTilesFor(u).map(t => t.id);
+const areas = (u) => at.hubAreasFor(u).map(a => [a.id, a.links.map(l => l.id)]);
+
+test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Admin & Compliance (owner, 2026-11-09)', () => {
+  assert.deepEqual(areas(at.fieldsFor('admin')), [
+    ['myGfc', ['myGfc']],
+    ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
+    ['clients', ['enrollment', 'clientAccounts']],
+    ['clinical', ['clinical']],
+    ['billing', ['billing']],
+    ['adminCompliance', ['admin', 'audit', 'service', 'clientPortalAdmin']]
+  ]);
+  assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
+    ['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']);
+  for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) {
+    assert.deepEqual(areas(at.fieldsFor(t)), [['myGfc', ['myGfc']], ['clinical', ['clinical']]], t);
+  }
+  assert.deepEqual(areas({ ...at.fieldsFor('caregiver'), licenseLevel: 'cna' }), [['myGfc', ['myGfc']]]);
+  assert.equal(at.hubTilesFor({ ...at.fieldsFor('caregiver'), licenseLevel: 'cna' })[0].path, '/caregiver');
+  assert.deepEqual(areas(at.fieldsFor('caregiver')), [], 'no licence level, nothing on the hub');
+  for (const t of ['client', 'family']) assert.deepEqual(areas(at.fieldsFor(t)), [], t);
+  // An area with no link for this account is left out, never drawn empty.
+  for (const t of ['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison']) {
+    for (const a of at.hubAreasFor(at.fieldsFor(t))) assert.ok(a.links.length > 0, `${t} ${a.id}`);
+  }
+});
+
+test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
+  const area = (t, id) => at.hubAreasFor(at.fieldsFor(t)).find(a => a.id === id);
+  for (const t of ['admin', 'manager', 'coordinator']) {
+    assert.equal(area(t, 'people').links.find(l => l.id === 'users').path, '/admin?view=users&group=staff', t);
+    assert.deepEqual(area(t, 'clients').links.map(l => [l.id, l.path]),
+      [['enrollment', '/admin/enrollment'], ['clientAccounts', '/admin?view=users&group=clients']], t);
+  }
+});
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
-  assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'admin', 'people', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'service', 'clientPortalAdmin']);
+  assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
+    'enrollment', 'clientAccounts', 'clinical', 'billing', 'admin', 'audit', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -98,9 +134,10 @@ test('only the Super Admin sees the Admin Hub, the Service Portal and the Client
 test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Messages; a manager sees Clinical only when granted', () => {
   // 'people' holds User Management, the one part of the Admin Hub open to
   // them (owner, 2026-11-04), and Staff Onboarding (owner, 2026-11-08).
-  assert.deepEqual(ids(at.fieldsFor('coordinator')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), ['myGfc', 'clinical', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), ['myGfc', 'privateHomeCare', 'enrollment', 'billing', 'messages', 'people'],
+  const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'enrollment', 'clientAccounts'];
+  assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'billing']);
+  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'billing'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'billing'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);
@@ -167,9 +204,9 @@ test('the Billing module is its own page on its own route, behind the billing ga
   assert.equal(pred({ ...at.fieldsFor('provider') }), false);
 });
 
-test('Private Home Care opens to Caregiver Management and Caregiver Scheduling', () => {
-  const phc = at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === 'privateHomeCare');
-  assert.deepEqual(phc.children.map(c => [c.name, c.path]),
+test('Caregiver Management and Caregiver Scheduling sit in People for now (owner, 2026-11-09)', () => {
+  const people = at.hubAreasFor(at.fieldsFor('manager')).find(a => a.id === 'people');
+  assert.deepEqual(people.links.filter(l => l.path === '/caregivers' || l.path === '/scheduling').map(c => [c.name, c.path]),
     [['Caregiver Management', '/caregivers'], ['Caregiver Scheduling', '/scheduling']]);
 });
 
@@ -271,8 +308,11 @@ test('the user routes let the account type decide role, manager flag and clinica
 
 test('the login response carries the landing and the hub tiles, and the page reads them', () => {
   assert.match(serverSrc, /landing: accountTypes\.landingFor\(user\),/);
-  assert.match(serverSrc, /hubTiles: accountTypes\.hubTilesFor\(user\),/);
-  assert.match(loginSrc, /Array\.isArray\(user\.hubTiles\) \? user\.hubTiles : fallbackTiles\(\)/);
+  assert.match(serverSrc, /hubAreas: accountTypes\.hubAreasFor\(user\),/);
+  assert.match(serverSrc, /app\.get\('\/api\/staff\/hub', authenticateToken,/, 'the hub and the staff bar re-read the areas');
+  assert.match(loginSrc, /Array\.isArray\(user\.hubAreas\) \? user\.hubAreas : null/);
+  assert.match(loginSrc, /fetch\('\/api\/staff\/hub'/);
+  assert.ok(!/fallbackTiles|PHC_CHILDREN/.test(loginSrc), 'the login page keeps no second copy of who sees what');
   assert.match(loginSrc, /hasOwnProperty\.call\(u, 'landing'\)\) return u\.landing \|\| null;/);
   assert.ok(!/hasAdminHubAccess|hasClientPortalAdminAccess|hasServicePortalAccess/.test(loginSrc), 'the login page reads no retired checkbox');
 });
@@ -303,12 +343,13 @@ test('document approval is the care coordinator\'s or the admin\'s alone', () =>
   assert.equal(roles.canApproveChartDocuments({ ...at.fieldsFor('coordinator'), accountStatus: 'inactive' }), false);
 });
 
-test('People holds User Management and Staff Onboarding, like the Private Home Care block (owner, 2026-11-08)', () => {
+test('People holds User Management, Staff Onboarding and the caregiver office (owner, 2026-11-08, 2026-11-09)', () => {
   for (const t of ['admin', 'manager', 'coordinator']) {
-    const people = at.hubTilesFor(at.fieldsFor(t)).find(x => x.id === 'people');
-    assert.deepEqual(people.children.map(c => [c.id, c.path]), [['users', '/admin?view=users'], ['onboarding', '/onboarding']], t);
+    const people = at.hubAreasFor(at.fieldsFor(t)).find(x => x.id === 'people');
+    assert.deepEqual(people.links.map(c => [c.id, c.path]), [['users', '/admin?view=users&group=staff'], ['onboarding', '/onboarding'],
+      ['caregiverManagement', '/caregivers'], ['caregiverScheduling', '/scheduling']], t);
   }
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
-    assert.ok(!ids(at.fieldsFor(t)).includes('people'), t);
+    assert.ok(!at.hubAreasFor(at.fieldsFor(t)).some(a => a.id === 'people' || a.id === 'clients'), t);
   }
 });

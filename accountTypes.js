@@ -174,8 +174,9 @@ function isConsistent(u) {
 }
 
 // ---- Where each type lands on sign-in --------------------------------------
-// `null` means the Portal Hub: the Super Admin's launcher, and the manager's
-// and coordinator's (Clinical Workspace + Private Home Care).
+// `null` means the Portal Hub. Owner, 2026-11-09: the hub is the front door
+// for ALL internal staff, clinicians included, so every staff type lands
+// there. Clients, family, caregivers and liaisons keep their own landing.
 function landingFor(u) {
   const type = accountTypeOf(u);
   // A record waiting on an admin to choose its type keeps the clinical
@@ -183,79 +184,79 @@ function landingFor(u) {
   if (!type) return (u && (u.clinicalRole || u.role === 'caseManager')) ? '/clinical' : null;
   if (type === TYPES.CLIENT) return u.slug ? `/portal/${u.slug}` : '/portal';
   if (type === TYPES.FAMILY) return '/portal';
-  if (CLINICIAN_TYPES.includes(type)) return '/clinical';
   if (type === TYPES.CAREGIVER) return u.licenseLevel ? '/caregiver' : null;
   // A liaison lands straight in My GFC (owner, 2026-11-08).
   if (type === TYPES.LIAISON) return '/my';
-  return null;   // admin, manager, coordinator → the hub
+  return null;   // admin, manager, coordinator and every clinician → the hub
 }
 
-// ---- The hub tiles each type sees ------------------------------------------
-// Only a Super Admin sees the Admin Hub, the Client Portal Admin and the
-// Service Portal (owner, 2026-10-15: "until we revise these areas").
-// Private Home Care opens to Caregiver Management and Caregiver Scheduling.
-const PRIVATE_HOME_CARE = Object.freeze([
-  Object.freeze({ id: 'caregiverManagement', name: 'Caregiver Management', path: '/caregivers',
-    description: 'Escalations, visit log review, incidents, documents and the caregiver feed' }),
-  Object.freeze({ id: 'caregiverScheduling', name: 'Caregiver Scheduling', path: '/scheduling',
-    description: 'Shifts, availability, time tracking, payroll and client locations' })
-]);
-// ---- People (owner, 2026-11-08) ---------------------------------------------
-// User Management moved out of the Admin Hub into its own block, beside staff
-// onboarding: the same shape as Private Home Care. User Management still runs
-// on the Admin Hub page, opened straight to that view. Staff Onboarding's
-// office side is admin-or-manager (routes/onboarding.js), so the tile appears
-// for exactly those accounts.
-const PEOPLE_USERS = Object.freeze({ id: 'users', name: 'User Management', path: '/admin?view=users',
-  description: 'Add and edit staff, caregivers, clients and family contacts' });
-const PEOPLE_ONBOARDING = Object.freeze({ id: 'onboarding', name: 'Staff Onboarding', path: '/onboarding',
-  description: 'Who is onboarding, whose turn it is, credentialing and readiness' });
-const MY_GFC = Object.freeze({ id: 'myGfc', name: 'My GFC', path: '/my',
-  description: 'Your onboarding, documents, policies and shared folders' });
-function peopleTile(u) {
-  const children = [PEOPLE_USERS];
-  if (u && (u.role === 'admin' || u.isManager === true)) children.push(PEOPLE_ONBOARDING);
-  return { id: 'people', name: 'People', children };
-}
+// ---- The hub, by area (owner, 2026-11-09) ------------------------------------
+// The Portal Hub is grouped by AREA, declared once here and read by the hub
+// (login.html) and by the shared staff bar (staff-nav.js), so neither page
+// decides who sees what. An area with no link for this account is left out.
+//   My GFC   — your own portal, and Messages for the office
+//   People   — our team: staff accounts, onboarding, and (for now) caregiver
+//              management and scheduling
+//   Clients  — who we serve: enrollment, client and family accounts
+//   Clinical, Billing
+//   Admin & Compliance — the Super Admin's settings and the older tools
+// Only a Super Admin sees the Admin Hub, the Service Portal and the Client
+// Portal Admin (owner, 2026-10-15).
+const link = (id, name, path, description) => Object.freeze({ id, name, path, description });
+const MY_GFC = link('myGfc', 'My GFC', '/my', 'Your onboarding, documents, policies and shared folders');
+const MESSAGES = link('messages', 'Messages', '/messages', 'Support conversations and admin broadcasts');
+const STAFF_ONBOARDING = link('onboarding', 'Staff Onboarding', '/onboarding', 'Who is onboarding, whose turn it is, credentialing and readiness');
+const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Caregiver Management', '/caregivers',
+  'Escalations, visit log review, incidents, documents and the caregiver feed');
+const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
+  'Shifts, availability, time tracking, payroll and client locations');
+const ENROLLMENT = link('enrollment', 'Enrollment', '/admin/enrollment', 'Intake, consents, documents, approvals and patient accounts');
+const CLIENT_ACCOUNTS = link('clientAccounts', 'Client & Family Accounts', '/admin?view=users&group=clients',
+  'Add and edit client logins and family contacts');
+const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, visits, orders and the clinical inbox');
+const BILLING = link('billing', 'Billing', '/billing', 'Claims waiting on billing, patient statements, copays and home care hours');
+const ADMIN_HUB = link('admin', 'Admin Hub', '/admin', 'Settings, inbox, notifications and setup checks');
+const AUDIT_LOG = link('audit', 'Audit Log', '/audit', 'Who opened which record, and when');
+const SERVICE_PORTAL = link('service', 'Service Portal', '/service-portal', 'Submit and track service reports');
+const CLIENT_PORTAL_ADMIN = link('clientPortalAdmin', 'Client Portal Admin', '/portal', 'Client portal content, settings and communications');
 
-function hubTilesFor(u) {
+const OFFICE_TYPES = [TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR];
+
+function hubAreasFor(u) {
   const type = accountTypeOf(u);
-  const tiles = [];
-  const clinical = { id: 'clinical', name: 'Clinical Workspace', path: '/clinical' };
-  const phc = { id: 'privateHomeCare', name: 'Private Home Care', children: PRIVATE_HOME_CARE };
-  // Enrollment and Billing are modules of their own (owner, 2026-10-15),
-  // because both cover home care as well as medical visits.
-  const enrollment = { id: 'enrollment', name: 'Enrollment', path: '/admin/enrollment' };
-  const billingTile = { id: 'billing', name: 'Billing', path: '/billing' };
-  // Managers and coordinators read Support and Admin Broadcasts here; the
-  // Super Admin's inbox is in the Admin Hub.
-  const messages = { id: 'messages', name: 'Messages', path: '/messages' };
-  // User Management now sits inside People (owner, 2026-11-08). A manager or
-  // care coordinator still reaches only User Management in the Admin Hub.
-  const people = peopleTile(u);
-  // My GFC, the staff portal (owner, 2026-11-08): everyone's own onboarding,
-  // documents, policies and shared Drive folders. First, because it is theirs.
-  if ([TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR].includes(type)) tiles.push(MY_GFC);
-  if (type === TYPES.ADMIN) {
-    tiles.push({ id: 'admin', name: 'Admin Hub', path: '/admin' }, people, clinical, phc, enrollment, billingTile,
-      { id: 'service', name: 'Service Portal', path: '/service-portal' },
-      { id: 'clientPortalAdmin', name: 'Client Portal Admin', path: '/portal' });
-  } else if (type === TYPES.COORDINATOR) {
-    tiles.push(clinical, phc, enrollment, billingTile, messages, people);
-  } else if (type === TYPES.MANAGER) {
-    if (managerAccessOf(u) !== 'none' && u.clinicalRole) tiles.push(clinical);
-    tiles.push(phc, enrollment, billingTile, messages, people);
-  } else if (CLINICIAN_TYPES.includes(type)) {
-    // Owner, 2026-11-09: every staff member can step back to the hub from
-    // their sidebar, so the hub lists what each of them can open.
-    tiles.push(MY_GFC, clinical);
-  } else if (type === TYPES.CAREGIVER && u.licenseLevel) {
+  const isAdmin = type === TYPES.ADMIN;
+  const office = OFFICE_TYPES.includes(type);
+  const areas = [];
+  const add = (id, name, links) => { const l = links.filter(Boolean); if (l.length) areas.push({ id, name, links: l }); };
+
+  if (type === TYPES.CAREGIVER) {
     // A caregiver's My GFC is the caregiver app.
-    tiles.push(Object.assign({}, MY_GFC, { path: '/caregiver' }));
-  } else if (type === TYPES.LIAISON) {
-    tiles.push(MY_GFC);
+    if (u.licenseLevel) add('myGfc', 'My GFC', [Object.assign({}, MY_GFC, { path: '/caregiver' })]);
+    return areas;
   }
-  return tiles;
+  if (type === TYPES.LIAISON || CLINICIAN_TYPES.includes(type) || office) add('myGfc', 'My GFC', [MY_GFC, !isAdmin && office && MESSAGES]);
+  if (office) {
+    // A manager or coordinator manages caregiver, client and family accounts
+    // only (accountTypes E1), so "our team" for them is the caregivers.
+    add('people', 'People', [
+      link('users', 'User Management', '/admin?view=users&group=staff',
+        isAdmin ? 'Add and edit staff, clinicians and caregivers' : 'Add and edit caregiver accounts'),
+      (isAdmin || u.isManager === true) && STAFF_ONBOARDING,
+      CAREGIVER_MANAGEMENT, CAREGIVER_SCHEDULING
+    ]);
+    add('clients', 'Clients', [ENROLLMENT, CLIENT_ACCOUNTS]);
+  }
+  const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
+    (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
+  if (clinicalOpen) add('clinical', 'Clinical', [CLINICAL]);
+  if (office) add('billing', 'Billing', [BILLING]);
+  if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
+  return areas;
+}
+
+// Every link the hub offers this account, flat, in area order.
+function hubTilesFor(u) {
+  return hubAreasFor(u).reduce((all, a) => all.concat(a.links), []);
 }
 
 // ---- Who runs private home care day to day -------------------------------
@@ -404,9 +405,9 @@ function applyAccountTypeMigration(users) {
 module.exports = {
   TYPES, ACCOUNT_TYPES, ALL_TYPES, isValidType,
   MANAGER_CLINICAL_ACCESS, DEFAULT_MANAGER_CLINICAL_ACCESS, isValidManagerAccess,
-  CLINICIAN_TYPES, PRIVATE_HOME_CARE, LEGACY_FLAGS,
+  CLINICIAN_TYPES, LEGACY_FLAGS,
   fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
-  landingFor, hubTilesFor, applyAccountTypeMigration,
+  landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
 };
