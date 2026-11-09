@@ -474,6 +474,20 @@ function recWithCourseDuties(ch, rec) {
   return Object.keys(extra).length ? Object.assign({}, rec, { recurring: Object.assign({}, rec.recurring || {}, extra) }) : rec;
 }
 
+// THE STAFF WELCOME PACKET IS STEP 1 (owner, 2026-11-09). Every chapter but
+// A (caregivers carry their own packet through Chapter A's items) opens with
+// it. It has no steps of its own: it is complete when the packet is signed
+// in My GFC, read from the packet store like Chapter A's evidence and never
+// stored here, so nobody can tick it by hand. The route passes the packet's
+// one row (`staff_welcome`) in packetRows; a caller that passes no rows gets
+// the chapter exactly as written.
+const STAFF_WELCOME_ITEM_ID = 'WELCOME';
+const staffWelcomeItem = (ch) => Object.freeze({
+  id: STAFF_WELCOME_ITEM_ID, phase: ch.PHASES[0].id, title: 'Welcome packet signed', ref: null,
+  classifications: [], classificationNote: null, steps: [], packet: ['staff_welcome'],
+  link: { url: '/my#welcome', label: 'Open Welcome Packet' }
+});
+
 function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
@@ -484,7 +498,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   }).map(f => [f.moduleId, f]));
   const office = audience === 'office';
 
-  const items = composeChecklist(i).map(it => {
+  const checklist = composeChecklist(i);
+  if (ch.CHAPTER.id !== 'A' && Array.isArray(packetRows) && ch.PHASES.length) checklist.unshift(staffWelcomeItem(ch));
+  const items = checklist.map(it => {
     const st = (rec.items || {})[it.id] || null;
     const ns = nextStep(it, st);
     // A completed item whose document has expired reads Renewal Due.
@@ -631,5 +647,5 @@ module.exports = {
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
-  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence
+  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID
 };

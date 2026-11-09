@@ -108,6 +108,8 @@ const posted = [];   // every POST body the page sends
     }
     if (url.startsWith('/cdn/')) return serve(path.join(CDN, path.basename(url)), 'application/javascript');
     if (url === '/gfc-time.js') return serve(path.join(root, 'public', 'gfc-time.js'), 'application/javascript');
+    // The shared theme (2026-11-09): without it the page renders its older look.
+    if (url.startsWith('/css/') && /^[a-z0-9-]+\.css$/.test(path.basename(url))) return serve(path.join(root, 'public', 'css', path.basename(url)), 'text/css');
     if (url === '/session-guard.js') { res.writeHead(200, { 'Content-Type': 'application/javascript' }); res.end('// stubbed'); return; }
     res.writeHead(404); res.end('');
   });

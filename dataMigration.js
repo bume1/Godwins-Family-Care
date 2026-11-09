@@ -245,6 +245,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'escalation_events', phi: true, owner: '6/9' },
   { key: 'escalation_status_events', phi: true, owner: '6/9' },
   { key: 'incident_reports', phi: true, owner: '6' },
+  { key: 'incident_events', phi: true, owner: 'care-records 2026-11-09' },
   { key: 'caregiver_broadcasts', phi: false, owner: '6' },
   // ---- scheduling (Session 7) ----
   { key: 'shifts', phi: true, owner: '7' },

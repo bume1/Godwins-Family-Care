@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Incident Log</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The Incident Log (owner, 2026-11-09): falls and abuse or neglect, each a
+       reportable record with a follow-up note and any state report. In the My
+       GFC look: cream page, white cards. Every element is built with DOM nodes
+       and textContent; nothing a caregiver typed is ever parsed as HTML. */
+    :root{--navy:#033D50;--gold:#C9A44A;--gold-ink:#9A7430;--cream:#FAF7F2;--wash:#F6EFE2;--ink:#1a2a32;--mut:#41555f;--edge:#ECE4D6;--edge2:#E1D7C5;--green:#1d7a5a;--red:#B5462E}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--cream);color:var(--ink);font-family:'DM Sans',system-ui,sans-serif;font-size:15px;line-height:1.5}
+    .wrap{max-width:1000px;margin:0 auto;padding:24px 16px 60px}
+    h1{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600;color:var(--navy);font-size:34px;line-height:1.15}
+    .lead{color:var(--mut);margin:4px 0 18px}
+    .tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+    .tabs button{padding:8px 16px;border-radius:999px;font-weight:600;font-size:14px;cursor:pointer;color:var(--navy);background:#fff;border:1px solid var(--edge2);font-family:inherit}
+    .tabs button.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+    .card{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}
+    .card.hl{border-color:var(--gold)}
+    .row{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline}
+    .t{font-weight:700;color:var(--navy);font-size:16px}
+    .mut{color:var(--mut);font-size:13.5px}
+    .pill{display:inline-flex;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600}
+    .pill.open{background:#FBF1DC;color:#6b5121} .pill.closed{background:#e7f4ee;color:var(--green)}
+    a{color:var(--navy);font-weight:600}
+    .detail{white-space:pre-wrap;margin-top:8px}
+    .trail{margin-top:10px;border-top:1px solid var(--edge);padding-top:8px}
+    label{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:10px 0 4px}
+    textarea,input{width:100%;border:1px solid var(--edge2);border-radius:11px;padding:9px 11px;font:inherit;background:#fff}
+    textarea{min-height:80px}
+    .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+    @media (max-width:640px){.grid3{grid-template-columns:1fr}}
+    .btn{border-radius:12px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;margin-top:10px}
+    .btn.ghost{background:#fff;color:var(--navy);border-color:var(--edge2)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .err{background:#fdecea;border:1px solid rgba(181,70,46,.3);color:var(--red);border-radius:11px;padding:10px 12px;margin:10px 0;font-size:14px}
+    .note{background:var(--wash);border:1px solid var(--edge);border-radius:12px;padding:12px 14px;color:var(--mut)}
+  </style>
+  <script src="/session-guard.js"></script>
+  <script src="/staff-nav.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Incident Log</h1>
+    <p class="lead">Falls and abuse or neglect reported on a visit log. Close each one with what was done, and record a state report if one was made. A closed incident is final.</p>
+    <nav class="tabs" id="tabs">
+      <button data-status="open" class="on">Open</button>
+      <button data-status="closed">Closed</button>
+    </nav>
+    <div id="app"><p class="mut">Loading…</p></div>
+  </div>
+<script>
+(function () {
+  'use strict';
+  var token = localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+  if (!token) { window.location.replace('/login'); return; }
+  var root = document.getElementById('app');
+  var status = 'open';
+  var triedClosed = false;
+  var TZ = window.GFC_TIME && window.GFC_TIME.PRACTICE_TIMEZONE;
+
+  function h(tag, attrs, kids) {
+    var el = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'onclick') el.onclick = v;
+      else if (k === 'className') el.className = v;
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    (Array.isArray(kids) ? kids : [kids]).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+    });
+    return el;
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function when(iso) { return iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: TZ }) : ''; }
+  function api(method, path, body) {
+    var opts = { method: method, headers: { Authorization: 'Bearer ' + token } };
+    if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+    });
+  }
+  var clientHref = function (id) { return '/admin/enrollment?client=' + encodeURIComponent(id); };
+  var staffHref = function (id) { return '/admin?view=users&person=' + encodeURIComponent(id); };
+
+  function closeForm(inc) {
+    var note = h('textarea', { placeholder: 'What was done: who was told, what changed, any follow-up visit' });
+    var rAt = h('input', { type: 'date' });
+    var rAgency = h('input', { placeholder: 'e.g. Georgia HFRD' });
+    var rRef = h('input', { placeholder: 'Reference number, if any' });
+    var msg = h('div');
+    var btn = h('button', { className: 'btn', onclick: function () {
+      clear(msg);
+      var report = (rAt.value || rAgency.value || rRef.value) ? { reportedAt: rAt.value, agency: rAgency.value, reference: rRef.value } : null;
+      btn.disabled = true;
+      api('POST', '/api/caregiver/incidents/' + encodeURIComponent(inc.id) + '/close', { note: note.value, stateReport: report }).then(function (r) {
+        btn.disabled = false;
+        if (!r.ok) { msg.appendChild(h('div', { className: 'err', role: 'alert' }, r.body.error || 'That did not save.')); return; }
+        load();
+      });
+    } }, 'Close Incident');
+    return h('div', { className: 'trail' }, [
+      h('label', {}, 'Follow-up note (required)'), note,
+      h('label', {}, 'State report, if one was made'),
+      h('div', { className: 'grid3' }, [rAt, rAgency, rRef]),
+      msg, btn
+    ]);
+  }
+
+  function card(inc) {
+    var isOpen = (inc.status || 'open') === 'open';
+    var focus = location.hash && decodeURIComponent(location.hash.slice(1)) === inc.id;
+    var kids = [
+      h('div', { className: 'row' }, [
+        h('span', { className: 't' }, (inc.label || inc.kind || 'Incident') + ' · ' + (inc.client_name || 'Client')),
+        h('span', { className: 'pill ' + (isOpen ? 'open' : 'closed') }, isOpen ? 'Open' : 'Closed')
+      ]),
+      h('div', { className: 'mut' }, [
+        'Reported ' + when(inc.reported_at) + ' by ',
+        inc.caregiver_id ? h('a', { href: staffHref(inc.caregiver_id) }, inc.caregiver_name || 'the caregiver') : (inc.caregiver_name || 'a caregiver'),
+        ' · ',
+        h('a', { href: clientHref(inc.client_id) }, 'Open Client Record')
+      ]),
+      inc.detail ? h('div', { className: 'detail' }, inc.detail) : h('div', { className: 'detail mut' }, 'No detail was written on the visit log.')
+    ];
+    if ((inc.trail || []).length) {
+      kids.push(h('div', { className: 'trail' }, inc.trail.map(function (t) {
+        var sr = t.stateReport;
+        return h('div', { className: 'mut' }, [
+          (t.action === 'closed' ? 'Closed' : t.action) + ' · ' + when(t.at) + (t.byName ? ' · ' + t.byName : ''),
+          t.note ? h('div', { className: 'detail', style: 'color:var(--ink)' }, t.note) : null,
+          sr ? h('div', {}, 'Reported to ' + sr.agency + ' on ' + sr.reportedAt + (sr.reference ? ' · ref ' + sr.reference : '')) : h('div', {}, 'No state report recorded.')
+        ]);
+      })));
+    }
+    if (isOpen) kids.push(closeForm(inc));
+    return h('div', { className: 'card' + (focus ? ' hl' : ''), id: 'inc-' + inc.id }, kids);
+  }
+
+  function load() {
+    clear(root);
+    root.appendChild(h('p', { className: 'mut' }, 'Loading…'));
+    api('GET', '/api/caregiver/incidents?status=' + status).then(function (r) {
+      clear(root);
+      if (!r.ok) { root.appendChild(h('div', { className: 'err', role: 'alert' }, r.status === 403 ? 'The Incident Log is for the office and clinical staff.' : (r.body.error || 'Incidents could not be loaded.'))); return; }
+      var list = r.body.incidents || [];
+      // Oldest open first: the one waiting longest is the one most likely forgotten.
+      if (status === 'open') list = list.slice().reverse();
+      if (!list.length && location.hash && status === 'open' && !triedClosed) { triedClosed = true; document.querySelector('#tabs button[data-status="closed"]').click(); return; }
+      if (!list.length) { root.appendChild(h('div', { className: 'note' }, status === 'open' ? 'No open incidents.' : 'No closed incidents yet.')); return; }
+      list.forEach(function (i) { root.appendChild(card(i)); });
+      var wanted = location.hash ? decodeURIComponent(location.hash.slice(1)) : '';
+      var focus = wanted && document.getElementById('inc-' + wanted);
+      if (focus) focus.scrollIntoView({ block: 'start' });
+      // A link to a closed incident (from a client record) lands on Closed.
+      else if (wanted && status === 'open' && !triedClosed) { triedClosed = true; document.querySelector('#tabs button[data-status="closed"]').click(); }
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function (b) {
+    b.onclick = function () {
+      status = b.getAttribute('data-status');
+      Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function (x) { x.className = x === b ? 'on' : ''; });
+      load();
+    };
+  });
+  load();
+})();
+</script>
+</body>
+</html>

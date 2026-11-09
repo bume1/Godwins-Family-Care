@@ -206,11 +206,15 @@ const link = (id, name, path, description) => Object.freeze({ id, name, path, de
 const MY_GFC = link('myGfc', 'My GFC', '/my', 'Your onboarding, documents, policies and shared folders');
 const MESSAGES = link('messages', 'Messages', '/messages', 'Support conversations and admin broadcasts');
 const STAFF_ONBOARDING = link('onboarding', 'Staff Onboarding', '/onboarding', 'Who is onboarding, whose turn it is, credentialing and readiness');
-const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Caregiver Management', '/caregivers',
-  'Escalations, visit log review, incidents, documents and the caregiver feed');
+// Caregiver Management became Home Care Oversight (owner, 2026-11-09): only
+// what is waiting on the office, each row opening the record it belongs to.
+const CAREGIVER_MANAGEMENT = link('caregiverManagement', 'Home Care Oversight', '/caregivers',
+  'What is waiting on the office: concerns, visit logs to review, incidents, documents and clearance');
 const CAREGIVER_SCHEDULING = link('caregiverScheduling', 'Caregiver Scheduling', '/scheduling',
   'Shifts, availability, time tracking, payroll and client locations');
-const ENROLLMENT = link('enrollment', 'Enrollment', '/admin/enrollment', 'Intake, consents, documents, approvals and patient accounts');
+// Renamed from Enrollment (owner, 2026-11-09): it is the client's whole
+// record now, care history included. Enrollment status is a section inside.
+const ENROLLMENT = link('enrollment', 'Clients & Patients', '/admin/enrollment', 'Each client\'s record: intake, consents, documents, care plan and care history');
 const CLIENT_ACCOUNTS = link('clientAccounts', 'Client & Family Accounts', '/admin?view=users&group=clients',
   'Add and edit client logins and family contacts');
 const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, visits, orders and the clinical inbox');
@@ -220,6 +224,8 @@ const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, vi
 const IME = link('ime', 'Independent Medical Examinations', '/ime', 'Exam-day veterans list and the AI case review of claim files');
 const BILLING = link('billing', 'Billing', '/billing', 'Claims waiting on billing, patient statements, copays and home care hours');
 const ADMIN_HUB = link('admin', 'Admin Hub', '/admin', 'Settings, inbox, notifications and setup checks');
+// Falls and abuse/neglect, with a follow-up note and any state report.
+const INCIDENT_LOG = link('incidents', 'Incident Log', '/incidents', 'Falls and abuse or neglect reports, follow-up and state reports');
 const AUDIT_LOG = link('audit', 'Audit Log', '/audit', 'Who opened which record, and when');
 const SERVICE_PORTAL = link('service', 'Service Portal', '/service-portal', 'Submit and track service reports');
 const CLIENT_PORTAL_ADMIN = link('clientPortalAdmin', 'Client Portal Admin', '/portal', 'Client portal content, settings and communications');
@@ -254,7 +260,11 @@ function hubAreasFor(u) {
     (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
   add('clinical', 'Clinical', [clinicalOpen && CLINICAL, (office || CLINICIAN_TYPES.includes(type)) && IME]);
   if (office) add('billing', 'Billing', [BILLING]);
-  if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
+  // The Incident Log is the caregiver office's (owner, 2026-11-09): managers
+  // and care coordinators run home care, so they get Admin & Compliance with
+  // the Incident Log alone; the rest of it stays the Super Admin's.
+  if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, INCIDENT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
+  else if (office) add('adminCompliance', 'Admin & Compliance', [INCIDENT_LOG]);
   return areas;
 }
 
