@@ -1502,7 +1502,7 @@ const buildAttestation = ({ id, record, actor, at, billingNpi, narrativeNoteSid 
 };
 const isEncounterClosed = (attestation) => !!(attestation && attestation.signedAt);
 // Corrections after close are addenda: own text, own signer, own timestamp.
-const buildAddendum = ({ id, encounterUuid, clientId, text, actor, at }) => {
+const buildAddendum = ({ id, encounterUuid, clientId, text, actor, at, source }) => {
   const body = String(text || '').trim();
   if (body.length < 3) return { error: 'Addendum text is required', code: 'ADDENDUM_EMPTY' };
   return {
@@ -1510,9 +1510,26 @@ const buildAddendum = ({ id, encounterUuid, clientId, text, actor, at }) => {
       id, encounterUuid: String(encounterUuid), clientId,
       text: body.slice(0, 8000),
       at: at || new Date().toISOString(),
-      by: actorRecord(actor)
+      by: actorRecord(actor),
+      // What wrote it, when it was not typed by hand (an order added after
+      // signing). Absent for an ordinary addendum.
+      ...(source ? { source } : {})
     }
   };
+};
+// An OpenEMR failure keeps its own code and status on the way to the page
+// ("Sign in to OpenEMR", "not configured") instead of a bare 502 that says
+// nothing anyone can act on. Anything that is not an EMR failure returns null.
+const emrFailureResponse = (err) => {
+  if (!err) return null;
+  const code = String(err.code || '');
+  if (code.startsWith('EMR_')) {
+    return { status: Number(err.status) >= 400 ? Number(err.status) : 502, body: { error: err.message, code } };
+  }
+  if (err.name === 'OpenEmrError') {
+    return { status: 502, body: { error: `OpenEMR did not answer as expected (${String(err.message || '').slice(0, 200)}).`, code: 'EMR_REQUEST_FAILED' } };
+  }
+  return null;
 };
 // Where a SIGNED encounter stands with billing. A record signed before the
 // split carries no billingStatus; it went through the old one-step sign that
@@ -3024,7 +3041,7 @@ module.exports = {
   ATTESTATION_TEXT,
   buildAttestation,
   isEncounterClosed,
-  buildAddendum,
+  buildAddendum, emrFailureResponse,
   deriveEncounterState,
   RX_ROUTES,
   RX_KINDS,
