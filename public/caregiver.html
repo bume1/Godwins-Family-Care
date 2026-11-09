@@ -196,6 +196,7 @@
 <!-- My GFC: the shared staff portal frame and sections. A caregiver's My GFC
      is this page (owner, 2026-11-08): the same frame as everyone's, plus the
      shift tools below. Loaded first so window.MyGFC exists before the app. -->
+<script type="text/babel" src="/welcome-packet-ui.js"></script>
 <script type="text/babel" src="/account-cards.js"></script>
 <script type="text/babel" src="/my-pay.js"></script>
 <script type="text/babel" src="/my-gfc.js"></script>
@@ -1353,7 +1354,81 @@ const OnboardingCard = ({ me, onChanged }) => {
   );
 };
 
-const MoreTab = ({ visitLogs, queued, me }) => (
+// ── WHAT YOU FILED, IN FULL (owner, 2026-11-09) ──────────────────────────
+// A caregiver used to see a visit log only at the moment they sent it, and a
+// concern only while it was open. Every visit log now opens to the whole log
+// as filed (the labelled sections the server builds, cg.describeVisitLog), and
+// every concern they raised stays listed with where it got to and what was
+// said. Read-only: a filed log is never edited.
+const FiledBlock = ({ title, children }) => (
+  <div style={{ marginTop: 10 }}>
+    <div className="mu" style={{ fontWeight: 600, marginBottom: 3 }}>{title}</div>
+    {children}
+  </div>
+);
+const FiledVisitLog = ({ d }) => {
+  if (!d) return <div className="mu" style={{ marginTop: 8 }}>The full log could not be shown.</div>;
+  const has = (a) => Array.isArray(a) && a.length > 0;
+  const empty = !has(d.tasks) && !has(d.measurements) && !has(d.narratives) && !has(d.patientCondition)
+    && !has(d.safetyConcerns) && !has(d.standingInstructionsAcknowledged) && !d.satisfaction;
+  return (
+    <div style={{ borderTop: '1px solid var(--line, #E1D9C9)', marginTop: 10, paddingTop: 4 }}>
+      {has(d.tasks) && <FiledBlock title="Care provided">{d.tasks.map((t, i) => (
+        <div className="mu" key={i}>{t.done ? '✓' : '✗'} {t.label}{t.done ? '' : ' (not done)'}{t.note ? ` — ${t.note}` : ''}</div>
+      ))}</FiledBlock>}
+      {has(d.measurements) && <FiledBlock title="Measurements"><div className="mu">{d.measurements.map(m => `${m.label} ${m.value}`).join(' · ')}</div></FiledBlock>}
+      {(has(d.patientCondition) || d.satisfaction) && <FiledBlock title="How the client was"><div className="mu">
+        {has(d.patientCondition) ? d.patientCondition.join(', ') : ''}{has(d.patientCondition) && d.satisfaction ? ' · ' : ''}{d.satisfaction ? `Client ${String(d.satisfaction).toLowerCase()}` : ''}
+      </div></FiledBlock>}
+      {has(d.safetyConcerns) && <FiledBlock title="Safety concerns raised"><div className="mu">{d.safetyConcerns.join(', ')}</div></FiledBlock>}
+      {has(d.standingInstructionsAcknowledged) && <FiledBlock title="Standing instructions acknowledged"><div className="mu">{d.standingInstructionsAcknowledged.join(' · ')}</div></FiledBlock>}
+      {has(d.narratives) && d.narratives.map((n, i) => <FiledBlock title={n.label} key={i}><div className="mu" style={{ whiteSpace: 'pre-wrap' }}>{n.value}</div></FiledBlock>)}
+      {empty && <div className="mu" style={{ marginTop: 8 }}>No care detail was recorded on this log.</div>}
+    </div>
+  );
+};
+const MyVisitLogRow = ({ v }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <b>{v.visitType} · {v.visitDate}{v.clientName ? ` · ${v.clientName}` : ''}</b>
+      <div className="mu">
+        {titleize(v.status)}
+        {v.submittedOffline ? ' · filed offline' : ''}
+        {v.reviews && v.reviews.length > 0 ? ` · ${v.reviews.length} review note${v.reviews.length > 1 ? 's' : ''}` : ''}
+      </div>
+      {v.reviews && v.reviews.map(r => (
+        <div className="note ok" key={r.id} style={{ marginTop: 8 }}>
+          <i className="ti ti-message-2"></i>
+          <span><b>{r.byName}</b><span>{r.note}</span></span>
+        </div>
+      ))}
+      <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => setOpen(!open)}>{open ? 'Hide Full Log' : 'View Full Log'}</button>
+      {open && <FiledVisitLog d={v.detail} />}
+    </div>
+  );
+};
+const MyConcernRow = ({ e }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <EscalationRow e={e} />
+      <button className="btn ghost sm" style={{ margin: '0 0 10px' }} onClick={() => setOpen(!open)}>{open ? 'Hide Details' : 'View Details'}</button>
+      {open && (
+        <div style={{ margin: '0 0 12px' }}>
+          <FiledBlock title="What you reported"><div className="mu" style={{ whiteSpace: 'pre-wrap' }}>{e.description || 'No description was given.'}</div></FiledBlock>
+          {(e.trail || []).length > 0 && <FiledBlock title="What happened since">
+            {e.trail.map((t, i) => (
+              <div className="mu" key={i}>{titleize(t.status)} · {fmtDate(t.at)}{t.byName ? ` · ${t.byName}` : ''}{t.note ? ` — ${t.note}` : ''}</div>
+            ))}
+          </FiledBlock>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MoreTab = ({ visitLogs, escalations, queued, me }) => (
   <div>
     <h2 className="pg">Logs & Messages</h2>
     <p className="sub">Your visit logs, messages and help.</p>
@@ -1366,22 +1441,15 @@ const MoreTab = ({ visitLogs, queued, me }) => (
       )}
       {visitLogs.length === 0
         ? <Empty icon="clipboard">Nothing filed yet.</Empty>
-        : visitLogs.slice(0, 25).map(v => (
-          <div className="row" style={{ display: 'block' }} key={v.id}>
-            <b>{v.visitType} · {v.visitDate}</b>
-            <div className="mu">
-              {titleize(v.status)}
-              {v.submittedOffline ? ' · filed offline' : ''}
-              {v.reviews && v.reviews.length > 0 ? ` · ${v.reviews.length} review note${v.reviews.length > 1 ? 's' : ''}` : ''}
-            </div>
-            {v.reviews && v.reviews.map(r => (
-              <div className="note ok" key={r.id} style={{ marginTop: 8 }}>
-                <i className="ti ti-message-2"></i>
-                <span><b>{r.byName}</b><span>{r.note}</span></span>
-              </div>
-            ))}
-          </div>
-        ))}
+        : visitLogs.slice(0, 50).map(v => <MyVisitLogRow key={v.id} v={v} />)}
+    </div>
+
+    <div className="card">
+      <h3>Concerns I Raised</h3>
+      <p className="mu" style={{ marginTop: 0 }}>Every concern you flagged, open or resolved, and what was done about it.</p>
+      {(escalations || []).length === 0
+        ? <Empty icon="flag">You have not raised a concern.</Empty>
+        : escalations.map(e => <MyConcernRow key={e.id} e={e} />)}
     </div>
 
     {/* Shifts, the open pool, availability and time history all live in the
@@ -1439,211 +1507,9 @@ const PacketHero = ({ firstName }) => (
   </div>
 );
 
-const SignaturePad = ({ onChange }) => {
-  const canvasRef = useRef(null);
-  const drawing = useRef(false);
-  const dirty = useRef(false);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    // Drawn at device resolution, or a signature on a phone comes out furry.
-    const ratio = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * ratio;
-    canvas.height = rect.height * ratio;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(ratio, ratio);
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#0d2438';
-  }, []);
-
-  const pointFrom = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    const source = e.touches ? e.touches[0] : e;
-    return { x: source.clientX - rect.left, y: source.clientY - rect.top };
-  };
-
-  const start = (e) => {
-    e.preventDefault();
-    drawing.current = true;
-    const ctx = canvasRef.current.getContext('2d');
-    const p = pointFrom(e);
-    ctx.beginPath();
-    ctx.moveTo(p.x, p.y);
-  };
-  const move = (e) => {
-    if (!drawing.current) return;
-    e.preventDefault();
-    const ctx = canvasRef.current.getContext('2d');
-    const p = pointFrom(e);
-    ctx.lineTo(p.x, p.y);
-    ctx.stroke();
-    dirty.current = true;
-  };
-  const end = () => {
-    if (!drawing.current) return;
-    drawing.current = false;
-    if (dirty.current) onChange(canvasRef.current.toDataURL('image/png'));
-  };
-  const clear = () => {
-    const canvas = canvasRef.current;
-    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-    dirty.current = false;
-    onChange(null);
-  };
-
-  return (
-    <div>
-      <canvas ref={canvasRef}
-        style={{ width: '100%', height: 150, border: '1.5px dashed #d8cdb8', borderRadius: 10, background: '#fff', touchAction: 'none' }}
-        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
-        onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
-      <button type="button" className="btn ghost" style={{ marginTop: 8 }} onClick={clear}>Clear Signature</button>
-    </div>
-  );
-};
-
-// One field, rendered from its served definition. Nothing here knows what any
-// particular question is.
-const PacketField = ({ field, value, onChange, imported }) => {
-  const set = (v) => onChange(field.id, v);
-
-  const label = (
-    <label>
-      {field.label}
-      {field.required ? <span style={{ color: '#b3261e' }}> *</span> : null}
-      {imported ? <span className="lvl" style={{ marginLeft: 8, fontSize: 10 }}>from your packet — check this</span> : null}
-    </label>
-  );
-
-  if (field.type === 'single') {
-    return (
-      <div className="fld">
-        {label}
-        <div className="chips">
-          {field.options.map(o => (
-            <button type="button" key={o.value}
-              className={`chip ${value === o.value ? 'on' : ''}`}
-              onClick={() => set(value === o.value ? '' : o.value)}>{o.label}</button>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (field.type === 'multi') {
-    const picked = Array.isArray(value) ? value : [];
-    return (
-      <div className="fld">
-        {label}
-        {field.hint ? <p className="sub" style={{ marginBottom: 8 }}>{field.hint}</p> : null}
-        <div className="chips">
-          {field.options.map(o => (
-            <button type="button" key={o.value}
-              className={`chip ${picked.includes(o.value) ? 'on' : ''}`}
-              onClick={() => set(picked.includes(o.value) ? picked.filter(v => v !== o.value) : [...picked, o.value])}>
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (field.type === 'grid') {
-    const grid = (value && typeof value === 'object') ? value : {};
-    return (
-      <div className="fld">
-        {label}
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left', padding: '6px 4px', color: '#6f6a60', fontWeight: 600 }}></th>
-                {field.columns.map(c => (
-                  <th key={c.value} style={{ padding: '6px 4px', color: '#6f6a60', fontWeight: 600, fontSize: 11 }}>{c.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {field.rows.map(r => (
-                <tr key={r.value} style={{ borderTop: '1px solid #ece6db' }}>
-                  <td style={{ padding: '8px 4px', fontWeight: 600, color: '#0d2438' }}>{r.label}</td>
-                  {field.columns.map(c => {
-                    const on = (grid[r.value] || []).includes(c.value);
-                    return (
-                      <td key={c.value} style={{ padding: '6px 4px', textAlign: 'center' }}>
-                        <button type="button"
-                          aria-label={`${r.label} ${c.label}`}
-                          aria-pressed={on}
-                          className={`chip ${on ? 'on' : ''}`}
-                          style={{ padding: '6px 10px', minWidth: 36 }}
-                          onClick={() => {
-                            const current = grid[r.value] || [];
-                            const next = on ? current.filter(v => v !== c.value) : [...current, c.value];
-                            set({ ...grid, [r.value]: next });
-                          }}>{on ? '✓' : ''}</button>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  if (field.type === 'rows') {
-    const rows = Array.isArray(value) ? value : [];
-    return (
-      <div className="fld">
-        {label}
-        {Array.from({ length: field.rowCount }).map((_, i) => (
-          <div key={i} className="card" style={{ marginBottom: 10 }}>
-            <p className="sub" style={{ marginBottom: 8 }}>Reference {i + 1}</p>
-            {field.rowFields.map(rf => (
-              <div className="fld" key={rf.id} style={{ marginBottom: 9 }}>
-                <label>{rf.label}</label>
-                <input className="inp" type={rf.type === 'tel' ? 'tel' : 'text'}
-                  value={(rows[i] || {})[rf.id] || ''}
-                  onChange={(e) => {
-                    const next = Array.from({ length: field.rowCount }).map((__, j) => ({ ...(rows[j] || {}) }));
-                    next[i][rf.id] = e.target.value;
-                    set(next);
-                  }} />
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (field.type === 'textarea') {
-    return (
-      <div className="fld">
-        {label}
-        {field.hint ? <p className="sub" style={{ marginBottom: 8 }}>{field.hint}</p> : null}
-        <textarea className="inp" rows={4} value={value || ''} maxLength={field.max || 2000}
-          onChange={(e) => set(e.target.value)} />
-      </div>
-    );
-  }
-
-  const inputType = field.type === 'date' ? 'date' : (field.type === 'email' ? 'email' : (field.type === 'tel' ? 'tel' : 'text'));
-  return (
-    <div className="fld">
-      {label}
-      <input className="inp" type={inputType} value={value || ''} maxLength={field.max || undefined}
-        onChange={(e) => set(e.target.value)} />
-    </div>
-  );
-};
+// The packet's field renderer and signature pad live in /welcome-packet-ui.js,
+// shared with the staff welcome packet (owner, 2026-11-09: one format).
+const { PacketField, SignaturePad } = window.GFCWelcomePacketUI;
 
 // A run of text with **bold** spans. The bodies mark emphasis the way the
 // client consents do, and both render it rather than printing the asterisks.
@@ -2383,7 +2249,7 @@ const App = () => {
           <p className="sub">Your documents, policies, pay and account.</p>
           <window.MyGFC.StaffTiles data={staff} go={go} only={['onboarding', 'documents', 'policies', 'folders', 'hours', 'account']} />
         </div>
-        <MoreTab visitLogs={visitLogs} queued={queued} me={me} />
+        <MoreTab visitLogs={visitLogs} escalations={escalations} queued={queued} me={me} />
         <button className="btn ghost mg-phone-only" onClick={logout}><i className="ti ti-logout"></i> Sign Out</button>
       </div>
     );

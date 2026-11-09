@@ -107,6 +107,11 @@ module.exports = function createCaregiverRoutes(deps) {
   // competencies, the Feed. Read by ACCOUNT TYPE (accountTypes.js), never by
   // `role`, because a coordinator is stored as `role: 'user'`.
   const isCaregiverOffice = (u) => accountTypes.isHomeCareOffice(u);
+  // An employee of any kind: an account type that is not a client or family.
+  const isStaffAccount = (u) => {
+    const t = accountTypes.accountTypeOf(u);
+    return !!t && t !== 'client' && t !== 'family';
+  };
 
   const requireCaregiverOffice = (req, res, next) => {
     if (isCaregiverOffice(req.user)) return next();
@@ -925,17 +930,127 @@ module.exports = function createCaregiverRoutes(deps) {
   });
 
   // ==========================================================================
-  // GET /api/caregiver/incidents — staff only. Falls and abuse/neglect.
+  // INCIDENTS — falls and abuse/neglect, reportable records with a lifecycle.
   // ==========================================================================
+  // Owner, 2026-11-09: incidents get an Incident Log under Admin & Compliance.
+  // They were written `status: 'open'` and nothing could ever close one or
+  // record what was done, which for a reportable event is the gap that
+  // matters. Now: open → closed, closing REQUIRES a follow-up note, a state
+  // report can be recorded with it, and every change is appended to
+  // `incident_events` (who, when, what) — never edited. A closed incident is
+  // final; a correction is a new note on the trail.
+  const STATE_REPORT_FIELDS = ['reportedAt', 'agency', 'reference'];
+  const clientNames = async (ids) => {
+    const wanted = new Set(ids.map(String));
+    const names = new Map();
+    if (!wanted.size) return names;
+    for (const c of await getUsers()) if (c && wanted.has(String(c.id))) names.set(String(c.id), c.name || '');
+    return names;
+  };
+  const publicIncident = (r, names, events) => ({
+    ...r,
+    client_name: names.get(String(r.client_id)) || '',
+    trail: events.filter(e => e && e.incident_id === r.id)
+      .sort((a, b) => String(a.at).localeCompare(String(b.at)))
+      .map(e => ({ action: e.action, at: e.at, byName: e.by_name, note: e.note, stateReport: e.state_report || null }))
+  });
+
+  // GET /api/caregiver/incidents — review staff. ?status=open|closed.
   router.get('/api/caregiver/incidents', authenticateToken, requireReviewStaff, async (req, res) => {
     try {
-      const rows = await readRows('incident_reports');
+      let rows = await readRows('incident_reports');
+      const want = String(req.query.status || '');
+      if (want === 'open' || want === 'closed') rows = rows.filter(r => (r.status || 'open') === want);
       rows.sort((a, b) => String(b.reported_at || '').localeCompare(String(a.reported_at || '')));
-      res.json({ incidents: rows.slice(0, 200) });
+      const page = rows.slice(0, 200);
+      const names = await clientNames(page.map(r => r.client_id));
+      const events = await readRows('incident_events');
+      res.json({ incidents: page.map(r => publicIncident(r, names, events)) });
     } catch (error) {
       console.error('Incident list error:', error);
       res.status(500).json({ error: 'Server error' });
     }
+  });
+
+  // POST /api/caregiver/incidents/:id/close — the caregiver office closes an
+  // incident with a follow-up note, and records a state report if one was made.
+  router.post('/api/caregiver/incidents/:id/close', authenticateToken, requireCaregiverOffice, async (req, res) => {
+    try {
+      const { note, stateReport } = req.body || {};
+      const text = String(note || '').trim();
+      if (!text) {
+        return res.status(400).json({ error: 'Say what was done before closing the incident.', code: 'INCIDENT_NOTE_REQUIRED' });
+      }
+      let report = null;
+      if (stateReport && typeof stateReport === 'object' && Object.values(stateReport).some(v => String(v || '').trim())) {
+        report = {};
+        for (const k of STATE_REPORT_FIELDS) report[k] = String(stateReport[k] || '').trim().slice(0, 200) || null;
+        if (!report.reportedAt || !report.agency) {
+          return res.status(400).json({ error: 'A state report needs the date it was made and the agency it went to.', code: 'STATE_REPORT_INCOMPLETE' });
+        }
+      }
+      const rows = await readRows('incident_reports');
+      const i = rows.findIndex(r => r && r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Incident not found.', code: 'INCIDENT_NOT_FOUND' });
+      if ((rows[i].status || 'open') === 'closed') {
+        return res.status(409).json({ error: 'This incident is already closed. A closed incident is final.', code: 'INCIDENT_CLOSED' });
+      }
+      const at = new Date().toISOString();
+      rows[i] = { ...rows[i], status: 'closed', closed_at: at, closed_by_id: req.user.id, closed_by_name: req.user.name || req.user.email || null, state_report: report };
+      await db.set('incident_reports', rows);
+      const events = await readRows('incident_events');
+      events.push({ id: uuidv4(), incident_id: rows[i].id, action: 'closed', at, by_id: req.user.id,
+        by_name: req.user.name || req.user.email || null, note: text.slice(0, 2000), state_report: report });
+      await db.set('incident_events', events);
+      // The activity log records THAT it closed and whether it was reported,
+      // never the note: an audit trail is not a second copy of the incident.
+      await logActivity(req.user.id, req.user.name || req.user.email, 'incident_closed', 'incident_report', rows[i].id,
+        { clientId: rows[i].client_id, stateReported: !!report });
+      const names = await clientNames([rows[i].client_id]);
+      res.json({ incident: publicIncident(rows[i], names, events) });
+    } catch (error) {
+      console.error('Incident close error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/caregiver/clients/:clientId/care-history — everything caregivers
+  // filed about ONE client, for the client's record (owner, 2026-11-09):
+  // visit logs, concerns (escalations) and incidents. Review staff only.
+  // Deliberately ALL of the client's escalations, not only those this viewer
+  // was notified on: a client record that hides some of the client's
+  // concerns is not a record.
+  router.get('/api/caregiver/clients/:clientId/care-history', authenticateToken, requireReviewStaff, async (req, res) => {
+    try {
+      const clientId = String(req.params.clientId);
+      const client = (await getUsers()).find(u => u && String(u.id) === clientId && u.role === ROLES.CLIENT);
+      if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
+      const byNewest = (k) => (a, b) => String(b[k] || '').localeCompare(String(a[k] || ''));
+      const reviews = await readRows('caregiver_visit_log_reviews');
+      const visitLogs = (await readRows('caregiver_visit_logs')).filter(r => r && String(r.client_id) === clientId)
+        .sort(byNewest('submitted_at')).slice(0, 200)
+        .map(r => ({ ...publicVisitLog(r), clientName: client.name || '',
+          reviews: reviews.filter(v => v && v.visit_log_id === r.id).map(v => ({ id: v.id, note: v.note, byName: v.by_name, at: v.at })) }));
+      const trail = await readRows('escalation_status_events');
+      const escalations = (await readRows('escalation_events')).filter(e => e && String(e.client_id) === clientId)
+        .sort(byNewest('raised_at')).slice(0, 200)
+        .map(e => ({ ...publicEscalation(e),
+          trail: trail.filter(t => t && t.escalation_id === e.id).sort((a, b) => String(a.at).localeCompare(String(b.at)))
+            .map(t => ({ status: t.status, at: t.at, byName: t.by_name, note: t.note })) }));
+      const names = new Map([[clientId, client.name || '']]);
+      const events = await readRows('incident_events');
+      const incidents = (await readRows('incident_reports')).filter(r => r && String(r.client_id) === clientId)
+        .sort(byNewest('reported_at')).slice(0, 200).map(r => publicIncident(r, names, events));
+      res.json({ clientId, visitLogs, escalations, incidents });
+    } catch (error) {
+      console.error('Care history error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // The Incident Log page. The shell is public; the API decides who sees what.
+  router.get('/incidents', (req, res) => {
+    res.sendFile(require('path').join(__dirname, '..', 'public', 'incidents.html'));
   });
 
   // GET /api/caregiver/admin/competencies — the catalog an admin picks from.
@@ -1029,6 +1144,8 @@ module.exports = function createCaregiverRoutes(deps) {
     id: e.id,
     clientId: e.client_id,
     clientName: e.client_name,
+    // Who raised it, so a caregiver's staff record can list their own.
+    caregiverId: e.caregiver_id,
     caregiverName: e.caregiver_name,
     visitLogId: e.visit_log_id,
     concernType: e.concern_type,
@@ -1183,11 +1300,15 @@ module.exports = function createCaregiverRoutes(deps) {
           return res.status(400).json({ error: 'Say which caregiver this belongs to.', code: 'CAREGIVER_ID_REQUIRED' });
         }
         const users = await getUsers();
-        me = users.find(u => u.id === caregiverId && cg.isCaregiver(u)) || null;
+        // ANY staff member, not only a caregiver (owner, 2026-11-09): every
+        // employee's record in User Management files their documents here,
+        // and this store already holds clinicians' onboarding files. A client
+        // or family account is never staff and is refused.
+        me = users.find(u => u.id === caregiverId && isStaffAccount(u)) || null;
       } else {
         me = await freshCaregiver(req);
       }
-      if (!me) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
+      if (!me) return res.status(404).json({ error: isOffice ? 'Staff member not found.' : 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
 
       const safeName = prepared.safeName;
       let stored;

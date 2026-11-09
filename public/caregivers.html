@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Godwins Family Care — Caregiver Management</title>
+  <title>Godwins Family Care — Home Care Oversight</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -81,6 +81,8 @@
     .trail{border-left:2px solid var(--line);margin:8px 0 0 4px;padding-left:11px}
     .trail div{font-size:13.5px;color:var(--mut);padding:3px 0}
   </style>
+  <!-- The My GFC look (owner, 2026-11-09). After the page's own styles, so it wins. -->
+  <link rel="stylesheet" href="/css/gfc-theme.css">
 </head>
 <body>
   <div id="root"></div>
@@ -198,6 +200,7 @@ const EscalationRow = ({ e, onAdvanced, setErr, setOk }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
         <div>
           <b>{titleize(e.concernType)} · {e.clientName}</b>
+          {e.clientId && <a className="mu" style={{ marginLeft: 8 }} href={clientHref(e.clientId)}>Open Client Record</a>}
           <div className="mu">Raised by {e.caregiverName} · {fmtWhen(e.raisedAt)}</div>
         </div>
         <div>
@@ -367,6 +370,7 @@ const VisitLogRow = ({ v, reload, setErr, setOk }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
         <div>
           <b>{v.clientName || v.clientId} · {v.visitType || 'Visit'}</b>
+          {v.clientId && <a className="mu" style={{ marginLeft: 8 }} href={clientHref(v.clientId)}>Open Client Record</a>}
           <div className="mu">
             {v.caregiverName} · {v.licenseLevel ? titleize(v.licenseLevel) + ' · ' : ''}{fmtPlainDate(v.visitDate)}
             {v.submittedAt ? ` · filed ${fmtWhen(v.submittedAt)}` : ''}
@@ -429,14 +433,17 @@ const VisitLogs = ({ rows, reload, setErr, setOk, status, setStatus }) => (
 const Incidents = ({ rows }) => (
   <div className="card">
     <h2>Incident reports</h2>
-    <p className="sub">A fall or an abuse/neglect observation is its own record, not a checkbox on a visit log.</p>
+    <p className="sub">A fall or an abuse/neglect observation is its own record, not a checkbox on a visit log. Close each one, with what was done, in the <a href="/incidents">Incident Log</a>.</p>
     {rows.length === 0
       ? <Empty icon="shield-check">No incidents reported.</Empty>
       : rows.map(i => (
         <div className="row" style={{ display: 'block' }} key={i.id}>
-          <b>{titleize(i.type || i.label || 'Incident')} · {i.client_name || i.clientName || ''}</b>
+          {/* The rows carry `kind`/`label` and (since 2026-11-09) `client_name`;
+              this read `type` and showed "Incident ·" with no client. */}
+          <b>{i.label || titleize(i.kind || 'Incident')} · {i.client_name || ''}</b>
+          <span className="mu" style={{ marginLeft: 8 }}>{(i.status || 'open') === 'open' ? 'Open' : 'Closed'}</span>
           <div className="mu">
-            {i.caregiver_name || i.caregiverName || ''} · {fmtWhen(i.reported_at || i.reportedAt)}
+            {i.caregiver_name || ''} · {fmtWhen(i.reported_at)} · <a href={`/incidents#${encodeURIComponent(i.id)}`}>Open in Incident Log</a>
           </div>
           {(i.detail || i.description) && <div style={{ marginTop: 5 }}>{i.detail || i.description}</div>}
         </div>
@@ -447,6 +454,56 @@ const Incidents = ({ rows }) => (
 // ============================================================================
 // Documents — what caregivers sent the office
 // ============================================================================
+// Each queue row opens the person's full record in User Management, where
+// everything about them lives (owner, 2026-11-09). This page is the office's
+// to-do list, not a second home for anyone's files.
+const recordHref = (userId, section) => `/admin?view=users&person=${encodeURIComponent(userId)}#${section}`;
+// A visit log, a concern or an incident lives on the client's record
+// (owner, 2026-11-09), so every row about a client opens it.
+const clientHref = (clientId) => `/admin/enrollment?client=${encodeURIComponent(clientId)}`;
+
+// ============================================================================
+// Waiting — ONE list of what is waiting on the office (owner, 2026-11-09)
+// ============================================================================
+// Home Care Oversight is a to-do list. Each row says what it is and who it is
+// about, and opens the record it belongs to; the work itself is done there or
+// in the tab for that kind. Oldest first: what has waited longest is what is
+// most likely to have been forgotten.
+const waitingRows = ({ escalations, pendingLogs, incidents, documents, notCleared }) => [
+  ...escalations.filter(e => e.status !== 'resolved').map(e => ({ key: `e:${e.id}`, kind: 'Concern', what: `${titleize(e.concernType)} · ${e.clientName || 'client'}`,
+    who: `raised by ${e.caregiverName || 'a caregiver'} · ${titleize(e.status)}`, at: e.raisedAt, href: clientHref(e.clientId), cta: 'Open Client Record' })),
+  ...pendingLogs.map(v => ({ key: `v:${v.id}`, kind: 'Visit log to review', what: `${v.clientName || 'client'} · ${v.visitType || 'Visit'}`,
+    who: `filed by ${v.caregiverName || 'a caregiver'}`, at: v.submittedAt, href: clientHref(v.clientId), cta: 'Open Client Record' })),
+  ...incidents.filter(i => (i.status || 'open') === 'open').map(i => ({ key: `i:${i.id}`, kind: 'Incident', what: `${i.label || titleize(i.kind)} · ${i.client_name || 'client'}`,
+    who: `reported by ${i.caregiver_name || 'a caregiver'}`, at: i.reported_at, href: `/incidents#${encodeURIComponent(i.id)}`, cta: 'Open in Incident Log' })),
+  ...documents.filter(d => d.status === 'received').map(d => ({ key: `d:${d.id}`, kind: 'Document to review', what: `${d.kindLabel || 'Document'} · ${d.caregiverName || 'staff member'}`,
+    who: d.fileName || '', at: d.uploadedAt, href: recordHref(d.caregiverId, 'sr-documents'), cta: 'Open Record' })),
+  ...notCleared.map(c => ({ key: `c:${c.caregiverId}`, kind: 'Not yet cleared', what: c.name || c.email || 'Caregiver',
+    who: c.clearanceMessage || `${c.outstandingCount || 0} item(s) outstanding`, at: null, href: recordHref(c.caregiverId, 'sr-onboarding'), cta: 'Open Record' }))
+].sort((a, b) => (a.at && b.at ? String(a.at).localeCompare(String(b.at)) : a.at ? -1 : b.at ? 1 : 0));
+
+const Waiting = (props) => {
+  const rows = waitingRows(props);
+  return (
+    <div className="card">
+      <h2>Waiting on the Office</h2>
+      <p className="sub">Everything open, oldest first. Each row opens the record it belongs to.</p>
+      {rows.length === 0
+        ? <Empty icon="circle-check">Nothing is waiting on the office.</Empty>
+        : rows.map(r => (
+          <div className="row" key={r.key} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <div>
+              <span className="chip received" style={{ marginRight: 8 }}>{r.kind}</span>
+              <b>{r.what}</b>
+              <div className="mu">{r.who}{r.at ? ` · ${fmtWhen(r.at)}` : ''}</div>
+            </div>
+            <a className="btn sm ghost" style={{ textDecoration: 'none' }} href={r.href}>{r.cta}</a>
+          </div>
+        ))}
+    </div>
+  );
+};
+
 const Documents = ({ rows, reload, setErr, setOk }) => {
   // The Super Admin, a manager or a care coordinator reviews what a caregiver
   // sent (owner, 2026-11-03). Removing a document stays with the Super Admin.
@@ -461,13 +518,14 @@ const Documents = ({ rows, reload, setErr, setOk }) => {
       await reload();
     } catch (e) { setErr(e.message); }
   };
+  const waiting = rows.filter(d => d.status === 'received');
   return (
     <div className="card">
-      <h2>Caregiver documents</h2>
-      <p className="sub">LTC forms, certifications, receipts — whatever a caregiver sent in.</p>
-      {rows.length === 0
-        ? <Empty icon="file-off">Nothing sent yet.</Empty>
-        : rows.map(d => (
+      <h2>Documents to Review</h2>
+      <p className="sub">What staff sent in that nobody has accepted or sent back yet. Everything else on file for a person is on their record in User Management.</p>
+      {waiting.length === 0
+        ? <Empty icon="file-check">Nothing is waiting on review.</Empty>
+        : waiting.map(d => (
           <div className="row" key={d.id} style={{ display: 'block' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
               <div>
@@ -475,9 +533,12 @@ const Documents = ({ rows, reload, setErr, setOk }) => {
                 <div className="mu">{d.caregiverName} · {d.fileName} · {fmtWhen(d.uploadedAt)}</div>
                 {d.reviewNote && <div className="mu">Note: {d.reviewNote}</div>}
               </div>
-              <a className="btn sm ghost" style={{ textDecoration: 'none' }}
-                href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
-                target="_blank" rel="noreferrer">Open</a>
+              <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <a className="btn sm ghost" style={{ textDecoration: 'none' }}
+                  href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
+                  target="_blank" rel="noreferrer">Open</a>
+                <a className="btn sm ghost" style={{ textDecoration: 'none' }} href={recordHref(d.caregiverId, 'sr-documents')}>Open Record</a>
+              </span>
             </div>
             {d.status === 'received' && (
               <div style={{ marginTop: 6 }}>
@@ -570,10 +631,13 @@ const Onboarding = ({ setErr, setOk }) => {
 
   if (!rows) return <p className="mu">Loading…</p>;
   const all = rows.caregivers || [];
-  // Default to the half that is OURS to act on. A queue that mixes "we have
-  // not run their orientation" with "they have not photographed their TB
-  // result" cannot be worked, and only the first half is on this screen.
-  const list = onlyWaiting ? all.filter(c => c.waitingOnUs > 0) : all;
+  // The queue is the caregivers NOT YET CLEARED (owner, 2026-11-09); a
+  // cleared caregiver's onboarding lives on their record. Default to the half
+  // that is OURS to act on. A queue that mixes "we have not run their
+  // orientation" with "they have not photographed their TB result" cannot be
+  // worked, and only the first half is on this screen.
+  const notCleared = all.filter(c => !c.cleared);
+  const list = onlyWaiting ? notCleared.filter(c => c.waitingOnUs > 0) : notCleared;
 
   const setItem = async (caregiverId, kind, status) => {
     setErr(''); setOk('');
@@ -605,13 +669,13 @@ const Onboarding = ({ setErr, setOk }) => {
       </p>
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 10 }}>
         <input type="checkbox" checked={onlyWaiting} onChange={e => setOnlyWaiting(e.target.checked)} />
-        Only those waiting on us ({all.filter(c => c.waitingOnUs > 0).length} of {all.length})
+        Only those waiting on us ({notCleared.filter(c => c.waitingOnUs > 0).length} of {notCleared.length} not yet cleared)
       </label>
       {list.length === 0 && (
         <p className="mu">
           {onlyWaiting
-            ? 'Nothing is waiting on the office. Untick the box above to see every caregiver.'
-            : 'No caregivers on file yet.'}
+            ? 'Nothing is waiting on the office. Untick the box above to see every caregiver not yet cleared.'
+            : 'Every caregiver is cleared for shifts.'}
         </p>
       )}
       {list.map(c => {
@@ -633,9 +697,12 @@ const Onboarding = ({ setErr, setOk }) => {
                 {c.cleared ? 'Cleared' : `${doneCount} of ${office.length} office items`}
               </span>
             </div>
-            <button className="btn ghost sm" onClick={() => setOpen(open === c.caregiverId ? null : c.caregiverId)}>
-              {open === c.caregiverId ? 'Hide' : 'Set office items'}
-            </button>
+            <div className="btns">
+              <button className="btn ghost sm" onClick={() => setOpen(open === c.caregiverId ? null : c.caregiverId)}>
+                {open === c.caregiverId ? 'Hide' : 'Set office items'}
+              </button>
+              <a className="btn ghost sm" style={{ textDecoration: 'none' }} href={recordHref(c.caregiverId, 'sr-onboarding')}>Open Record</a>
+            </div>
             {open === c.caregiverId && (
               <div style={{ marginTop: 8 }}>
                 {office.length === 0 && <p className="mu">No office items are configured.</p>}
@@ -674,7 +741,9 @@ const Onboarding = ({ setErr, setOk }) => {
 };
 
 const App = () => {
-  const [tab, setTab] = useState('escalations');
+  const [tab, setTab] = useState('waiting');
+  const [waitingLogs, setWaitingLogs] = useState([]);
+  const [notCleared, setNotCleared] = useState([]);
   const [escalations, setEscalations] = useState([]);
   const [visitLogs, setVisitLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -687,16 +756,22 @@ const App = () => {
 
   const reload = useCallback(async () => {
     const q = logStatus ? `?status=${encodeURIComponent(logStatus)}` : '';
-    const [e, v, i, d] = await Promise.all([
+    const [e, v, i, d, p, w] = await Promise.all([
       api('/api/caregiver/escalations').catch(er => { if (er.status === 403) setDenied(true); return { escalations: [] }; }),
       api(`/api/caregiver/visit-logs${q}`).catch(() => ({ visitLogs: [] })),
       api('/api/caregiver/incidents').catch(() => ({ incidents: [] })),
-      api('/api/caregiver/documents').catch(() => ({ documents: [] }))
+      api('/api/caregiver/documents').catch(() => ({ documents: [] })),
+      // The Waiting list reads what is pending review whatever the Visit
+      // logs tab is filtered to, and who is not yet cleared.
+      api('/api/caregiver/visit-logs?status=pending_review').catch(() => ({ visitLogs: [] })),
+      api('/api/caregiver/admin/welcome-packets').catch(() => ({ caregivers: [] }))
     ]);
     setEscalations(e.escalations || []);
     setVisitLogs(v.visitLogs || []);
     setIncidents(i.incidents || []);
     setDocuments(d.documents || []);
+    setWaitingLogs(p.visitLogs || []);
+    setNotCleared((w.caregivers || []).filter(c => !c.cleared));
   }, [logStatus]);
 
   useEffect(() => {
@@ -709,10 +784,10 @@ const App = () => {
   if (denied) {
     return (
       <div>
-        <div className="hdr"><span className="t">Caregiver Management</span><a href="/admin">Admin hub</a></div>
+        <div className="hdr"><span className="t">Home Care Oversight</span><a href="/login?hub=1">Portal Hub</a></div>
         <div className="wrap"><div className="card">
           <h2>Not your area</h2>
-          <p className="sub">This is for administrators, clinical staff and case managers.</p>
+          <p className="sub">This is for the caregiver office: the Super Admin, managers and care coordinators.</p>
         </div></div>
       </div>
     );
@@ -721,22 +796,24 @@ const App = () => {
   const openEscalations = escalations.filter(e => e.status !== 'resolved').length;
   const pendingLogs = visitLogs.filter(v => v.status === 'pending_review').length;
 
+  const waitingCount = waitingRows({ escalations, pendingLogs: waitingLogs, incidents, documents, notCleared }).length;
   const TABS = [
+    { id: 'waiting', label: 'Waiting', n: waitingCount },
     { id: 'escalations', label: 'Escalations', n: openEscalations },
     { id: 'logs', label: 'Visit logs', n: logStatus === 'pending_review' ? pendingLogs : 0 },
     { id: 'incidents', label: 'Incidents', n: 0 },
-    { id: 'documents', label: 'Documents', n: 0 },
-    { id: 'onboarding', label: 'Onboarding', n: 0 },
+    { id: 'documents', label: 'Documents to Review', n: documents.filter(d => d.status === 'received').length },
+    { id: 'onboarding', label: 'Not Yet Cleared', n: 0 },
     { id: 'broadcast', label: 'Feed post', n: 0 }
   ];
 
   return (
     <div>
       <div className="hdr">
-        <span className="t">Caregiver Management</span>
+        <span className="t">Home Care Oversight</span>
         <span style={{ display: 'flex', gap: 14 }}>
           <a href="/scheduling">Scheduling</a>
-          <a href="/admin">Admin hub</a>
+          <a href="/admin?view=users&amp;group=staff">User Management</a>
         </span>
       </div>
       <div className="wrap">
@@ -751,6 +828,7 @@ const App = () => {
         {err && <div className="err">{err}</div>}
         {ok && <div className="ok">{ok}</div>}
 
+        {tab === 'waiting' && <Waiting escalations={escalations} pendingLogs={waitingLogs} incidents={incidents} documents={documents} notCleared={notCleared} />}
         {tab === 'escalations' && <Escalations rows={escalations} reload={reload} setErr={setErr} setOk={setOk} />}
         {tab === 'logs' && <VisitLogs rows={visitLogs} reload={reload} setErr={setErr} setOk={setOk}
           status={logStatus} setStatus={setLogStatus} />}
@@ -760,7 +838,7 @@ const App = () => {
         {tab === 'broadcast' && <Broadcast setErr={setErr} setOk={setOk} />}
 
         <div className="note">
-          <b>Roster, license levels and competencies live in the Admin hub.</b>
+          <b>Each person's documents, license level, competencies and onboarding live on their record in User Management; each client's visit logs and concerns live on their record in Clients &amp; Patients.</b>
           Shifts, time logs, payroll and billing live in Scheduling. This page is the supervision
           queue: what caregivers raised, documented and sent in.
         </div>

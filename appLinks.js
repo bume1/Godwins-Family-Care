@@ -47,6 +47,7 @@ const PATHS = Object.freeze({
   LOGIN: '/login',
   // Pay stubs, pay setup and tax forms live in My GFC's Hours & Pay section.
   // A caregiver's My GFC is the caregiver app (2026-11-08).
+  STAFF_WELCOME: '/my#welcome',            // a staff member's welcome packet; login opens it until signed
   MY_PAY: '/my#hours',
   CAREGIVER_PAY: '/caregiver#hours',
   PAYROLL_ADMIN: '/payroll',                // the owner's payroll screen

@@ -13,7 +13,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/[^\n]*/g, '$1').replace(/<!--[\s\S]*?-->/g, '');
 
 const STAFF_PAGES = ['admin-hub', 'admin-enrollment', 'scheduling', 'caregivers', 'clinical', 'billing',
-  'messages', 'onboarding', 'audit', 'my', 'ime'];
+  'messages', 'onboarding', 'audit', 'my', 'ime', 'incidents'];
 
 test('every staff page carries the shared staff bar exactly once', () => {
   for (const p of STAFF_PAGES) {

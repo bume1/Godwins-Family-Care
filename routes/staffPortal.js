@@ -26,6 +26,8 @@ const { ACKNOWLEDGMENTS, ITEMS } = require('../onboarding/chapterC');
 const staffFolders = require('../onboarding/staffFolders');
 const { SOURCES } = require('../onboarding/sources');
 const attestations = require('../caregiverAttestations');
+const wp = require('../welcomePacketRepository');
+const welcomePacketPdf = require('../welcomePacketPdf');
 
 const FOLDERS = 'staff_portal_folders';
 const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'liaison']);
@@ -95,6 +97,8 @@ function roleFolderFor(type) {
 }
 
 const BIO_MAX = 3000;
+
+
 const PAYSTUBS = 'staff_paystubs';
 const PROFILES = 'staff_profiles';
 const isIsoDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(Date.parse(v));
@@ -149,6 +153,119 @@ module.exports = function createStaffPortalRoutes(deps) {
     : res.status(403).json({ error: 'Only the admin team manages this.', code: 'STAFF_PORTAL_ADMIN_ONLY' }));
   const folders = async () => (await db.get(FOLDERS)) || [];
 
+  // ---- the staff welcome packet (owner, 2026-11-09) ---------------------------
+  // The caregiver welcome packet's format for every other role: the same
+  // sections code, the same sanitizer, the same sign step and the same signed
+  // PDF. Its own store, so caregiver code that reads welcome_packets never
+  // meets a staff row. Availability is step 3: the shared availability form.
+  const STAFF_PACKETS = 'staff_welcome_packets';
+  const staffPacketFor = async (userId) => ((await db.get(STAFF_PACKETS)) || []).find(p => p && String(p.user_id) === String(userId)) || null;
+  const saveStaffPacket = async (packet) => {
+    const rows = (await db.get(STAFF_PACKETS)) || [];
+    const i = rows.findIndex(r => r && String(r.user_id) === String(packet.user_id));
+    packet.updated_at = nowIso();
+    if (i === -1) rows.push(packet); else rows[i] = packet;
+    await db.set(STAFF_PACKETS, rows);
+  };
+  const availabilityFor = async (userId) => {
+    const rows = ((await db.get('caregiver_availability')) || []).filter(r => r && String(r.caregiver_id) === String(userId))
+      .sort((a, b) => String(b.submitted_at).localeCompare(String(a.submitted_at)));
+    const cur = rows[0] || null;
+    return cur ? { effectiveFrom: cur.effective_from, windows: cur.windows || [], blackoutDates: cur.blackout_dates || [], note: cur.note || null, submittedAt: cur.submitted_at } : null;
+  };
+  const DAY = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
+  const availabilityLines = (a) => (!a ? ['No availability on file.'] : [`From ${a.effectiveFrom}`]
+    .concat((a.windows || []).map(x => `${DAY[x.day] || x.day} ${x.start}–${x.end}`))
+    .concat(a.note ? [`Note: ${a.note}`] : []));
+  const staffPacketPdf = async (packet, user) => welcomePacketPdf.generateSignedWelcomePacketPDF(packet, user, [], {
+    sections: wp.STAFF_PACKET_SECTIONS, title: 'COMPLETED STAFF WELCOME PACKET',
+    extraSections: [{ number: 3, title: 'Availability', lines: availabilityLines(await availabilityFor(user.id)) }]
+  });
+  const requireNotCaregiver = (req, res, next) => (audienceOf(req.user) === 'caregiver'
+    ? res.status(409).json({ error: 'Caregivers fill in the welcome packet in the caregiver app.', code: 'WELCOME_CAREGIVER_PACKET' }) : next());
+
+  router.get('/api/my/welcome-packet', authenticateToken, requireStaff, requireNotCaregiver, async (req, res) => {
+    const p = await staffPacketFor(req.user.id);
+    return res.json({
+      version: wp.STAFF_PACKET_VERSION, sections: wp.STAFF_PACKET_SECTIONS, signNote: wp.STAFF_SIGN_NOTE,
+      status: p ? p.status : 'not_started', data: (p && p.data) || { email: req.user.email || '' },
+      signedAt: p ? p.signed_at || null : null, availabilityOnFile: !!(await availabilityFor(req.user.id)),
+      missing: wp.missingProfileFields((p && p.data) || {}, wp.STAFF_PACKET_SECTIONS)
+    });
+  });
+  // Saved a step at a time and MERGED, the caregiver packet's rule.
+  router.put('/api/my/welcome-packet', authenticateToken, requireStaff, requireNotCaregiver, async (req, res) => {
+    const p = (await staffPacketFor(req.user.id)) || { id: uuidv4(), user_id: req.user.id, status: 'in_progress', data: {}, created_at: nowIso() };
+    if (p.status === 'submitted') return res.status(409).json({ error: 'Your packet is signed. Contact the office to change anything on it.', code: 'PACKET_SIGNED' });
+    const { clean, dropped } = wp.sanitizePacket(req.body && req.body.data, wp.STAFF_PACKET_SECTIONS);
+    p.data = Object.assign({}, p.data, clean);
+    p.status = 'in_progress';
+    await saveStaffPacket(p);
+    return res.json({ saved: true, data: p.data, dropped, missing: wp.missingProfileFields(p.data, wp.STAFF_PACKET_SECTIONS) });
+  });
+  router.post('/api/my/welcome-packet/submit', authenticateToken, requireStaff, requireNotCaregiver, async (req, res) => {
+    const p = (await staffPacketFor(req.user.id)) || { id: uuidv4(), user_id: req.user.id, status: 'in_progress', data: {}, created_at: nowIso() };
+    if (p.status === 'submitted') return res.status(409).json({ error: 'Your packet is already signed.', code: 'PACKET_SIGNED' });
+    const { data, signaturePng, printedName } = req.body || {};
+    if (data) p.data = Object.assign({}, p.data, wp.sanitizePacket(data, wp.STAFF_PACKET_SECTIONS).clean);
+    const missing = wp.missingProfileFields(p.data, wp.STAFF_PACKET_SECTIONS);
+    if (!(await availabilityFor(req.user.id))) missing.push({ id: 'availability', label: 'Your availability', section: 'availability', sectionTitle: 'Availability' });
+    if (missing.length) return res.status(400).json({ error: 'Some answers are still needed before you can sign.', code: 'PACKET_INCOMPLETE', missing });
+    const sig = String(signaturePng || '');
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig)) return res.status(400).json({ error: 'Please sign in the box before submitting.', code: 'SIGNATURE_REQUIRED' });
+    if (sig.length > 400000) return res.status(413).json({ error: 'That signature is too large to store.', code: 'SIGNATURE_TOO_LARGE' });
+    const printed = String(printedName || '').trim();
+    if (!printed) return res.status(400).json({ error: 'Type your name as it should appear on the packet.', code: 'PRINTED_NAME_REQUIRED' });
+    Object.assign(p, { signature_png: sig, printed_name: printed.slice(0, 160), signed_at: nowIso(), status: 'submitted', version: wp.STAFF_PACKET_VERSION });
+    await saveStaffPacket(p);
+    await logActivity(req.user.id, req.user.name, 'staff_welcome_packet_submitted', 'staff_welcome_packet', p.id, { version: p.version });
+    return res.json({ submitted: true, signedAt: p.signed_at });
+  });
+  router.get('/api/my/welcome-packet/signed.pdf', authenticateToken, requireStaff, requireNotCaregiver, async (req, res) => {
+    const p = await staffPacketFor(req.user.id);
+    if (!p || p.status !== 'submitted') return res.status(404).json({ error: 'No signed packet is on file.', code: 'PACKET_NOT_SIGNED' });
+    const u = (await getUsers()).find(x => String(x.id) === String(req.user.id)) || req.user;
+    const buf = await staffPacketPdf(p, u);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `GFC_Welcome_Packet_${u.name || u.id}.pdf`));
+    return res.send(buf);
+  });
+
+  // ---- the admin team reads anyone's completed welcome packet ------------------
+  // Caregivers' and everyone else's, from User Management (owner, 2026-11-09).
+  router.get('/api/my/admin/welcome/:userId', authenticateToken, requireAdmin, async (req, res) => {
+    const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));
+    if (!u) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    if (audienceOf(u) === 'caregiver') {
+      const cp = ((await db.get('welcome_packets')) || []).find(p => p && String(p.caregiver_id) === String(u.id)) || null;
+      return res.json({ kind: 'caregiver', status: cp ? cp.status : 'not_started', signedAt: cp ? cp.signed_at || null : null,
+        sections: wp.PACKET_SECTIONS, data: (cp && cp.data) || {} });
+    }
+    const p = await staffPacketFor(u.id);
+    return res.json({ kind: 'staff', status: p ? p.status : 'not_started', signedAt: p ? p.signed_at || null : null,
+      sections: wp.STAFF_PACKET_SECTIONS, data: (p && p.data) || {}, availability: await availabilityFor(u.id) });
+  });
+  router.get('/api/my/admin/welcome/:userId/signed.pdf', authenticateToken, requireAdmin, async (req, res) => {
+    const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId) && audienceOf(x));
+    if (!u) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    let buf;
+    if (audienceOf(u) === 'caregiver') {
+      const cp = ((await db.get('welcome_packets')) || []).find(p => p && String(p.caregiver_id) === String(u.id));
+      if (!cp || cp.status !== 'submitted') return res.status(404).json({ error: 'No signed packet is on file.', code: 'PACKET_NOT_SIGNED' });
+      const docs = ((await db.get('caregiver_documents')) || []).filter(r => r && String(r.caregiver_id) === String(u.id));
+      const atts = ((await db.get('caregiver_attestations')) || []).filter(r => r && String(r.caregiver_id) === String(u.id));
+      buf = await welcomePacketPdf.generateSignedWelcomePacketPDF(cp, u, wp.buildChecklist(cp.data, docs, cp.office, atts));
+    } else {
+      const p = await staffPacketFor(u.id);
+      if (!p || p.status !== 'submitted') return res.status(404).json({ error: 'No signed packet is on file.', code: 'PACKET_NOT_SIGNED' });
+      buf = await staffPacketPdf(p, u);
+    }
+    await logActivity(req.user.id, req.user.name, 'welcome_packet_read', 'welcome_packet', u.id, {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `GFC_Welcome_Packet_${u.name || u.id}.pdf`));
+    return res.send(buf);
+  });
+
   // ---- who I am ------------------------------------------------------------
   router.get('/api/my/profile', authenticateToken, requireStaff, async (req, res) => {
     const type = audienceOf(req.user);
@@ -159,9 +276,12 @@ module.exports = function createStaffPortalRoutes(deps) {
       isCaregiver: type === 'caregiver',
       isLiaison: type === 'liaison',
       employmentType: req.user.employmentType || null,
-      isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess
+      isClinician: ['provider', 'rn', 'lcsw', 'lmsw'].includes(type) || !!req.user.hasClinicalAccess,
+      // Caregivers have their welcome packet; everyone else this short form.
+      welcomeDone: type === 'caregiver' ? true : ((await staffPacketFor(req.user.id)) || {}).status === 'submitted'
     });
   });
+
 
   // ---- a liaison's clients ------------------------------------------------------
   // Owner, 2026-11-08: a Community Care Liaison sees the clients assigned to
@@ -205,8 +325,12 @@ module.exports = function createStaffPortalRoutes(deps) {
   //   signed  — what they signed: policy acknowledgments at a version, and a
   //             caregiver's welcome packet and in-app attestations
   // Our ids only; never a Drive id.
-  router.get('/api/my/documents', authenticateToken, requireStaff, async (req, res) => {
-    const me = String(req.user.id);
+  // Everything on file for one staff member: their uploaded documents and
+  // every policy, packet and attestation they signed. ONE function, read by
+  // the person's own My GFC and by the office's view of their staff record
+  // (owner, 2026-11-09), so the two can never show different files.
+  const documentsFor = async (person) => {
+    const me = String(person.id);
     const files = ((await db.get('caregiver_documents')) || [])
       .filter(r => String(r.caregiver_id) === me && !r.deleted_at)
       .sort((a, b) => String(b.uploaded_at).localeCompare(String(a.uploaded_at)))
@@ -228,7 +352,7 @@ module.exports = function createStaffPortalRoutes(deps) {
           current: String(a.version) === String(def.version), links: def.driveFileIds.map(viewUrl) });
       }
     }
-    if (audienceOf(req.user) === 'caregiver') {
+    if (audienceOf(person) === 'caregiver') {
       const packet = ((await db.get('welcome_packets')) || []).find(p => p && String(p.caregiver_id) === me);
       if (packet && packet.signed_at) {
         signed.push({ id: 'packet', title: 'Caregiver welcome packet', signedAt: packet.signed_at, pdf: 'packet' });
@@ -238,7 +362,22 @@ module.exports = function createStaffPortalRoutes(deps) {
       }
     }
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
-    return res.json({ documents: files, signed });
+    return { documents: files, signed };
+  };
+
+  router.get('/api/my/documents', authenticateToken, requireStaff, async (req, res) => {
+    return res.json(await documentsFor(req.user));
+  });
+
+  // The office's read of one staff member's documents, for their record in
+  // User Management. The admin team only (admin, manager, care coordinator);
+  // a client or family account is not staff and reads as unknown. Files open
+  // through GET /api/caregiver/documents/:id/file, which is the office's too.
+  router.get('/api/my/admin/people/:userId/documents', authenticateToken, requireAdmin, async (req, res) => {
+    const person = (await getUsers()).find(u => String(u.id) === String(req.params.userId) && audienceOf(u));
+    if (!person) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'staff_record_documents_read', 'user', person.id, {});
+    return res.json(await documentsFor(person));
   });
   router.get('/api/my/documents/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const row = ((await db.get('caregiver_documents')) || []).find(r => r.id === req.params.id);

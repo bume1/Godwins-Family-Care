@@ -292,10 +292,11 @@ test('ROUTE: who is refused recording for somebody else', async () => {
     assert.equal(r.status, 403, why);
     assert.equal(r.body.code, 'AVAILABILITY_RECORDER_ONLY');
   }
-  // A coordinator has no availability of their OWN to post.
-  const own = await call(h.app, 'POST', '/api/scheduling/availability', { effectiveFrom: plus(20), windows: W }, 'coord');
-  assert.equal(own.status, 403);
-  assert.equal(own.body.code, 'SCHEDULING_STAFF_ONLY');
+  // A coordinator now posts their OWN availability (owner, 2026-11-09: every
+  // staff member submits it in their welcome packet). Recording for somebody
+  // else is still the office's, which the loop above proves.
+  const own = await call(h.app, 'POST', '/api/scheduling/availability', { effectiveFrom: plus(40), windows: W }, 'coord');
+  assert.equal(own.status, 200, JSON.stringify(own.body));
   // And nobody records availability for a client, who has none.
   const cl = await call(h.app, 'POST', '/api/scheduling/availability',
     { caregiverId: 'client-1', effectiveFrom: plus(20), windows: W }, 'coord');

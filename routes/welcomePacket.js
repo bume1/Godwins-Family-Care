@@ -22,6 +22,7 @@
 const express = require('express');
 const links = require('../appLinks');   // where each person actually goes
 const cg = require('../caregiverRepository');
+const accountTypes = require('../accountTypes');
 const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
 const packetPdf = require('../welcomePacketPdf');
@@ -49,9 +50,15 @@ module.exports = function createWelcomePacketRoutes(deps) {
     return res.status(403).json({ error: 'Caregiver access required.', code: 'CAREGIVER_ONLY' });
   };
 
-  const requireAdmin = (req, res, next) => {
-    if (req.user.role === ROLES.ADMIN) return next();
-    return res.status(403).json({ error: 'Administrator access required.', code: 'ADMIN_ONLY' });
+  // The caregiver office: the Super Admin, managers and care coordinators
+  // (accountTypes.isHomeCareOffice, owner 2026-11-03). The onboarding queue,
+  // the office's own checklist items and a caregiver's signed copies are
+  // theirs. These were admin-only, so a manager opening Caregiver Management's
+  // Onboarding tab, or a caregiver's staff record, was refused (2026-11-09).
+  const isOffice = (u) => accountTypes.isHomeCareOffice(u);
+  const requireOffice = (req, res, next) => {
+    if (isOffice(req.user)) return next();
+    return res.status(403).json({ error: 'The caregiver office (admin, manager or care coordinator) manages onboarding.', code: 'CAREGIVER_OFFICE_ONLY' });
   };
 
   const freshCaregiver = async (req) => {
@@ -530,7 +537,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
   router.get('/api/caregiver/welcome-packet/attestations/:kind.pdf',
     authenticateToken, async (req, res) => {
       try {
-        const isAdmin = req.user.role === ROLES.ADMIN;
+        const isAdmin = isOffice(req.user);
         if (!isAdmin && !cg.isCaregiver(req.user)) {
           return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
         }
@@ -592,11 +599,11 @@ module.exports = function createWelcomePacketRoutes(deps) {
 
   router.get('/api/caregiver/welcome-packet/signed.pdf', authenticateToken, async (req, res) => {
     try {
-      const isAdmin = req.user.role === ROLES.ADMIN;
+      const isAdmin = isOffice(req.user);
       if (!isAdmin && !cg.isCaregiver(req.user)) {
         return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
       }
-      // The filter is ADMIN-ONLY: a caregiver passing someone else's id still
+      // The filter is the OFFICE's only: a caregiver passing someone else's id still
       // gets their own, the same rule the document list follows.
       const caregiverId = isAdmin && req.query.caregiverId ? String(req.query.caregiverId) : req.user.id;
       const users = await getUsers();
@@ -628,51 +635,68 @@ module.exports = function createWelcomePacketRoutes(deps) {
   // ==========================================================================
   // Admin — the onboarding queue and the office's own checklist items.
   // ==========================================================================
-  router.get('/api/caregiver/admin/welcome-packets', authenticateToken, requireAdmin, async (req, res) => {
+  // One caregiver's onboarding row: the summary, counts and the office items.
+  // Onboarding state, not PHI — no date of birth, no address, nothing from the
+  // packet's answers. Shared by the queue and the one-person read, so the two
+  // can never disagree about a caregiver.
+  const queueRowFor = async (caregiver) => {
+    const state = await stateFor(caregiver);
+    return {
+      caregiverId: caregiver.id,
+      name: caregiver.name,
+      email: caregiver.email,
+      licenseLevel: caregiver.licenseLevel || null,
+      ...state.summary,
+      // Counts, not the answers. A queue is a glance, and a caregiver's
+      // date of birth has no business on one.
+      outstandingCount: state.summary.outstanding.length,
+      waitingOnUs: state.summary.outstanding.filter(o => o.waitingOn === 'us').length,
+      // The office's four items with their CURRENT status, because the
+      // screen that sets them has to show where each one stands. Counts
+      // alone cannot do that: `outstanding` drops an item once it is done,
+      // so a queue built from it could not tell "done" from "not a
+      // required item".
+      office: state.checklist
+        .filter(r => r.source === 'office')
+        .map(r => ({
+          // `kind` (fingerprinting, orientation, …) NOT `item`, which is the
+          // printed packet's item NUMBER. The PUT validates against
+          // OFFICE_ITEM_KINDS, so sending the number would be refused.
+          kind: r.kind, title: r.title, required: !!r.required,
+          officeStatus: r.officeStatus, officeAt: r.officeAt, officeByName: r.officeByName
+        }))
+    };
+  };
+  // officeStatuses too: the screen's dropdown is built from it, and the route
+  // refuses a status outside this list (OFFICE_STATUS_UNKNOWN). A page that
+  // named its own would offer an option the save rejects.
+  const officeMeta = () => ({
+    officeItems: wp.DOCUMENT_ITEMS.filter(d => d.source === 'office'),
+    officeStatuses: wp.OFFICE_STATUSES
+  });
+
+  router.get('/api/caregiver/admin/welcome-packets', authenticateToken, requireOffice, async (req, res) => {
     try {
       const users = await getUsers();
-      const caregivers = users.filter(cg.isCaregiver);
       const out = [];
-      for (const caregiver of caregivers) {
-        const state = await stateFor(caregiver);
-        out.push({
-          caregiverId: caregiver.id,
-          name: caregiver.name,
-          email: caregiver.email,
-          licenseLevel: caregiver.licenseLevel || null,
-          ...state.summary,
-          // Counts, not the answers. A queue is a glance, and a caregiver's
-          // date of birth has no business on one.
-          outstandingCount: state.summary.outstanding.length,
-          waitingOnUs: state.summary.outstanding.filter(o => o.waitingOn === 'us').length,
-          // The office's four items with their CURRENT status, because the
-          // screen that sets them has to show where each one stands. Counts
-          // alone cannot do that: `outstanding` drops an item once it is done,
-          // so a queue built from it could not tell "done" from "not a
-          // required item". Onboarding state, not PHI — no date of birth, no
-          // address, nothing from the packet's answers.
-          office: state.checklist
-            .filter(r => r.source === 'office')
-            .map(r => ({
-              // `kind` (fingerprinting, orientation, …) NOT `item`, which is the
-              // printed packet's item NUMBER. The PUT validates against
-              // OFFICE_ITEM_KINDS, so sending the number would be refused.
-              kind: r.kind, title: r.title, required: !!r.required,
-              officeStatus: r.officeStatus, officeAt: r.officeAt, officeByName: r.officeByName
-            }))
-        });
-      }
-      // officeStatuses too: the screen's dropdown is built from it, and the
-      // route refuses a status outside this list (OFFICE_STATUS_UNKNOWN). A
-      // page that named its own would offer an option the save rejects — or,
-      // worse, render an empty dropdown and look broken.
-      res.json({
-        caregivers: out,
-        officeItems: wp.DOCUMENT_ITEMS.filter(d => d.source === 'office'),
-        officeStatuses: wp.OFFICE_STATUSES
-      });
+      for (const caregiver of users.filter(cg.isCaregiver)) out.push(await queueRowFor(caregiver));
+      res.json({ caregivers: out, ...officeMeta() });
     } catch (error) {
       console.error('Welcome packet queue error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // One caregiver, for their staff record in User Management (owner,
+  // 2026-11-09), so a record does not load every caregiver's packet.
+  router.get('/api/caregiver/admin/welcome-packets/:caregiverId', authenticateToken, requireOffice, async (req, res) => {
+    try {
+      const users = await getUsers();
+      const caregiver = users.find(u => u.id === req.params.caregiverId && cg.isCaregiver(u));
+      if (!caregiver) return res.status(404).json({ error: 'Caregiver not found.', code: 'CAREGIVER_NOT_FOUND' });
+      res.json({ caregiver: await queueRowFor(caregiver), ...officeMeta() });
+    } catch (error) {
+      console.error('Welcome packet one-caregiver read error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -681,7 +705,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
   // check. A caregiver cannot upload their way past any of them, which is why
   // they are tracked by status and set here.
   router.put('/api/caregiver/admin/welcome-packets/:caregiverId/office-item',
-    authenticateToken, requireAdmin, async (req, res) => {
+    authenticateToken, requireOffice, async (req, res) => {
       try {
         const { kind, status, note } = req.body || {};
         if (!wp.OFFICE_ITEM_KINDS.includes(kind)) {

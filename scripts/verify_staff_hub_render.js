@@ -107,7 +107,7 @@ const json = (res, body, status) => { res.writeHead(status || 200, { 'Content-Ty
     const heads = await page.$$eval('main section h2', hs => hs.map(h => h.textContent.trim()));
     ok(`${label}: hub shows the six areas in order`, JSON.stringify(heads) === JSON.stringify(['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']), JSON.stringify(heads));
     const people = await page.$$eval('#area-people + div h3', hs => hs.map(h => h.textContent.trim()));
-    ok(`${label}: People holds caregiver management and scheduling`, people.includes('Caregiver Management') && people.includes('Caregiver Scheduling'), JSON.stringify(people));
+    ok(`${label}: People holds Home Care Oversight and scheduling`, people.includes('Home Care Oversight') && people.includes('Caregiver Scheduling'), JSON.stringify(people));
     ok(`${label}: hub has no page errors`, errors.length === 0, errors.join(' | '));
     if (shot) await page.screenshot({ path: path.join(shot, `hub-${label}.png`), fullPage: true });
     await ctx.close();
@@ -120,7 +120,7 @@ const json = (res, body, status) => { res.writeHead(status || 200, { 'Content-Ty
     ok(`${label}: the bar says you are in People`, here === 'People', here);
     if (bar) await page.click('.gfc-sn-menu');
     const panel = await page.$$eval('.gfc-sn-panel h3', hs => hs.map(h => h.textContent));
-    ok(`${label}: All areas opens to the manager's areas`, JSON.stringify(panel) === JSON.stringify(['My GFC', 'People', 'Clients', 'Clinical', 'Billing']), JSON.stringify(panel));
+    ok(`${label}: All areas opens to the manager's areas`, JSON.stringify(panel) === JSON.stringify(['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']), JSON.stringify(panel));
     if (shot) await page.screenshot({ path: path.join(shot, `bar-${label}.png`) });
     await ctx.close();
 

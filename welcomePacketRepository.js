@@ -320,6 +320,36 @@ const PACKET_SECTIONS = Object.freeze([
 ]);
 
 // ---------------------------------------------------------------------------
+// THE STAFF WELCOME PACKET (owner, 2026-11-09): the same packet, in the same
+// format, for every role except caregivers. Short: who you are and where you
+// live, your emergency contact, your availability (the shared availability
+// form, step 3, not a field here), and how you learn and like to be reached.
+// No references (checked before hire) and no start date.
+// The About and Emergency Contact fields are the caregiver packet's own, so a
+// field means the same thing on both packets.
+// ---------------------------------------------------------------------------
+const cgField = (sectionId, fieldId) => PACKET_SECTIONS.find(s => s.id === sectionId).fields.find(f => f.id === fieldId);
+const STAFF_PACKET_SECTIONS = Object.freeze([
+  { id: 'about', number: 1, title: 'About You', intro: 'How to reach you, and where you live.',
+    fields: ['firstName', 'lastName', 'preferredName', 'mobilePhone', 'email', 'homeAddress', 'homeZip'].map(f => cgField('about', f)) },
+  { id: 'emergency_contact', number: 2, title: 'Emergency Contact', intro: 'Someone we can reach if something happens while you are working.',
+    fields: PACKET_SECTIONS.find(s => s.id === 'emergency_contact').fields },
+  // Number 3 is the availability step, which submits to the shared
+  // availability form so it lives in the scheduling area afterwards.
+  { id: 'learning', number: 4, title: 'How You Learn and How to Reach You', intro: null,
+    fields: [
+      { id: 'learningStyles', label: 'How do you best absorb new information?', type: 'multi', required: true,
+        options: [opt('reading', 'Reading documentation'), opt('hands_on', 'Hands-on practice'),
+          opt('walkthrough', 'Live walkthroughs'), opt('video', 'Short videos')] },
+      { id: 'learningNote', label: 'Anything else that helps you learn', type: 'textarea', required: false, max: 600 },
+      { id: 'contactPreference', label: 'How do you prefer to be contacted?', type: 'multi', required: true,
+        options: [opt('phone', 'Phone call'), opt('text', 'Text message'), opt('email', 'Email'), opt('chat', 'Team chat')] }
+    ] }
+].map(Object.freeze));
+const STAFF_PACKET_VERSION = 'staff-2026-11';
+const STAFF_SIGN_NOTE = 'By signing, you confirm the information in this packet is true and complete to the best of your knowledge. You can update your availability at any time in My GFC.';
+
+// ---------------------------------------------------------------------------
 // PART TWO — what to send us.
 // ---------------------------------------------------------------------------
 // `source` says who produces the document, and it is the difference between a
@@ -554,13 +584,15 @@ const OFFICE_STATUSES = Object.freeze(['not_started', 'scheduled', 'done']);
 // Normalizing what comes back from a form, a PDF, or an importer.
 // ---------------------------------------------------------------------------
 
-const FIELD_INDEX = (() => {
+const indexOf = (sections) => {
   const map = new Map();
-  for (const section of PACKET_SECTIONS) {
+  for (const section of sections) {
     for (const field of section.fields) map.set(field.id, { field, section });
   }
   return map;
-})();
+};
+const FIELD_INDEX = indexOf(PACKET_SECTIONS);
+const STAFF_FIELD_INDEX = indexOf(STAFF_PACKET_SECTIONS);
 
 // The attestation wording and its version live in caregiverAttestations.js.
 // Required rather than restated: a second copy of "which version counts"
@@ -589,16 +621,19 @@ const normalizeDate = (v) => {
  * nobody can read back, and on a matching profile it would quietly steer
  * placements off a value nobody chose.
  */
-function sanitizePacket(raw) {
+// `sections` defaults to the caregiver packet; the staff packet passes its own.
+function sanitizePacket(raw, sections) {
+  const index = !sections || sections === PACKET_SECTIONS ? FIELD_INDEX
+    : (sections === STAFF_PACKET_SECTIONS ? STAFF_FIELD_INDEX : indexOf(sections));
   const input = (raw && typeof raw === 'object') ? raw : {};
   const clean = {};
   const dropped = [];
 
   for (const key of Object.keys(input)) {
-    if (!FIELD_INDEX.has(key)) dropped.push(key);
+    if (!index.has(key)) dropped.push(key);
   }
 
-  for (const [id, { field }] of FIELD_INDEX.entries()) {
+  for (const [id, { field }] of index.entries()) {
     if (!(id in input)) continue;
     const value = input[id];
     if (value == null) continue;
@@ -668,10 +703,10 @@ function sanitizePacket(raw) {
  * Which required profile fields are still empty.
  * → [{ id, label, section, sectionTitle }]
  */
-function missingProfileFields(packet) {
+function missingProfileFields(packet, sections) {
   const p = packet || {};
   const missing = [];
-  for (const section of PACKET_SECTIONS) {
+  for (const section of (sections || PACKET_SECTIONS)) {
     for (const field of section.fields) {
       if (!field.required) continue;
       let empty;
@@ -802,6 +837,9 @@ function buildChecklist(packet, documents, office, attestations) {
 module.exports = {
   PACKET_VERSION,
   PACKET_SECTIONS,
+  STAFF_PACKET_SECTIONS,
+  STAFF_PACKET_VERSION,
+  STAFF_SIGN_NOTE,
   DOCUMENT_ITEMS,
   GROUP_TITLES,
   GROUP_INTROS,

@@ -478,11 +478,13 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
 
-        {item.link && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
+        {item.link && !(item.id === 'WELCOME' && office) && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
           <div><label className="f">From the welcome packet</label>
-            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen.</div>
+            <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>{item.id === 'WELCOME'
+              ? (office ? 'This ticks itself when they sign their welcome packet in My GFC. Their staff record in User Management shows the signed packet.' : 'This ticks itself when you sign your welcome packet in My GFC.')
+              : "These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
               <li key={r.kind}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b></li>
             ))}</ul></div>
@@ -511,6 +513,9 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
 
+        {/* The welcome packet step is read from the packet itself, so it takes
+            no notes and cannot be marked not applicable (owner, 2026-11-09). */}
+        {item.id !== 'WELCOME' && <>
         <label className="f">Notes</label>
         {item.notes.map(n => <div key={n.id} style={{ fontSize: 14, padding: '4px 0', borderBottom: '1px solid #F1ECE1' }}><b>{n.byName}</b> <span style={{ color: 'var(--mut)', fontSize: 12 }}>{fmtDate(n.at)}</span><div>{n.text}</div></div>)}
         <textarea rows={2} placeholder="Add a note" value={note} onChange={e => setNote(e.target.value)} style={{ marginTop: 6 }} />
@@ -525,6 +530,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             </div>
           </div>
         )}
+        </>}
         {item.sourceUrl && <div style={{ marginTop: 14, fontSize: 12.5 }}><a href={item.sourceUrl} target="_blank" rel="noopener">Source: Onboarding Playbook</a></div>}
       </div>
     </>
@@ -1023,7 +1029,10 @@ const Mine = ({ viewer, track, onChanged }) => {
 
 // ---- the shell ---------------------------------------------------------------
 const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
-  const [view, setView] = useState('overview'); const [person, setPerson] = useState(null);
+  // ?person=<id> opens straight to one person: the staff record in User
+  // Management links here for the full checklist (owner, 2026-11-09).
+  const linked = (() => { try { return new URLSearchParams(window.location.search).get('person'); } catch (e) { return null; } })();
+  const [view, setView] = useState(linked ? 'person' : 'overview'); const [person, setPerson] = useState(linked || null);
   const open = (id) => { setPerson(id); setView('person'); };
   return (
     <div className="shell">
