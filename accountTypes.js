@@ -164,6 +164,24 @@ function accountTypeOf(u) {
   return deriveType(u);
 }
 
+// The name of this account's role as people see it (the Portal Hub badge and
+// its account card). Read from the ONE account type, so the hub can never call
+// a provider a "Team Member" or a caregiver a "Vendor" again (owner,
+// 2026-11-09: "make sure roles on the portal hub match their actual roles").
+// A caregiver carries their licence level; an account with no type says so
+// rather than guessing, since that one needs an admin to choose.
+const CAREGIVER_LEVEL_LABELS = Object.freeze({ sitter: 'Sitter', pca: 'PCA', cna: 'CNA', lpn: 'LPN' });
+function accountTypeLabel(u) {
+  const type = accountTypeOf(u);
+  if (!type) return 'Account type not set';
+  const def = ACCOUNT_TYPES.find(t => t.value === type);
+  if (type === TYPES.CAREGIVER) {
+    const lvl = CAREGIVER_LEVEL_LABELS[String((u && u.licenseLevel) || '').toLowerCase()];
+    return lvl ? `Caregiver (${lvl})` : 'Caregiver';
+  }
+  return def.label;
+}
+
 // Does a stored record already carry exactly what its type sets?
 function isConsistent(u) {
   const type = accountTypeOf(u);
@@ -419,7 +437,7 @@ module.exports = {
   TYPES, ACCOUNT_TYPES, ALL_TYPES, isValidType,
   MANAGER_CLINICAL_ACCESS, DEFAULT_MANAGER_CLINICAL_ACCESS, isValidManagerAccess,
   CLINICIAN_TYPES, LEGACY_FLAGS,
-  fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
+  fieldsFor, deriveType, accountTypeOf, accountTypeLabel, managerAccessOf, isConsistent,
   landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite

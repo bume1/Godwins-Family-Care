@@ -3921,6 +3921,7 @@ const loginProfileFor = (user) => {
     // Where this account lands and which hub tiles it sees, answered ONCE on
     // the server (accountTypes.js) so the login page cannot drift from it.
     accountType: accountTypes.accountTypeOf(user),
+    accountTypeLabel: accountTypes.accountTypeLabel(user),
     clinicalRole: clinicalRoles.resolveClinicalRole(user),
     landing: accountTypes.landingFor(user),
     hubTiles: accountTypes.hubTilesFor(user),
@@ -3952,7 +3953,8 @@ app.get('/api/staff/hub', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const me = users.find(u => String(u.id) === String(req.user.id)) || req.user;
-    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me) });
+    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me),
+      accountType: accountTypes.accountTypeOf(me), accountTypeLabel: accountTypes.accountTypeLabel(me) });
   } catch (err) {
     console.error('Staff hub read failed:', err.message);
     return res.status(500).json({ error: 'The Portal Hub could not be loaded.', code: 'STAFF_HUB_UNAVAILABLE' });

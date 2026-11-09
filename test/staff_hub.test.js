@@ -128,3 +128,34 @@ test('the Portal Hub banner is the brand graphic, shown whole', () => {
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'banners', 'banner-hub.webp')));
   assert.ok(!/banner-admin\.webp/.test(stripComments(login)), 'the old photo banner is gone from the hub');
 });
+
+// Owner, 2026-11-09: "make sure roles on the portal hub match their actual
+// roles". The hub used to work the badge out from lab-era fields, so every
+// clinician read "Team Member" and every caregiver "Vendor".
+test('the hub names each account by its real account type', () => {
+  const want = {
+    admin: 'Super Admin', manager: 'Manager', coordinator: 'Care Coordinator',
+    provider: 'Provider (FNP / MD / PA)', rn: 'RN', lcsw: 'LCSW', lmsw: 'LMSW / Case Manager',
+    liaison: 'Community Care Liaison', client: 'Client', family: 'Family / Authorized Contact'
+  };
+  for (const [type, label] of Object.entries(want)) {
+    assert.equal(at.accountTypeLabel(Object.assign({}, at.fieldsFor(type), { accountType: type })), label, type);
+    // A record written before account types existed reads the same.
+    if (type !== 'liaison') assert.equal(at.accountTypeLabel(at.fieldsFor(type)), label, `${type} (derived)`);
+  }
+  assert.equal(at.accountTypeLabel({ role: 'vendor', licenseLevel: 'cna' }), 'Caregiver (CNA)');
+  assert.equal(at.accountTypeLabel({ role: 'vendor' }), 'Caregiver');
+  assert.equal(at.accountTypeLabel({ role: 'user' }), 'Account type not set');
+});
+
+test('the hub page shows the server\'s role name and works none out itself', () => {
+  const src = stripComments(read('public/login.html'));
+  const hub = src.slice(src.indexOf('const PortalHub'), src.indexOf('<footer'));
+  assert.ok(hub.length > 1000, 'could not find the hub component');
+  assert.ok(!/'Team Member'|'Vendor'|External Vendor/.test(hub), 'no lab-era role names');
+  assert.match(hub, /user\.accountTypeLabel/);
+  assert.match(hub, /d\.accountTypeLabel/);
+  const server = read('server.js');
+  assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(user\)/);
+  assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(me\)/);
+});

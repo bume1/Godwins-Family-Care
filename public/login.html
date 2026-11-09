@@ -303,12 +303,13 @@
     // Portal Hub - Landing page after login showing available portals
     const PortalHub = ({ user, token, onLogout }) => {
       const [showFeedbackModal, setShowFeedbackModal] = useState(false);
-      const isAdmin = user.role === 'admin'; // Super Admin
-      const isManager = user.isManager && !isAdmin; // Manager or Care Coordinator
-      const isCoordinator = isManager && user.clinicalRole === 'coordinator' && user.accountType !== 'manager';
-      const isTeamMember = user.role === 'user';
       const isVendor = user.role === 'vendor';
       const isClient = user.role === 'client';
+      // THE ROLE NAME COMES FROM THE SERVER TOO (accountTypes.accountTypeLabel,
+      // owner 2026-11-09): it is the person's real account type, never worked
+      // out here from lab-era fields, which called every clinician a "Team
+      // Member" and every caregiver a "Vendor".
+      const [role, setRole] = useState(() => ({ type: user.accountType || null, label: user.accountTypeLabel || '' }));
 
       // THE AREAS COME FROM THE SERVER (accountTypes.hubAreasFor, owner
       // 2026-11-09), so this page never decides who sees what. They arrive on
@@ -336,7 +337,7 @@
       useEffect(() => {
         fetch('/api/staff/hub', { headers: { Authorization: `Bearer ${token}` } })
           .then(r => r.ok ? r.json() : Promise.reject(new Error('The Portal Hub could not be loaded. Refresh the page.')))
-          .then(d => { setAreas(Array.isArray(d.areas) ? d.areas : []); setAreasErr(''); })
+          .then(d => { setAreas(Array.isArray(d.areas) ? d.areas : []); setAreasErr(''); if (d.accountTypeLabel) setRole({ type: d.accountType || null, label: d.accountTypeLabel }); })
           .catch(e => { if (!Array.isArray(user.hubAreas)) setAreasErr(e.message); });
       }, [token]);
       const shownAreas = (areas || []).map(a => ({ ...a,
@@ -374,18 +375,13 @@
                 <div>
                   <div className="flex items-center gap-2">
                     <h1 className="text-xl font-bold text-accent">Portal Hub</h1>
-                    <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                      isAdmin ? 'bg-purple-100 text-purple-700' :
-                      isManager ? 'bg-indigo-100 text-indigo-700' :
-                      isClient ? 'bg-blue-100 text-blue-700' :
-                      isVendor ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
-                    }`}>{
-                      isAdmin ? 'Super Admin' :
-                      isCoordinator ? 'Care Coordinator' :
-                      isManager ? 'Manager' :
-                      isClient ? 'Client' :
-                      isVendor ? 'Vendor' : 'Team Member'
-                    }</span>
+                    {role.label && <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                      role.type === 'admin' ? 'bg-purple-100 text-purple-700' :
+                      (role.type === 'manager' || role.type === 'coordinator') ? 'bg-indigo-100 text-indigo-700' :
+                      ['provider', 'rn', 'lcsw', 'lmsw'].includes(role.type) ? 'bg-teal-100 text-teal-700' :
+                      role.type === 'caregiver' ? 'bg-green-100 text-green-700' :
+                      role.type ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-800'
+                    }`}>{role.label}</span>}
                   </div>
                   <p className="text-sm text-gray-500">Welcome back, {user.practiceName || user.name}</p>
                 </div>
@@ -468,9 +464,7 @@
                 </div>
                 <div>
                   <p className="text-gray-500">Role</p>
-                  <p className="font-medium capitalize">
-                    {isAdmin ? 'Super Admin' : isCoordinator ? 'Care Coordinator' : isManager ? 'Manager' : user.role === 'user' ? 'Team Member' : user.role === 'vendor' ? 'External Vendor' : user.role === 'client' ? 'Client' : user.role}
-                  </p>
+                  <p className="font-medium">{role.label || 'Loading…'}</p>
                 </div>
               </div>
               {isVendor && user.assignedClients && user.assignedClients.length > 0 && (
