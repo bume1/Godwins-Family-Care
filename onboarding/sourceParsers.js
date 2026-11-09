@@ -80,6 +80,36 @@ function sopChecks(lines) {
   return out;
 }
 
+/**
+ * Each SOP's own text, keyed by procedure id: its heading, then every line up
+ * to its check questions. The questions and their answers are left out on
+ * purpose, because they are the module's check and are switched on
+ * separately. A procedure that stops at the next heading or at "Set 2 ·
+ * Planned" without a "Check questions" line is returned whole.
+ */
+function sopSections(lines) {
+  const out = {};
+  const text = lines.map(l => unescapeMd(l).trim());
+  for (let i = 0; i < text.length; i++) {
+    const h = SOP_HEADING.exec(text[i]);
+    if (!h) continue;
+    const id = h[1];
+    const body = [];
+    let j = i + 1;
+    for (; j < text.length; j++) {
+      const l = text[j];
+      if (SOP_HEADING.test(l) || /^Set \d+ · /.test(l) || /^Document Control$/i.test(l) || /^Check questions$/i.test(l)) break;
+      body.push(l);
+    }
+    // Trim leading and trailing blank lines; keep the single blanks between
+    // paragraphs so the page can render them as breaks.
+    while (body.length && !body[0]) body.shift();
+    while (body.length && !body[body.length - 1]) body.pop();
+    if (!out[id]) out[id] = { id, title: text[i].replace(SOP_HEADING, '').trim(), lines: body };
+  }
+  return out;
+}
+
 /** Module-specific checks in the Training Library, keyed by module id. */
 function libraryChecks(lines) {
   const out = {};
@@ -141,4 +171,4 @@ function verifyChapterClassifications(lines, items, { section, next }) {
   return out;
 }
 
-module.exports = { documentVersion, manualFingerprint, sopChecks, libraryChecks, checksForModule, verifyChapterClassifications };
+module.exports = { documentVersion, manualFingerprint, sopChecks, sopSections, libraryChecks, checksForModule, verifyChapterClassifications };

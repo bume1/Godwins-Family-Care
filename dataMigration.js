@@ -164,6 +164,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'staff_welcome_packets', phi: false, owner: 'staff-portal', note: 'staff welcome packet (non-caregiver roles): profile answers + signature image' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
+  { key: 'onboarding_training_materials', phi: false, owner: 'onboarding', note: 'per module: links and files the office added as training material (Drive ids stay server-side)' },
   { key: 'onboarding_manual_versions', phi: false, owner: 'onboarding', note: 'per manual version: section fingerprints (hashes, never text) and the computed change from the prior version' },
   // The four forms a caregiver signs IN THE APP rather than printing: the
   // background check authorization, the registry attestation, the physical

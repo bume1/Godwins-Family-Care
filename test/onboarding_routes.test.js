@@ -159,7 +159,9 @@ test('a flagged module cannot be started by a new learner; an unflagged one can'
   h.as(NP);
   const flagged = await h.call('POST', '/api/onboarding/me/modules/TRN-207/complete', {});
   assert.strictEqual(flagged.data.code, 'MODULE_UNDER_REVIEW');
-  const ok = await h.call('POST', '/api/onboarding/me/modules/TRN-001/complete', {});
+  // TRN-001 teaches no SOP, so it opens only once the office adds material
+  // (owner, 2026-11-09). TRN-003 teaches SOP-SYS-01 and is open as it stands.
+  const ok = await h.call('POST', '/api/onboarding/me/modules/TRN-003/complete', {});
   assert.strictEqual(ok.status, 200);
   const office = await h.call('POST', '/api/onboarding/me/modules/TRN-006/complete', {});
   assert.strictEqual(office.data.code, 'MODULE_OFFICE_SIGNOFF', 'a countersigned module is the office\'s');
