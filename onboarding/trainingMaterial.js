@@ -158,10 +158,32 @@ function setOffice(entry, body, actor, now) {
   e.office = {
     nextStep: nextStep || null,
     note: b.note === undefined ? (prev.note || '') : String(b.note || '').trim().slice(0, MAX_NOTE),
+    // The policy line the training ties to (owner, 2026-11-10). Absent keeps
+    // the office's earlier edit, null goes back to the catalog's line.
+    policy: b.policy === undefined ? (prev.policy || null) : cleanPolicy(b.policy),
     at: now, byId: actor.id, byName: actor.name
   };
   return e;
 }
+
+const MAX_POLICY = 200;
+function cleanPolicy(p) {
+  if (p === null) return null;
+  if (typeof p !== 'object') throw fail('POLICY_INVALID', 'The policy needs a document name.');
+  const document = String(p.document || '').trim().slice(0, MAX_POLICY);
+  if (!document) throw fail('POLICY_INVALID', 'The policy needs a document name.');
+  const sections = String(p.sections || '').trim().slice(0, MAX_POLICY);
+  let url = String(p.url || '').trim() || null;
+  if (url) {
+    let u = null; try { u = new URL(url); } catch (e) { u = null; }
+    if (!u || u.protocol !== 'https:') throw fail('POLICY_URL_INVALID', 'The policy link must start with https://.');
+    url = u.toString();
+  }
+  return { document, sections, url };
+}
+
+/** The office's own policy line for a training, or null to use the catalog's. */
+const policyOverride = (entry) => (entry && entry.office && entry.office.policy) || null;
 
 /** A live file row, for the download. */
 function findFile(entry, fileId) {
@@ -218,5 +240,5 @@ module.exports = {
   COLLECTION, STATUS, LINK_KINDS,
   hasAddedMaterial, materialFor, forStaff, validateLink,
   addLink, addFile, remove, setNote, findFile,
-  DEFAULT_MATERIAL, seedDefaults, NEXT_STEPS, setOffice
+  DEFAULT_MATERIAL, seedDefaults, NEXT_STEPS, setOffice, policyOverride
 };
