@@ -67,7 +67,9 @@ test('both tracks build with no Training Library modules, a Drive folder, and th
   for (const c of ['H', 'R1']) {
     const t = T.buildTrack({ inputs: { chapter: c }, record: {}, audience: 'office' });
     assert.strictEqual(t.chapter.id, c);
-    assert.strictEqual(t.modules.length, 0);
+    // A student gets only the general modules (owner, 2026-11-10); a
+    // supervising physician under agreement gets none.
+    assert.deepStrictEqual(t.modules.map(m => m.id).sort(), c === 'H' ? [...require('../onboarding/libraryTrainings').SHARED_MODULE_IDS].sort() : []);
     assert.ok(staffFolders.folderForChapter(c));
   }
   const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'onboarding.js'), 'utf8');

@@ -60,7 +60,8 @@ const wpRepo = require('../welcomePacketRepository');
 const welcomePacketPdf = require('../welcomePacketPdf');
 const attestations = require('../caregiverAttestations');
 const CC = require('../onboarding/caregiverCourses');
-const { MODULES, findModule } = require('../onboarding/modules');
+const { MODULES, findModule: findCatalogModule } = require('../onboarding/modules');
+const LT = require('../onboarding/libraryTrainings');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
 const { driveViewUrl } = require('../onboarding/sources');
@@ -200,6 +201,18 @@ module.exports = function createOnboardingRoutes(deps) {
   // her packet: facts about her, never typed into Setup.
   const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null, careCoordinator: !!(pk && pk.careCoordinator) });
 
+  // ---- the whole team's library (owner, 2026-11-10) -------------------------
+  // Trainings the office added, scoped to account types. Read fresh on every
+  // request that needs them; `libCache` lets the synchronous lookups below
+  // (material, completion) resolve an office-added id from the same read.
+  let libCache = [];
+  const libraryRows = async () => { libCache = (await db.get(LT.COLLECTION)) || []; return libCache; };
+  const findModule = (id) => LT.findAny(id, libCache);
+  const typeOfRec = async (rec) => {
+    const u = ((await getUsers()) || []).find(x => String(x.id) === String(rec.userId));
+    return u ? accountTypes.accountTypeOf(u) : null;
+  };
+
   // ---- training material (owner, 2026-11-09) --------------------------------
   // What each module teaches from: a written SOP read live from Drive, or
   // material the office added. A module with neither is greyed out for staff.
@@ -224,7 +237,9 @@ module.exports = function createOnboardingRoutes(deps) {
       moduleReviews: await reviews(),
       legacy: await legacyFor(rec.userId),
       packetRows: pk.rows,
-      customTasks: await customTasks()
+      customTasks: await customTasks(),
+      libraryTrainings: await libraryRows(),
+      accountType: await typeOfRec(rec)
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -299,6 +314,7 @@ module.exports = function createOnboardingRoutes(deps) {
     } catch (e) { return send(res, e); }
   }
   async function doRecheck(req, res, rec, actor) {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     try {
@@ -642,6 +658,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // modules are signed off by the office.
   router.post('/api/onboarding/me/modules/:moduleId/complete', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     if (!['ATTEST', 'NONE'].includes(m.signoff)) return res.status(403).json({ error: 'The office signs this module off.', code: 'MODULE_OFFICE_SIGNOFF' });
@@ -730,9 +747,11 @@ module.exports = function createOnboardingRoutes(deps) {
     const packets = {};
     for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const custom = await customTasks();
+    const lib = await libraryRows();
     const people = rows.map(rec => {
-      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom });
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
+      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom,
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null });
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
@@ -780,7 +799,9 @@ module.exports = function createOnboardingRoutes(deps) {
     const users = await getUsers();
     const tasks = (await customTasks()).filter(t => !t.removedAt)
       .map(t => Object.assign({}, t, { scopeLabel: scopeLabel(t, users) }));
-    return res.json({ tasks, chapters: CHAPTER_CHOICES });
+    // The phases of each chapter, so the office picks where a task sits.
+    const phases = Object.fromEntries(CHAPTER_CHOICES.map(c => [c.id, ((T.CHAPTERS[c.id] || {}).PHASES || []).map(p => ({ id: p.id, number: p.number, label: p.label }))]));
+    return res.json({ tasks, chapters: CHAPTER_CHOICES, phases });
   });
   router.post('/api/onboarding/admin/custom-tasks', authenticateToken, requireOffice, async (req, res) => {
     const b = req.body || {};
@@ -800,7 +821,13 @@ module.exports = function createOnboardingRoutes(deps) {
     } else {
       return res.status(400).json({ error: 'Choose who gets this task: one person, or everyone of a type.', code: 'TASK_SCOPE_REQUIRED' });
     }
-    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope,
+    // Which phase it sits in, on that chapter's own checklist (2026-11-10).
+    let chapterId = scope.chapter;
+    if (scope.userId) { const r = find(await all(), scope.userId); chapterId = (r && r.inputs && r.inputs.chapter) || 'C'; }
+    const phaseIds = ((T.CHAPTERS[chapterId] || {}).PHASES || []).map(p => p.id);
+    const phase = b.phase ? String(b.phase) : null;
+    if (phase && !phaseIds.includes(phase)) return res.status(400).json({ error: 'That phase is not on this checklist.', code: 'TASK_PHASE_UNKNOWN' });
+    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope, phase,
       review: !!b.review, askForFile: !!b.askForFile, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
       createdAt: nowIso(), removedAt: null };
     const rows = await customTasks(); rows.push(task); await db.set(CUSTOM, rows);
@@ -953,6 +980,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // records it for her.
   router.post('/api/onboarding/admin/people/:userId/modules/:moduleId/complete', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     rec.training = rec.training || {};
@@ -981,20 +1009,53 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/admin/library', authenticateToken, requireOffice, async (req, res) => {
     const m = await manual();
     const revs = await reviews();
-    const mm = await materialMap(MODULES.map(x => x.id));
+    const added = LT.live(await libraryRows()).map(LT.toModule);
+    const pool = MODULES.concat(added);
+    const mm = await materialMap(pool.map(x => x.id));
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
     return res.json({
       settings: await settings(),
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
-      modules: MODULES.map(x => ({
-        id: x.id, title: x.title, phase: x.phase, phaseLabel: (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
+      roles: LT.STAFF_TYPES.map(t => ({ value: t, label: LT.TYPE_LABELS[t] })),
+      modules: pool.map(x => ({
+        // Who it is for (2026-11-10): Clinicians, Everyone, or the roles the
+        // office chose. An office-added training carries no manual flag.
+        audience: LT.audienceLabel(x), addedByOffice: !!x.addedByOffice, types: x.types || null, description: x.description || null,
+        id: x.id, title: x.title, phase: x.phase, phaseLabel: x.addedByOffice ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
-        plannedSop: x.plannedSop, flag: flags[x.id], review: revs[x.id] || null,
+        plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,
         sopRefs: x.sopRefs, material: mm.byModule[x.id]
       })),
       sopDocument: { ok: !!mm.sops.ok, version: mm.sops.version || null, reason: mm.sops.ok ? null : (mm.sops.reason || null), url: driveViewUrl('CLINICAL_SOPS_SET1') }
     });
+  });
+  // The office adds a training to the library for chosen roles (owner,
+  // 2026-11-10). It is required in the onboarding of everyone of those roles,
+  // in their chapter's training phase. Its material is added the same way as
+  // any module's (Manage Material). Removing keeps the row and every
+  // completion anyone recorded.
+  router.post('/api/onboarding/admin/library/trainings', authenticateToken, requireOffice, async (req, res) => {
+    const v = LT.validate(req.body);
+    if (!v.ok) return res.status(400).json({ error: v.error, code: v.code });
+    const rows = await libraryRows();
+    const row = Object.assign({ id: `LIB-${uuidv4().replace(/-/g, '').slice(0, 8)}`, version: '1',
+      createdAt: nowIso(), createdById: String(req.user.id), createdByName: req.user.name || req.user.email, removedAt: null }, v.row);
+    rows.push(row);
+    await db.set(LT.COLLECTION, rows);
+    libCache = rows;
+    await logActivity(req.user.id, req.user.name, 'onboarding_training_added', 'onboarding', row.id, { types: row.types });
+    return res.json({ ok: true, training: row });
+  });
+  router.delete('/api/onboarding/admin/library/trainings/:trainingId', authenticateToken, requireOffice, async (req, res) => {
+    const rows = await libraryRows();
+    const row = rows.find(r => r && r.id === req.params.trainingId && !r.removedAt);
+    if (!row) return res.status(404).json({ error: 'No such training.', code: 'TRAINING_UNKNOWN' });
+    row.removedAt = nowIso(); row.removedById = String(req.user.id); row.removedByName = req.user.name || req.user.email;
+    await db.set(LT.COLLECTION, rows);
+    libCache = rows;
+    await logActivity(req.user.id, req.user.name, 'onboarding_training_removed', 'onboarding', row.id, {});
+    return res.json({ ok: true });
   });
   router.put('/api/onboarding/admin/settings', authenticateToken, requireOffice, async (req, res) => {
     const next = Object.assign(await settings(), { checkQuestionsForStaff: req.body && req.body.checkQuestionsForStaff === true,
@@ -1007,6 +1068,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // clears a flag; or confirms a module's drafted manual sections, which makes
   // them drive the flag from then on.
   router.post('/api/onboarding/admin/library/:moduleId/review', authenticateToken, requireOffice, async (req, res) => {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     const man = await manual();
@@ -1029,7 +1091,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // The office adds what a module teaches from when no written SOP covers it,
   // or alongside one. Every change is stamped with who and when, and removing
   // keeps the row, so what someone learned from stays on record.
-  const moduleOr404 = (req, res) => {
+  const moduleOr404 = async (req, res) => {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     return m;
@@ -1046,28 +1109,28 @@ module.exports = function createOnboardingRoutes(deps) {
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
   router.get('/api/onboarding/admin/library/:moduleId/material', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     const sops = await sopState();
     return res.json(await materialBody(m.id, TM.materialFor(m, (await materials())[m.id] || null, sops.ids)));
   });
   router.get('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return sendMaterialFile(req, res, m.id);
   });
   router.post('/api/onboarding/admin/library/:moduleId/material/links', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.addLink(e, req.body, officeActor(req), nowIso(), uuidv4()), { action: 'link_added' });
   });
   router.delete('/api/onboarding/admin/library/:moduleId/material/links/:linkId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.remove(e, 'links', req.params.linkId, officeActor(req), nowIso()), { action: 'link_removed' });
   });
   router.put('/api/onboarding/admin/library/:moduleId/material/note', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.setNote(e, (req.body || {}).note, officeActor(req), nowIso()), { action: 'note_set' });
   });
   router.post('/api/onboarding/admin/library/:moduleId/material/files', authenticateToken, requireOffice, upload.single('file'), async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
     const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: STAFF_MAX, keyPrefix: m.id });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
@@ -1084,7 +1147,7 @@ module.exports = function createOnboardingRoutes(deps) {
     return saveMaterial(req, res, m, (e) => TM.addFile(e, file, officeActor(req), nowIso()), { action: 'file_added' });
   });
   router.delete('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.remove(e, 'files', req.params.fileId, officeActor(req), nowIso()), { action: 'file_removed' });
   });
 

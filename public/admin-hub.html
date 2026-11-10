@@ -1172,74 +1172,20 @@
     };
 
     // Inbox Page - Bug Reports and Feature Requests
-    // ── Caregiver Feed broadcasts (Session 6) ──
-    // The caregiver app's Feed tab reads `caregiver_broadcasts` and this
-    // caregiver's own escalation alerts. The escalation half fills itself. The
-    // broadcast half had a working API and NO SCREEN ANYWHERE, so nothing could
-    // ever be posted and the Feed read "Nothing new right now" permanently.
-    // Same shape as the two admin screens built on 2026-09-10: an owner item is
-    // only open for the owner once there is somewhere to do it.
-    const CaregiverFeedPanel = ({ token }) => {
-      const [title, setTitle] = useState('');
-      const [body, setBody] = useState('');
-      const [posting, setPosting] = useState(false);
-      const [result, setResult] = useState(null);
-
-      const post = async () => {
-        setPosting(true);
-        setResult(null);
-        try {
-          const res = await fetch(`${window.location.origin}/api/caregiver/broadcasts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ title, body })
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error || `Could not post (${res.status})`);
-          setResult({ ok: true, text: 'Posted. It is on every caregiver\'s Feed now.' });
-          setTitle('');
-          setBody('');
-        } catch (err) {
-          setResult({ ok: false, text: err.message });
-        } finally {
-          setPosting(false);
-        }
-      };
-
-      return (
-        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-5 space-y-4">
-          <div>
-            <h3 className="font-semibold text-gray-800">Post to the caregiver Feed</h3>
-            <p className="text-sm text-gray-500 mt-1">
-              Goes to every caregiver, read-only, in the Feed tab of their app. It reaches
-              everyone, so it carries no client names and nothing clinical — a message about
-              one person's care belongs in a thread about that person, under Messages.
-            </p>
-          </div>
-          {result && (
-            <div className={`rounded-lg px-4 py-3 text-sm ${result.ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-              {result.text}
-            </div>
-          )}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-            <input value={title} onChange={e => setTitle(e.target.value)} maxLength={200}
-              placeholder="Office closed Monday"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
-            <textarea value={body} onChange={e => setBody(e.target.value)} maxLength={4000} rows={4}
-              placeholder="Payroll runs Tuesday this week instead of Monday."
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
-          </div>
-          <button onClick={post} disabled={posting || !title.trim()}
-            className="px-4 py-2 rounded-lg bg-primary-500 text-white text-sm font-medium disabled:opacity-50">
-            {posting ? 'Posting…' : 'Post to Feed'}
-          </button>
-        </div>
-      );
-    };
+    // ── Announcements: posted in My GFC (2026-11-10) ──
+    // The caregiver Feed's posts are now announcements for the whole team,
+    // posted from ONE composer in My GFC → Announcements. This tab points there
+    // rather than keeping a second composer that would drift from it.
+    const CaregiverFeedPanel = () => (
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 className="font-semibold text-gray-800 mb-1">Announcements</h3>
+        <p className="text-sm text-gray-500 mb-3">
+          Announcements for every caregiver, and for the rest of the team, are posted in My GFC → Announcements.
+          Caregivers see them on their Feed tab; everyone else sees them on My GFC Home.
+        </p>
+        <a href="/my#announcements" className="inline-block px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium">Open Announcements</a>
+      </div>
+    );
 
     const InboxPage = ({ token, user, initialTab }) => {
       const [feedback, setFeedback] = useState([]);
@@ -2026,8 +1972,8 @@
           {!inRecord && <h4 className="font-medium text-gray-800 mb-1">Documents</h4>}
           <p className="text-xs text-gray-500 mb-3">
             Photo ID, paystub and W-9 for onboarding, plus anything {caregiverName || 'this caregiver'} has
-            sent in. <span className="font-medium">Gusto is where payroll paperwork is actually submitted</span> —
-            this is the office's copy, and uploading here does not send it to Gusto.
+            sent in. These are the office's copies. <span className="font-medium">The W-4, G-4, I-9 and direct deposit are filled in by the
+            caregiver in My GFC, under Hours &amp; Pay</span>, not uploaded here.
           </p>
 
           <div className="flex flex-wrap items-end gap-2 mb-3">
