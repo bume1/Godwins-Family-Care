@@ -228,6 +228,11 @@ module.exports = function createOnboardingRoutes(deps) {
     moduleIds.forEach(id => { out[id] = TM.materialFor(findModule(id), mats[id] || null, sops.ids); });
     return { byModule: out, sops };
   }
+  // Whether a module has material, for the checklist's phase completion.
+  async function readyCheck() {
+    const [mats, sops] = await Promise.all([materials(), sopState()]);
+    return (id) => { const mod = findModule(id); return !!(mod && TM.materialFor(mod, mats[id] || null, sops.ids).ready); };
+  }
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -240,7 +245,8 @@ module.exports = function createOnboardingRoutes(deps) {
       packetRows: pk.rows,
       customTasks: await customTasks(),
       libraryTrainings: await libraryRows(),
-      accountType: await typeOfRec(rec)
+      accountType: await typeOfRec(rec),
+      materialReady: await readyCheck()
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -268,7 +274,8 @@ module.exports = function createOnboardingRoutes(deps) {
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
       // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
       const mod = findModule(x.id);
-      x.policy = (mod && mod.policy) || LC.policyFor(x.id);
+      x.policy = x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id));
+      delete x.policyOverride;
       if (!mat.ready && !x.complete) x.available = false;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
@@ -754,10 +761,11 @@ module.exports = function createOnboardingRoutes(deps) {
     for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const custom = await customTasks();
     const lib = await libraryRows();
+    const ready = await readyCheck();
     const people = rows.map(rec => {
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom,
-        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null });
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready });
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
@@ -996,6 +1004,9 @@ module.exports = function createOnboardingRoutes(deps) {
     await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
+    // Only a training on this person's own checklist (2026-11-10).
+    const onTrack = (await buildFor(rec, 'office')).modules.some(x => x.id === m.id);
+    if (!onTrack) return res.status(409).json({ error: "That training isn't on this person's onboarding.", code: 'MODULE_NOT_ON_TRACK' });
     rec.training = rec.training || {};
     rec.training[m.id] = { completedAt: nowIso(), version: m.version, byName: req.user.name || req.user.email, signedOffByOffice: true, note: trim((req.body || {}).note, 500) || null };
     await save(rec);
@@ -1024,6 +1035,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const revs = await reviews();
     const added = LT.live(await libraryRows()).map(LT.toModule);
     const pool = MODULES.concat(added);
+    const who = LT.whoGets(LT.live(await libraryRows()), T.chapterBaseIds);
     const mm = await materialMap(pool.map(x => x.id));
     const mats = await materials();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
@@ -1035,7 +1047,8 @@ module.exports = function createOnboardingRoutes(deps) {
         // Who it is for (2026-11-10): Clinicians, Everyone, or the roles the
         // office chose. An office-added training carries no manual flag.
         audience: LT.audienceLabel(x), addedByOffice: !!x.addedByOffice, types: x.types || null, description: x.description || null,
-        id: x.id, title: x.title, phase: x.phase, phaseLabel: x.addedByOffice ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
+        forTypes: who[x.id] || [],
+        id: x.id, title: x.title, phase: x.phase, phaseLabel: (x.addedByOffice || x.audience || LT.SHARED_MODULE_IDS.includes(x.id)) ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
         plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,

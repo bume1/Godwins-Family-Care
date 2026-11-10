@@ -927,7 +927,7 @@ const Person = ({ userId, onBack }) => {
           {[['checklist', 'Checklist'], ['credentialing', 'Credentialing'], ['readiness', 'Ready to See Patients'], ['training', 'Training'], ['renewals', `Renewals${(t.counts.renewalsDue + t.counts.recurringDue) ? ` (${t.counts.renewalsDue + t.counts.recurringDue})` : ''}`], ['activity', 'Activity'], ['setup', 'Setup']]
             // Credentialing and readiness are the clinician chapters'. A contracted
             // clinician (D) gets only the non-clinical modules her chapter names.
-            .filter(([k]) => k === 'training' ? (['C', 'D', 'E'].includes(t.chapter.id) || (t.trainingCourses || []).length > 0) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
+            .filter(([k]) => k === 'training' ? ((t.modules || []).length > 0 || (t.trainingCourses || []).length > 0) : (['C', 'D', 'E'].includes(t.chapter.id) || !['credentialing', 'readiness'].includes(k))).map(([k, l]) =>
             <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}
         </div>
       </div>
@@ -1208,7 +1208,8 @@ const Library = () => {
     try { await call(`/api/onboarding/admin/library/${m.id}/review`, { method: 'POST', body }); setOk(`${m.title}: recorded.`); await load(); } catch (e) { setErr(e.message); }
   };
   if (!d) return err ? <div className="err">{err}</div> : <div className="note">Loading…</div>;
-  const forThis = (m) => !forRole || m.audience === 'Everyone' || (m.types ? m.types.includes(forRole) : ['provider', 'rn', 'lcsw', 'lmsw'].includes(forRole));
+  // Who gets it comes from the server, from the same rule as the checklist.
+  const forThis = (m) => !forRole || (m.forTypes || []).includes(forRole);
   const matches = (m) => filter === 'all' ? true
     : filter === 'write' ? ['write', 'gap'].includes(m.nextStep)
     : filter === 'attach' ? m.nextStep === 'attach' && libStatus(m) !== 'ready'
@@ -1428,7 +1429,7 @@ const Mine = ({ viewer, track, onChanged }) => {
         <Rechecks track={t} base={base} onChanged={onChanged} />
         {t.checks && !t.checks.ok && <div className="note">Some check questions could not be loaded just now.</div>}
         {t.modules.length > 0 && t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
-        {t.modules.filter(m => !m.complete).slice(0, 8).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
+        {t.modules.filter(m => !m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
         {t.modules.filter(m => m.complete).length > 0 && <><h3 style={{ margin: '14px 0 6px' }}>Completed</h3>{t.modules.filter(m => m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</>}
       </>}
       {tab === 'documents' && <>

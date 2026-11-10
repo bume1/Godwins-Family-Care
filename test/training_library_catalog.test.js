@@ -90,7 +90,9 @@ test('staff see why a training matters; only the office sees the next step and t
   h.as(CG);
   const track = (await h.call('GET', '/api/onboarding/me')).data.track;
   const mine = track.modules.find(m => m.id === 'TRN-216');
-  assert.match(mine.policy.sections, /19\.1/);
+  // A caregiver works under the PHC manual, not the Clinical Manual (2026-11-10).
+  assert.match(mine.policy.document, /Private Home Care|PHC/i);
+  assert.strictEqual(mine.host, 'EXECUTIVE_DIRECTOR');
   const payload = JSON.stringify(track.modules);
   assert.ok(!/officeNote|nextStep|counsel|Hole:/.test(payload), 'no office field reaches staff');
   assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/library/TRN-216/office', { note: 'x' })).status, 403);

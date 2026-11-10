@@ -24,6 +24,7 @@
 'use strict';
 
 const { findModule, HOSTS, MODULES } = require('./modules');
+const { SOURCES } = require('./sources');
 
 const COLLECTION = 'onboarding_library_trainings';
 
@@ -92,6 +93,30 @@ function findAny(id, rows) {
   return row ? toModule(row) : null;
 }
 
+// Non-clinical chapters (2026-11-10): mandatory reporting and incidents are
+// the Executive Director's, under the role's own manual, never the Clinical
+// Manual. Caregivers and RNs work under the PHC manual; the office, liaisons
+// and students have no manual section to cite yet.
+const NON_CLINICAL = Object.freeze(['A', 'B', 'F', 'G', 'H']);
+const PHC_CHAPTERS = Object.freeze(['A', 'B']);
+const OFFICE_ONLY = Object.freeze(['F', 'G', 'H']);
+function phcPolicy() {
+  const src = SOURCES.PHC_MANUAL;
+  return src ? Object.freeze({ document: `${src.title}${src.transcribedFromVersion ? ` v${src.transcribedFromVersion}` : ''}`, sections: '',
+    url: `https://drive.google.com/file/d/${src.driveFileId}/view` }) : null;
+}
+/** How a shared module reads for this chapter: host, policy and title. */
+function sharedFor(id, chapterId) {
+  const out = {};
+  if (NON_CLINICAL.includes(chapterId) && (id === 'TRN-216' || id === 'TRN-217')) {
+    out.host = HOSTS.EXECUTIVE_DIRECTOR;
+    out.policy = PHC_CHAPTERS.includes(chapterId) ? phcPolicy() : null;
+  }
+  // The office, liaisons and students don't work in clients' homes.
+  if (id === 'TRN-005' && OFFICE_ONLY.includes(chapterId)) out.title = 'Privacy and security in GFC systems';
+  return out;
+}
+
 /**
  * The trainings this person gets on top of their chapter's own curriculum,
  * each with the phase it sits in. `alreadyIds` are the modules the chapter
@@ -103,7 +128,7 @@ function extrasFor({ chapterId, accountType, rows, alreadyIds }) {
   const have = new Set(alreadyIds || []);
   const out = [];
   for (const id of SHARED_MODULE_IDS) {
-    if (!have.has(id)) { out.push({ module: findModule(id), phase, shared: true }); have.add(id); }
+    if (!have.has(id)) { out.push(Object.assign({ module: findModule(id), phase, shared: true }, sharedFor(id, chapterId))); have.add(id); }
   }
   // Catalog modules scoped to account types (TRN-009, TRN-501–503).
   for (const m of MODULES) {
@@ -113,6 +138,8 @@ function extrasFor({ chapterId, accountType, rows, alreadyIds }) {
   }
   for (const row of live(rows)) {
     if (!accountType || !(row.types || []).includes(accountType) || have.has(String(row.id))) continue;
+    // A contracted clinician takes no training the office signs off (D.1-D.2).
+    if (chapterId === 'D' && row.signoff === 'OBSERVED') continue;
     out.push({ module: toModule(row), phase, shared: false });
     have.add(String(row.id));
   }
@@ -149,6 +176,24 @@ function validate(body) {
   } };
 }
 
+// Each staff type's usual chapter, for the Library's "Show what <role> gets".
+const DEFAULT_CHAPTER = Object.freeze({ caregiver: 'A', rn: 'B', provider: 'C', lcsw: 'C', lmsw: 'C',
+  admin: 'F', manager: 'F', coordinator: 'F', liaison: 'G' });
+/**
+ * The account types that get each module, from the same rule the checklist
+ * uses. `baseFor(chapterId)` returns the ids that chapter's own curriculum
+ * carries. → { [moduleId]: [type…] }
+ */
+function whoGets(rows, baseFor) {
+  const out = {};
+  for (const t of STAFF_TYPES) {
+    const base = baseFor(DEFAULT_CHAPTER[t]) || [];
+    const ids = base.concat(extrasFor({ chapterId: DEFAULT_CHAPTER[t], accountType: t, rows, alreadyIds: base }).map(x => x.module.id));
+    for (const id of ids) (out[id] = out[id] || []).push(t);
+  }
+  return out;
+}
+
 /** Who a library module is for, in words, for the office's library list. */
 function audienceLabel(m) {
   if (m.addedByOffice) return m.types.map(t => TYPE_LABELS[t] || t).join(', ');
@@ -159,5 +204,5 @@ function audienceLabel(m) {
 
 module.exports = {
   COLLECTION, SHARED_MODULE_IDS, TRAINING_PHASE, STAFF_TYPES, TYPE_LABELS, SIGNOFFS,
-  toModule, findAny, extrasFor, validate, audienceLabel, live
+  toModule, findAny, extrasFor, validate, audienceLabel, live, whoGets
 };
