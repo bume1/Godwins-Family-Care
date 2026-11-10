@@ -7263,7 +7263,7 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
         }
 
         // Queue one notification per recipient with recipient-specific rendered content
-        let queued = 0;
+        let queued = 0, skipped = 0;
         for (const user of recipients) {
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
@@ -7288,17 +7288,25 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
             { subject, body: textBody, htmlBody },
             { relatedEntityId: newAnnouncement.id, relatedEntityType: 'announcement', createdBy: req.user.id }
           );
-          if (result) queued++;
+          // `queueNotification` answers a TRUTHY `{ skipped: true, reason }`
+          // for somebody who has unsubscribed, been deactivated, or holds a
+          // placeholder login — so `if (result)` counted them as sent and this
+          // figure overstated every time. The staff announcement route already
+          // reads `!q.skipped`; same rule here, and the skips are counted
+          // separately rather than dropped, because "9 of 12, 3 unsubscribed"
+          // is the sentence somebody needs.
+          if (result && !result.skipped) queued++;
+          else if (result && result.skipped) skipped++;
         }
 
-        console.log(`[ANNOUNCEMENTS] Queued ${queued}/${recipients.length} notifications for: ${newAnnouncement.title}`);
+        console.log(`[ANNOUNCEMENTS] Queued ${queued}/${recipients.length} notifications (${skipped} skipped) for: ${newAnnouncement.title}`);
 
         // Save queue stats on announcement record
         try {
           const current = (await db.get('announcements')) || [];
           const idx = current.findIndex(a => a.id === newAnnouncement.id);
           if (idx !== -1) {
-            current[idx].emailQueued = { queued, total: recipients.length, queuedAt: new Date().toISOString() };
+            current[idx].emailQueued = { queued, skipped, total: recipients.length, queuedAt: new Date().toISOString() };
             await db.set('announcements', current);
           }
         } catch (dbErr) {
@@ -7306,7 +7314,7 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
         }
 
         await logActivity(req.user.id, req.user.name, 'announcement_queued', 'announcement', newAnnouncement.id,
-          { title: newAnnouncement.title, emailsQueued: queued, totalRecipients: recipients.length });
+          { title: newAnnouncement.title, emailsQueued: queued, emailsSkipped: skipped, totalRecipients: recipients.length });
       }
     } catch (emailError) {
       console.error('Announcement email notification error:', emailError);

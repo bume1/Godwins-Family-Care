@@ -4470,7 +4470,15 @@
             {activeTab === 'announcements' && (
               <div className="p-6 space-y-6">
                 <form onSubmit={handleCreateAnnouncement} className="bg-gray-50 p-4 rounded-lg space-y-4">
-                  <h3 className="font-medium text-gray-800">Create New Announcement</h3>
+                  <h3 className="font-medium text-gray-800">Post a Client Announcement</h3>
+                  {/* This heading used to read "Create New Announcement", which
+                      gives no clue who receives it. It emails EVERY active
+                      client, and nothing on the screen said so. Staff news is a
+                      different board entirely (My GFC → Announcements). */}
+                  <p className="text-sm text-gray-600">
+                    This goes to <strong>every client</strong> — on their portal home and by email. It never reaches the team;
+                    staff news is posted in <a href="/my#announcements" className="text-primary underline">My GFC → Announcements</a>.
+                  </p>
                   <div className="grid md:grid-cols-2 gap-4">
                     <input type="text" value={newAnnouncement.title} onChange={(e) => setNewAnnouncement({...newAnnouncement, title: e.target.value})}
                       className="px-4 py-2 border rounded-lg" placeholder="Title" required />
@@ -4496,7 +4504,13 @@
                       <div>
                         <h4 className="font-semibold text-gray-800">{ann.title}</h4>
                         <p className="text-sm text-gray-600 mt-1">{ann.content}</p>
-                        <p className="text-xs text-gray-400 mt-2">{new Date(ann.createdAt).toLocaleDateString()}</p>
+                        <p className="text-xs text-gray-400 mt-2">
+                          {new Date(ann.createdAt).toLocaleDateString()}
+                          {/* Who it actually reached. The figure was being
+                              stored and shown on no screen at all. */}
+                          {ann.emailQueued ? ` · emailed ${ann.emailQueued.queued} of ${ann.emailQueued.total} clients` : ''}
+                          {ann.emailQueued && ann.emailQueued.skipped ? ` (${ann.emailQueued.skipped} unsubscribed or inactive)` : ''}
+                        </p>
                       </div>
                       <button onClick={() => handleDeleteAnnouncement(ann.id)} className="text-red-600 hover:text-red-800 p-1">
                         {Icons.trash}

@@ -7,6 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const express = require('express');
 const config = require('../config');
+const accountTypes = require('../accountTypes');
 const A = require('../staffAnnouncements');
 
 const ADMIN = { id: 'a1', name: 'Office Admin', role: 'admin', email: 'admin@gfc.test' };
@@ -90,6 +91,33 @@ test('clients and family are refused', async (t) => {
     h.as(u);
     assert.strictEqual((await h.call('GET', '/api/my/announcements')).status, 403);
   }
+});
+
+// Owner, 2026-11-10: "I dont want any extra wiring that sends to clients
+// accidentally." It cannot, and this is why: `visibleTo` admits an account type
+// only if STAFF_TYPES names it, and STAFF_TYPES is a hand-written list sitting
+// beside accountTypes.js's own `staff` flag. Two lists for one idea drift, and
+// the drift is silent either way — a new staff role stops being told anything,
+// or worse, a non-staff type is admitted. So the lists are DERIVED from each
+// other here rather than restated, and a tenth role is covered the day it lands.
+test('"staff" means the same thing in both files, so no client can ever be a recipient', () => {
+  const declared = accountTypes.ACCOUNT_TYPES;
+  assert.ok(declared.length > 2 && declared.some(t => t.staff) && declared.some(t => !t.staff),
+    'the fixture is wrong, not the code: accountTypes must declare both staff and non-staff types or this proves nothing');
+
+  const shouldBeStaff = declared.filter(t => t.staff).map(t => t.value).sort();
+  assert.deepStrictEqual([...A.STAFF_TYPES].sort(), shouldBeStaff,
+    'STAFF_TYPES and accountTypes.staff disagree — add the new role to STAFF_TYPES or it silently receives no announcements');
+
+  // The direction that matters. Not implied by the equality above: that would
+  // still hold if somebody flipped a client to `staff: true` in BOTH files.
+  for (const t of declared.filter(t => !t.staff)) {
+    assert.ok(!A.STAFF_TYPES.includes(t.value), `${t.value} is not staff and must never be an announcement audience`);
+    assert.strictEqual(A.visibleTo({ id: 'x', audience: A.ALL_STAFF }, t.value, 'x'), false,
+      `an all-staff announcement must not be visible to ${t.value}`);
+  }
+  assert.ok(!A.STAFF_TYPES.includes(accountTypes.TYPES.CLIENT) && !A.STAFF_TYPES.includes(accountTypes.TYPES.FAMILY),
+    'client and family are named explicitly too, because these are the two the owner asked about');
 });
 
 test('"I\'ve reviewed this" is your own receipt, once, and the admin team sees who has not', async (t) => {
