@@ -150,8 +150,35 @@ function findFile(entry, fileId) {
   return live(entry && entry.files).find(f => f.id === fileId) || null;
 }
 
+// Material the app ships with (owner, 2026-11-10): SOP 1, "Signing In and
+// Onboarding", is what TRN-004 "Application tour at first login" teaches,
+// since the app has no built-in tour. Seeded at boot ONCE per module: only
+// when the module has no material and was never seeded, so an office that
+// removes or replaces it is never overridden by the next restart.
+const DEFAULT_MATERIAL = Object.freeze({
+  'TRN-004': Object.freeze({
+    label: 'SOP 1: Signing In and Onboarding',
+    url: 'https://docs.google.com/document/d/1Bs-wgsurXK3SbJt2aLFD1AtmUEqp2FPqapqM_OA0oFw/view',
+    kind: 'document'
+  })
+});
+function seedDefaults(all, now) {
+  const out = Object.assign({}, all || {});
+  const seeded = [];
+  for (const [moduleId, link] of Object.entries(DEFAULT_MATERIAL)) {
+    const e = out[moduleId] || null;
+    if (hasAddedMaterial(e) || (e && e.defaultSeededAt)) continue;
+    const next = addLink(e, link, { id: 'system', name: 'GFC (built in)' }, now, `default-${moduleId}`);
+    next.defaultSeededAt = now;
+    out[moduleId] = next;
+    seeded.push(moduleId);
+  }
+  return { all: out, seeded };
+}
+
 module.exports = {
   COLLECTION, STATUS, LINK_KINDS,
   hasAddedMaterial, materialFor, forStaff, validateLink,
-  addLink, addFile, remove, setNote, findFile
+  addLink, addFile, remove, setNote, findFile,
+  DEFAULT_MATERIAL, seedDefaults
 };
