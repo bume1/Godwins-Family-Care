@@ -93,7 +93,7 @@ const ITEMS = Object.freeze([
   { id: 'F.5.02', phase: 'F.5', title: 'Wage and hour classification', ref: P('F.2'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, STATED)],
     classifications: [cls('Statutory', 'Wage and hour classification', F2)] },
-  { id: 'F.5.03', phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
+  { id: 'F.5.03', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9 within three business days of the start date', 'Form W-4', 'Direct deposit authorization', 'Emergency contact information'],
     classifications: [cls('Statutory and regulatory', 'Work authorization', F2)] },
@@ -121,7 +121,7 @@ const ITEMS = Object.freeze([
   { id: 'F.6.02', phase: 'F.6', title: 'Compensation gate', ref: P('F.6'), when: { outOfState: true },
     steps: [step(A.PAYROLL_FINANCE_OFFICER, X.RECORD, INFERRED)],
     classifications: [], classificationNote: NO_F2_ROW },
-  { id: 'F.6.03', phase: 'F.6', title: 'Time recording', ref: P('F.6'),
+  { id: 'F.6.03', link: { label: 'Open Time Clock', url: '/my#hours/clock' }, phase: 'F.6', title: 'Time recording', ref: P('F.6'),
     steps: [step(A.PAYROLL_FINANCE_OFFICER, X.PROVISION, STATED), step(A.NEW_HIRE, X.COMPLETE, INFERRED)],
     classifications: [], classificationNote: NO_F2_ROW },
 

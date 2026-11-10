@@ -145,7 +145,7 @@ const ITEMS = Object.freeze([
   { id: 'C.5.02', phase: 'C.5', title: 'Classification determination', ref: P('C.5'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, STATED)],
     classifications: [], classificationNote: NO_C2_ROW },
-  { id: 'C.5.03', phase: 'C.5', title: 'Employment and tax documentation', ref: P('C.5'),
+  { id: 'C.5.03', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'C.5', title: 'Employment and tax documentation', ref: P('C.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9', 'Form W-4', 'Direct deposit authorization', 'Personal details'],
     classifications: [], classificationNote: NO_C2_ROW },
@@ -231,7 +231,7 @@ const ITEMS = Object.freeze([
     classifications: [], classificationNote: NO_C2_ROW },
 
   // ---- C.7 · Systems Access and Clinical Orientation ----------------------
-  { id: 'C.7.01', phase: 'C.7', title: 'Clinical system identity', ref: P('C.7'),
+  { id: 'C.7.01', link: { label: 'Open OpenEMR Sign-In', url: '/clinical#settings' }, phase: 'C.7', title: 'Clinical system identity', ref: P('C.7'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.PROVISION, CONFIRMED), step(A.NEW_HIRE, X.COMPLETE, CONFIRMED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.7.02', phase: 'C.7', title: 'Clinical orientation', ref: P('C.7'),

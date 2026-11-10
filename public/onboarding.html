@@ -125,6 +125,7 @@
 <div id="root"></div>
 <script src="/session-guard.js"></script>
 <script src="/staff-nav.js"></script>
+<script src="/sop-format.js"></script>
 <script type="text/babel" src="/welcome-packet-ui.js"></script>
 <script type="text/babel" src="/document-sign-ui.js"></script>
 <script type="text/babel">
@@ -270,9 +271,9 @@ const materialDetail = (mat) => {
   if (!mat) return '';
   if (mat.status === 'SOP_WRITTEN') return `Teaches ${mat.sops.join(', ')}${mat.links.length + mat.files.length ? `, plus ${mat.links.length + mat.files.length} added item${mat.links.length + mat.files.length === 1 ? '' : 's'}` : ''}.`;
   if (mat.status === 'MATERIAL_ADDED') return `${mat.links.length + mat.files.length} item${mat.links.length + mat.files.length === 1 ? '' : 's'} added by the office.`;
-  if (mat.status === 'SOP_NOT_WRITTEN') return `${mat.plannedSop} is planned but not written. Staff see this module greyed out until the SOP is written or material is added.`;
+  if (mat.status === 'SOP_NOT_WRITTEN') return `${mat.plannedSop} is planned but not written.`;
   if (mat.status === 'SOP_MISSING_FROM_DRIVE') return `${mat.missingSops.join(', ')} is named here but was not found in the SOP document in Drive.`;
-  return 'No SOP covers this module and no material has been added. Staff see it greyed out.';
+  return 'No material attached.';
 };
 
 // The material itself: the SOP text read from Drive, then links and files.
@@ -288,9 +289,13 @@ const MaterialView = ({ moduleId, base }) => {
       {d.sops.map(sec => (
         <div key={sec.id} style={{ marginBottom: 14 }}>
           <h3 style={{ fontSize: 17 }}>{sec.id}{sec.title ? ` · ${sec.title}` : ''}</h3>
-          {sec.lines ? <div style={{ fontSize: 14, lineHeight: 1.55 }}>{sec.lines.map((l, i) => l === '' ? <div key={i} style={{ height: 8 }} />
-            : l.startsWith('|') ? <div key={i} style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12.5, overflowWrap: 'anywhere' }}>{l}</div>
-            : <div key={i}>{l}</div>)}</div>
+          {sec.lines ? <div style={{ fontSize: 14.5, lineHeight: 1.6, maxWidth: 760 }}>{window.GFCSopFormat.sopBlocks(sec.lines).map((b, i) =>
+            b.kind === 'gap' ? <div key={i} style={{ height: 6 }} />
+            : b.kind === 'table' ? <div key={i} style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12.5, overflowWrap: 'anywhere' }}>{b.text}</div>
+            : b.kind === 'meta' ? <div key={i} style={{ fontSize: 12.5, color: 'var(--mut)', marginBottom: 8 }}>{b.text}</div>
+            : b.kind === 'heading' ? <div key={i} style={{ fontWeight: 700, color: 'var(--navy)', margin: '14px 0 4px' }}>{b.text}</div>
+            : b.kind === 'bullet' ? <div key={i} style={{ display: 'flex', gap: 8, margin: '3px 0 3px 4px' }}><span style={{ color: 'var(--gold)' }}>•</span><span>{b.lead && <b>{b.lead} </b>}{b.text}</span></div>
+            : <p key={i} style={{ margin: '0 0 8px' }}>{b.lead && <b>{b.lead} </b>}{b.text}</p>)}</div>
             : <div className="note">This procedure could not be read. <a href={d.sopDocument.url} target="_blank" rel="noopener">Open the SOP document</a>.</div>}
         </div>
       ))}
@@ -501,7 +506,8 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         </div>
         {/* What this item is, for everyone (owner, 2026-11-09). Where the
             words came from, and the Playbook bookkeeping note, are the office's. */}
-        {item.description && <p className="desc" style={{ fontSize: 14.5, lineHeight: 1.55, margin: '4px 0 10px' }}>{item.description}</p>}
+        {item.description && <p className="desc" style={{ fontSize: 14.5, lineHeight: 1.55, margin: '4px 0 10px', whiteSpace: 'pre-wrap' }}>{item.description}</p>}
+        {office && <InstructionsEditor id={item.id} text={item.description} onSaved={onChanged} />}
         {office && (item.descriptionSource || item.classificationNote) && (
           <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>
             {item.descriptionSource && <span>{({ PLAYBOOK: 'From the Onboarding Playbook.', PLAYBOOK_ADAPTED: 'Adapted from the Onboarding Playbook.', DRAFTED: 'Drafted for review: not in the Onboarding Playbook.' })[item.descriptionSource]} </span>}
@@ -604,7 +610,11 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             </label>
           </div>
         )}
-        {item.link && !(item.id === 'WELCOME' && office) && <div style={{ margin: '6px 0 10px' }}><a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a></div>}
+        {/* A link into the app is for the person doing it, in the same tab
+            (2026-11-10); an outside course still opens in a new one. */}
+        {item.link && !(office && item.link.url.startsWith('/')) && <div style={{ margin: '6px 0 10px' }}>{item.link.url.startsWith('/')
+          ? <a className="btn gold sm" href={item.link.url}><i className="ti ti-arrow-right" />{item.link.label}</a>
+          : <a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a>}</div>}
 
         {item.packet && item.packet.length > 0 && (
           <div><label className="f">From the welcome packet</label>
@@ -735,13 +745,42 @@ const Readiness = ({ track, base, office, onChanged }) => {
 const FORMAT = { LIBRARY: 'GFC Training', VIDEO: 'Video', READ: 'Read', LIVE: 'Live Session', EXTERNAL: 'Outside Training', OBSERVED: 'Observed', SHADOW: 'Shadowing', IN_APP: 'In the App', 'VIDEO + OBSERVED': 'Video and Observed' };
 const HOST = { EXECUTIVE_DIRECTOR: 'Executive Director', CLINICAL_DIRECTOR: 'Clinical Director', CLINICAL_OPS_COORDINATOR: 'Clinical Ops Coordinator', SELF_PACED: 'Self-paced', SYSTEM: 'Automatic' };
 
+// A "video" module whose material is only written text reads as Read
+// (owner, 2026-11-10): the label says what they will actually get.
+const shownFormat = (m) => {
+  const mat = m.material;
+  if (m.format !== 'VIDEO' || !mat || !mat.ready) return m.format;
+  return (mat.links || []).some(l => l.kind === 'video') || (mat.files || []).some(f => /video/.test(f.mime || '')) ? 'VIDEO' : 'READ';
+};
+
+// The office rewrites what an item or a training tells the person to do.
+const InstructionsEditor = ({ id, text, onSaved }) => {
+  const [open, setOpen] = useState(false); const [v, setV] = useState(text || ''); const [err, setErr] = useState('');
+  const save = async () => {
+    setErr('');
+    try { await call(`/api/onboarding/admin/instructions/${encodeURIComponent(id)}`, { method: 'PUT', body: { text: v } }); setOpen(false); await onSaved(); } catch (e) { setErr(e.message); }
+  };
+  if (!open) return <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => { setV(text || ''); setOpen(true); }}>Edit Instructions</button>;
+  return (
+    <div style={{ marginTop: 6 }}>
+      <textarea rows={4} value={v} onChange={e => setV(e.target.value)} />
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <button className="btn sm" onClick={save}>Save</button>
+        <button className="btn sm ghost" onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
 const ModuleCard = ({ m, checks, base, office, onChanged }) => {
   const [openQs, setOpenQs] = useState(false); const [shown, setShown] = useState({}); const [err, setErr] = useState('');
   const [openMat, setOpenMat] = useState(false);
   const qs = (checks && checks[m.id]) || [];
   const ready = !!(m.material && m.material.ready);
   // Staff: a module with no material is greyed out with nothing to press.
-  if (!office && !ready && !m.complete) {
+  // Greyed out only while it waits on an SOP to be written (2026-11-10).
+  if (!office && m.waitingOnSop) {
     return (
       <div className="line-card" style={{ opacity: 0.55, background: '#F3F1EC' }} aria-disabled="true">
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
@@ -764,10 +803,11 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
         <b style={{ flex: 1 }}>{m.title}</b>
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
-      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
-      {m.description && <div style={{ fontSize: 14, marginTop: 4 }}>{m.description}</div>}
+      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
+      {m.description && <div style={{ fontSize: 14, marginTop: 4, whiteSpace: 'pre-wrap' }}>{m.description}</div>}
       {m.policy && <div style={{ fontSize: 13, marginTop: 4 }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>}
-      {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}</span></div>}
+      {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}{m.waitingOnSop ? ' Staff see it greyed out until it is written.' : ''}</span></div>}
+      {office && <InstructionsEditor id={m.id} text={m.description} onSaved={onChanged} />}
       {ready && <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => setOpenMat(!openMat)}>{openMat ? 'Hide Training' : 'Open Training'}</button>}
       {openMat && <MaterialView moduleId={m.id} base={base} />}
       {office && m.versionFlag && m.versionFlag.status === 'FLAGGED' && <div className="err">Flagged: manual section {m.versionFlag.hits.join(', ')} changed. Review before the next new hire starts it.</div>}
@@ -784,7 +824,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
       {!m.complete && !m.underReview && (office
         ? <button className="btn sm" style={{ marginTop: 6 }} onClick={complete}>Sign Off</button>
         : selfAttest ? <button className="btn sm" style={{ marginTop: 6 }} onClick={complete}>I Completed This</button>
-          : <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 4 }}>The {HOST[m.host] || 'office'} signs this off.</div>)}
+          : <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 4 }}>{m.signoff === 'CERTIFICATE' ? 'Submit Your Certificate To Office' : `The ${['SELF_PACED', 'SYSTEM'].includes(m.host) ? 'office' : (HOST[m.host] || 'office')} signs this off.`}</div>)}
     </div>
   );
 };
@@ -1270,7 +1310,7 @@ const Library = () => {
                   </tr>
                   {open === m.id && <tr><td colSpan={6} style={{ background: 'var(--cream)' }}>
                     <div style={{ display: 'grid', gap: 10, padding: '6px 2px' }}>
-                      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
+                      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
                       {m.description && <div style={{ fontSize: 14 }}>{m.description}</div>}
                       <OfficeFields m={m} nextSteps={d.nextSteps} onSaved={load} />
                       {!m.addedByOffice && (

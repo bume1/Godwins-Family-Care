@@ -98,7 +98,7 @@ const ITEMS = Object.freeze([
     counselReview: true,
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED), step(A.NEW_HIRE, X.SIGN, INFERRED)],
     classifications: [], classificationNote: NO_CLASS },
-  { id: 'D.4.03', phase: 'D.4', title: 'Tax and confidentiality documentation', ref: P('D.4'),
+  { id: 'D.4.03', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'D.4', title: 'Tax and confidentiality documentation', ref: P('D.4'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, INFERRED)],
     elements: ['Form W-9', 'Vendor payment setup'],
     classifications: [], classificationNote: NO_CLASS },
@@ -141,7 +141,7 @@ const ITEMS = Object.freeze([
 
   // ---- D.6 · Systems Access and Standards Review ---------------------------
   // Provisioning and the contracted standard. Not clinical instruction.
-  { id: 'D.6.01', phase: 'D.6', title: 'System provisioning', ref: P('D.6'),
+  { id: 'D.6.01', link: { label: 'Open OpenEMR Sign-In', url: '/clinical#settings' }, phase: 'D.6', title: 'System provisioning', ref: P('D.6'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.PROVISION, INFERRED), step(A.NEW_HIRE, X.COMPLETE, INFERRED)],
     elements: ['Clinical record account with provider authorization', 'National provider identifier and taxonomies',
       'Electronic signature', 'Multi-factor authentication',
