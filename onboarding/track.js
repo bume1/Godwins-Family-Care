@@ -435,6 +435,13 @@ function chapterTraining(ch) {
   return Array.isArray(ch.TRAINING) ? new Map(ch.TRAINING.map(t => [t.id, t])) : null;
 }
 
+/** The module ids a chapter's own curriculum can carry, whatever the person's lanes. */
+function chapterBaseIds(chapterId) {
+  const ch = chapterOf(normalizeInputs({ chapter: chapterId }));
+  const own = chapterTraining(ch);
+  return MODULES.filter(m => !m.audience && (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true))).map(m => m.id);
+}
+
 function phaseModules(phaseId, inputs) {
   const own = chapterTraining(chapterOf(inputs));
   if (own) return MODULES.filter(m => own.has(m.id) && own.get(m.id).phase === phaseId && moduleApplies(m, inputs));
@@ -558,7 +565,7 @@ const staffWelcomeItem = (ch) => Object.freeze({
   link: { url: '/my#welcome', label: 'Open Welcome Packet' }
 });
 
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks, libraryTrainings, accountType } = {}) {
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks, libraryTrainings, accountType, materialReady } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
   const rec = record || {};
@@ -623,7 +630,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || [],
       custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined,
-      document: it.document || null,
+      // A document the office attached to this person's item (2026-11-10), or a
+      // custom task's own.
+      document: it.document || (st && st.document) || null,
       // What the item is, in words (owner, 2026-11-09). Where the words came
       // from is the office's to know, not the new hire's.
       description: (DESC.descriptionFor(it.id) || {}).text || null,
@@ -639,14 +648,17 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const base = MODULES.filter(m => !m.audience && (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i));
   const extras = LT.extrasFor({ chapterId: ch.CHAPTER.id, accountType, rows: libraryTrainings, alreadyIds: base.map(m => m.id) });
   const extraPhase = new Map(extras.map(x => [x.module.id, x.phase]));
+  const extraOf = new Map(extras.map(x => [x.module.id, x]));
   const modules = base.concat(extras.map(x => x.module)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
     const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
       rechecks,
-      id: m.id, title: m.title, phase: extraPhase.has(m.id) ? extraPhase.get(m.id) : (own ? own.get(m.id).phase : m.phase), stage: m.stage, format: m.format,
+      id: m.id, title: (extraOf.get(m.id) || {}).title || m.title, phase: extraPhase.has(m.id) ? extraPhase.get(m.id) : (own ? own.get(m.id).phase : m.phase), stage: m.stage, format: m.format,
       description: m.description || null, addedByOffice: !!m.addedByOffice,
-      minutes: m.minutes, host: m.host, signoff: m.signoff,
+      minutes: m.minutes, host: (extraOf.get(m.id) || {}).host || m.host, signoff: m.signoff,
+      fromLibrary: extraOf.has(m.id),
+      policyOverride: extraOf.has(m.id) && 'policy' in extraOf.get(m.id) ? extraOf.get(m.id).policy : undefined,
       requiredFor: m.requiredFor, sopRefs: m.sopRefs, manualRefs: m.manualRefs,
       unlocksAfter: m.unlocksAfter, ref: m.libraryRef,
       carriedOver: carried.byModule[m.id] || [],
@@ -664,7 +676,13 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const phases = ch.PHASES.map(p => {
     const its = items.filter(x => x.phase === p.id);
     const mods = phaseModules(p.id, i).map(m => m.id).concat(extras.filter(x => x.phase === p.id).map(x => x.module.id));
-    const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
+    // A library training with no material yet doesn't hold the phase open
+    // (owner, 2026-11-10). The chapter's own curriculum still does.
+    const modsOpen = mods.filter(id => {
+      const x = modules.find(y => y.id === id) || {};
+      if (x.complete) return false;
+      return !(x.fromLibrary && materialReady && !materialReady(id));
+    });
     const itemsOpen = its.filter(x => x.status !== STATUS.COMPLETE && x.status !== STATUS.NOT_APPLICABLE).map(x => x.id);
     return {
       id: p.id, number: p.number, label: p.label, plainWhen: p.plainWhen,
@@ -727,6 +745,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 }
 
 module.exports = {
+  chapterBaseIds,
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,

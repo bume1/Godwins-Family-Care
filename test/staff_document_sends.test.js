@@ -276,7 +276,7 @@ test('the screens: My GFC waits on them, the staff record and Admin Hub send, on
   assert.match(hub, /case 'documents':[\s\S]{0,600}<window\.GFCDocSign\.OfficeDocuments \/>/, 'by type, on its own page');
   const ob = read('public/onboarding.html');
   assert.match(ob, /<DocSign\.WaitingOnYou only=\{item\.document\.sendId\}/);
-  assert.match(ob, /!\(item\.document && s\.index === 0\)/, 'no Mark Done on a document step');
+  assert.match(ob, /!\(item\.document && s\.hers && s\.index === item\.steps\.findIndex\(x => x\.hers\)\)/, 'no Mark Done on a document step');
   for (const f of ['public/my.html', 'public/caregiver.html', 'public/admin-hub.html', 'public/onboarding.html']) {
     assert.match(read(f), /src="\/document-sign-ui\.js"/, f);
   }

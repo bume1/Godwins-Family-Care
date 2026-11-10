@@ -167,6 +167,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'staff_document_signings', phi: false, owner: 'staff-portal', note: 'one row per person who acknowledged or signed a sent document: printed name, time, hashed IP, the filed copy id' },
   // Trainings the office added to the library, scoped to roles (2026-11-10).
   { key: 'onboarding_library_trainings', phi: false, owner: 'Onboarding' },
+  // What the office rewrote an item's or a training's instructions to say (2026-11-10).
+  { key: 'onboarding_instructions', phi: false, owner: 'Onboarding' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'onboarding_training_materials', phi: false, owner: 'onboarding', note: 'per module: links and files the office added as training material (Drive ids stay server-side)' },

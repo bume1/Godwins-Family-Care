@@ -231,6 +231,30 @@ module.exports = function createOnboardingRoutes(deps) {
     moduleIds.forEach(id => { out[id] = TM.materialFor(findModule(id), mats[id] || null, sops.ids); });
     return { byModule: out, sops };
   }
+  // The Library's next step for a module: the office's choice, else the
+  // tracker's (an "attach" with something attached reads as covered).
+  function nextStepFor(id, mats, mat, addedByOffice) {
+    const entry = LC.entryFor(id) || {};
+    return ((mats[id] || {}).office || {}).nextStep
+      || ((entry.next === 'attach' && mat && mat.ready) ? 'done' : null)
+      || entry.next || (addedByOffice ? 'write' : null);
+  }
+  // Greyed out ONLY while it waits on an SOP still to be written (owner,
+  // 2026-11-10). An outside course, a document to sign, or one needing no
+  // material stays open, so onboarding agrees with the Library.
+  const WAITING = ['write', 'gap'];
+  function waitingOnSop(id, mats, mat) {
+    const mod = findModule(id);
+    return !mat.ready && WAITING.includes(nextStepFor(id, mats, mat, !!(mod && mod.addedByOffice)));
+  }
+  // Whether a module can be worked now, for the checklist's phase completion.
+  async function readyCheck() {
+    const [mats, sops] = await Promise.all([materials(), sopState()]);
+    return (id) => { const mod = findModule(id); if (!mod) return false; return !waitingOnSop(id, mats, TM.materialFor(mod, mats[id] || null, sops.ids)); };
+  }
+  // Instructions the office wrote for an item or a training (2026-11-10).
+  const INSTRUCTIONS = 'onboarding_instructions';
+  const instructions = async () => (await db.get(INSTRUCTIONS)) || {};
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -243,7 +267,8 @@ module.exports = function createOnboardingRoutes(deps) {
       packetRows: pk.rows,
       customTasks: await customTasks(),
       libraryTrainings: await libraryRows(),
-      accountType: await typeOfRec(rec)
+      accountType: await typeOfRec(rec),
+      materialReady: await readyCheck()
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -266,13 +291,21 @@ module.exports = function createOnboardingRoutes(deps) {
     // Material per module. Staff see only ready / not ready; a module with no
     // material is not available to them, whoever's turn it would otherwise be.
     const mm = await materialMap(track.modules.map(x => x.id));
-    const matRows = await materials();
+    const mats = await materials();
+    const ins = await instructions();
+    track.items.forEach(it => { if (ins[it.id] && ins[it.id].text) it.description = ins[it.id].text; if (audience === 'office') it.instructionsEditedBy = (ins[it.id] || {}).byName || null; });
     track.modules.forEach(x => {
       const mat = mm.byModule[x.id];
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
       // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
-      x.policy = effectivePolicy(x.id, findModule(x.id), matRows[x.id]);
-      if (!mat.ready && !x.complete) x.available = false;
+      // The office's own edit wins; then the chapter's own line; then the default.
+      const mod = findModule(x.id);
+      x.policy = TM.policyOverride(mats[x.id]) || (x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id)));
+      delete x.policyOverride;
+      x.waitingOnSop = !x.complete && waitingOnSop(x.id, mats, mat);
+      if (x.waitingOnSop) x.available = false;
+      if (ins[x.id] && ins[x.id].text) x.description = ins[x.id].text;
+      if (audience === 'office') x.instructionsEditedBy = (ins[x.id] || {}).byName || null;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
     track.manual = { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : (m.reason || null) };
@@ -406,6 +439,12 @@ module.exports = function createOnboardingRoutes(deps) {
   async function doStep(req, res, rec, actor) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    // A document attached to her item is done by signing it, never by Mark Done.
+    const linked = ((rec.items || {})[item.id] || {}).document;
+    const idx = Number(req.params.index);
+    if (linked && item.steps[idx] && item.steps[idx].actor === 'NEW_HIRE' && idx === item.steps.findIndex(s => s.actor === 'NEW_HIRE')) {
+      return res.status(409).json({ error: 'This step is done by signing the attached document.', code: 'DOCUMENT_SIGN_ROUTE' });
+    }
     try {
       rec.items = rec.items || {};
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
@@ -586,9 +625,16 @@ module.exports = function createOnboardingRoutes(deps) {
     const f = (st.files || []).find(x => x.id === req.params.fileId);
     if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
     try {
-      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      // A signed copy points at her Documents row, where the Drive file is.
+      let driveId = f.driveFileId; let mime = f.mime;
+      if (!driveId && f.documentId) {
+        const row = ((await db.get('caregiver_documents')) || []).find(d => d.id === f.documentId && String(d.caregiver_id) === String(rec.userId));
+        driveId = row && row.drive_file_id; mime = mime || (row && row.mime_type) || 'application/pdf';
+      }
+      if (!driveId) return res.status(404).json({ error: 'No stored file is attached to that record.', code: 'DOC_FILE_MISSING' });
+      const buf = await drive.downloadFileBuffer(driveId);
       await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
-      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Type', mime || 'application/octet-stream');
       res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
       return res.send(buf);
     } catch (e) {
@@ -675,7 +721,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const row = track.modules.find(x => x.id === m.id);
     if (!row) return res.status(409).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
     if (row.underReview) return res.status(409).json({ error: 'This module is being updated. It opens again once it is reviewed.', code: 'MODULE_UNDER_REVIEW' });
-    if (!row.material || !row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (row.available === false) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
     const blocked = m.unlocksAfter.filter(id => !(track.modules.find(x => x.id === id) || {}).complete);
     if (blocked.length) return res.status(409).json({ error: 'Finish the modules before this one first.', code: 'MODULE_LOCKED', outstanding: blocked });
     rec.training = rec.training || {};
@@ -706,7 +752,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const track = await buildFor(rec, 'new_hire');
     const row = track.modules.find(x => x.id === req.params.moduleId);
     if (!row) return res.status(404).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
-    if (!row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (!row.material.ready) return res.status(409).json({ error: 'This training has no material to open.', code: 'MODULE_NO_MATERIAL' });
     await logActivity(req.user.id, req.user.name, 'onboarding_material_read', 'onboarding', rec.userId, { moduleId: row.id });
     return res.json(await materialBody(row.id, row.material));
   });
@@ -757,10 +803,11 @@ module.exports = function createOnboardingRoutes(deps) {
     for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const custom = await customTasks();
     const lib = await libraryRows();
+    const ready = await readyCheck();
     const people = rows.map(rec => {
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom,
-        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null });
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready });
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
@@ -899,6 +946,33 @@ module.exports = function createOnboardingRoutes(deps) {
     if (isNew) await notifyStarted(rec);
     return res.json({ ok: true });
   });
+  // Attach a document the office sent this person to one of her items
+  // (owner, 2026-11-10). She signs it from the item; signing completes her
+  // step and files the signed copy. documentSendId null detaches it.
+  router.put('/api/onboarding/admin/people/:userId/items/:itemId/document', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const item = await itemFor(rec, req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    if (!item.steps.some(s => s.actor === 'NEW_HIRE')) return res.status(409).json({ error: 'This item has no step for her to sign.', code: 'ITEM_NOT_HERS' });
+    rec.items = rec.items || {};
+    const st = rec.items[item.id] = rec.items[item.id] || {};
+    const sendId = (req.body || {}).documentSendId;
+    if (!sendId) { delete st.document; await save(rec); return res.json({ ok: true }); }
+    const s = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(sendId) && !x.removedAt);
+    if (!s) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'ITEM_DOCUMENT_UNKNOWN' });
+    if (!s.scope || String(s.scope.userId) !== String(rec.userId)) return res.status(400).json({ error: 'That document was not sent to this person.', code: 'ITEM_DOCUMENT_NOT_THEIRS' });
+    st.document = { sendId: s.id, action: s.action, title: s.title };
+    // Attaching it is the office issuing it: any office step before hers
+    // (e.g. "Executive Director issues" the offer letter) is recorded now.
+    const hersAt = item.steps.findIndex(x => x.actor === 'NEW_HIRE');
+    for (let i = 0; i < hersAt; i++) {
+      if ((st.steps || {})[i]) continue;
+      try { Object.assign(st, T.recordStep(item, st, i, officeActorOf(req), { source: 'Document sent in the app', verifiedOn: nowIso().slice(0, 10) }, nowIso())); } catch (_) { break; }
+    }
+    await save(rec);
+    await event({ userId: rec.userId, type: 'document_attached', itemId: item.id, sendId: s.id, byId: req.user.id, byName: req.user.name });
+    return res.json({ ok: true });
+  });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/steps/:index', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
     return doStep(req, res, rec, officeActorOf(req));
@@ -999,6 +1073,9 @@ module.exports = function createOnboardingRoutes(deps) {
     await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
+    // Only a training on this person's own checklist (2026-11-10).
+    const onTrack = (await buildFor(rec, 'office')).modules.some(x => x.id === m.id);
+    if (!onTrack) return res.status(409).json({ error: "That training isn't on this person's onboarding.", code: 'MODULE_NOT_ON_TRACK' });
     rec.training = rec.training || {};
     rec.training[m.id] = { completedAt: nowIso(), version: m.version, byName: req.user.name || req.user.email, signedOffByOffice: true, note: trim((req.body || {}).note, 500) || null };
     await save(rec);
@@ -1027,6 +1104,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const revs = await reviews();
     const added = LT.live(await libraryRows()).map(LT.toModule);
     const pool = MODULES.concat(added);
+    const who = LT.whoGets(LT.live(await libraryRows()), T.chapterBaseIds);
     const mm = await materialMap(pool.map(x => x.id));
     const mats = await materials();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
@@ -1038,7 +1116,8 @@ module.exports = function createOnboardingRoutes(deps) {
         // Who it is for (2026-11-10): Clinicians, Everyone, or the roles the
         // office chose. An office-added training carries no manual flag.
         audience: LT.audienceLabel(x), addedByOffice: !!x.addedByOffice, types: x.types || null, description: x.description || null,
-        id: x.id, title: x.title, phase: x.phase, phaseLabel: x.addedByOffice ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
+        forTypes: who[x.id] || [],
+        id: x.id, title: x.title, phase: x.phase, phaseLabel: (x.addedByOffice || x.audience || LT.SHARED_MODULE_IDS.includes(x.id)) ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
         plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,
@@ -1050,9 +1129,7 @@ module.exports = function createOnboardingRoutes(deps) {
         catalogPolicy: x.policy || LC.policyFor(x.id),
         // The office's own choice wins. Otherwise the catalog's, except that an
         // "attach" once something is attached reads as covered.
-        nextStep: ((mats[x.id] || {}).office || {}).nextStep
-          || (((LC.entryFor(x.id) || {}).next === 'attach' && (mm.byModule[x.id] || {}).ready) ? 'done' : null)
-          || (LC.entryFor(x.id) || {}).next || (x.addedByOffice ? 'write' : null),
+        nextStep: nextStepFor(x.id, mats, mm.byModule[x.id], !!x.addedByOffice),
         officeNote: ((mats[x.id] || {}).office || {}).note != null ? mats[x.id].office.note : ((LC.entryFor(x.id) || {}).note || ''),
         officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null
       })),
@@ -1139,6 +1216,18 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true, material: TM.materialFor(m, all[m.id], sops.ids) });
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
+  // The office edits what an item or a training tells the person to do.
+  // Blank goes back to the default wording.
+  router.put('/api/onboarding/admin/instructions/:id', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    if (!T.findItem(id) && !findModule(id) && !(await customTasks()).some(t => t.id === id)) return res.status(404).json({ error: 'No such item or training.', code: 'INSTRUCTIONS_UNKNOWN' });
+    const text = trim((req.body || {}).text, 2000);
+    const all = await instructions();
+    if (text) all[id] = { text, byName: req.user.name || req.user.email, at: nowIso() }; else delete all[id];
+    await db.set(INSTRUCTIONS, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_instructions_edited', 'onboarding', id, {});
+    return res.json({ ok: true });
+  });
   // The office's next step, note and policy line for a training (2026-11-10).
   router.put('/api/onboarding/admin/library/:moduleId/office', authenticateToken, requireOffice, async (req, res) => {
     const m = await moduleOr404(req, res); if (!m) return;

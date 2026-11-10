@@ -90,7 +90,9 @@ test('staff see why a training matters; only the office sees the next step and t
   h.as(CG);
   const track = (await h.call('GET', '/api/onboarding/me')).data.track;
   const mine = track.modules.find(m => m.id === 'TRN-216');
-  assert.match(mine.policy.sections, /19\.1/);
+  // A caregiver works under the PHC manual, not the Clinical Manual (2026-11-10).
+  assert.match(mine.policy.document, /Private Home Care|PHC/i);
+  assert.strictEqual(mine.host, 'EXECUTIVE_DIRECTOR');
   const payload = JSON.stringify(track.modules);
   assert.ok(!/officeNote|nextStep|counsel|Hole:/.test(payload), 'no office field reaches staff');
   assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/library/TRN-216/office', { note: 'x' })).status, 403);
@@ -114,6 +116,7 @@ test('the office can edit the policy line a training ties to, and staff see the 
   const libRow = async () => (await h.call('GET', '/api/onboarding/admin/library')).data.modules.find(m => m.id === 'TRN-216');
   const staffRow = async () => { h.as(CG); const r = (await h.call('GET', '/api/onboarding/me')).data.track.modules.find(m => m.id === 'TRN-216'); h.as(OFFICE); return r; };
   const original = (await libRow()).policy;
+  const staffOriginal = (await staffRow()).policy; // a caregiver's own line can differ (Private Home Care manual)
   assert.strictEqual((await libRow()).policyEdited, false);
 
   // Bad input is refused and nothing is stored.
@@ -142,5 +145,5 @@ test('the office can edit the policy line a training ties to, and staff see the 
   assert.strictEqual((await h.call('PUT', url, { policy: null })).status, 200);
   assert.deepStrictEqual((await libRow()).policy, original);
   assert.strictEqual((await libRow()).policyEdited, false);
-  assert.deepStrictEqual((await staffRow()).policy, original);
+  assert.deepStrictEqual((await staffRow()).policy, staffOriginal);
 });
