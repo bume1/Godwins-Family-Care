@@ -491,7 +491,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
   // it), so its form appears only once the step before it is done.
   const canAct = (s) => !s.done && (office || s.hers) && !(s.action === 'VERIFY' && s.index > 0 && !item.steps[s.index - 1].done)
     // A document step is recorded only by signing it, never by Mark Done.
-    && !(item.document && s.index === 0);
+    && !(item.document && s.hers && s.index === item.steps.findIndex(x => x.hers));
   const DocSign = window.GFCDocSign;
   return (
     <>
@@ -530,13 +530,15 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               <div className="line-card">
                 <b>{item.document.title}</b>
                 <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)', margin: '4px 0 8px' }}>
-                  {item.steps[0] && item.steps[0].done ? `${item.document.action === 'sign' ? 'Signed' : 'Acknowledged'} ${fmtDate(item.steps[0].at)}. The copy is in their Documents.` : `Waiting on ${subject || 'them'} to ${item.document.action === 'sign' ? 'sign' : 'acknowledge'} it. Only they can.`}
+                  {(item.steps.find(x => x.hers) || {}).done ? `${item.document.action === 'sign' ? 'Signed' : 'Acknowledged'} ${fmtDate((item.steps.find(x => x.hers) || {}).at)}. The copy is in their Documents.` : `Waiting on ${subject || 'them'} to ${item.document.action === 'sign' ? 'sign' : 'acknowledge'} it. Only they can.`}
                 </div>
                 <button className="btn sm ghost" onClick={() => DocSign.openPdf(`/api/my/document-sends/${encodeURIComponent(item.document.sendId)}/file`, `${item.document.title}.pdf`).catch(e => setErr(e.message))}>Open Document</button>
               </div>
             )}
           </div>
         )}
+        {/* Attach a PDF for her to sign on this item (owner, 2026-11-10). */}
+        {office && !item.document && item.steps.some(s => s.hers) && track.person && <AttachDocument item={item} userId={track.person.userId} onDone={onChanged} />}
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to acknowledge</label>
@@ -751,6 +753,36 @@ const shownFormat = (m) => {
   const mat = m.material;
   if (m.format !== 'VIDEO' || !mat || !mat.ready) return m.format;
   return (mat.links || []).some(l => l.kind === 'video') || (mat.files || []).some(f => /video/.test(f.mime || '')) ? 'VIDEO' : 'READ';
+};
+
+// The office attaches a PDF to one person's item. It goes to that person
+// only; signing it completes her step and files the signed copy.
+const AttachDocument = ({ item, userId, onDone }) => {
+  const [open, setOpen] = useState(false); const [file, setFile] = useState(null); const [action, setAction] = useState('sign');
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const go = async () => {
+    setBusy(true); setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file); fd.append('title', item.title); fd.append('action', action); fd.append('scope', JSON.stringify({ userId }));
+      const sent = (await call('/api/my/admin/document-sends', { method: 'POST', body: fd })).send;
+      await call(`/api/onboarding/admin/people/${encodeURIComponent(userId)}/items/${encodeURIComponent(item.id)}/document`, { method: 'PUT', body: { documentSendId: sent.id } });
+      setOpen(false); await onDone();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  if (!open) return <button className="btn sm ghost" style={{ margin: '4px 0 10px' }} onClick={() => setOpen(true)}><i className="ti ti-signature" />Attach Document to Sign</button>;
+  return (
+    <div className="line-card" style={{ margin: '4px 0 12px' }}>
+      <input type="file" accept="application/pdf,.pdf" onChange={e => setFile(e.target.files[0] || null)} />
+      <label style={{ display: 'block', fontSize: 14, marginTop: 6 }}><input type="radio" style={{ width: 'auto' }} checked={action === 'sign'} onChange={() => setAction('sign')} /> They sign it</label>
+      <label style={{ display: 'block', fontSize: 14 }}><input type="radio" style={{ width: 'auto' }} checked={action === 'acknowledge'} onChange={() => setAction('acknowledge')} /> They acknowledge they read it</label>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <button className="btn sm" disabled={busy || !file} onClick={go}>{busy ? 'Sending…' : 'Send'}</button>
+        <button className="btn sm ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </div>
+  );
 };
 
 // The office rewrites what an item or a training tells the person to do.

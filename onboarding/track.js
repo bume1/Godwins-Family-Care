@@ -630,7 +630,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || [],
       custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined,
-      document: it.document || null,
+      // A document the office attached to this person's item (2026-11-10), or a
+      // custom task's own.
+      document: it.document || (st && st.document) || null,
       // What the item is, in words (owner, 2026-11-09). Where the words came
       // from is the office's to know, not the new hire's.
       description: (DESC.descriptionFor(it.id) || {}).text || null,

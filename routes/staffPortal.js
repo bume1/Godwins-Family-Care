@@ -809,13 +809,27 @@ module.exports = function createStaffPortalRoutes(deps) {
 
   async function completeOnboardingTasks(send, me, user, at, documentId) {
     const tasks = ((await db.get('onboarding_custom_tasks')) || []).filter(t => !t.removedAt && t.documentSendId === send.id);
-    if (!tasks.length) return;
     const recs = (await db.get('onboarding_records')) || [];
     const rec = recs.find(r => String(r.userId) === me.userId);
     if (!rec) return;
     const T = require('../onboarding/track');
-    const mine = T.customItemsFor(tasks, rec.inputs, rec.userId);
     rec.items = rec.items || {};
+    // Any of her own items this document was attached to (2026-11-10): her
+    // first step is done, and the signed copy sits on the item.
+    for (const [itemId, st] of Object.entries(rec.items)) {
+      if (!st || !st.document || st.document.sendId !== send.id) continue;
+      const def = T.findItem(itemId);
+      if (!def) continue;
+      const idx = def.steps.findIndex(s => s.actor === 'NEW_HIRE');
+      if (idx < 0 || (st.steps && st.steps[idx])) continue;
+      try {
+        Object.assign(st, T.recordStep(def, st, idx, { id: user.id, name: user.name || user.email, isOffice: false }, {}, at));
+      } catch (_) { /* the signing stands; the step can be recorded by hand */ }
+      st.files = (st.files || []).concat([{ id: uuidv4(), name: `${send.title} (${send.action === 'sign' ? 'signed' : 'acknowledged'})`,
+        documentId, uploadedAt: at, uploadedById: user.id, uploadedByName: user.name || user.email, filedBy: 'SELF' }]);
+    }
+    if (!tasks.length) { rec.updatedAt = nowIso(); await db.set('onboarding_records', recs); return; }
+    const mine = T.customItemsFor(tasks, rec.inputs, rec.userId);
     for (const item of mine) {
       const st = rec.items[item.id] || {};
       if (st.steps && st.steps[0]) continue;
