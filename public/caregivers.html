@@ -557,48 +557,19 @@ const Documents = ({ rows, reload, setErr, setOk }) => {
 };
 
 // ============================================================================
-// Broadcast — a message onto every caregiver's Feed tab
+// Feed post — moved to My GFC → Announcements (owner, 2026-11-10)
 // ============================================================================
-const Broadcast = ({ setErr, setOk }) => {
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const send = async () => {
-    if (!title.trim()) { setErr('A title is required.'); return; }
-    setErr(''); setOk(''); setBusy(true);
-    try {
-      await api('/api/caregiver/broadcasts', {
-        method: 'POST', body: JSON.stringify({ title: title.trim(), body: body.trim() })
-      });
-      setOk('Posted to every caregiver\'s feed.');
-      setTitle(''); setBody('');
-    } catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="card">
-      <h2>Post to the caregiver feed</h2>
-      <p className="sub">Goes to every caregiver's Feed tab. Not a message thread — nobody replies to it.</p>
-      <div style={{ marginBottom: 10 }}>
-        <label>Title</label>
-        <input value={title} maxLength={200} onChange={e => setTitle(e.target.value)} placeholder="Holiday pay schedule" />
-      </div>
-      <div>
-        <label>Message</label>
-        <textarea value={body} maxLength={4000} onChange={e => setBody(e.target.value)} />
-      </div>
-      <div className="btns">
-        <button className="btn gold" disabled={busy} onClick={send}>{busy ? 'Posting…' : 'Post to Feed'}</button>
-      </div>
-      <div className="note">
-        <b>This is not the place for anything about one client.</b>
-        Every caregiver sees it, including caregivers with no connection to that client. Use Messages for that.
-      </div>
+// There is one place to post for the whole team now. A second composer here
+// is how the two drift, so this tab points there.
+const Broadcast = () => (
+  <div className="card">
+    <h2>Post an announcement</h2>
+    <p className="sub">Announcements for caregivers, and for the rest of the team, are posted in one place: My GFC → Announcements. Caregivers see them on their Feed tab.</p>
+    <div className="btns">
+      <a className="btn gold" href="/my#announcements">Open Announcements</a>
     </div>
-  );
-};
+  </div>
+);
 
 // ============================================================================
 // App
@@ -804,7 +775,7 @@ const App = () => {
     { id: 'incidents', label: 'Incidents', n: 0 },
     { id: 'documents', label: 'Documents to Review', n: documents.filter(d => d.status === 'received').length },
     { id: 'onboarding', label: 'Not Yet Cleared', n: 0 },
-    { id: 'broadcast', label: 'Feed post', n: 0 }
+    { id: 'broadcast', label: 'Announcements', n: 0 }
   ];
 
   return (
@@ -835,7 +806,7 @@ const App = () => {
         {tab === 'incidents' && <Incidents rows={incidents} />}
         {tab === 'documents' && <Documents rows={documents} reload={reload} setErr={setErr} setOk={setOk} />}
         {tab === 'onboarding' && <Onboarding setErr={setErr} setOk={setOk} />}
-        {tab === 'broadcast' && <Broadcast setErr={setErr} setOk={setOk} />}
+        {tab === 'broadcast' && <Broadcast />}
 
         <div className="note">
           <b>Each person's documents, license level, competencies and onboarding live on their record in User Management; each client's visit logs and concerns live on their record in Clients &amp; Patients.</b>

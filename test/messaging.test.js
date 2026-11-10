@@ -587,8 +587,11 @@ test('BUILD: the admin hub has ONE inbox, with messages inside it', () => {
 test('BUILD: the caregiver Feed\'s broadcast half has a screen', () => {
   // It had an API and no UI, so the Feed could only ever read "Nothing new".
   const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
-  assert.ok(/CaregiverFeedPanel/.test(hub), 'the composer exists');
-  assert.ok(/\/api\/caregiver\/broadcasts/.test(hub), 'and posts to the route that feeds it');
+  // Since 2026-11-10 the one composer is My GFC → Announcements; the Inbox tab
+  // points there.
+  assert.ok(/CaregiverFeedPanel/.test(hub) && hub.includes('/my#announcements'), 'the Inbox tab leads to the composer');
+  const my = fs.readFileSync(path.join(__dirname, '..', 'public', 'my-gfc.js'), 'utf8');
+  assert.ok(/\/api\/caregiver\/broadcasts/.test(my), 'which posts to the route that feeds it');
   const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
   // Widened 2026-11-03 to the caregiver office (Super Admin, manager, coordinator).
   assert.ok(/router\.post\('\/api\/caregiver\/broadcasts', authenticateToken, requireCaregiverOffice/.test(routes),

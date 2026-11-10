@@ -69,6 +69,11 @@ function App() {
                 <button className="mg-btn" onClick={() => go('welcome')}><i className="ti ti-confetti" />Open Welcome Packet</button>
               </Section>
             )}
+            {(data.news || []).filter(a => !a.reviewedAt).slice(0, 3).map(a => (
+              <Section key={a.id} title={`New: ${a.title}`} sub="An announcement from the office.">
+                <button className="mg-btn" onClick={() => go('announcements')}><i className="ti ti-speakerphone" />Read It</button>
+              </Section>
+            ))}
             <StaffTiles data={data} go={go}
               extra={profile.isLiaison ? <Tile key="clients" icon="ti-users" title="My Clients" sub="Where each client is in enrollment" onClick={() => go('clients')} /> : null} />
             <Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section>

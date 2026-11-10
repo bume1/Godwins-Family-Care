@@ -41,6 +41,7 @@ const { contentDisposition } = require('../contentDisposition');
 const staffDocs = require('../staffDocuments');
 
 const accountTypes = require('../accountTypes');
+const announcements = require('../staffAnnouncements');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
@@ -888,8 +889,10 @@ module.exports = function createCaregiverRoutes(deps) {
       const events = await readRows('escalation_events');
       const mine = events.filter(e => e && e.caregiver_id === req.user.id);
       const items = broadcasts
-        .filter(b => b && b.active !== false)
-        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, at: b.posted_at, byName: b.posted_by_name }))
+        // Caregiver posts and all-staff announcements (2026-11-10), through the
+        // same audience rule My GFC → Announcements reads.
+        .filter(b => announcements.visibleTo(b, 'caregiver'))
+        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
         .concat(mine.map(e => ({
           id: e.id, kind: 'escalation', title: `${e.concern_type.replace(/_/g, ' ')} concern — ${e.client_name}`,
           body: `Status: ${String(e.status).replace(/_/g, ' ')}. ${cg.describeRecipients(e.notified) === 'no one — this concern could not be routed' ? '' : `Sent to ${cg.describeRecipients(e.notified)}.`}`.trim(),
@@ -909,11 +912,18 @@ module.exports = function createCaregiverRoutes(deps) {
     try {
       const { title, body } = req.body || {};
       if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.', code: 'TITLE_REQUIRED' });
+      // Who it is for (2026-11-10). No audience means caregivers, as before.
+      const aud = announcements.parseAudience((req.body || {}).audience);
+      if (!aud.ok) return res.status(400).json({ error: aud.error, code: aud.code });
+      const lnk = announcements.parseLink((req.body || {}).link);
+      if (!lnk.ok) return res.status(400).json({ error: lnk.error, code: lnk.code });
       const rows = await readRows('caregiver_broadcasts');
       const row = {
         id: uuidv4(),
-        title: String(title).trim().slice(0, 200),
-        body: String(body || '').trim().slice(0, 4000),
+        title: String(title).trim().slice(0, announcements.TITLE_MAX),
+        body: String(body || '').trim().slice(0, announcements.BODY_MAX),
+        audience: aud.audience,
+        link: lnk.link,
         active: true,
         posted_at: nowIso(),
         posted_by: req.user.id,
@@ -925,6 +935,26 @@ module.exports = function createCaregiverRoutes(deps) {
       res.json({ broadcast: row });
     } catch (error) {
       console.error('Broadcast error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/caregiver/broadcasts/:id/retire — take a post down. The row is
+  // kept (active: false) with who retired it and when, never deleted.
+  router.post('/api/caregiver/broadcasts/:id/retire', authenticateToken, requireCaregiverOffice, async (req, res) => {
+    try {
+      const rows = await readRows('caregiver_broadcasts');
+      const row = rows.find(b => b && b.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
+      if (row.active === false) return res.json({ broadcast: row });
+      row.active = false;
+      row.retired_at = nowIso();
+      row.retired_by_name = req.user.name || req.user.email;
+      await db.set('caregiver_broadcasts', rows);
+      await logActivity(req.user.id, row.retired_by_name, 'caregiver_broadcast_retired', 'broadcast', row.id, { title: row.title });
+      res.json({ broadcast: row });
+    } catch (error) {
+      console.error('Broadcast retire error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });

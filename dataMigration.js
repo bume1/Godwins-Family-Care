@@ -249,6 +249,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'incident_reports', phi: true, owner: '6' },
   { key: 'incident_events', phi: true, owner: 'care-records 2026-11-09' },
   { key: 'caregiver_broadcasts', phi: false, owner: '6' },
+  // My GFC → Announcements: who reviewed which office post (2026-11-10).
+  { key: 'staff_announcement_reads', phi: false, owner: 'MyGFC' },
   // ---- scheduling (Session 7) ----
   { key: 'shifts', phi: true, owner: '7' },
   { key: 'shift_requests', phi: true, owner: '7' },
