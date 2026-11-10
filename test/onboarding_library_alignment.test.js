@@ -119,3 +119,41 @@ test('through the real route: a training with no material is not counted against
   assert.ok(!a7.outstandingModules.includes('TRN-216'), 'but not holding the phase open');
   assert.strictEqual(mine.modules.find(m => m.id === 'TRN-216').available, false, 'still Coming Soon');
 });
+
+test('the office rewrites an item\'s or a training\'s instructions; staff see them; blank goes back', async (t) => {
+  const h = await mount(t);
+  await h.call('PUT', `/api/onboarding/admin/people/${CG.id}/inputs`, { chapter: 'A' });
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/instructions/A.5.02', { text: 'Upload your I-9 photo and your W-4.' })).status, 200);
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/instructions/TRN-001', { text: 'Watch the welcome video.' })).status, 200);
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/instructions/NOPE', { text: 'x' })).status, 404);
+  h.as(CG);
+  let tr = (await h.call('GET', '/api/onboarding/me')).data.track;
+  assert.strictEqual(tr.items.find(i => i.id === 'A.5.02').description, 'Upload your I-9 photo and your W-4.');
+  assert.strictEqual(tr.modules.find(m => m.id === 'TRN-001').description, 'Watch the welcome video.');
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/instructions/A.5.02', { text: 'x' })).status, 403, 'only the office edits');
+  h.as(OFFICE);
+  await h.call('PUT', '/api/onboarding/admin/instructions/A.5.02', { text: '' });
+  h.as(CG);
+  tr = (await h.call('GET', '/api/onboarding/me')).data.track;
+  assert.notStrictEqual(tr.items.find(i => i.id === 'A.5.02').description, 'Upload your I-9 photo and your W-4.', 'blank restores the default');
+});
+
+test('onboarding greys out only what the Library says is waiting on an SOP', async (t) => {
+  const h = await mount(t);
+  await h.call('PUT', `/api/onboarding/admin/people/${CG.id}/inputs`, { chapter: 'A' });
+  const lib = (await h.call('GET', '/api/onboarding/admin/library')).data.modules;
+  h.as(CG);
+  const mine = (await h.call('GET', '/api/onboarding/me')).data.track.modules;
+  for (const m of mine) {
+    const step = (lib.find(x => x.id === m.id) || {}).nextStep;
+    const waiting = !(m.material && m.material.ready) && ['write', 'gap'].includes(step);
+    assert.strictEqual(!!m.waitingOnSop, waiting, `${m.id}: Library says ${step}`);
+  }
+});
+
+test('the page greys a training out by the server\'s waitingOnSop, and the office can edit instructions', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /if \(!office && m\.waitingOnSop\) \{/);
+  assert.match(page, /\{office && <InstructionsEditor id=\{item\.id\}/);
+  assert.match(page, /\{office && <InstructionsEditor id=\{m\.id\}/);
+});

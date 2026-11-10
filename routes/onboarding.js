@@ -228,11 +228,30 @@ module.exports = function createOnboardingRoutes(deps) {
     moduleIds.forEach(id => { out[id] = TM.materialFor(findModule(id), mats[id] || null, sops.ids); });
     return { byModule: out, sops };
   }
-  // Whether a module has material, for the checklist's phase completion.
+  // The Library's next step for a module: the office's choice, else the
+  // tracker's (an "attach" with something attached reads as covered).
+  function nextStepFor(id, mats, mat, addedByOffice) {
+    const entry = LC.entryFor(id) || {};
+    return ((mats[id] || {}).office || {}).nextStep
+      || ((entry.next === 'attach' && mat && mat.ready) ? 'done' : null)
+      || entry.next || (addedByOffice ? 'write' : null);
+  }
+  // Greyed out ONLY while it waits on an SOP still to be written (owner,
+  // 2026-11-10). An outside course, a document to sign, or one needing no
+  // material stays open, so onboarding agrees with the Library.
+  const WAITING = ['write', 'gap'];
+  function waitingOnSop(id, mats, mat) {
+    const mod = findModule(id);
+    return !mat.ready && WAITING.includes(nextStepFor(id, mats, mat, !!(mod && mod.addedByOffice)));
+  }
+  // Whether a module can be worked now, for the checklist's phase completion.
   async function readyCheck() {
     const [mats, sops] = await Promise.all([materials(), sopState()]);
-    return (id) => { const mod = findModule(id); return !!(mod && TM.materialFor(mod, mats[id] || null, sops.ids).ready); };
+    return (id) => { const mod = findModule(id); if (!mod) return false; return !waitingOnSop(id, mats, TM.materialFor(mod, mats[id] || null, sops.ids)); };
   }
+  // Instructions the office wrote for an item or a training (2026-11-10).
+  const INSTRUCTIONS = 'onboarding_instructions';
+  const instructions = async () => (await db.get(INSTRUCTIONS)) || {};
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -269,6 +288,9 @@ module.exports = function createOnboardingRoutes(deps) {
     // Material per module. Staff see only ready / not ready; a module with no
     // material is not available to them, whoever's turn it would otherwise be.
     const mm = await materialMap(track.modules.map(x => x.id));
+    const mats = await materials();
+    const ins = await instructions();
+    track.items.forEach(it => { if (ins[it.id] && ins[it.id].text) it.description = ins[it.id].text; if (audience === 'office') it.instructionsEditedBy = (ins[it.id] || {}).byName || null; });
     track.modules.forEach(x => {
       const mat = mm.byModule[x.id];
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
@@ -276,7 +298,10 @@ module.exports = function createOnboardingRoutes(deps) {
       const mod = findModule(x.id);
       x.policy = x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id));
       delete x.policyOverride;
-      if (!mat.ready && !x.complete) x.available = false;
+      x.waitingOnSop = !x.complete && waitingOnSop(x.id, mats, mat);
+      if (x.waitingOnSop) x.available = false;
+      if (ins[x.id] && ins[x.id].text) x.description = ins[x.id].text;
+      if (audience === 'office') x.instructionsEditedBy = (ins[x.id] || {}).byName || null;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
     track.manual = { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : (m.reason || null) };
@@ -679,7 +704,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const row = track.modules.find(x => x.id === m.id);
     if (!row) return res.status(409).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
     if (row.underReview) return res.status(409).json({ error: 'This module is being updated. It opens again once it is reviewed.', code: 'MODULE_UNDER_REVIEW' });
-    if (!row.material || !row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (row.available === false) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
     const blocked = m.unlocksAfter.filter(id => !(track.modules.find(x => x.id === id) || {}).complete);
     if (blocked.length) return res.status(409).json({ error: 'Finish the modules before this one first.', code: 'MODULE_LOCKED', outstanding: blocked });
     rec.training = rec.training || {};
@@ -710,7 +735,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const track = await buildFor(rec, 'new_hire');
     const row = track.modules.find(x => x.id === req.params.moduleId);
     if (!row) return res.status(404).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
-    if (!row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (!row.material.ready) return res.status(409).json({ error: 'This training has no material to open.', code: 'MODULE_NO_MATERIAL' });
     await logActivity(req.user.id, req.user.name, 'onboarding_material_read', 'onboarding', rec.userId, { moduleId: row.id });
     return res.json(await materialBody(row.id, row.material));
   });
@@ -1058,9 +1083,7 @@ module.exports = function createOnboardingRoutes(deps) {
         policy: x.policy || LC.policyFor(x.id),
         // The office's own choice wins. Otherwise the catalog's, except that an
         // "attach" once something is attached reads as covered.
-        nextStep: ((mats[x.id] || {}).office || {}).nextStep
-          || (((LC.entryFor(x.id) || {}).next === 'attach' && (mm.byModule[x.id] || {}).ready) ? 'done' : null)
-          || (LC.entryFor(x.id) || {}).next || (x.addedByOffice ? 'write' : null),
+        nextStep: nextStepFor(x.id, mats, mm.byModule[x.id], !!x.addedByOffice),
         officeNote: ((mats[x.id] || {}).office || {}).note != null ? mats[x.id].office.note : ((LC.entryFor(x.id) || {}).note || ''),
         officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null
       })),
@@ -1148,6 +1171,18 @@ module.exports = function createOnboardingRoutes(deps) {
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
   // The office's next step and note for a training (2026-11-10).
+  // The office edits what an item or a training tells the person to do.
+  // Blank goes back to the default wording.
+  router.put('/api/onboarding/admin/instructions/:id', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    if (!T.findItem(id) && !findModule(id) && !(await customTasks()).some(t => t.id === id)) return res.status(404).json({ error: 'No such item or training.', code: 'INSTRUCTIONS_UNKNOWN' });
+    const text = trim((req.body || {}).text, 2000);
+    const all = await instructions();
+    if (text) all[id] = { text, byName: req.user.name || req.user.email, at: nowIso() }; else delete all[id];
+    await db.set(INSTRUCTIONS, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_instructions_edited', 'onboarding', id, {});
+    return res.json({ ok: true });
+  });
   router.put('/api/onboarding/admin/library/:moduleId/office', authenticateToken, requireOffice, async (req, res) => {
     const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.setOffice(e, req.body, officeActor(req), nowIso()), { action: 'office_fields_set' });
