@@ -96,7 +96,7 @@ const ITEMS = Object.freeze([
     packet: ['offer_letter'],
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED)],
     classifications: [], classificationNote: NO_A2_ROW },
-  { id: 'A.5.02', phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
+  { id: 'A.5.02', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
     packet: ['id_document', 'ssn_card', 'work_authorization', 'direct_deposit', 'emergency_contact'],
     // Form I-9 within three business days, and the W-4, which the packet does
     // not collect.
@@ -108,7 +108,7 @@ const ITEMS = Object.freeze([
     acknowledges: ['FIELD_ADDENDUM', 'PHC_MANUAL', 'JOB_DESCRIPTION'],
     steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, STATED)],
     classifications: [], classificationNote: NO_A2_ROW },
-  { id: 'A.5.04', phase: 'A.5', title: 'Consents and attestations', ref: P('A.5'),
+  { id: 'A.5.04', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.5', title: 'Consents and attestations', ref: P('A.5'),
     // The registry attestation is the abuse, neglect and exploitation
     // statement Rule 111-8-65-.09(5)(a)1 requires; the drug testing consent is
     // not in the packet.
@@ -127,18 +127,18 @@ const ITEMS = Object.freeze([
     elements: ['OIG List of Excluded Individuals and Entities', 'System for Award Management', 'Georgia Medicaid excluded provider list'],
     steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, STATED)],
     classifications: [cls('Recommended practice', 'Exclusion screening', A2)] },
-  { id: 'A.6.03', phase: 'A.6', title: 'Tuberculosis screening', ref: P('A.6'),
+  { id: 'A.6.03', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.6', title: 'Tuberculosis screening', ref: P('A.6'),
     packet: ['tb_test'], steps: [],
     classifications: [cls('Regulatory', 'Tuberculosis screening', A2)] },
-  { id: 'A.6.04', phase: 'A.6', title: 'Drug screening', ref: P('A.6'),
+  { id: 'A.6.04', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.6', title: 'Drug screening', ref: P('A.6'),
     packet: ['drug_screen'], steps: [],
     classifications: [cls('Internal policy', 'Drug screening', A2)] },
-  { id: 'A.6.05', phase: 'A.6', title: 'Driving record and insurance', ref: P('A.6'),
+  { id: 'A.6.05', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.6', title: 'Driving record and insurance', ref: P('A.6'),
     when: { drives: true },
     packet: ['id_document', 'license_insurance'],
     steps: [step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
     classifications: [], classificationNote: NO_A2_ROW },
-  { id: 'A.6.06', phase: 'A.6', title: 'Credentials', ref: P('A.6'),
+  { id: 'A.6.06', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.6', title: 'Credentials', ref: P('A.6'),
     packet: ['certification', 'cpr_first_aid'],
     elements: [
       { row: 'Companion or sitter: able to read, write and follow instructions; competency in client needs, meals, transportation, housekeeping, home safety, emergencies and infection control', when: { caregiverClass: 'COMPANION' } },
@@ -158,7 +158,7 @@ const ITEMS = Object.freeze([
     elements: ['Twenty hours before serving any client', 'Twenty more within six months of the start of training', 'Directing nurse named in the training record'],
     steps: [step(A.SUPERVISOR, X.RECORD, INFERRED)],
     classifications: [cls('Regulatory', 'Forty-hour training program', A2)] },
-  { id: 'A.6.08', phase: 'A.6', title: 'Physical ability acknowledgment', ref: null,
+  { id: 'A.6.08', link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.6', title: 'Physical ability acknowledgment', ref: null,
     addedBy: 'Welcome packet item 12; Playbook v3.0 Chapter A does not list it.',
     packet: ['physical_ability', 'immunization_record'], steps: [],
     classifications: [], classificationNote: NO_A2_ROW },

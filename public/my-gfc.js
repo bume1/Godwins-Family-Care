@@ -134,9 +134,9 @@ const KIND_LABELS = { timesheet: 'Timesheet', visit_note: 'Signed visit note', m
   id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', signed_document: 'Signed document', other: 'Other' };
 const STATUS_PILL = { accepted: ['mg-ok', 'Accepted'], received: ['mg-wait', 'With the office'], rejected: ['mg-bad', 'Sent back'] };
 
-function Section({ title, sub, children, right }) {
+function Section({ title, sub, children, right, id }) {
   return (
-    <div className="mg-card">
+    <div className="mg-card" id={id}>
       {(title || right) && <div className="mg-card-h">{title ? <h2>{title}</h2> : <span />}{right}</div>}
       {sub && <p className="mg-lead">{sub}</p>}
       {children}
@@ -827,15 +827,15 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
-        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
-        {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
-        {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
-        {!profile.isCaregiver && <Section title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
+        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section id="mg-clock" title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section id="mg-clock" title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === '1099' && <Section id="mg-clock" title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
+        {!profile.isCaregiver && <Section id="mg-availability" title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected in Staff Scheduling → Time Logs. Payroll is run, and the hours file exported, in Payroll.</p><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="mg-btn mg-ghost" href="/scheduling">Open Staff Scheduling</a><a className="mg-btn mg-ghost" href="/payroll">Open Payroll</a></div></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
-        {window.MyPay && <Section title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
+        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
         {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>

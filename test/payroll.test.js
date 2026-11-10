@@ -231,7 +231,7 @@ test('IME: an entity with no rates bills nothing; an exam bills once; voiding fr
 // ── wiring into My GFC, not beside it ────────────────────────────────────────────
 test('pay setup lives in My GFC\'s Hours & Pay, and stubs land in the store My GFC already lists', () => {
   const g = read('public/my-gfc.js');
-  assert.match(g, /window\.MyPay && <Section title="Pay Setup"/);
+  assert.match(g, /window\.MyPay && <Section id="mg-pay" title="Pay Setup"/);
   assert.match(g, /<window\.MyPay\.ContractorInvoices Section=\{Section\} \/>/);
   for (const page of ['public/my.html', 'public/caregiver.html']) {
     const h = fs.readFileSync(path.join(ROOT, page), 'utf8');
