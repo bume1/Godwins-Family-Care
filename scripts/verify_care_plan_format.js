@@ -154,12 +154,14 @@ const PHC_PLAN = {
     outsideCare: { externalTeam: [{ name: 'Dr. Patel', role: 'Cardiology' }] }
   });
   ok('a coordinator can write a clinical patient\u2019s plan', cwi.status === 200 && cwi.body.providerCoSignStatus === 'pending', cwi.body);
-  const rnIhpc = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, rnT, { signatureImageB64: SIG });
-  ok('  an RN cannot activate a clinical patient\u2019s plan', rnIhpc.status === 403, rnIhpc.status);
-  const rnIhpcView = (await call('GET', `/api/clinical/patients/${ihpc2.id}/care-plan`, rnT)).body;
-  ok('  and is not offered the co-signature', rnIhpcView.canCoSign === false, rnIhpcView.canCoSign);
+  // Owner, 2026-11-09: an RN co-signs a clinical plan a coordinator wrote, and
+  // the shared admin account (no NPI) is an author, never a signer.
   const adminCo = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, admin, { signatureImageB64: SIG });
-  ok('  a provider-level signature activates it', adminCo.status === 200 && adminCo.body.carePlan.providerCoSignStatus === 'complete', adminCo.body);
+  ok('  an admin account with no NPI cannot activate it', adminCo.status === 403, adminCo.body);
+  const rnIhpcView = (await call('GET', `/api/clinical/patients/${ihpc2.id}/care-plan`, rnT)).body;
+  ok('  an RN is offered the co-signature', rnIhpcView.canCoSign === true, rnIhpcView.canCoSign);
+  const rnIhpc = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, rnT, { signatureImageB64: SIG });
+  ok('  and the RN\u2019s signature activates it', rnIhpc.status === 200 && rnIhpc.body.carePlan.providerCoSignStatus === 'complete', rnIhpc.body);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

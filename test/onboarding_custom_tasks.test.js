@@ -71,8 +71,10 @@ test('a person task reaches only them; a type task reaches everyone of that type
     assert.deepStrictEqual(customOf(t1).map(i => i.title).sort(), ['All liaisons', 'Just Lee']);
     assert.deepStrictEqual(customOf(t2).map(i => i.title), ['All liaisons']);
     assert.deepStrictEqual(customOf(tn), []);
-    assert.ok(t1.phases.some(p => p.id === 'GFC' && p.label === 'Added by GFC'));
-    assert.ok(!tn.phases.some(p => p.id === 'GFC'), 'no empty Added by GFC phase');
+    // A task sits inside the chapter's own phases (owner, 2026-11-10), never
+    // in an "Added by GFC" phase of its own.
+    assert.ok(!t1.phases.some(p => p.id === 'GFC'), 'no Added by GFC phase');
+    assert.ok(customOf(t1).every(i => t1.phases.some(p => p.id === i.phase)), 'each task is in a real phase');
     // Another person's task is unknown to her doors.
     const lees = customOf(t1).find(i => i.title === 'Just Lee');
     assert.strictEqual((await h.call('li2', 'POST', `/api/onboarding/me/items/${lees.id}/steps/0`, {})).status, 404);
@@ -123,7 +125,7 @@ test('removing a task takes it off every checklist and keeps the row', async () 
 
 test('the page offers it to the office: Add a Task on a person and on the overview, Remove on the item', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
-  assert.match(page, /^const AddTaskForm = \(\{ person, chapters, onAdded, onCancel \}\) => \{/m, 'module scope, so typing keeps focus');
+  assert.match(page, /^const AddTaskForm = \(\{ person, chapters, phase, phases, onAdded, onCancel \}\) => \{/m, 'module scope, so typing keeps focus');
   assert.match(page, /<AddTaskForm person=\{\{ userId, name: t\.person\.name, chapter: t\.chapter\.id \}\}/);
   assert.match(page, /<CustomTaskList \/>/);
   assert.match(page, /\{office && item\.custom && \(/);
@@ -162,5 +164,25 @@ test('a task carrying a sent document: refused when unknown, signed only through
     const done = await h.call('li1', 'POST', `/api/onboarding/me/items/${item.id}/steps/0`, {});
     assert.notStrictEqual(done.status, 200);
     assert.strictEqual(done.body.code, 'DOCUMENT_SIGN_ROUTE');
+  } finally { h.close(); }
+});
+
+test('a task goes in the phase the office picks, and a task with no phase goes in the last phase', async () => {
+  const h = await mount();
+  try {
+    await h.call('admin', 'PUT', '/api/onboarding/admin/people/li1/inputs', { chapter: 'G' });
+    const phases = (await h.call('admin', 'GET', '/api/onboarding/admin/custom-tasks')).body.phases.G;
+    assert.ok(phases.length > 1, 'the chapter has phases to pick from');
+    const first = phases[0].id; const last = phases[phases.length - 1].id;
+    await h.call('admin', 'POST', '/api/onboarding/admin/custom-tasks', { title: 'Early task', phase: first, scope: { userId: 'li1' } });
+    await h.call('admin', 'POST', '/api/onboarding/admin/custom-tasks', { title: 'No phase', scope: { userId: 'li1' } });
+    const bad = await h.call('admin', 'POST', '/api/onboarding/admin/custom-tasks', { title: 'Wrong', phase: 'C.7', scope: { userId: 'li1' } });
+    assert.strictEqual(bad.status, 400, "another chapter's phase is refused");
+    const t = (await h.call('li1', 'GET', '/api/onboarding/me')).body.track;
+    const by = Object.fromEntries(customOf(t).map(i => [i.title, i.phase]));
+    assert.strictEqual(by['Early task'], first);
+    assert.strictEqual(by['No phase'], last);
+    assert.strictEqual(t.phases.length, phases.length, 'no extra phase was added');
+    assert.ok(t.phases.find(p => p.id === first).items.includes(customOf(t).find(i => i.title === 'Early task').id), 'it is a task in that phase');
   } finally { h.close(); }
 });

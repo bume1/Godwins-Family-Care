@@ -1317,6 +1317,66 @@ test('a stop with no coordinates is COUNTED, not silently missing from the map',
   assert.match(pageCode, /could not be plotted/);
 });
 
+test('an unplotted stop says WHY, and a video visit is never counted as missing coordinates', () => {
+  // The map had one sentence for every empty state ("no coordinates"), so an
+  // admin who HAD set coordinates on a client whose visit was not linked to
+  // them was told to set them again (owner report, 2026-11-09).
+  const plot = myDay.plotStops({
+    stops: [
+      { eid: '1', clientId: 'c1', patientName: 'Placed', coords: { lat: 33.8, lng: -84.4 } },
+      { eid: '2', clientId: null, patientName: 'Unlinked' },
+      { eid: '3', clientId: 'c3', patientName: 'Bare' },
+      { eid: '4', clientId: 'c4', patientName: 'Video', remote: true }
+    ]
+  });
+  assert.strictEqual(plot.points.length, 1);
+  assert.strictEqual(plot.unplaceable, 2, 'the video visit is not an unplaced stop');
+  assert.strictEqual(plot.remote, 1);
+  assert.strictEqual(plot.total, 4);
+  assert.deepStrictEqual(plot.unplaced.map(u => [u.label, u.reason]),
+    [['Unlinked', 'not_linked'], ['Bare', 'no_coordinates']]);
+  const empty = myDay.plotStops({ stops: [] });
+  assert.strictEqual(empty.total, 0);
+  const i = pageCode.indexOf('const DayMap');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const NearbyDue'));
+  assert.match(body, /No visits on this day/, 'an empty day is not reported as missing coordinates');
+  assert.match(body, /calendar could not be read/, 'an unreadable calendar is not reported as missing coordinates');
+  assert.match(pageCode, /<DayMap plot=\{day\.plot\} calendar=\{day\.calendar\} \/>/);
+  assert.match(pageCode, /not linked to a client in this app/);
+});
+
+test('a visit pointing at a duplicate client record says the coordinates are on the other one', () => {
+  const plot = myDay.plotStops({
+    stops: [{ eid: '1', clientId: 'dup', patientName: 'Juanita  Guess' }, { eid: '2', clientId: 'solo', patientName: 'Ray Moss' }],
+    clients: [
+      { id: 'real', name: 'juanita guess', address: { lat: 33.9, lng: -84.5 } },
+      { id: 'dup', name: 'Juanita Guess' },
+      { id: 'solo', name: 'Ray Moss' }
+    ]
+  });
+  assert.deepStrictEqual(plot.unplaced.map(u => u.reason), ['other_record', 'no_coordinates']);
+  assert.match(pageCode, /other_record:/);
+  assert.match(serverCode, /clients: Array\.from\(clientsById\.values\(\)\)/);
+});
+
+test('a one-visit day with coordinates is not reported as missing coordinates', () => {
+  // One stop has no leg, so miles is null. That is not the same fact as a stop
+  // with no coordinates (owner report, 2026-11-09).
+  const myDayOne = myDay.buildMyDay({
+    date: '2026-11-09',
+    appointments: [{ eid: '1', clientId: 'c1', date: '2026-11-09', startTime: '18:00' }],
+    clientsById: new Map([['c1', { id: 'c1', name: 'One', address: { lat: 33.6, lng: -84.3 } }]]),
+    timingsByEid: new Map(), signedEids: new Set(), unsignedEarlier: [], openTasks: 0, blocks: [],
+    homeVisitFields: [], startCoords: null, videoByEid: new Map(), imeExams: []
+  });
+  assert.strictEqual(myDayOne.totals.miles, null);
+  assert.strictEqual(myDayOne.totals.unplaceableStops, 0);
+  const i = pageCode.indexOf('Distances unavailable');
+  const block = pageCode.slice(i - 400, i + 600);
+  assert.match(block, /unplaceableStops > 0\s*\?/, 'the coordinates warning shows only when a stop has none');
+  assert.match(block, /No drive between stops to measure/);
+});
+
 test('the map sends no coordinates to a tile provider, because there is no tile provider', () => {
   // A tile provider would receive the coordinates of every patient's home on
   // every render — a disclosure of where people live, to a third party with no

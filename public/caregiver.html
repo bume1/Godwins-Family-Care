@@ -1018,17 +1018,24 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online, shiftId, initialCli
 // ============================================================================
 // FEED · CLIENTS · MORE
 // ============================================================================
-const FeedTab = ({ items }) => (
+// Announcements from the office sit here beside your concern alerts. The same
+// posts other staff see in My GFC → Announcements, with the same "I've
+// reviewed this" record (owner, 2026-11-10).
+const FeedTab = ({ items, reviewed, onReviewed }) => (
   <div>
     <h2 className="pg">Feed</h2>
-    <p className="sub">Broadcasts and your concern alerts. Read-only.</p>
+    <p className="sub">Announcements from the office and your concern alerts.</p>
     {items.length === 0
       ? <Empty icon="news">Nothing new right now.</Empty>
       : items.map(i => (
         <div className="card" key={`${i.kind}-${i.id}`}>
           <h3>{i.title}</h3>
-          <p style={{ fontSize: 15, color: 'var(--mut)' }}>{i.body}</p>
+          <p style={{ fontSize: 15, color: 'var(--mut)', whiteSpace: 'pre-wrap' }}>{i.body}</p>
+          {i.link && <p style={{ marginTop: 6 }}><a href={i.link} target="_blank" rel="noopener noreferrer">Open the guide</a></p>}
           <p className="mu" style={{ fontSize: 13, marginTop: 6, color: '#9a9388' }}>{fmtDate(i.at)}</p>
+          {i.kind === 'broadcast' && (reviewed[i.id]
+            ? <p className="mu" style={{ fontSize: 13, marginTop: 6 }}>Reviewed</p>
+            : <button className="btn" style={{ marginTop: 8 }} onClick={() => api(`/api/my/announcements/${i.id}/reviewed`, { method: 'POST' }).then(onReviewed).catch(() => {})}>I've Reviewed This</button>)}
         </div>
       ))}
   </div>
@@ -2042,6 +2049,10 @@ const App = () => {
   const [visitLogs, setVisitLogs] = useState([]);
   const [escalations, setEscalations] = useState([]);
   const [feed, setFeed] = useState([]);
+  const [reviewed, setReviewed] = useState({});
+  const loadReviewed = useCallback(() => api('/api/my/announcements')
+    .then(d => setReviewed(Object.fromEntries((d.announcements || []).filter(a => a.reviewedAt).map(a => [a.id, true]))))
+    .catch(() => {}), []);
   // Read so Home can show the caregiver's ACTUAL clock state. Session 7's
   // component owns every clock ACTION; this is the same board, read only.
   const [shifts, setShifts] = useState([]);
@@ -2087,7 +2098,8 @@ const App = () => {
     setEscalations(e.escalations || []);
     setFeed(f.items || []);
     setShifts(s.shifts || []);
-  }, []);
+    loadReviewed();
+  }, [loadReviewed]);
 
   useEffect(() => {
     if (!getToken()) { window.location.replace('/login'); return; }
@@ -2200,7 +2212,7 @@ const App = () => {
         setScreen('visitLog');
       }} />;
   } else if (tab === 'feed') {
-    content = <FeedTab items={feed} />;
+    content = <FeedTab items={feed} reviewed={reviewed} onReviewed={loadReviewed} />;
   } else if (tab === 'clients') {
     content = <ClientsTab clients={clients} detail={clientDetail}
       onOpen={openClient} onClose={() => setClientDetail(null)}

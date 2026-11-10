@@ -31,6 +31,7 @@ const welcomePacketPdf = require('../welcomePacketPdf');
 const DS = require('../staffDocumentSends');
 const signedDocument = require('../onboarding/signedDocument');
 const staffDocs = require('../staffDocuments');
+const announcements = require('../staffAnnouncements');
 
 const FOLDERS = 'staff_portal_folders';
 const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'liaison']);
@@ -361,7 +362,7 @@ module.exports = function createStaffPortalRoutes(deps) {
         signed.push({ id: 'packet', title: 'Caregiver welcome packet', signedAt: packet.signed_at, pdf: 'packet' });
       }
       for (const a of ((await db.get('caregiver_attestations')) || []).filter(x => x && String(x.caregiver_id) === me && x.signed_at)) {
-        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: a.version, signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
+        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: attestations.versionLabel(a.version), signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
       }
     }
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
@@ -402,6 +403,46 @@ module.exports = function createStaffPortalRoutes(deps) {
   });
 
   // ---- shared folders --------------------------------------------------------
+  // ---- announcements (owner, 2026-11-10) ----------------------------------------
+  // Office news and upgrade notes for every staff member, read from the same
+  // `caregiver_broadcasts` rows the caregiver Feed reads, through the same
+  // audience rule (staffAnnouncements.visibleTo). Posting and retiring stay on
+  // POST /api/caregiver/broadcasts, so there is one way to post.
+  const READS = 'staff_announcement_reads';
+  router.get('/api/my/announcements', authenticateToken, requireStaff, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const reads = (await db.get(READS)) || [];
+    return res.json({ announcements: announcements.forViewer(rows, reads, req.user, audienceOf(req.user)) });
+  });
+  // Always the signed-in person's own receipt: there is no user id to pass.
+  router.post('/api/my/announcements/:id/reviewed', authenticateToken, requireStaff, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const row = rows.find(r => r && r.id === req.params.id);
+    if (!row || !announcements.visibleTo(row, audienceOf(req.user), req.user.id)) {
+      return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
+    }
+    const reads = (await db.get(READS)) || [];
+    const had = reads.find(r => r && r.announcement_id === row.id && String(r.user_id) === String(req.user.id));
+    if (had) return res.json({ reviewedAt: had.reviewed_at });
+    const rec = { id: uuidv4(), announcement_id: row.id, user_id: req.user.id, user_name: req.user.name || req.user.email, reviewed_at: nowIso() };
+    reads.push(rec);
+    await db.set(READS, reads);
+    await logActivity(req.user.id, rec.user_name, 'announcement_reviewed', 'broadcast', row.id, {});
+    return res.json({ reviewedAt: rec.reviewed_at });
+  });
+  router.get('/api/my/admin/announcements', authenticateToken, requireAdmin, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const reads = (await db.get(READS)) || [];
+    const people = (await getUsers())
+      .filter(u => audienceOf(u) && u.accountStatus !== 'inactive')
+      .map(u => ({ id: u.id, name: u.name || u.email, type: audienceOf(u) }));
+    return res.json({
+      announcements: announcements.report(rows, reads, people),
+      roles: announcements.STAFF_TYPES.map(t => ({ value: t, label: TYPE_LABELS[t] })),
+      people: people.map(p => ({ id: p.id, name: p.name, typeLabel: TYPE_LABELS[p.type] })).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    });
+  });
+
   router.get('/api/my/folders', authenticateToken, requireStaff, async (req, res) => {
     const mine = (await folders()).filter(f => canSee(f, req.user))
       .map(f => ({ id: f.id, label: f.label, description: f.description || null }));

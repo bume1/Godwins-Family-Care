@@ -346,7 +346,7 @@ function createNotifier(deps) {
         // visit that was not theirs. Found by rendering the POA's copy.
         paragraphs: actingFor
           ? paragraphs.map(p => p.replace(
-              /^Your (caregiver visit|clinician visit|visit|test result)/,
+              /^Your (caregiver visit|clinician visit|visit|test result|care plan)/,
               (m, what) => `${actingFor.name}'s ${what}`))
           : paragraphs,
         fields, callout, calloutLabel,
@@ -516,6 +516,31 @@ function createNotifier(deps) {
       });
     } catch (e) {
       console.error('[PORTAL] result reviewed notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- A care plan is active and ready for the client (owner, 2026-11-09) ---
+  // A plan reaches the portal only once a licensed clinician has signed it. A
+  // coordinator's or LMSW's plan waits on a co-signature first, and nobody told
+  // the client when it cleared, so the plan sat unread and unsigned. Sent when
+  // the plan becomes active: a licensed author's own save, or the co-signature.
+  // Never the plan's content; that is in the portal.
+  async function carePlanReady({ clientId, version, actorId }) {
+    try {
+      return await sendToClientSide({
+        clientId,
+        type: 'care_plan_ready',
+        subject: 'Your care plan is ready to review',
+        headline: 'Your care plan is ready',
+        paragraphs: ['Your care plan is ready to review in your portal. Please read it and add your signature so we can begin.',
+          'If anything in it is unclear, message your care team from the portal.'],
+        actorId,
+        entityId: `${clientId}:careplan:v${version}:ready`,
+        entityType: 'care_plan'
+      });
+    } catch (e) {
+      console.error('[PORTAL] care plan ready notice failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -1350,7 +1375,7 @@ function createNotifier(deps) {
     // clinical visits
     appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder, videoReminder,
     // patient portal (P1)
-    visitSummaryReady, resultReviewed,
+    visitSummaryReady, resultReviewed, carePlanReady,
     // caregiver visits (PHCP)
     caregiverVisitConfirmed, caregiverVisitMoved,
     // messaging
