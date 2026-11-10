@@ -1160,15 +1160,29 @@ const AddTrainingForm = ({ roles, onAdded, onCancel }) => {
 // The office's next step and note for one training (2026-11-10). Module scope,
 // so typing keeps focus.
 const OfficeFields = ({ m, nextSteps, onSaved }) => {
+  const pol = m.policy || {};
   const [f, setF] = useState({ nextStep: m.nextStep || '', note: m.officeNote || '' });
+  const [p, setP] = useState({ document: pol.document || '', sections: pol.sections || '', url: pol.url || '' });
+  // A reload after a save (or "Use the Original") shows what is now stored.
+  useEffect(() => { setP({ document: pol.document || '', sections: pol.sections || '', url: pol.url || '' }); }, [pol.document, pol.sections, pol.url]);
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
-  const save = async () => {
+  const put = async (body) => {
     setBusy(true); setMsg('');
-    try { await call(`/api/onboarding/admin/library/${encodeURIComponent(m.id)}/office`, { method: 'PUT', body: f }); setMsg('Saved.'); await onSaved(); }
+    try { await call(`/api/onboarding/admin/library/${encodeURIComponent(m.id)}/office`, { method: 'PUT', body }); setMsg('Saved.'); await onSaved(); }
     catch (e) { setMsg(e.message); } finally { setBusy(false); }
   };
+  // The policy is sent only when it changed, so saving a note never turns the
+  // catalog's line into a frozen office copy.
+  const policyChanged = p.document !== (pol.document || '') || p.sections !== (pol.sections || '') || p.url !== (pol.url || '');
+  const save = () => put(policyChanged ? Object.assign({}, f, { policy: p }) : f);
   return (
     <div style={{ display: 'grid', gap: 6, maxWidth: 640 }}>
+      <label className="f">Policy it ties to (staff see this)</label>
+      <input value={p.document} maxLength={200} onChange={e => setP(Object.assign({}, p, { document: e.target.value }))} placeholder="Document, e.g. Clinical Policies and Procedures Manual v2.2" />
+      <input value={p.sections} maxLength={200} onChange={e => setP(Object.assign({}, p, { sections: e.target.value }))} placeholder="Sections, e.g. 19.1 to 19.3" />
+      <input value={p.url} onChange={e => setP(Object.assign({}, p, { url: e.target.value }))} placeholder="Link (https://…)" />
+      {m.policyEdited && <div style={{ fontSize: 12, color: 'var(--mut)' }}>Edited by the office.{m.catalogPolicy ? ` The original is ${m.catalogPolicy.document}${m.catalogPolicy.sections ? `, ${m.catalogPolicy.sections}` : ''}.` : ''}{' '}
+        <button className="btn sm ghost" disabled={busy} onClick={() => put({ policy: null })}>Use the Original</button></div>}
       <label className="f">Next step</label>
       <select value={f.nextStep} onChange={e => setF(Object.assign({}, f, { nextStep: e.target.value }))} style={{ maxWidth: 260 }}>
         <option value="">Not set</option>
