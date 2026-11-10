@@ -29,3 +29,11 @@ test('without it, nothing changes for other notices', () => {
   assert.doesNotMatch(html, /<h2/);
   assert.ok(!html.includes('x<br>y'));
 });
+
+test('an announcement message is never cut short (owner, 2026-11-10)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  assert.match(src, /body: String\(body \|\| ''\)\.trim\(\),/);
+  assert.doesNotMatch(src, /BODY_MAX/);
+  const long = 'x'.repeat(9000);
+  assert.strictEqual(A.emailFor({ title: 'T', body: long }, null).body.length, 9000, 'the email carries all of it');
+});
