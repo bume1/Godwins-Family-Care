@@ -4637,6 +4637,21 @@ function renderUnsubscribePageHtml(message, isSuccess) {
 </html>`;
 }
 
+// Tell the Super Admins when someone turns automated email off or back on
+// (owner, 2026-11-10: "I need to know if someone unsubscribes"). Only a real
+// change is announced, and a failed notice never undoes the preference.
+const emailPreferenceNotice = require('./emailPreferenceNotice');
+async function announceEmailPreferenceChange(person, unsubscribed, users) {
+  const at = new Date().toISOString();
+  try {
+    await logActivity(person.id, person.name || person.email, unsubscribed ? 'email_unsubscribed' : 'email_resubscribed', 'user', person.id, {});
+    const ctaUrl = `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`;
+    for (const n of emailPreferenceNotice.noticesFor({ person, unsubscribed, users, at, ctaUrl })) {
+      await queueNotification(n.type, n.userId, n.email, n.name, n.data, n.options);
+    }
+  } catch (e) { console.error('Email preference notice failed:', e.message); }
+}
+
 // Unsubscribe from automated emails (clicked from email link — no login required)
 app.get('/api/unsubscribe', async (req, res) => {
   const { token } = req.query;
@@ -4649,8 +4664,11 @@ app.get('/api/unsubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = true;
+    if (!wasOff) users[idx].emailUnsubscribedAt = new Date().toISOString();
     await db.set('users', users);
+    if (!wasOff) await announceEmailPreferenceChange(users[idx], true, users);
 
     // Generate a resubscribe token (same token works for both directions)
     const resubToken = jwt.sign({ userId: decoded.userId, purpose: 'email_unsubscribe' }, JWT_SECRET, { expiresIn: '365d' });
@@ -4677,8 +4695,10 @@ app.get('/api/resubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = false;
     await db.set('users', users);
+    if (wasOff) await announceEmailPreferenceChange(users[idx], false, users);
 
     res.send(renderUnsubscribePageHtml(
       'You have been resubscribed to automated emails. You will now receive task reminders, milestone updates, and other automated notifications.',
@@ -4832,6 +4852,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       role: u.role,
       accountStatus: u.accountStatus || 'active',
       emailUnsubscribed: u.emailUnsubscribed || false,
+      emailUnsubscribedAt: u.emailUnsubscribed ? (u.emailUnsubscribedAt || null) : null,
       createdAt: u.createdAt,
       // Manager flag
       isManager: u.isManager || false,
@@ -7615,6 +7636,18 @@ async function seedReferralProviders() {
     await db.set('referral_providers', seeded.entries);
     console.log(`[referrals] ${seeded.added.length} outside provider${seeded.added.length === 1 ? '' : 's'} added to the list from past referrals.`);
   }
+}
+
+// SOP 1 as the app tour's material (owner, 2026-11-10). Once per module, never
+// over the office's own choice: see trainingMaterial.seedDefaults.
+async function seedDefaultTrainingMaterial() {
+  const TM = require('./onboarding/trainingMaterial');
+  const out = TM.seedDefaults(await db.get(TM.COLLECTION), new Date().toISOString());
+  if (out.seeded.length) {
+    await db.set(TM.COLLECTION, out.all);
+    console.log(`[Onboarding] Default training material added to ${out.seeded.join(', ')}.`);
+  }
+  return out;
 }
 
 async function seedRequisitionReturnFax() {
@@ -32487,6 +32520,11 @@ app.listen(PORT, () => {
       await seedRequisitionReturnFax();
     } catch (err) {
       console.error('Return-fax seed failed (non-fatal):', err.message);
+    }
+    try {
+      await seedDefaultTrainingMaterial();
+    } catch (err) {
+      console.error('Training material seed failed (non-fatal):', err.message);
     }
     try {
       await seedReferralProviders();
