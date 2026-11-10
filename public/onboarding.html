@@ -177,6 +177,9 @@ const STATUS = {
   EXPIRED: { label: 'Renewal Due', sw: '#C98A1A', icon: 'ti-refresh' },
   NOT_APPLICABLE: { label: 'Not Applicable', sw: '#C9CED1', icon: 'ti-minus' }
 };
+// Who someone is in onboarding, in words: their track and how they're employed.
+const roleLabel = (chapterId, relationship) => `${({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison', H: 'Student or Extern', R1: 'Supervising Physician (Georgia)' })[chapterId] || 'Admin Team / Non-Clinical'}, ${({ PLACEMENT: 'Educational placement, unpaid', '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[relationship] || 'Employed (W-2)'}`;
+
 const ACTION_WORD = { SUBMIT: 'Sends', SIGN: 'Signs', ACKNOWLEDGE: 'Acknowledges', COMPLETE: 'Completes', VERIFY: 'Verifies',
   RECORD: 'Records', PROVISION: 'Sets up', EXECUTE: 'Issues', OBSERVE: 'Observes and signs off', REVIEW: 'Reviews' };
 const done = (s) => s === 'COMPLETE' || s === 'NOT_APPLICABLE';
@@ -988,7 +991,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card-h">
           <div>
             <h1 style={{ fontSize: 30 }}>{t.person.name}</h1>
-            <div style={{ color: 'var(--mut)' }}>{({ A: 'Caregiver', B: 'Registered Nurse', C: 'Clinician', D: 'Clinician', E: 'Clinician', G: 'Community Care Liaison', H: 'Student or Extern', R1: 'Supervising Physician (Georgia)' })[t.chapter.id] || 'Admin Team / Non-Clinical'}, {({ PLACEMENT: 'Educational placement, unpaid', '1099': 'Contracted (1099)', 'W2+1099': 'Hybrid: Employed (W-2) and Contracted for Exams (1099)' })[t.chapter.relationship] || 'Employed (W-2)'}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
+            <div style={{ color: 'var(--mut)' }}>{roleLabel(t.chapter.id, t.chapter.relationship)}{t.person.startDate ? ` · Start date ${fmtDate(t.person.startDate)}` : ''}</div>
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Overall progress</span><b>{pct(t)}%</b></div>
@@ -1166,7 +1169,7 @@ const Overview = ({ onOpen }) => {
             <tbody>{people.map(p => (
               <tr key={p.userId} className="click" onClick={() => onOpen(p.userId)}>
                 <td><b>{p.name}</b>{p.credential ? <div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{p.credential}</div> : null}</td>
-                <td className="hide-sm">Clinician (W-2)</td>
+                <td className="hide-sm">{roleLabel(p.chapter, p.relationship)}</td>
                 <td>{p.currentPhase ? `Phase ${p.currentPhase.number} · ${p.currentPhase.label}` : 'All phases complete'}</td>
                 <td style={{ minWidth: 120 }}>{p.progress}%<div className="bar"><span style={{ width: `${p.progress}%` }} /></div></td>
                 <td>{p.next ? <><span className={`pill ${p.next.waitingOnHer ? 'p-her' : 'p-office'}`}>{p.next.waitingOnHer ? `Waiting on ${String(p.name).split(' ')[0]}` : 'Waiting on Office'}</span><div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 3 }}>{p.next.title}</div></> : '—'}</td>

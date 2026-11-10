@@ -157,3 +157,9 @@ test('the page greys a training out by the server\'s waitingOnSop, and the offic
   assert.match(page, /\{office && <InstructionsEditor id=\{item\.id\}/);
   assert.match(page, /\{office && <InstructionsEditor id=\{m\.id\}/);
 });
+
+test('the pipeline names each person\'s own role, never a blanket "Clinician (W-2)"', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /<td className="hide-sm">\{roleLabel\(p\.chapter, p\.relationship\)\}<\/td>/);
+  assert.doesNotMatch(page, />Clinician \(W-2\)</);
+});
