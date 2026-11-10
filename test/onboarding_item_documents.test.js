@@ -79,6 +79,20 @@ test('the office attaches a document to her item; she signs it from there; the i
   assert.strictEqual(other.document, null, 'another person with the same item is untouched');
 });
 
+test('attaching the offer letter records the office having issued it, then she signs', async (t) => {
+  const h = await mount(t);
+  await h.call('PUT', `/api/onboarding/admin/people/${NP.id}/inputs`, { chapter: 'C' });
+  const s = await h.send(NP.id);
+  await h.call('PUT', `/api/onboarding/admin/people/${NP.id}/items/C.5.01/document`, { documentSendId: s.id });
+  h.as(NP);
+  let item = (await h.call('GET', '/api/onboarding/me')).data.track.items.find(i => i.id === 'C.5.01');
+  assert.ok(item.steps[0].done && !item.steps[0].hers, 'the office step is done');
+  assert.strictEqual(item.next.hers, true, 'now waiting on her');
+  await h.call('POST', `/api/my/document-sends/${s.id}/sign`, { printedName: 'Nia Provider', acknowledged: true, signaturePng: SIG });
+  item = (await h.call('GET', '/api/onboarding/me')).data.track.items.find(i => i.id === 'C.5.01');
+  assert.strictEqual(item.status, 'COMPLETE');
+});
+
 test('attaching refuses a document sent to someone else, and only the office attaches', async (t) => {
   const h = await mount(t);
   await h.call('PUT', `/api/onboarding/admin/people/${NP.id}/inputs`, { chapter: 'C' });

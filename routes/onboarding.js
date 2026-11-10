@@ -958,6 +958,13 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!s) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'ITEM_DOCUMENT_UNKNOWN' });
     if (!s.scope || String(s.scope.userId) !== String(rec.userId)) return res.status(400).json({ error: 'That document was not sent to this person.', code: 'ITEM_DOCUMENT_NOT_THEIRS' });
     st.document = { sendId: s.id, action: s.action, title: s.title };
+    // Attaching it is the office issuing it: any office step before hers
+    // (e.g. "Executive Director issues" the offer letter) is recorded now.
+    const hersAt = item.steps.findIndex(x => x.actor === 'NEW_HIRE');
+    for (let i = 0; i < hersAt; i++) {
+      if ((st.steps || {})[i]) continue;
+      try { Object.assign(st, T.recordStep(item, st, i, officeActorOf(req), { source: 'Document sent in the app', verifiedOn: nowIso().slice(0, 10) }, nowIso())); } catch (_) { break; }
+    }
     await save(rec);
     await event({ userId: rec.userId, type: 'document_attached', itemId: item.id, sendId: s.id, byId: req.user.id, byName: req.user.name });
     return res.json({ ok: true });

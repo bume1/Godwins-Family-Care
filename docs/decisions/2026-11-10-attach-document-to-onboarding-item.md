@@ -7,7 +7,7 @@
   - It goes to **that person only** (owner choice).
   - It is the same send as Documents to Sign (`staff_document_sends`), linked to her item as `rec.items[id].document`.
 - **She signs it:** she signs from the item, or from My Documents.
-  - Signing completes her first step on the item, and the signed copy (the original plus a signature page) is filed to her Documents and attached to the item.
+  - Attaching it records any office step before hers (e.g. "Executive Director issues" the offer letter). Signing completes her first step on the item, and the signed copy (the original plus a signature page) is filed to her Documents and attached to the item.
   - Mark Done is refused on that step (`DOCUMENT_SIGN_ROUTE`).
 - **Policy items** that complete through their own acknowledgment list (C.5.04 and similar) still do. The signed document is filed alongside.
 - **Fixed on the way:** a signed copy on an item now opens. Item files that point at her Documents row are read from that row's Drive file, which fixes custom tasks too.
