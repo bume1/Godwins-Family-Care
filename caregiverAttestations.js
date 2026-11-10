@@ -23,12 +23,10 @@
 // one. A caregiver whose signed version is no longer current is asked to sign
 // again; that is a NEW signature on a changed document, not an edit.
 //
-// ⚠️ THE WORDING IS A DRAFT PENDING COUNSEL AND GEORGIA LICENSURE REVIEW —
-// the same status the client consent set carries. In particular the background
-// check authorization is written as a STANDALONE disclosure because the FCRA
-// requires the disclosure to appear in a document consisting solely of it;
-// folding it into the welcome packet's own signature would defeat that. Nobody
-// should treat these as approved text until that review lands.
+// THE WORDING IS APPROVED FOR USE (owner, 2026-11-10). The background check
+// authorization stays a STANDALONE disclosure because the FCRA requires the
+// disclosure to appear in a document consisting solely of it; folding it into
+// the welcome packet's own signature would defeat that.
 //
 // Pure: no storage, no request context, no I/O.
 // ============================================================================
@@ -53,9 +51,13 @@ const choice = (key, label, options, required = true) => ({
   options: options.map(([value, optLabel]) => ({ value, label: optLabel }))
 });
 
-// The version a NEW signature is stamped with. One id for this whole drafting
-// pass keeps the audit trail legible: "signed against the 2026-09 draft".
+// The version a NEW signature is stamped with. The stored id keeps the word
+// "draft" from its first pass and MUST NOT be renamed: every signature on file
+// is matched against it, and a new id would ask every caregiver to sign again.
+// What people SEE is `versionLabel`, which never shows "draft" (owner,
+// 2026-11-10: no draft wording on these forms anywhere).
 const CURRENT_VERSION = '2026-09-draft-1';
+const versionLabel = (v) => (v ? String(v).replace(/-?draft-?/ig, '-').replace(/--+/g, '-').replace(/^-|-$/g, '') : v);
 
 // ---------------------------------------------------------------------------
 // 1. Background check authorization
@@ -367,6 +369,7 @@ function isSupersededSignature(record) {
 }
 
 module.exports = {
+  versionLabel,
   CURRENT_VERSION,
   ATTESTATIONS,
   ARCHIVE,

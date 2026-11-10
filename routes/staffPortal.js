@@ -359,7 +359,7 @@ module.exports = function createStaffPortalRoutes(deps) {
         signed.push({ id: 'packet', title: 'Caregiver welcome packet', signedAt: packet.signed_at, pdf: 'packet' });
       }
       for (const a of ((await db.get('caregiver_attestations')) || []).filter(x => x && String(x.caregiver_id) === me && x.signed_at)) {
-        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: a.version, signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
+        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: attestations.versionLabel(a.version), signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
       }
     }
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));

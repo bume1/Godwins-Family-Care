@@ -666,7 +666,7 @@ function ManageAnnouncements({ onChanged }) {
   return (
     <div>
       {err && <div className="mg-err">{err}</div>}
-      <p className="mg-note">An announcement reaches everyone you choose, on their My GFC Home and, for caregivers, their Feed. Write it for the whole team: no client names or health details.</p>
+      <p className="mg-note">An announcement reaches everyone you choose, on their My GFC Home and, for caregivers, their Feed. Each person also gets it by email, word for word. Write it for the whole team: no client names or health details.</p>
       <label>Title</label>
       <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="App update: what's new this week" />
       <label>Message</label>

@@ -23,6 +23,8 @@
   - `POST /api/my/announcements/:id/reviewed` records the signed-in person's own receipt only.
   - `GET /api/my/admin/announcements` is the admin team's report.
 
+- **Email, word for word (owner, same day).** Posting emails everyone it reaches, the poster aside, through `queueNotification` (`staff_announcement`), so unsubscribes and inactive accounts are honoured. The subject is the title and the message is exactly as written, plus the guide link. The button opens the caregiver's Feed or My GFC → Announcements (`appLinks.announcementsFor`).
+
 ## Must not undo
 - **No audience means caregivers.** Widening the default would show old caregiver-only posts to everyone.
 - **A post is never deleted.** Taking one down sets `active: false` and keeps who did it and when.
@@ -43,5 +45,4 @@
 - The caregiver Feed's new button was compiled, not rendered.
 
 ## Open for the owner
-- No email goes out when something is posted. Say if staff should get a PHI-free "new announcement in My GFC" email.
 - First post: the updated staff guide, once it is uploaded.

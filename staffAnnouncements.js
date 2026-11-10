@@ -122,7 +122,19 @@ const report = (rows, reads, people) => (rows || [])
   })
   .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
 
+/**
+ * The email for one recipient (owner, 2026-11-10: "email announcement text
+ * verbatim"). The title is the subject and the message goes out exactly as
+ * written; only a link line and the button are added.
+ */
+const emailFor = (row, ctaUrl) => ({
+  subject: row.title,
+  body: [row.body || '', row.link ? `Guide: ${row.link}` : ''].filter(Boolean).join('\n\n') || row.title,
+  ctaUrl,
+  ctaLabel: 'Open in the app'
+});
+
 module.exports = {
   ALL_STAFF, STAFF_TYPES, LEGACY_AUDIENCE, TITLE_MAX, BODY_MAX,
-  audienceOf, userIdsOf, visibleTo, parseAudience, parseLink, forViewer, report
+  audienceOf, userIdsOf, visibleTo, emailFor, parseAudience, parseLink, forViewer, report
 };

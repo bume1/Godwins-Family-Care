@@ -19,6 +19,7 @@ const USERS = [ADMIN, COORD, RN, CG, CLIENT, FAMILY];
 
 async function mount(t) {
   const store = { welcome_packets: [{ caregiver_id: 'c1', status: 'submitted' }] };
+  const queued = [];
   const db = { get: async (k) => (k in store ? JSON.parse(JSON.stringify(store[k])) : null), set: async (k, v) => { store[k] = JSON.parse(JSON.stringify(v)); } };
   let current = ADMIN;
   const auth = (req, _res, next) => { req.user = current; next(); };
@@ -31,7 +32,8 @@ async function mount(t) {
     getUsers: async () => USERS, enrollmentSummary: () => ({}), authenticateToken: auth
   }));
   app.use(require('../routes/caregiver')({
-    db, config, logActivity: async () => {}, queueNotification: async () => {}, getUsers: async () => USERS,
+    db, config, logActivity: async () => {}, getUsers: async () => USERS,
+    queueNotification: async (type, userId, email, name, data, opts) => { queued.push({ type, userId, email, data, opts }); return { id: 'q' }; },
     invalidateUsersCache: () => {}, authenticateToken: auth, uuidv4, drive: {}, detectFileType: () => null
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -42,7 +44,7 @@ async function mount(t) {
     let data = null; try { data = await res.json(); } catch (_) { /* empty */ }
     return { status: res.status, data };
   };
-  return { store, call, as: (u) => { current = u; } };
+  return { store, queued, call, as: (u) => { current = u; } };
 }
 
 test('a post made before audiences stays caregivers-only', () => {
@@ -138,4 +140,37 @@ test('a post can name individual team members, alone or beside roles', async (t)
   assert.strictEqual((await h.call('POST', '/api/caregiver/broadcasts', { title: 'x', audience: [] })).status, 400, 'an empty choice is refused');
   const rep = (await h.call('GET', '/api/my/admin/announcements')).data.announcements.find(a => a.title === 'Just Rae');
   assert.deepStrictEqual(rep.notReviewed, ['Rae Nurse'], 'the report counts only who it reaches');
+});
+
+test('each person it reaches gets it by email, word for word, with a button to the right screen', async (t) => {
+  const people = [ADMIN, COORD, RN, CG, CLIENT, FAMILY].map(u => Object.assign({ email: `${u.id}@gfc.test` }, u));
+  USERS.splice(0, USERS.length, ...people);
+  const h = await mount(t);
+  h.as(people[1]); // the coordinator posts
+  const text = 'Line one.\n\nLine two, exactly as typed.';
+  const r = await h.call('POST', '/api/caregiver/broadcasts', { title: 'App update', body: text, audience: 'all_staff', link: 'https://docs.google.com/x' });
+  assert.strictEqual(r.status, 200);
+  const to = h.queued.map(q => q.userId).sort();
+  assert.deepStrictEqual(to, ['a1', 'c1', 'r1'], 'every staff reader but the poster; never a client or family');
+  for (const q of h.queued) {
+    assert.strictEqual(q.type, 'staff_announcement');
+    assert.strictEqual(q.data.subject, 'App update');
+    assert.ok(q.data.body.startsWith(text), 'the message is sent verbatim');
+    assert.match(q.data.body, /https:\/\/docs\.google\.com\/x/);
+  }
+  assert.strictEqual(h.queued.find(q => q.userId === 'c1').data.ctaUrl, '/caregiver#feed');
+  assert.strictEqual(h.queued.find(q => q.userId === 'r1').data.ctaUrl, '/my#announcements');
+  assert.strictEqual(r.data.emailed, 3);
+  h.queued.length = 0;
+  await h.call('POST', '/api/caregiver/broadcasts', { title: 'Nurses', body: 'x', audience: ['rn'] });
+  assert.deepStrictEqual(h.queued.map(q => q.userId), ['r1'], 'a scoped post emails only its readers');
+});
+
+test('no "draft" shows on a signed form', () => {
+  const a = require('../caregiverAttestations');
+  assert.doesNotMatch(String(a.versionLabel(a.CURRENT_VERSION)), /draft/i);
+  assert.strictEqual(a.CURRENT_VERSION, '2026-09-draft-1', 'the stored id is unchanged, so no one is asked to sign again');
+  const fs = require('fs'); const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'caregiverAttestations.js'), 'utf8');
+  assert.doesNotMatch(src, /DRAFT PENDING COUNSEL/);
 });

@@ -935,7 +935,22 @@ module.exports = function createCaregiverRoutes(deps) {
       rows.push(row);
       await db.set('caregiver_broadcasts', rows);
       await logActivity(req.user.id, row.posted_by_name, 'caregiver_broadcast_posted', 'broadcast', row.id, { title: row.title });
-      res.json({ broadcast: row });
+      // Everyone it reaches gets it by email too, word for word (owner,
+      // 2026-11-10). Through the queue, so an unsubscribe or an inactive
+      // account is honoured. A failed send never undoes the post.
+      let emailed = 0;
+      const recipients = (await getUsers()).filter(u => u && u.email && u.accountStatus !== 'inactive'
+        && String(u.id) !== String(req.user.id)
+        && announcements.visibleTo(row, accountTypes.accountTypeOf(u), u.id));
+      for (const u of recipients) {
+        try {
+          const q = await queueNotification('staff_announcement', u.id, u.email, u.name || u.email,
+            announcements.emailFor(row, links.announcementsFor(u)),
+            { relatedEntityId: row.id, relatedEntityType: 'announcement', createdBy: req.user.id });
+          if (q && !q.skipped) emailed++;
+        } catch (e) { console.error('Announcement email failed:', e.message); }
+      }
+      res.json({ broadcast: row, emailed });
     } catch (error) {
       console.error('Broadcast error:', error);
       res.status(500).json({ error: 'Server error' });
