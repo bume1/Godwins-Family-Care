@@ -62,6 +62,7 @@ const attestations = require('../caregiverAttestations');
 const CC = require('../onboarding/caregiverCourses');
 const { MODULES, findModule: findCatalogModule } = require('../onboarding/modules');
 const LT = require('../onboarding/libraryTrainings');
+const LC = require('../onboarding/libraryCatalog');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
 const { driveViewUrl } = require('../onboarding/sources');
@@ -265,6 +266,9 @@ module.exports = function createOnboardingRoutes(deps) {
     track.modules.forEach(x => {
       const mat = mm.byModule[x.id];
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
+      // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
+      const mod = findModule(x.id);
+      x.policy = (mod && mod.policy) || LC.policyFor(x.id);
       if (!mat.ready && !x.complete) x.available = false;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
@@ -1021,6 +1025,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const added = LT.live(await libraryRows()).map(LT.toModule);
     const pool = MODULES.concat(added);
     const mm = await materialMap(pool.map(x => x.id));
+    const mats = await materials();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
     return res.json({
       settings: await settings(),
@@ -1034,8 +1039,20 @@ module.exports = function createOnboardingRoutes(deps) {
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
         plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,
-        sopRefs: x.sopRefs, material: mm.byModule[x.id]
+        sopRefs: x.sopRefs, material: mm.byModule[x.id],
+        // The tracker's fields (2026-11-10). Status is the material above, never typed.
+        group: (LC.entryFor(x.id) || {}).group || 'Added by GFC',
+        policy: x.policy || LC.policyFor(x.id),
+        // The office's own choice wins. Otherwise the catalog's, except that an
+        // "attach" once something is attached reads as covered.
+        nextStep: ((mats[x.id] || {}).office || {}).nextStep
+          || (((LC.entryFor(x.id) || {}).next === 'attach' && (mm.byModule[x.id] || {}).ready) ? 'done' : null)
+          || (LC.entryFor(x.id) || {}).next || (x.addedByOffice ? 'write' : null),
+        officeNote: ((mats[x.id] || {}).office || {}).note != null ? mats[x.id].office.note : ((LC.entryFor(x.id) || {}).note || ''),
+        officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null
       })),
+      groups: LC.GROUPS.concat(['Added by GFC']), nextSteps: LC.NEXT,
+      referenceRows: LC.referenceRows(),
       sopDocument: { ok: !!mm.sops.ok, version: mm.sops.version || null, reason: mm.sops.ok ? null : (mm.sops.reason || null), url: driveViewUrl('CLINICAL_SOPS_SET1') }
     });
   });
@@ -1117,6 +1134,11 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true, material: TM.materialFor(m, all[m.id], sops.ids) });
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
+  // The office's next step and note for a training (2026-11-10).
+  router.put('/api/onboarding/admin/library/:moduleId/office', authenticateToken, requireOffice, async (req, res) => {
+    const m = await moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.setOffice(e, req.body, officeActor(req), nowIso()), { action: 'office_fields_set' });
+  });
   router.get('/api/onboarding/admin/library/:moduleId/material', authenticateToken, requireOffice, async (req, res) => {
     const m = await moduleOr404(req, res); if (!m) return;
     const sops = await sopState();

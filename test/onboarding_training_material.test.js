@@ -113,10 +113,10 @@ test('the SOP parser returns each procedure up to its check questions, never the
   assert.deepStrictEqual(s['SOP-EXM-01'].lines, ['Purpose. Examine.'], 'a planned SOP is not read as written');
 });
 
-test('today\'s catalog against today\'s Drive: 13 modules open, the rest greyed for staff', () => {
+test('today\'s catalog against today\'s Drive: 12 modules open on a written SOP, the rest greyed for staff', () => {
   const ids = new Set(WRITTEN);
   const ready = MODULES.filter(m => TM.materialFor(m, null, ids).ready);
-  assert.strictEqual(ready.length, 13);
+  assert.strictEqual(ready.length, 12, 'TRN-101 (SOP-EXM-01) was retired 2026-11-10');
   assert.strictEqual(MODULES.filter(m => TM.materialFor(m, null, ids).status === 'SOP_NOT_WRITTEN').length, 10);
 });
 

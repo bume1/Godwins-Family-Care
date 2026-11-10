@@ -46,9 +46,10 @@ async function mount(t) {
 
 test('a caregiver gets the six general modules in their training phase, and no clinical curriculum', () => {
   const t = T.buildTrack({ inputs: { chapter: 'A' }, record: { userId: 'c1' }, accountType: 'caregiver' });
-  assert.deepStrictEqual(t.modules.map(m => m.id).sort(), [...LT.SHARED_MODULE_IDS].sort());
+  const expected = [...LT.SHARED_MODULE_IDS, 'TRN-501', 'TRN-502', 'TRN-503'].sort();
+  assert.deepStrictEqual(t.modules.map(m => m.id).sort(), expected, 'the six general modules plus the three caregiver app videos');
   t.modules.forEach(m => assert.strictEqual(m.phase, 'A.7', m.id));
-  assert.deepStrictEqual(t.phases.find(p => p.id === 'A.7').requiredModules.sort(), [...LT.SHARED_MODULE_IDS].sort(), 'they count toward the phase');
+  assert.deepStrictEqual(t.phases.find(p => p.id === 'A.7').requiredModules.sort(), expected, 'they count toward the phase');
 });
 
 test('a clinician already carries the general modules once, not twice', () => {

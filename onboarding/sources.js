@@ -85,6 +85,16 @@ const SOURCES = Object.freeze({
     folder: 'Liaison',
     transcribedFromVersion: '2.5'
   }),
+  // Training material sources (owner, 2026-11-10, Training Material Tracker).
+  TEAM_ROLES: Object.freeze({
+    key: 'TEAM_ROLES',
+    title: 'Team Roles and Responsibilities',
+    docNumber: 'GFC-ROLES',
+    driveFileId: '1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc',
+    mimeType: 'application/pdf',
+    folder: 'Onboarding Library / 00 All Employees',
+    transcribedFromVersion: '2.0'
+  }),
   ADMIN_MANUAL: Object.freeze({
     key: 'ADMIN_MANUAL',
     title: 'Administrative and Business Operations Policies and Procedures',

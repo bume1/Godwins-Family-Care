@@ -190,7 +190,7 @@ test('the office opens a service line only with every condition and a scope, and
   h.as(OFFICE);
   const early = await h.call('POST', `/api/onboarding/admin/people/${NP.id}/determinations/IME`, {});
   assert.strictEqual(early.data.code, 'DETERMINATION_NOT_READY');
-  for (const id of ['TRN-101', 'TRN-102', 'TRN-103', 'TRN-104', 'TRN-105']) {
+  for (const id of ['TRN-102', 'TRN-103', 'TRN-104', 'TRN-105']) {
     await h.call('POST', `/api/onboarding/admin/people/${NP.id}/modules/${id}/complete`, {});
   }
   const det = C.DETERMINATIONS.find(d => d.id === 'IME');
