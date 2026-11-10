@@ -696,7 +696,7 @@ const Readiness = ({ track, base, office, onChanged }) => {
 };
 
 // ---- Training (both views) --------------------------------------------------
-const FORMAT = { VIDEO: 'Video', READ: 'Read', LIVE: 'Live Session', EXTERNAL: 'Outside Training', OBSERVED: 'Observed', SHADOW: 'Shadowing', IN_APP: 'In the App', 'VIDEO + OBSERVED': 'Video and Observed' };
+const FORMAT = { LIBRARY: 'GFC Training', VIDEO: 'Video', READ: 'Read', LIVE: 'Live Session', EXTERNAL: 'Outside Training', OBSERVED: 'Observed', SHADOW: 'Shadowing', IN_APP: 'In the App', 'VIDEO + OBSERVED': 'Video and Observed' };
 const HOST = { EXECUTIVE_DIRECTOR: 'Executive Director', CLINICAL_DIRECTOR: 'Clinical Director', CLINICAL_OPS_COORDINATOR: 'Clinical Ops Coordinator', SELF_PACED: 'Self-paced', SYSTEM: 'Automatic' };
 
 const ModuleCard = ({ m, checks, base, office, onChanged }) => {
@@ -728,6 +728,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
+      {m.description && <div style={{ fontSize: 14, marginTop: 4 }}>{m.description}</div>}
       {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}</span></div>}
       {ready && <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => setOpenMat(!openMat)}>{openMat ? 'Hide Training' : 'Open Training'}</button>}
       {openMat && <MaterialView moduleId={m.id} base={base} />}
@@ -1050,11 +1051,55 @@ const Overview = ({ onOpen }) => {
   );
 };
 
+// ---- the whole team's library (owner, 2026-11-10) -------------------------------
+// A training the office adds is required for everyone in the roles chosen,
+// in their onboarding's training phase. Module scope, so typing keeps focus.
+const AddTrainingForm = ({ roles, onAdded, onCancel }) => {
+  const [f, setF] = useState({ title: '', description: '', types: [], signoff: 'ATTEST', minutes: '' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
+  const toggle = (v) => set('types', f.types.includes(v) ? f.types.filter(x => x !== v) : f.types.concat([v]));
+  const save = async () => {
+    setBusy(true); setErr('');
+    try { await call('/api/onboarding/admin/library/trainings', { method: 'POST', body: f }); await onAdded(); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="line-card" style={{ marginBottom: 12 }}>
+      <label className="f">Training name</label>
+      <input value={f.title} maxLength={200} onChange={e => set('title', e.target.value)} placeholder="e.g. Dementia care basics" />
+      <label className="f">What it covers (optional)</label>
+      <textarea rows={2} value={f.description} onChange={e => set('description', e.target.value)} />
+      <label className="f">Who it is for</label>
+      <div>{(roles || []).map(r => (
+        <label key={r.value} style={{ display: 'inline-flex', gap: 6, fontSize: 14, marginRight: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.types.includes(r.value)} onChange={() => toggle(r.value)} />{r.label}</label>
+      ))}</div>
+      <label className="f">Who marks it complete</label>
+      <select value={f.signoff} onChange={e => set('signoff', e.target.value)} style={{ maxWidth: 360 }}>
+        <option value="ATTEST">The team member, once they finish it</option>
+        <option value="OBSERVED">The office, after watching or checking it</option>
+      </select>
+      <label className="f">About how many minutes (optional)</label>
+      <input value={f.minutes} onChange={e => set('minutes', e.target.value)} style={{ maxWidth: 120 }} />
+      <div className="note" style={{ marginTop: 8 }}>It becomes required in the onboarding of everyone in those roles. Add what it teaches from with Manage Material once it is saved; until then it shows greyed out.</div>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button className="btn sm" disabled={busy || !f.title.trim() || !f.types.length} onClick={save}>{busy ? 'Adding…' : 'Add Training'}</button>
+        <button className="btn sm ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
 // ---- OFFICE: training library -------------------------------------------------
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
-  const [openMat, setOpenMat] = useState(null);
+  const [openMat, setOpenMat] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState('');
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/library')); } catch (e) { setErr(e.message); } }, []);
+  const removeTraining = async (m) => {
+    if (!window.confirm(`Remove "${m.title}" from the library? It leaves everyone's onboarding; anything already completed stays on record.`)) return;
+    try { await call(`/api/onboarding/admin/library/trainings/${encodeURIComponent(m.id)}`, { method: 'DELETE' }); await load(); } catch (e) { setErr(e.message); }
+  };
   useEffect(() => { load(); }, [load]);
   const review = async (m, confirm) => {
     setErr(''); setOk('');
@@ -1063,7 +1108,8 @@ const Library = () => {
   };
   if (!d) return err ? <div className="err">{err}</div> : <div className="note">Loading…</div>;
   const order = { FLAGGED: 0, PENDING: 1, CHANGES_UNKNOWN: 2, CLEARED_NO_OVERLAP: 3, CURRENT: 4 };
-  const mods = d.modules.slice().sort((a, b) => (order[a.flag.status] ?? 9) - (order[b.flag.status] ?? 9));
+  const forThis = (m) => !forRole || m.audience === 'Everyone' || (m.types ? m.types.includes(forRole) : ['provider', 'rn', 'lcsw', 'lmsw'].includes(forRole));
+  const mods = d.modules.filter(forThis).sort((a, b) => (order[a.flag.status] ?? 9) - (order[b.flag.status] ?? 9));
   return (
     <div className="card">
       <div className="card-h"><h2>Training Library</h2><span>Clinical manual {d.manual.version ? `v${d.manual.version}` : '(could not be read)'}</span></div>
@@ -1082,10 +1128,20 @@ const Library = () => {
           {!d.sopDocument.ok && <div className="err">The SOP document could not be read from Drive ({d.sopDocument.reason}). Modules that teach an SOP stay open to staff meanwhile.</div>}
         </div>;
       })()}
+      <div className="note">The library serves the whole team. Clinical modules go to clinicians; modules marked Everyone go to every role; trainings you add go to the roles you choose. Each one shows in that person's onboarding under Training.</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '6px 0 10px' }}>
+        <select value={forRole} onChange={e => setForRole(e.target.value)} style={{ maxWidth: 260 }}>
+          <option value="">Every role</option>
+          {(d.roles || []).map(r => <option key={r.value} value={r.value}>Show what {r.label} gets</option>)}
+        </select>
+        {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Training</button>}
+      </div>
+      {adding && <AddTrainingForm roles={d.roles} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
       <table><thead><tr><th>Module</th><th>Material</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
         {mods.map(m => (<React.Fragment key={m.id}>
           <tr>
-            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.id} · Phase {m.phaseNumber} · {m.phaseLabel}</div></td>
+            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.addedByOffice ? `Added by GFC · For: ${m.audience}` : `${m.id} · Phase ${m.phaseNumber} · ${m.phaseLabel} · For: ${m.audience}`}</div>
+              {m.description && <div style={{ fontSize: 13 }}>{m.description}</div>}</td>
             <td style={{ minWidth: 150 }}>{m.material && <span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span>}
               {m.material && m.material.status === 'SOP_NOT_WRITTEN' && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.plannedSop}</div>}
               {m.material && m.material.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.sops.join(', ')}</div>}
@@ -1095,11 +1151,12 @@ const Library = () => {
               : m.flag.status === 'CHANGES_UNKNOWN' ? <span className="pill p-EXPIRED">Check Needed</span>
               : <span className="pill p-COMPLETE">Current</span>}
               {m.plannedSop && <div style={{ fontSize: 12, color: 'var(--mut)' }}>SOP still to write</div>}</td>
-            <td style={{ minWidth: 180 }}>{m.manualRefs.length ? m.manualRefs.join(', ')
+            <td style={{ minWidth: 180 }}>{m.addedByOffice ? <span style={{ color: 'var(--mut)' }}>Not from the manual</span> : m.manualRefs.length ? m.manualRefs.join(', ')
               : <input value={refs[m.id] != null ? refs[m.id] : (m.proposedManualRefs || []).join(', ')} onChange={e => setRefs(Object.assign({}, refs, { [m.id]: e.target.value }))} placeholder="e.g. 18.1" />}</td>
             <td style={{ whiteSpace: 'nowrap' }}>
               {m.flag.status === 'FLAGGED' && <button className="btn sm" onClick={() => review(m, false)}>Mark Reviewed</button>}
               {m.flag.status === 'PENDING' && <button className="btn sm" onClick={() => review(m, true)}>Confirm Sections</button>}
+              {m.addedByOffice && <button className="btn sm ghost" onClick={() => removeTraining(m)}>Remove</button>}
             </td>
           </tr>
           {openMat === m.id && <tr><td colSpan={5}><MaterialEditor m={m} onChanged={load} />
