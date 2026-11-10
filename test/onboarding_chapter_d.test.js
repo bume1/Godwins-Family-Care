@@ -71,7 +71,7 @@ test('D.2: every contractor module is non-clinical — signed off as attestation
     assert.ok(['ATTEST', 'CERTIFICATE', 'NONE'].includes(m.signoff), `${t.id} signs off as ${m.signoff}`);
     (m.unlocksAfter || []).forEach(u => assert.ok(D.TRAINING.some(x => x.id === u), `${t.id} waits on ${u}, which a contractor never gets`));
   });
-  assert.deepStrictEqual(D.TRAINING.map(x => x.id).sort(), ['TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-008', 'TRN-101', 'TRN-103', 'TRN-205']);
+  assert.deepStrictEqual(D.TRAINING.map(x => x.id).sort(), ['TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-008', 'TRN-103', 'TRN-205']);
 });
 
 test('a D readiness determination opens on the C.8 conditions with no training recorded', () => {

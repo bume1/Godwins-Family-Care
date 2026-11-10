@@ -23,7 +23,7 @@
 
 'use strict';
 
-const { findModule, HOSTS } = require('./modules');
+const { findModule, HOSTS, MODULES } = require('./modules');
 
 const COLLECTION = 'onboarding_library_trainings';
 
@@ -77,6 +77,7 @@ function toModule(row) {
     dueDay: null, everyDays: null, untilDay: null,
     version: String(row.version || '1'),
     libraryRef: null,
+    policy: row.policyText ? Object.freeze({ document: row.policyText, sections: '', url: row.policyUrl || null }) : null,
     addedByOffice: true
   });
 }
@@ -104,6 +105,12 @@ function extrasFor({ chapterId, accountType, rows, alreadyIds }) {
   for (const id of SHARED_MODULE_IDS) {
     if (!have.has(id)) { out.push({ module: findModule(id), phase, shared: true }); have.add(id); }
   }
+  // Catalog modules scoped to account types (TRN-009, TRN-501–503).
+  for (const m of MODULES) {
+    if (!m.audience || !accountType || !m.audience.includes(accountType) || have.has(m.id)) continue;
+    out.push({ module: m, phase, shared: false });
+    have.add(m.id);
+  }
   for (const row of live(rows)) {
     if (!accountType || !(row.types || []).includes(accountType) || have.has(String(row.id))) continue;
     out.push({ module: toModule(row), phase, shared: false });
@@ -128,8 +135,16 @@ function validate(body) {
   if (minutes != null && (!Number.isFinite(minutes) || minutes < 0 || minutes > 2400)) {
     return { ok: false, code: 'TRAINING_MINUTES_INVALID', error: 'Minutes must be a number from 0 to 2400.' };
   }
+  // What it ties to (2026-11-10): a line of words and an optional https link.
+  const policyText = String(b.policyText || '').trim().slice(0, 200) || null;
+  let policyUrl = String(b.policyUrl || '').trim() || null;
+  if (policyUrl) {
+    let u = null; try { u = new URL(policyUrl); } catch (e) { u = null; }
+    if (!u || u.protocol !== 'https:') return { ok: false, code: 'TRAINING_POLICY_URL_INVALID', error: 'The policy link must start with https://.' };
+    policyUrl = u.toString();
+  }
   return { ok: true, row: {
-    title, types, signoff, minutes,
+    title, types, signoff, minutes, policyText, policyUrl,
     description: String(b.description || '').trim().slice(0, 2000) || null
   } };
 }
@@ -137,6 +152,7 @@ function validate(body) {
 /** Who a library module is for, in words, for the office's library list. */
 function audienceLabel(m) {
   if (m.addedByOffice) return m.types.map(t => TYPE_LABELS[t] || t).join(', ');
+  if (m.audience) return m.audience.map(t => TYPE_LABELS[t] || t).join(', ');
   if (SHARED_MODULE_IDS.includes(m.id)) return 'Everyone';
   return 'Clinicians';
 }

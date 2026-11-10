@@ -59,6 +59,10 @@
     .p-NOT_APPLICABLE{background:#EEF0F1;color:var(--grey)}
     .p-her{background:var(--navy);color:#fff}
     .p-office{background:#FFF6E2;color:#7A5A12;border:1px solid var(--gold-light)}
+    .lib-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:8px 0 10px}
+    .lib-tile{border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:6px;padding:10px 12px;background:#fff}
+    .lib-tile b{display:block;font-size:24px;color:var(--navy)} .lib-tile span{font-size:12px;color:var(--mut)}
+    @media (max-width:720px){.lib thead{display:none}.lib tr{display:block;border-bottom:1px solid var(--line);padding:6px 0}.lib td{display:block;border:none!important;padding:3px 6px}}
     .chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:11.5px;color:var(--mut);background:var(--cream)}
     .chip.legal{border-color:#B9CED6;color:var(--navy);background:#EEF4F6}
     .bar{height:8px;background:#EFE8DA;border-radius:6px;overflow:hidden}
@@ -745,6 +749,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
           <span className="pill p-NOT_STARTED">Coming Soon</span>
         </div>
         <div style={{ fontSize: 13, color: 'var(--mut)' }}>The training material for this module has not been added yet.</div>
+        {m.policy && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>Ties to: {m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>}
       </div>
     );
   }
@@ -761,6 +766,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
       </div>
       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
       {m.description && <div style={{ fontSize: 14, marginTop: 4 }}>{m.description}</div>}
+      {m.policy && <div style={{ fontSize: 13, marginTop: 4 }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>}
       {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}</span></div>}
       {ready && <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => setOpenMat(!openMat)}>{openMat ? 'Hide Training' : 'Open Training'}</button>}
       {openMat && <MaterialView moduleId={m.id} base={base} />}
@@ -1126,6 +1132,9 @@ const AddTrainingForm = ({ roles, onAdded, onCancel }) => {
       <input value={f.title} maxLength={200} onChange={e => set('title', e.target.value)} placeholder="e.g. Dementia care basics" />
       <label className="f">What it covers (optional)</label>
       <textarea rows={2} value={f.description} onChange={e => set('description', e.target.value)} />
+      <label className="f">What policy it ties to (optional)</label>
+      <input value={f.policyText || ''} maxLength={200} onChange={e => set('policyText', e.target.value)} placeholder="e.g. Private Home Care P&P 17.3 orientation" />
+      <input value={f.policyUrl || ''} onChange={e => set('policyUrl', e.target.value)} placeholder="Link to the policy (https://…)" style={{ marginTop: 6 }} />
       <label className="f">Who it is for</label>
       <div>{(roles || []).map(r => (
         <label key={r.value} style={{ display: 'inline-flex', gap: 6, fontSize: 14, marginRight: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.types.includes(r.value)} onChange={() => toggle(r.value)} />{r.label}</label>
@@ -1148,9 +1157,45 @@ const AddTrainingForm = ({ roles, onAdded, onCancel }) => {
 };
 
 // ---- OFFICE: training library -------------------------------------------------
+// The office's next step and note for one training (2026-11-10). Module scope,
+// so typing keeps focus.
+const OfficeFields = ({ m, nextSteps, onSaved }) => {
+  const [f, setF] = useState({ nextStep: m.nextStep || '', note: m.officeNote || '' });
+  const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try { await call(`/api/onboarding/admin/library/${encodeURIComponent(m.id)}/office`, { method: 'PUT', body: f }); setMsg('Saved.'); await onSaved(); }
+    catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ display: 'grid', gap: 6, maxWidth: 640 }}>
+      <label className="f">Next step</label>
+      <select value={f.nextStep} onChange={e => setF(Object.assign({}, f, { nextStep: e.target.value }))} style={{ maxWidth: 260 }}>
+        <option value="">Not set</option>
+        {Object.entries(nextSteps || {}).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+      <label className="f">Office note (staff never see this)</label>
+      <textarea rows={2} value={f.note} onChange={e => setF(Object.assign({}, f, { note: e.target.value }))} />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="btn sm" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+        {msg && <span style={{ fontSize: 13, color: 'var(--mut)' }}>{msg}</span>}
+        {m.officeEditedBy && <span style={{ fontSize: 12, color: 'var(--mut)' }}>Last edited by {m.officeEditedBy}</span>}
+      </div>
+    </div>
+  );
+};
+
+// Where a training stands, in the tracker's three words. Ready comes from the
+// material (a written SOP or something attached), never typed by hand.
+const OFFICE_SIGNOFFS = ['COUNTERSIGN', 'OBSERVED', 'CERTIFICATE', 'NONE'];
+const libStatus = (m) => (m.material && m.material.ready) ? 'ready' : OFFICE_SIGNOFFS.includes(m.signoff) ? 'office' : 'needs';
+const LIB_STATUS = { ready: ['Ready', 'p-COMPLETE'], needs: ['Needs material', 'p-RETURNED'], office: ['Office signs off', 'p-NOT_APPLICABLE'] };
+const LIB_FILTERS = [['all', 'All'], ['needs', 'Needs material'], ['write', 'Needs writing'], ['attach', 'Attach today'], ['caregiver', 'Caregivers'], ['ready', 'Ready'], ['office', 'Office signs off']];
+const SIGNOFF_LABEL = { ATTEST: 'Attest', COUNTERSIGN: 'Countersign', OBSERVED: 'Observed', CERTIFICATE: 'Certificate', NONE: 'None' };
+
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
-  const [openMat, setOpenMat] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState('');
+  const [open, setOpen] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState(''); const [filter, setFilter] = useState('all');
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/library')); } catch (e) { setErr(e.message); } }, []);
   const removeTraining = async (m) => {
     if (!window.confirm(`Remove "${m.title}" from the library? It leaves everyone's onboarding; anything already completed stays on record.`)) return;
@@ -1163,62 +1208,106 @@ const Library = () => {
     try { await call(`/api/onboarding/admin/library/${m.id}/review`, { method: 'POST', body }); setOk(`${m.title}: recorded.`); await load(); } catch (e) { setErr(e.message); }
   };
   if (!d) return err ? <div className="err">{err}</div> : <div className="note">Loading…</div>;
-  const order = { FLAGGED: 0, PENDING: 1, CHANGES_UNKNOWN: 2, CLEARED_NO_OVERLAP: 3, CURRENT: 4 };
   const forThis = (m) => !forRole || m.audience === 'Everyone' || (m.types ? m.types.includes(forRole) : ['provider', 'rn', 'lcsw', 'lmsw'].includes(forRole));
-  const mods = d.modules.filter(forThis).sort((a, b) => (order[a.flag.status] ?? 9) - (order[b.flag.status] ?? 9));
+  const matches = (m) => filter === 'all' ? true
+    : filter === 'write' ? ['write', 'gap'].includes(m.nextStep)
+    : filter === 'attach' ? m.nextStep === 'attach' && libStatus(m) !== 'ready'
+    : filter === 'caregiver' ? m.group === 'Caregivers'
+    : libStatus(m) === filter;
+  const shown = d.modules.filter(m => forThis(m) && matches(m));
+  const count = (fn) => d.modules.filter(fn).length;
+  const tiles = [
+    [count(m => libStatus(m) === 'ready'), 'Ready now: a written SOP or material is behind it.'],
+    [count(m => libStatus(m) === 'needs'), 'Blocked: greyed out for staff until material is added.'],
+    [count(m => libStatus(m) === 'office'), 'Office records it: observed, certificate or review.'],
+    [count(m => m.nextStep === 'attach' && libStatus(m) !== 'ready'), 'Attach a document you already have.'],
+    [count(m => ['write', 'gap'].includes(m.nextStep)), 'Need material made: a video, an SOP, or both.']
+  ];
   return (
     <div className="card">
-      <div className="card-h"><h2>Training Library</h2><span>Clinical manual {d.manual.version ? `v${d.manual.version}` : '(could not be read)'}</span></div>
+      <div className="card-h"><h2>Training Library</h2><span>{d.modules.length} trainings · Clinical manual {d.manual.version ? `v${d.manual.version}` : '(could not be read)'}</span></div>
       {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
-      {/* Off until the SOPs behind the questions are written (owner, 2026-11-08). */}
-      <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '4px 0 12px', fontSize: 14 }}>
-        <input type="checkbox" checked={!!(d.settings && d.settings.checkQuestionsForStaff)}
-          onChange={async (e) => { try { await call('/api/onboarding/admin/settings', { method: 'PUT', body: { checkQuestionsForStaff: e.target.checked } }); await load(); } catch (x) { setErr(x.message); } }} />
-        Show training check questions to staff {d.settings && d.settings.checkQuestionsForStaff ? '(on)' : '(off until the SOPs are written)'}
-      </label>
-      {(() => {
-        const n = (st) => d.modules.filter(x => x.material && x.material.status === st).length;
-        return <div className="note">
-          {n('SOP_WRITTEN')} modules teach a written SOP · {n('MATERIAL_ADDED')} have material you added · {n('SOP_NOT_WRITTEN')} wait on an SOP not yet written · {n('NO_MATERIAL') + n('SOP_MISSING_FROM_DRIVE')} have nothing yet.
-          {' '}Staff see a module greyed out until it has an SOP or material. <a href={d.sopDocument.url} target="_blank" rel="noopener">SOP document</a>{d.sopDocument.version ? ` v${d.sopDocument.version}` : ''}.
-          {!d.sopDocument.ok && <div className="err">The SOP document could not be read from Drive ({d.sopDocument.reason}). Modules that teach an SOP stay open to staff meanwhile.</div>}
-        </div>;
-      })()}
-      <div className="note">The library serves the whole team. Clinical modules go to clinicians; modules marked Everyone go to every role; trainings you add go to the roles you choose. Each one shows in that person's onboarding under Training.</div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '6px 0 10px' }}>
-        <select value={forRole} onChange={e => setForRole(e.target.value)} style={{ maxWidth: 260 }}>
+      <div className="lib-tiles">{tiles.map(([n, l]) => <div key={l} className="lib-tile"><b>{n}</b><span>{l}</span></div>)}</div>
+      <details className="note" style={{ margin: '4px 0 10px' }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>How a training module is built</summary>
+        <ol style={{ margin: '8px 0 4px 18px' }}>
+          <li>The manual section gives the requirement.</li>
+          <li>The SOP-writing skill turns it into an SOP with a completion standard, escalation, frequent errors and check questions.</li>
+          <li>The deck slides become the visuals you narrate over.</li>
+          <li>The SOP's procedure is the script. Its check questions become the quiz at completion and at days 3, 10, 30 and 90.</li>
+        </ol>
+        <div>The deck and the SOP both trace to one manual section, so nothing is restated. Staff see a training greyed out until it has an SOP or material.</div>
+      </details>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', margin: '6px 0 10px' }}>
+        {LIB_FILTERS.map(([k, l]) => <button key={k} className={`btn sm ${filter === k ? '' : 'ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}
+        <select value={forRole} onChange={e => setForRole(e.target.value)} style={{ maxWidth: 230 }}>
           <option value="">Every role</option>
           {(d.roles || []).map(r => <option key={r.value} value={r.value}>Show what {r.label} gets</option>)}
         </select>
         {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Training</button>}
       </div>
       {adding && <AddTrainingForm roles={d.roles} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
-      <table><thead><tr><th>Module</th><th>Material</th><th>Status</th><th>Manual sections</th><th></th></tr></thead><tbody>
-        {mods.map(m => (<React.Fragment key={m.id}>
-          <tr>
-            <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.addedByOffice ? `Added by GFC · For: ${m.audience}` : `${m.id} · Phase ${m.phaseNumber} · ${m.phaseLabel} · For: ${m.audience}`}</div>
-              {m.description && <div style={{ fontSize: 13 }}>{m.description}</div>}</td>
-            <td style={{ minWidth: 150 }}>{m.material && <span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span>}
-              {m.material && m.material.status === 'SOP_NOT_WRITTEN' && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.plannedSop}</div>}
-              {m.material && m.material.sops.length > 0 && <div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.material.sops.join(', ')}</div>}
-              <div><button className="btn sm ghost" style={{ marginTop: 4 }} onClick={() => setOpenMat(openMat === m.id ? null : m.id)}>{openMat === m.id ? 'Close' : 'Manage Material'}</button></div></td>
-            <td>{m.flag.status === 'FLAGGED' ? <span className="pill p-RETURNED">Flagged · {m.flag.hits.join(', ')}</span>
-              : m.flag.status === 'PENDING' ? <span className="pill p-SUBMITTED">Pending</span>
-              : m.flag.status === 'CHANGES_UNKNOWN' ? <span className="pill p-EXPIRED">Check Needed</span>
-              : <span className="pill p-COMPLETE">Current</span>}
-              {m.plannedSop && <div style={{ fontSize: 12, color: 'var(--mut)' }}>SOP still to write</div>}</td>
-            <td style={{ minWidth: 180 }}>{m.addedByOffice ? <span style={{ color: 'var(--mut)' }}>Not from the manual</span> : m.manualRefs.length ? m.manualRefs.join(', ')
-              : <input value={refs[m.id] != null ? refs[m.id] : (m.proposedManualRefs || []).join(', ')} onChange={e => setRefs(Object.assign({}, refs, { [m.id]: e.target.value }))} placeholder="e.g. 18.1" />}</td>
-            <td style={{ whiteSpace: 'nowrap' }}>
-              {m.flag.status === 'FLAGGED' && <button className="btn sm" onClick={() => review(m, false)}>Mark Reviewed</button>}
-              {m.flag.status === 'PENDING' && <button className="btn sm" onClick={() => review(m, true)}>Confirm Sections</button>}
-              {m.addedByOffice && <button className="btn sm ghost" onClick={() => removeTraining(m)}>Remove</button>}
-            </td>
-          </tr>
-          {openMat === m.id && <tr><td colSpan={5}><MaterialEditor m={m} onChanged={load} />
-            {m.material.ready && <MaterialView moduleId={m.id} base={{ office: true }} />}</td></tr>}
-        </React.Fragment>))}
-      </tbody></table>
+      {(d.groups || []).map(g => {
+        const rows = shown.filter(m => m.group === g);
+        const refRows = (filter === 'all' || filter === 'caregiver') && !forRole ? (d.referenceRows || []).filter(r => r.group === g) : [];
+        if (!rows.length && !refRows.length) return null;
+        return (
+          <div key={g} style={{ marginTop: 14 }}>
+            <h3 style={{ margin: '0 0 6px' }}>{g} <span style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 500 }}>{rows.length} {rows.length === 1 ? 'training' : 'trainings'}</span></h3>
+            <table className="lib"><thead><tr><th>ID</th><th>Training</th><th>In app</th><th>Policy</th><th>Next step</th><th></th></tr></thead><tbody>
+              {rows.map(m => {
+                const st = LIB_STATUS[libStatus(m)];
+                return (<React.Fragment key={m.id}>
+                  <tr>
+                    <td style={{ whiteSpace: 'nowrap' }}><b>{m.addedByOffice ? 'GFC' : m.id}</b></td>
+                    <td><b>{m.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>For: {m.audience}</div></td>
+                    <td><span className={`pill ${st[1]}`}>{st[0]}</span></td>
+                    <td style={{ fontSize: 13 }}>{m.policy ? (m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document) : <span style={{ color: 'var(--mut)' }}>—</span>}
+                      {m.policy && m.policy.sections && <div style={{ color: 'var(--mut)' }}>{m.policy.sections}</div>}</td>
+                    <td style={{ fontSize: 13 }}>{(d.nextSteps || {})[m.nextStep] || '—'}</td>
+                    <td><button className="btn sm ghost" onClick={() => setOpen(open === m.id ? null : m.id)}>{open === m.id ? 'Close' : 'Details'}</button></td>
+                  </tr>
+                  {open === m.id && <tr><td colSpan={6} style={{ background: 'var(--cream)' }}>
+                    <div style={{ display: 'grid', gap: 10, padding: '6px 2px' }}>
+                      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[m.format] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
+                      {m.description && <div style={{ fontSize: 14 }}>{m.description}</div>}
+                      <OfficeFields m={m} nextSteps={d.nextSteps} onSaved={load} />
+                      {!m.addedByOffice && (
+                        <div style={{ fontSize: 13 }}>
+                          <b>Manual sections:</b> {m.manualRefs.length ? m.manualRefs.join(', ')
+                            : <input value={refs[m.id] != null ? refs[m.id] : (m.proposedManualRefs || []).join(', ')} onChange={e => setRefs(Object.assign({}, refs, { [m.id]: e.target.value }))} placeholder="e.g. 18.1" style={{ maxWidth: 200 }} />}
+                          {' '}{m.flag.status === 'FLAGGED' ? <span className="pill p-RETURNED">Flagged · {m.flag.hits.join(', ')}</span> : m.flag.status === 'PENDING' ? <span className="pill p-SUBMITTED">Sections pending</span> : null}
+                          {m.flag.status === 'FLAGGED' && <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => review(m, false)}>Mark Reviewed</button>}
+                          {m.flag.status === 'PENDING' && <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => review(m, true)}>Confirm Sections</button>}
+                        </div>
+                      )}
+                      <MaterialEditor m={m} onChanged={load} />
+                      {m.material.ready && <MaterialView moduleId={m.id} base={{ office: true }} />}
+                      {m.addedByOffice && <div><button className="btn sm ghost" onClick={() => removeTraining(m)}>Remove This Training</button></div>}
+                    </div>
+                  </td></tr>}
+                </React.Fragment>);
+              })}
+              {refRows.map(r => (
+                <tr key={r.id}>
+                  <td style={{ whiteSpace: 'nowrap', color: 'var(--mut)' }}>{r.id}</td>
+                  <td><b>{r.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>Lives in: {r.where}</div></td>
+                  <td><span className="pill p-NOT_APPLICABLE">Elsewhere</span></td>
+                  <td style={{ fontSize: 13 }}>{r.policy && <a href={r.policy.url} target="_blank" rel="noopener">{r.policy.document}</a>}{r.policy && <div style={{ color: 'var(--mut)' }}>{r.policy.sections}</div>}</td>
+                  <td style={{ fontSize: 13 }}>External</td><td></td>
+                </tr>
+              ))}
+            </tbody></table>
+          </div>
+        );
+      })}
+      <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '16px 0 4px', fontSize: 14 }}>
+        <input type="checkbox" checked={!!(d.settings && d.settings.checkQuestionsForStaff)}
+          onChange={async (e) => { try { await call('/api/onboarding/admin/settings', { method: 'PUT', body: { checkQuestionsForStaff: e.target.checked } }); await load(); } catch (x) { setErr(x.message); } }} />
+        Show training check questions to staff {d.settings && d.settings.checkQuestionsForStaff ? '(on)' : '(off until the SOPs are written)'}
+      </label>
+      <div className="note">SOP document: <a href={d.sopDocument.url} target="_blank" rel="noopener">Clinical SOPs Set 1</a>{d.sopDocument.version ? ` v${d.sopDocument.version}` : ''}.
+        {!d.sopDocument.ok && <span className="err" style={{ display: 'block' }}>The SOP document could not be read from Drive ({d.sopDocument.reason}). Trainings that teach an SOP stay open to staff meanwhile.</span>}</div>
     </div>
   );
 };

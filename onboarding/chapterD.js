@@ -183,7 +183,6 @@ const TRAINING = Object.freeze([
   { id: 'TRN-005', why: 'Privacy and security' },
   { id: 'TRN-008', why: 'Artificial intelligence policy' },
   { id: 'TRN-205', why: 'The documentation standard she has contracted to meet' },
-  { id: 'TRN-101', why: 'What an examination is and is not (IME scope only)' },
   { id: 'TRN-103', why: "The contracting organization's required training (IME scope only)" }
 ].map(t => Object.freeze(Object.assign({ phase: 'D.6' }, t))));
 

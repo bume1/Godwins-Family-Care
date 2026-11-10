@@ -636,7 +636,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   // general modules and the trainings the office scoped to their account
   // type, in their chapter's training phase (libraryTrainings.js).
   const own = chapterTraining(ch);
-  const base = MODULES.filter(m => (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i));
+  const base = MODULES.filter(m => !m.audience && (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i));
   const extras = LT.extrasFor({ chapterId: ch.CHAPTER.id, accountType, rows: libraryTrainings, alreadyIds: base.map(m => m.id) });
   const extraPhase = new Map(extras.map(x => [x.module.id, x.phase]));
   const modules = base.concat(extras.map(x => x.module)).map(m => {
