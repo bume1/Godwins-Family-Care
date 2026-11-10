@@ -579,17 +579,14 @@ test('the payroll kinds exist and say they are payroll', async (t) => {
   assert.strictEqual(kinds.find(k => k.kind === 'timesheet').payroll, false);
 });
 
-test('no screen claims the app submits anything to Gusto', () => {
-  // Gusto is the system of record for payroll paperwork. A screen that stays
-  // quiet about that lets someone believe uploading here filed their W-9.
+test('the documents card points pay paperwork at Hours & Pay, not Gusto', () => {
   const hub = read('public/admin-hub.html');
   const i = hub.indexOf('const CaregiverDocsSection');
   const card = hub.slice(i, hub.indexOf('const UsersPage', i));
   assert.ok(card.length > 500, 'the section should have been found');
-  assert.match(card, /Gusto/, 'the card must name where payroll paperwork actually goes');
-  assert.match(card, /does not send it to Gusto|office's copy/,
-    'and must not let it read as though uploading here submits it');
-  // Nothing in the app talks to Gusto, and nothing should start by accident.
+  assert.doesNotMatch(card, /Gusto/, 'Gusto is no longer part of onboarding');
+  assert.match(card, /Hours &amp; Pay/, 'the card must say where pay paperwork is filled in');
+  assert.match(card, /office's copies/);
   assert.ok(!/api\.gusto|gusto\.com\/v1|GUSTO_API/i.test(hub));
 });
 

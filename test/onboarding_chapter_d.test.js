@@ -51,7 +51,9 @@ test('a D track carries only its named non-clinical modules, in D.6, and its ser
   assert.strictEqual(t.chapter.id, 'D');
   const named = D.TRAINING.map(x => x.id);
   assert.ok(t.modules.length > 0);
-  t.modules.forEach(m => { assert.ok(named.includes(m.id), `${m.id} is not on D's list`); assert.strictEqual(m.phase, 'D.6', m.id); });
+  // Plus the general modules every role gets (owner, 2026-11-10), in the same phase.
+  const shared = require('../onboarding/libraryTrainings').SHARED_MODULE_IDS;
+  t.modules.forEach(m => { assert.ok(named.includes(m.id) || shared.includes(m.id), `${m.id} is not on D's list or shared`); assert.strictEqual(m.phase, 'D.6', m.id); });
   t.phases.filter(p => p.id !== 'D.6').forEach(p => assert.strictEqual(p.requiredModules.length, 0, p.id));
   assert.deepStrictEqual(t.phases.find(p => p.id === 'D.6').requiredModules.sort(), t.modules.map(m => m.id).sort());
   assert.deepStrictEqual(t.determinations.map(d => d.id).sort(), ['BEHAVIORAL', 'IME', 'INSURED', 'PRIVATE_PAY']);

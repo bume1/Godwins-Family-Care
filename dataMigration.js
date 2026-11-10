@@ -163,6 +163,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'staff_profiles', phi: false, owner: 'staff-portal', note: 'per staff member: website title, bio, headshot Drive pointer' },
   { key: 'staff_welcome_packets', phi: false, owner: 'staff-portal', note: 'staff welcome packet (non-caregiver roles): profile answers + signature image' },
   { key: 'onboarding_custom_tasks', phi: false, owner: 'onboarding', note: 'tasks an admin or manager added to one person or to a chapter; removed tasks kept with who and when' },
+  // Trainings the office added to the library, scoped to roles (2026-11-10).
+  { key: 'onboarding_library_trainings', phi: false, owner: 'Onboarding' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'onboarding_training_materials', phi: false, owner: 'onboarding', note: 'per module: links and files the office added as training material (Drive ids stay server-side)' },
@@ -249,6 +251,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'incident_reports', phi: true, owner: '6' },
   { key: 'incident_events', phi: true, owner: 'care-records 2026-11-09' },
   { key: 'caregiver_broadcasts', phi: false, owner: '6' },
+  // My GFC → Announcements: who reviewed which office post (2026-11-10).
+  { key: 'staff_announcement_reads', phi: false, owner: 'MyGFC' },
   // ---- scheduling (Session 7) ----
   { key: 'shifts', phi: true, owner: '7' },
   { key: 'shift_requests', phi: true, owner: '7' },
