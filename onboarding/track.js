@@ -37,6 +37,7 @@ const { MODULES } = require('./modules');
 const LT = require('./libraryTrainings');
 const VF = require('./versionFlags');
 const { carryOver } = require('./legacy260');
+const DESC = require('./descriptions');
 
 const { ACTORS, ACTIONS, FILED_BY } = V;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -187,13 +188,17 @@ function phaseForCustom(row, phases) {
   return ids.length ? ids[ids.length - 1] : CUSTOM_PHASE.id;
 }
 function customItem(row, phases) {
-  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: ACTIONS.COMPLETE, actorBasis: 'STATED' })];
+  // A task carrying a document (owner, 2026-11-09) is done by signing or
+  // acknowledging that document, never by a "mark done".
+  const firstAction = row.documentSendId ? (row.documentAction === 'sign' ? ACTIONS.SIGN : ACTIONS.ACKNOWLEDGE) : ACTIONS.COMPLETE;
+  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: firstAction, actorBasis: 'STATED' })];
   if (row.review) steps.push(Object.freeze({ actor: ACTORS.OFFICE, action: ACTIONS.REVIEW, actorBasis: 'STATED' }));
   return Object.freeze({
     id: String(row.id), chapter: 'GFC', phase: phaseForCustom(row, phases), title: String(row.title || 'Task'), ref: null,
     elements: row.details ? [String(row.details)] : undefined,
     steps: Object.freeze(steps), classifications: [], classificationNote: 'Added by the office; not a Playbook item.',
     custom: true, askForFile: !!row.askForFile,
+    document: row.documentSendId ? Object.freeze({ sendId: String(row.documentSendId), action: row.documentAction === 'sign' ? 'sign' : 'acknowledge', title: String(row.title || '') }) : null,
     scope: row.scope && row.scope.userId ? { userId: String(row.scope.userId) } : { chapter: row.scope && row.scope.chapter }
   });
 }
@@ -312,7 +317,7 @@ function refuse(code, message) {
  *   VERIFY — { source, verifiedOn } (what was checked, and when)
  *   any    — { note }
  */
-function recordStep(item, state, stepIndex, actor, body, now) {
+function recordStep(item, state, stepIndex, actor, body, now, opts) {
   if (!item) throw refuse('ITEM_UNKNOWN', 'No such onboarding item.');
   const idx = Number(stepIndex);
   const step = item.steps[idx];
@@ -321,6 +326,11 @@ function recordStep(item, state, stepIndex, actor, body, now) {
   if (st.notApplicable) throw refuse('ITEM_NOT_APPLICABLE', 'This item has been marked not applicable.');
   st.steps = st.steps || {};
   if (st.steps[idx]) throw refuse('STEP_ALREADY_DONE', 'That step is already recorded.');
+  // A document the office sent is signed or acknowledged by the person, in
+  // the app, never marked done by anyone (owner, 2026-11-09).
+  if (item.document && step.actor === ACTORS.NEW_HIRE && !(opts && opts.viaDocument === true)) {
+    throw refuse('DOCUMENT_SIGN_ROUTE', item.document.action === 'sign' ? 'This document is signed by them in the app.' : 'This document is acknowledged by them in the app.');
+  }
   if (item.acknowledges && step.action === ACTIONS.ACKNOWLEDGE) {
     throw refuse('ACK_PER_DOCUMENT', 'Acknowledge each document at its version instead.');
   }
@@ -612,7 +622,12 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || [],
-      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined
+      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined,
+      document: it.document || null,
+      // What the item is, in words (owner, 2026-11-09). Where the words came
+      // from is the office's to know, not the new hire's.
+      description: (DESC.descriptionFor(it.id) || {}).text || null,
+      descriptionSource: office ? ((DESC.descriptionFor(it.id) || {}).source || null) : undefined
     };
   });
 

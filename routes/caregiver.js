@@ -1280,6 +1280,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // `id_document` and `certification` ALREADY EXIST above and are deliberately
   // reused rather than duplicated: a photo ID is a photo ID, and two buckets
   // for one document is how the office ends up chasing a file it already has.
+  // Kinds only the app files, never chosen on an upload form: a signed copy
+  // of a document the office sent comes only from the sign route (2026-11-09).
+  const FILED_ONLY_KIND_LABELS = { signed_document: 'Signed or acknowledged document' };
   const CAREGIVER_DOC_KINDS = [
     ...BASE_DOC_KINDS,
     ...wp.PACKET_DOCUMENT_KINDS
@@ -1575,7 +1578,7 @@ module.exports = function createCaregiverRoutes(deps) {
     caregiverId: r.caregiver_id,
     caregiverName: r.caregiver_name,
     kind: r.kind,
-    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || r.kind,
+    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || FILED_ONLY_KIND_LABELS[r.kind] || r.kind,
     fileName: r.file_name,
     sizeBytes: r.size_bytes,
     note: r.note || null,

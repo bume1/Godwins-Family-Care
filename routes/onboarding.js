@@ -255,7 +255,9 @@ module.exports = function createOnboardingRoutes(deps) {
       // welcome packet writes, never copied. Opened through doDownload.
       if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
       it.notes = st.notes || [];
-      it.sourceUrl = it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
+      // The Playbook is the office's working document (owner, 2026-11-09):
+      // its link goes to admins and managers only, never to the person onboarding.
+      it.sourceUrl = audience === 'office' && it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
     });
     // Material per module. Staff see only ready / not ready; a module with no
     // material is not available to them, whoever's turn it would otherwise be.
@@ -821,6 +823,12 @@ module.exports = function createOnboardingRoutes(deps) {
     } else {
       return res.status(400).json({ error: 'Choose who gets this task: one person, or everyone of a type.', code: 'TASK_SCOPE_REQUIRED' });
     }
+    // A task can carry a document the office already sent (owner, 2026-11-09).
+    let send = null;
+    if (b.documentSendId) {
+      send = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(b.documentSendId) && !x.removedAt);
+      if (!send) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'TASK_DOCUMENT_UNKNOWN' });
+    }
     // Which phase it sits in, on that chapter's own checklist (2026-11-10).
     let chapterId = scope.chapter;
     if (scope.userId) { const r = find(await all(), scope.userId); chapterId = (r && r.inputs && r.inputs.chapter) || 'C'; }
@@ -828,6 +836,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const phase = b.phase ? String(b.phase) : null;
     if (phase && !phaseIds.includes(phase)) return res.status(400).json({ error: 'That phase is not on this checklist.', code: 'TASK_PHASE_UNKNOWN' });
     const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope, phase,
+      documentSendId: send ? send.id : null, documentAction: send ? send.action : null,
       review: !!b.review, askForFile: !!b.askForFile, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
       createdAt: nowIso(), removedAt: null };
     const rows = await customTasks(); rows.push(task); await db.set(CUSTOM, rows);

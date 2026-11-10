@@ -99,6 +99,8 @@
   <div id="root"></div>
   <!-- The My GFC frame (Shell, Tile, Section), shared with /my and the caregiver app. -->
   <script type="text/babel" src="/my-gfc.js"></script>
+  <script type="text/babel" src="/welcome-packet-ui.js"></script>
+  <script type="text/babel" src="/document-sign-ui.js"></script>
   <!-- Client and family accounts live on the Clients page; the pieces both
        screens need are one shared copy (owner, 2026-11-09). -->
   <script type="text/babel" src="/client-account-ui.js"></script>
@@ -1828,6 +1830,9 @@
           <Sec id="sr-documents" title="Documents">
             <CaregiverDocsSection token={token} caregiverId={user.id} caregiverName={user.name} inRecord />
             <StaffSignedList token={token} user={user} />
+            {/* Documents the office sent this person to sign (owner, 2026-11-09). */}
+            <h3 style={{ margin: '18px 0 6px' }}>Sent to Sign</h3>
+            {window.GFCDocSign ? <window.GFCDocSign.OfficeDocuments userId={String(user.id)} userName={user.name} /> : null}
           </Sec>
           <Sec id="sr-onboarding" title="Onboarding & Clearance">
             <StaffOnboardingPanel token={token} user={user} />
@@ -5384,6 +5389,15 @@
           case 'veterans': window.location.replace('/ime#exam'); return null;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
+          // Send a document to everyone of a type to sign or acknowledge, and
+          // see who has (owner, 2026-11-09). One person's are on their record.
+          case 'documents': return (
+            <div className="mg-card">
+              <h2 style={{ marginBottom: 6 }}>Documents to Sign</h2>
+              <p className="mg-lead">Send a PDF to staff to sign or acknowledge in My GFC. Each person's copy files to their Documents in Google Drive. To send to one person, open their Staff Record.</p>
+              {window.GFCDocSign ? <window.GFCDocSign.OfficeDocuments /> : <p className="mg-note">Loading…</p>}
+            </div>
+          );
           case 'messages': return <InboxPage token={token} user={user} initialTab="messages" />;
           default: return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
         }
@@ -5400,6 +5414,7 @@
             { id: 'inbox', label: 'Inbox', icon: 'ti-inbox' },
             ...(activePage === 'users' ? [{ id: 'users', label: 'User Management', icon: 'ti-users' }] : []),
             { id: 'service_portal', label: 'Service Portal', icon: 'ti-clipboard-check', short: 'Service' },
+            { id: 'documents', label: 'Documents to Sign', icon: 'ti-signature', short: 'Sign' },
             { id: 'notifications', label: 'Notifications', icon: 'ti-bell', short: 'Alerts' }
           ];
       const view = activePage === 'dashboard' ? 'home' : activePage;
