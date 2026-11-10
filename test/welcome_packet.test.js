@@ -197,26 +197,36 @@ test('an office item is tracked by status and cannot be uploaded past', () => {
   assert.strictEqual(done.find(r => r.kind === 'fingerprinting').status, 'complete');
 });
 
-test('the Gusto group points at Gusto and does not say we will email them', () => {
-  // OWNER CHANGE: the printed packet said "You do not need to find these. We
-  // email them and you sign and return." They live in Gusto now, and somebody
-  // told to wait for an email would wait forever.
-  const intro = wp.GROUP_INTROS.E;
-  assert.match(intro, /Gusto/);
-  assert.doesNotMatch(intro, /do not need to find these/i);
-  assert.doesNotMatch(intro, /we email them/i);
-  // And it says plainly that the two do not talk to each other.
-  assert.match(intro, /does not file it in Gusto|does not send it here/i);
-  const gustoItems = wp.DOCUMENT_ITEMS.filter(d => d.group === 'E');
-  assert.strictEqual(gustoItems.length, 4, 'items 16-19; the mandatory reporter left this group in 09/2026');
-  for (const item of gustoItems) {
-    assert.strictEqual(item.source, 'gusto');
-    assert.strictEqual(item.upload, true, 'each signed copy comes back here one by one');
-    // THE RULE THAT MOVED ITEM 20 OUT, asserted rather than left to whoever
-    // edits the list next: this group's intro says every item in it is waiting
-    // in Gusto, so a form signed HERE cannot sit under that heading.
-    assert.ok(!item.sign, 'a form signed in the app does not belong under a heading that says it is in Gusto');
+test('no caregiver onboarding item is in Gusto any more (owner, 2026-11-10)', () => {
+  // Gusto left caregiver onboarding: pay paperwork is in My GFC → Hours & Pay,
+  // the handbook, privacy and conduct acknowledgments are signed here.
+  assert.ok(!wp.DOCUMENT_ITEMS.some(d => d.source === 'gusto'), 'no item may point at Gusto');
+  for (const key of Object.keys(wp.GROUP_TITLES)) assert.doesNotMatch(wp.GROUP_TITLES[key], /Gusto/i);
+  for (const key of Object.keys(wp.GROUP_INTROS)) assert.doesNotMatch(String(wp.GROUP_INTROS[key] || ''), /Gusto/i);
+  for (const d of wp.DOCUMENT_ITEMS) assert.doesNotMatch(`${d.title} ${d.detail || ''}`, /Gusto/i);
+  // The three acknowledgments are signed in the app and keep their numbers.
+  for (const [kind, item] of [['employee_handbook', 17], ['privacy_policy', 18], ['code_of_conduct', 19]]) {
+    const d = wp.DOCUMENT_ITEMS.find(x => x.kind === kind);
+    assert.strictEqual(d.item, item);
+    assert.strictEqual(d.source, 'gfc_sign');
+    assert.strictEqual(d.sign, true);
   }
+  // The offer letter stays an upload: it carries her own rate.
+  const offer = wp.DOCUMENT_ITEMS.find(x => x.kind === 'offer_letter');
+  assert.strictEqual(offer.upload, true);
+  assert.match(wp.GROUP_INTROS.E, /Hours & Pay/);
+});
+
+test('a handbook copy accepted before the move still counts; an unreviewed one does not', () => {
+  const docs = (status) => [{ kind: 'employee_handbook', status, uploaded_at: '2026-10-01' }];
+  const row = (status) => wp.buildChecklist(completeProfile(), docs(status), {}, []).find(r => r.kind === 'employee_handbook');
+  assert.strictEqual(row('accepted').status, 'complete');
+  assert.strictEqual(row('accepted').legacyUploadAccepted, true);
+  assert.strictEqual(row('received').status, 'missing');
+  assert.strictEqual(wp.buildChecklist(completeProfile(), [], {}, []).find(r => r.kind === 'employee_handbook').status, 'missing');
+  // A legacy upload never stands in for a form that was always signed here.
+  const mr = wp.buildChecklist(completeProfile(), [{ kind: 'mandatory_reporter', status: 'accepted' }], {}, []).find(r => r.kind === 'mandatory_reporter');
+  assert.strictEqual(mr.status, 'missing');
 });
 
 // ===========================================================================
@@ -926,14 +936,9 @@ test('the caregiver page names no question of its own', () => {
   }
 });
 
-test('no screen may imply that uploading here files anything in Gusto', () => {
-  // GUSTO IS THE SYSTEM OF RECORD and nothing here transmits to it. A screen
-  // that stays quiet about that lets someone believe their handbook signature
-  // was filed because they uploaded a copy.
+test('the caregiver app does not send anyone to Gusto', () => {
   const page = read('public/caregiver.html');
-  assert.ok(!/send (it |them )?to Gusto|files? (it|them) (in|to) Gusto|sync(ed)? (with|to) Gusto/i.test(page),
-    'the app does not transmit to Gusto and must not say it does');
-  assert.match(wp.GROUP_INTROS.E, /Uploading here does not file it in Gusto/i);
+  assert.ok(!/Gusto/i.test(page), 'Gusto is no longer part of caregiver onboarding');
 });
 
 /** The caregiver router, mounted the way server.js mounts it. */

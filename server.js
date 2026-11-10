@@ -4666,6 +4666,21 @@ function renderUnsubscribePageHtml(message, isSuccess) {
 </html>`;
 }
 
+// Tell the Super Admins when someone turns automated email off or back on
+// (owner, 2026-11-10: "I need to know if someone unsubscribes"). Only a real
+// change is announced, and a failed notice never undoes the preference.
+const emailPreferenceNotice = require('./emailPreferenceNotice');
+async function announceEmailPreferenceChange(person, unsubscribed, users) {
+  const at = new Date().toISOString();
+  try {
+    await logActivity(person.id, person.name || person.email, unsubscribed ? 'email_unsubscribed' : 'email_resubscribed', 'user', person.id, {});
+    const ctaUrl = `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`;
+    for (const n of emailPreferenceNotice.noticesFor({ person, unsubscribed, users, at, ctaUrl })) {
+      await queueNotification(n.type, n.userId, n.email, n.name, n.data, n.options);
+    }
+  } catch (e) { console.error('Email preference notice failed:', e.message); }
+}
+
 // Unsubscribe from automated emails (clicked from email link — no login required)
 app.get('/api/unsubscribe', async (req, res) => {
   const { token } = req.query;
@@ -4678,8 +4693,11 @@ app.get('/api/unsubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = true;
+    if (!wasOff) users[idx].emailUnsubscribedAt = new Date().toISOString();
     await db.set('users', users);
+    if (!wasOff) await announceEmailPreferenceChange(users[idx], true, users);
 
     // Generate a resubscribe token (same token works for both directions)
     const resubToken = jwt.sign({ userId: decoded.userId, purpose: 'email_unsubscribe' }, JWT_SECRET, { expiresIn: '365d' });
@@ -4706,8 +4724,10 @@ app.get('/api/resubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = false;
     await db.set('users', users);
+    if (wasOff) await announceEmailPreferenceChange(users[idx], false, users);
 
     res.send(renderUnsubscribePageHtml(
       'You have been resubscribed to automated emails. You will now receive task reminders, milestone updates, and other automated notifications.',
@@ -4871,6 +4891,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       role: u.role,
       accountStatus: u.accountStatus || 'active',
       emailUnsubscribed: u.emailUnsubscribed || false,
+      emailUnsubscribedAt: u.emailUnsubscribed ? (u.emailUnsubscribedAt || null) : null,
       createdAt: u.createdAt,
       // Manager flag
       isManager: u.isManager || false,
@@ -7698,6 +7719,18 @@ async function seedReferralProviders() {
     await db.set('referral_providers', seeded.entries);
     console.log(`[referrals] ${seeded.added.length} outside provider${seeded.added.length === 1 ? '' : 's'} added to the list from past referrals.`);
   }
+}
+
+// SOP 1 as the app tour's material (owner, 2026-11-10). Once per module, never
+// over the office's own choice: see trainingMaterial.seedDefaults.
+async function seedDefaultTrainingMaterial() {
+  const TM = require('./onboarding/trainingMaterial');
+  const out = TM.seedDefaults(await db.get(TM.COLLECTION), new Date().toISOString());
+  if (out.seeded.length) {
+    await db.set(TM.COLLECTION, out.all);
+    console.log(`[Onboarding] Default training material added to ${out.seeded.join(', ')}.`);
+  }
+  return out;
 }
 
 async function seedRequisitionReturnFax() {
@@ -10957,10 +10990,11 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
       catalog: carePlanCatalog.catalog(),
       newPlanDefaults: carePlanCatalog.newPlanDefaults(practiceToday()),
       // Whether THIS viewer can supply the co-signature a pending plan waits
-      // on, for this client's service line (an RN can complete a home care
-      // plan, never a clinical patient's). Same question the co-sign route asks.
+      // on, for this client's service line and this plan's author (an RN
+      // completes a home care plan, and a clinical one a coordinator or LMSW
+      // wrote). Same question the co-sign route asks.
       canCoSign: !!(client.carePlan && client.carePlan.providerCoSignStatus === 'pending'
-        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine)
+        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, client.carePlan)
         && String(client.carePlan.authoredById || '') !== String(req.user.id)),
       coSign: client.carePlanCoSign || {},
       docs: client.carePlanDocs || {},
@@ -11087,6 +11121,11 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
       clientId: client.id, emrDocumented, authorClinicalRole: planSig.clinicalRole,
       signatureRole: planSig.signatureRole, providerCoSignStatus: plan.providerCoSignStatus, serviceLine: client.serviceLine || null
     });
+    // A plan a licensed author completes is active now, so the client is told it
+    // is ready to sign. One that waits on a co-signature is told then instead.
+    if (!pendingProviderCoSign) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
+    }
     res.json({
       message: pendingProviderCoSign
         ? `Care plan v${plan.version} saved as the authoring signature. ${planSig.reason}`
@@ -11121,9 +11160,15 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     // An RN cannot clear an RN-authored IHPC plan, and an LMSW cannot clear
     // their own — the co-signature exists to add a credential the authoring
     // one does not carry.
-    const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
-    if (outcome.outcome !== clinicalRoles.CARE_PLAN_OUTCOME.COMPLETE) {
-      return res.status(403).json({ error: outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.', code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    // One answer for who may co-sign, shared with the care plan screen and the
+    // inbox: an RN may co-sign a clinical plan a coordinator or LMSW wrote,
+    // never one an RN wrote (owner, 2026-11-09).
+    if (!clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, plan)) {
+      const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
+      const rnOnRnPlan = clinicalRoles.resolveClinicalRole(req.user) === 'rn';
+      return res.status(403).json({ error: rnOnRnPlan
+        ? 'An RN wrote this clinical care plan, so it needs a provider or an LCSW to co-sign it.'
+        : (outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.'), code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
     }
     const sig = req.body && req.body.signatureImageB64;
     if (typeof sig !== 'string' || !/^data:image\/png;base64,/.test(sig)) {
@@ -11151,8 +11196,9 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
-    // The author was blocked on this signature and was not told it landed
-    // (audit, 2026-11-09). Never to the signer themselves.
+    // Two people are waiting on this signature and they are told separately.
+    // The author was blocked on it and was not told it landed (audit,
+    // 2026-11-09). Never to the signer themselves.
     if (plan.authoredById && plan.authoredById !== req.user.id) {
       const author = users.find(u => u && u.id === plan.authoredById);
       if (author) {
@@ -11161,6 +11207,12 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
           ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
         });
       }
+    }
+    // And the co-signature is what makes the plan active and visible in the
+    // portal, so this is the moment the client is told it is ready to sign.
+    // Not if they have already signed this version.
+    if (!(client.carePlanCoSign || {})[`v${plan.version}`]) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
     }
     // If the client has already co-signed, the signed PDF stored and filed
     // then shows the provider line as pending. Issue it again with all three
@@ -18484,7 +18536,8 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     // load in a page. One implementation beats a second one that drifts.
     const plot = myDay.plotStops({
       stops: day.visits.filter(v => v.state !== myDay.VISIT_STATE.CANCELLED),
-      width: 100, height: 100
+      width: 100, height: 100,
+      clients: Array.from(clientsById.values())
     });
     res.json({ ...day, plot, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
   } catch (error) {
@@ -19032,7 +19085,9 @@ app.get('/api/clinical/digest', authenticateToken, requireTaskManager, async (re
     const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
     const inbox = clinicalInbox.buildInbox({
       viewer, encounterRecords: records, attestations, orders: orderRows,
-      carePlanClients: clients.filter(c => isClinicalServiceLine(c.serviceLine)),
+      // Every client: a home care plan a coordinator or LMSW wrote waits on a
+      // clinician too, and the inbox already counts it. The digest did not.
+      carePlanClients: clients,
       visitLogs, patientNames, now: new Date().toISOString()
     });
 
@@ -25037,7 +25092,18 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
 
     const { override, overrideReason } = req.body || {};
     const comp = computeEnrollmentCompletion(client);
-    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length;
+    // A clinical client also needs the pre-visit half of the clinical
+    // enrollment checklist (owner, 2026-11-09): payer, records release, NPA
+    // and the clinical consents. The H&P and care plan are not asked for here;
+    // they need a visit, which needs enrollment. Activate still checks all six.
+    let missingClinicalSteps = [];
+    if (isClinicalServiceLine(client.serviceLine)) {
+      const roiEvents = await roiStore.listConsentEventsByClient(client.id);
+      missingClinicalSteps = clinicalRepo.missingPreApprovalSteps(clinicalRepo.deriveClinicalChecklist({
+        client, manualState: (client.clinicalEnrollment || {}).steps, roiEvents, isConsentSatisfied
+      }));
+    }
+    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length || missingClinicalSteps.length;
 
     if (incomplete && !override) {
       return res.status(409).json({
@@ -25045,6 +25111,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
         code: 'ENROLLMENT_INCOMPLETE',
         missingConsents: comp.missingConsentLabels,
         missingFields: comp.missingFieldLabels,
+        missingClinicalSteps,
         // Named so the UI can offer the override rather than leaving an admin
         // to discover it exists by reading the API.
         overridable: true
@@ -25073,7 +25140,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
       override: overrode ? {
         reason: String(overrideReason).trim().slice(0, 1000),
         missingConsents: comp.missingConsentLabels,
-        missingFields: comp.missingFieldLabels
+        missingFields: comp.missingFieldLabels,
+        missingClinicalSteps
       } : null
     };
     users[idx] = client;
@@ -25081,7 +25149,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id,
       overrode ? { override: true, reason: client.enrollmentApproval.override.reason,
-                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
+                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels,
+                   missingClinicalSteps } : {});
     // The client was never told they were approved. That was the one event
     // that says "you are done" and it was silent.
     await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
@@ -32812,6 +32881,11 @@ app.listen(PORT, () => {
       await seedRequisitionReturnFax();
     } catch (err) {
       console.error('Return-fax seed failed (non-fatal):', err.message);
+    }
+    try {
+      await seedDefaultTrainingMaterial();
+    } catch (err) {
+      console.error('Training material seed failed (non-fatal):', err.message);
     }
     try {
       await seedReferralProviders();

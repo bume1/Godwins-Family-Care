@@ -145,13 +145,78 @@ function setNote(entry, note, actor, now) {
   return stamp(e, actor, now);
 }
 
+// The office's working fields on the library page (2026-11-10): what the
+// training still needs, and a note. Office only, never sent to staff, and they
+// never make a training ready.
+const NEXT_STEPS = Object.freeze(['write', 'attach', 'done', 'external', 'none', 'confirm', 'gap']);
+function setOffice(entry, body, actor, now) {
+  const b = body || {};
+  const e = Object.assign({ links: [], files: [] }, entry || {});
+  const prev = e.office || {};
+  const nextStep = b.nextStep === undefined ? prev.nextStep : (b.nextStep === null || b.nextStep === '' ? null : String(b.nextStep));
+  if (nextStep && !NEXT_STEPS.includes(nextStep)) throw fail('NEXT_STEP_INVALID', `Next step must be one of: ${NEXT_STEPS.join(', ')}.`);
+  e.office = {
+    nextStep: nextStep || null,
+    note: b.note === undefined ? (prev.note || '') : String(b.note || '').trim().slice(0, MAX_NOTE),
+    at: now, byId: actor.id, byName: actor.name
+  };
+  return e;
+}
+
 /** A live file row, for the download. */
 function findFile(entry, fileId) {
   return live(entry && entry.files).find(f => f.id === fileId) || null;
 }
 
+// Material the app ships with (owner, 2026-11-10): SOP 1, "Signing In and
+// Onboarding", is what TRN-004 "Application tour at first login" teaches,
+// since the app has no built-in tour. Seeded at boot ONCE per module: only
+// when the module has no material and was never seeded, so an office that
+// removes or replaces it is never overridden by the next restart.
+const drive = (id) => `https://drive.google.com/file/d/${id}/view`;
+// Each module can carry SEVERAL default files (owner, 2026-11-10: the app
+// training is one module holding a guide per area of the app). Each default has
+// a stable `key`, and a key is seeded once: a file the office removes or
+// replaces never comes back, and a default added later still reaches a
+// module that was seeded before it existed.
+const DEFAULT_MATERIAL = Object.freeze({
+  'TRN-004': Object.freeze([
+    Object.freeze({ key: 'sop1', label: 'SOP 1: Signing In and Onboarding', kind: 'document',
+      url: 'https://docs.google.com/document/d/1Bs-wgsurXK3SbJt2aLFD1AtmUEqp2FPqapqM_OA0oFw/view' })
+  ]),
+  // Material that already exists in Drive (owner's Training Material Tracker).
+  'TRN-001': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
+  'TRN-002': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2: your role card (pages 12 to 21)', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
+  'TRN-501': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Accepting Shifts, Clocking In', url: drive('1YcwdwNhYIa1NKqmEdibsAYKlhekcQgHA'), kind: 'video' })]),
+  'TRN-502': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Submitting the Visit Report, Clocking Out', url: drive('1wWRk_njfMZIeJH0ogOwxheEXjv2fS04P'), kind: 'video' })]),
+  'TRN-503': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' })])
+});
+function seedDefaults(all, now) {
+  const out = Object.assign({}, all || {});
+  const seeded = [];
+  for (const [moduleId, defaults] of Object.entries(DEFAULT_MATERIAL)) {
+    let e = out[moduleId] || null;
+    // Seeded before keys existed (the first SOP 1 seed, 2026-11-10).
+    const done = new Set((e && e.defaultKeysSeeded) || (e && e.defaultSeededAt && moduleId === 'TRN-004' ? ['sop1'] : []));
+    let changed = false;
+    for (const d of defaults) {
+      if (done.has(d.key)) continue;
+      const already = e && (e.links || []).some(l => l.url === d.url);
+      if (!already) e = addLink(e, d, { id: 'system', name: 'GFC (built in)' }, now, `default-${moduleId}-${d.key}`);
+      done.add(d.key); changed = true;
+    }
+    if (changed) {
+      e = Object.assign({}, e, { defaultKeysSeeded: Array.from(done), defaultSeededAt: (e && e.defaultSeededAt) || now });
+      out[moduleId] = e;
+      seeded.push(moduleId);
+    }
+  }
+  return { all: out, seeded };
+}
+
 module.exports = {
   COLLECTION, STATUS, LINK_KINDS,
   hasAddedMaterial, materialFor, forStaff, validateLink,
-  addLink, addFile, remove, setNote, findFile
+  addLink, addFile, remove, setNote, findFile,
+  DEFAULT_MATERIAL, seedDefaults, NEXT_STEPS, setOffice
 };

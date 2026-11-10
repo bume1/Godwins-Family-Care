@@ -51,7 +51,9 @@ test('a D track carries only its named non-clinical modules, in D.6, and its ser
   assert.strictEqual(t.chapter.id, 'D');
   const named = D.TRAINING.map(x => x.id);
   assert.ok(t.modules.length > 0);
-  t.modules.forEach(m => { assert.ok(named.includes(m.id), `${m.id} is not on D's list`); assert.strictEqual(m.phase, 'D.6', m.id); });
+  // Plus the general modules every role gets (owner, 2026-11-10), in the same phase.
+  const shared = require('../onboarding/libraryTrainings').SHARED_MODULE_IDS;
+  t.modules.forEach(m => { assert.ok(named.includes(m.id) || shared.includes(m.id), `${m.id} is not on D's list or shared`); assert.strictEqual(m.phase, 'D.6', m.id); });
   t.phases.filter(p => p.id !== 'D.6').forEach(p => assert.strictEqual(p.requiredModules.length, 0, p.id));
   assert.deepStrictEqual(t.phases.find(p => p.id === 'D.6').requiredModules.sort(), t.modules.map(m => m.id).sort());
   assert.deepStrictEqual(t.determinations.map(d => d.id).sort(), ['BEHAVIORAL', 'IME', 'INSURED', 'PRIVATE_PAY']);
@@ -69,7 +71,7 @@ test('D.2: every contractor module is non-clinical — signed off as attestation
     assert.ok(['ATTEST', 'CERTIFICATE', 'NONE'].includes(m.signoff), `${t.id} signs off as ${m.signoff}`);
     (m.unlocksAfter || []).forEach(u => assert.ok(D.TRAINING.some(x => x.id === u), `${t.id} waits on ${u}, which a contractor never gets`));
   });
-  assert.deepStrictEqual(D.TRAINING.map(x => x.id).sort(), ['TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-008', 'TRN-101', 'TRN-103', 'TRN-205']);
+  assert.deepStrictEqual(D.TRAINING.map(x => x.id).sort(), ['TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-008', 'TRN-103', 'TRN-205']);
 });
 
 test('a D readiness determination opens on the C.8 conditions with no training recorded', () => {
@@ -124,7 +126,8 @@ test('a contracted provider defaults to D, and the record is stamped 1099', () =
 test('the page offers D, shows its Training tab, and names it Contracted (1099)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(src, /\['D', 'Clinician \(NP, PA\), contracted only \(1099\)'\]/);
-  assert.match(src, /k === 'training' \? \(\['C', 'D', 'E'\]\.includes\(t\.chapter\.id\)/);
+  // Every chapter with trainings shows the tab (2026-11-10), D included.
+  assert.match(src, /k === 'training' \? \(\(t\.modules \|\| \[\]\)\.length > 0/);
   assert.match(src, /Contracted \(1099\)/);
 });
 

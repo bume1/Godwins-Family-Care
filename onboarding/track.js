@@ -34,8 +34,10 @@ const ALL_ACKS = Object.freeze(Object.values(Object.values(CHAPTERS).reduce((acc
   ch.ACKNOWLEDGMENTS.forEach(a => { if (!acc[a.id]) acc[a.id] = a; }); return acc;
 }, {})));
 const { MODULES } = require('./modules');
+const LT = require('./libraryTrainings');
 const VF = require('./versionFlags');
 const { carryOver } = require('./legacy260');
+const DESC = require('./descriptions');
 
 const { ACTORS, ACTIONS, FILED_BY } = V;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -173,25 +175,40 @@ const findItem = (id) => ALL_ITEMS.find(it => it.id === String(id || '')) || nul
 // door (steps, files, notes, not applicable) treats it the same, and it is
 // never a Playbook item: no classification is claimed for it. She marks it
 // done; if the office asked to review it, it is complete only once reviewed.
+// OWNER, 2026-11-10: a task lands INSIDE a phase of the person's own
+// checklist, never in a phase of its own. The office picks the phase; a task
+// with no phase, or one naming a phase this chapter does not have (a task
+// saved before this change, or one for another chapter's person), sits in the
+// chapter's last phase.
 const CUSTOM_PHASE = Object.freeze({ id: 'GFC', label: 'Added by GFC', plainWhen: 'Tasks added by the office',
-  title: 'Added by GFC', when: 'Added by the office', ref: null });
-function customItem(row) {
-  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: ACTIONS.COMPLETE, actorBasis: 'STATED' })];
+  title: 'Added by GFC', when: 'Added by the office', ref: null }); // retired 2026-11-10; kept for old references
+function phaseForCustom(row, phases) {
+  const ids = (phases || []).map(p => p.id);
+  if (row && row.phase && ids.includes(row.phase)) return row.phase;
+  return ids.length ? ids[ids.length - 1] : CUSTOM_PHASE.id;
+}
+function customItem(row, phases) {
+  // A task carrying a document (owner, 2026-11-09) is done by signing or
+  // acknowledging that document, never by a "mark done".
+  const firstAction = row.documentSendId ? (row.documentAction === 'sign' ? ACTIONS.SIGN : ACTIONS.ACKNOWLEDGE) : ACTIONS.COMPLETE;
+  const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: firstAction, actorBasis: 'STATED' })];
   if (row.review) steps.push(Object.freeze({ actor: ACTORS.OFFICE, action: ACTIONS.REVIEW, actorBasis: 'STATED' }));
   return Object.freeze({
-    id: String(row.id), chapter: 'GFC', phase: CUSTOM_PHASE.id, title: String(row.title || 'Task'), ref: null,
+    id: String(row.id), chapter: 'GFC', phase: phaseForCustom(row, phases), title: String(row.title || 'Task'), ref: null,
     elements: row.details ? [String(row.details)] : undefined,
     steps: Object.freeze(steps), classifications: [], classificationNote: 'Added by the office; not a Playbook item.',
     custom: true, askForFile: !!row.askForFile,
+    document: row.documentSendId ? Object.freeze({ sendId: String(row.documentSendId), action: row.documentAction === 'sign' ? 'sign' : 'acknowledge', title: String(row.title || '') }) : null,
     scope: row.scope && row.scope.userId ? { userId: String(row.scope.userId) } : { chapter: row.scope && row.scope.chapter }
   });
 }
 /** The office-added tasks that apply to this person: theirs, or their chapter's. Removed ones never. */
 function customItemsFor(rows, inputs, userId) {
   const ch = normalizeInputs(inputs).chapter || 'C';
+  const phases = (CHAPTERS[ch] || C).PHASES;
   return (rows || []).filter(r => r && !r.removedAt && r.scope
     && ((r.scope.userId && String(r.scope.userId) === String(userId)) || (!r.scope.userId && r.scope.chapter === ch)))
-    .map(customItem);
+    .map(r => customItem(r, phases));
 }
 
 // ---- one item's state ------------------------------------------------------
@@ -227,7 +244,7 @@ function ackStatus(item, state) {
 // read from the packet's own checklist, never stored here. An entry the
 // packet marks not required does not hold the item open; a missing packet
 // fails closed (every entry reads missing).
-const PACKET_HERS = ['caregiver', 'gfc_sign', 'gusto'];
+const PACKET_HERS = ['caregiver', 'gfc_sign'];
 function packetEvidence(item, packetRows) {
   if (!item.packet) return null;
   const rows = Array.isArray(packetRows) ? packetRows : [];
@@ -300,7 +317,7 @@ function refuse(code, message) {
  *   VERIFY — { source, verifiedOn } (what was checked, and when)
  *   any    — { note }
  */
-function recordStep(item, state, stepIndex, actor, body, now) {
+function recordStep(item, state, stepIndex, actor, body, now, opts) {
   if (!item) throw refuse('ITEM_UNKNOWN', 'No such onboarding item.');
   const idx = Number(stepIndex);
   const step = item.steps[idx];
@@ -309,6 +326,11 @@ function recordStep(item, state, stepIndex, actor, body, now) {
   if (st.notApplicable) throw refuse('ITEM_NOT_APPLICABLE', 'This item has been marked not applicable.');
   st.steps = st.steps || {};
   if (st.steps[idx]) throw refuse('STEP_ALREADY_DONE', 'That step is already recorded.');
+  // A document the office sent is signed or acknowledged by the person, in
+  // the app, never marked done by anyone (owner, 2026-11-09).
+  if (item.document && step.actor === ACTORS.NEW_HIRE && !(opts && opts.viaDocument === true)) {
+    throw refuse('DOCUMENT_SIGN_ROUTE', item.document.action === 'sign' ? 'This document is signed by them in the app.' : 'This document is acknowledged by them in the app.');
+  }
   if (item.acknowledges && step.action === ACTIONS.ACKNOWLEDGE) {
     throw refuse('ACK_PER_DOCUMENT', 'Acknowledge each document at its version instead.');
   }
@@ -411,6 +433,13 @@ function moduleState(m, progress, flag) {
 // modules, placed in its own phases; everything else is untouched.
 function chapterTraining(ch) {
   return Array.isArray(ch.TRAINING) ? new Map(ch.TRAINING.map(t => [t.id, t])) : null;
+}
+
+/** The module ids a chapter's own curriculum can carry, whatever the person's lanes. */
+function chapterBaseIds(chapterId) {
+  const ch = chapterOf(normalizeInputs({ chapter: chapterId }));
+  const own = chapterTraining(ch);
+  return MODULES.filter(m => !m.audience && (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true))).map(m => m.id);
 }
 
 function phaseModules(phaseId, inputs) {
@@ -536,7 +565,7 @@ const staffWelcomeItem = (ch) => Object.freeze({
   link: { url: '/my#welcome', label: 'Open Welcome Packet' }
 });
 
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks } = {}) {
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks, libraryTrainings, accountType, materialReady } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
   const rec = record || {};
@@ -600,20 +629,36 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       renewals: st && st.history ? st.history.length : 0,
       notApplicable: st && st.notApplicable ? st.notApplicable : null,
       carriedOver: carried.byItem[it.id] || [],
-      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined
+      custom: !!it.custom, askForFile: !!it.askForFile, scope: it.custom ? it.scope : undefined,
+      // A document the office attached to this person's item (2026-11-10), or a
+      // custom task's own.
+      document: it.document || (st && st.document) || null,
+      // What the item is, in words (owner, 2026-11-09). Where the words came
+      // from is the office's to know, not the new hire's.
+      description: (DESC.descriptionFor(it.id) || {}).text || null,
+      descriptionSource: office ? ((DESC.descriptionFor(it.id) || {}).source || null) : undefined
     };
   });
 
-  // The Training Library is the clinical curriculum. A non-clinical role's
-  // training is its written role training plan (F.7), an item, not modules.
+  // The chapter's own curriculum: the clinical Library for C and E, a named
+  // list for D. On top of it (owner, 2026-11-10), every role gets the six
+  // general modules and the trainings the office scoped to their account
+  // type, in their chapter's training phase (libraryTrainings.js).
   const own = chapterTraining(ch);
-  const modules = MODULES.filter(m => (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i)).map(m => {
+  const base = MODULES.filter(m => !m.audience && (own ? own.has(m.id) : (ch === C || ch.CHAPTER.usesTrainingLibrary === true)) && moduleApplies(m, i));
+  const extras = LT.extrasFor({ chapterId: ch.CHAPTER.id, accountType, rows: libraryTrainings, alreadyIds: base.map(m => m.id) });
+  const extraPhase = new Map(extras.map(x => [x.module.id, x.phase]));
+  const extraOf = new Map(extras.map(x => [x.module.id, x]));
+  const modules = base.concat(extras.map(x => x.module)).map(m => {
     const s = moduleState(m, (rec.training || {})[m.id], flags[m.id]);
     const rechecks = s.complete ? R.rechecksFor(m, (rec.training || {})[m.id], today || new Date()) : null;
     const out = {
       rechecks,
-      id: m.id, title: m.title, phase: own ? own.get(m.id).phase : m.phase, stage: m.stage, format: m.format,
-      minutes: m.minutes, host: m.host, signoff: m.signoff,
+      id: m.id, title: (extraOf.get(m.id) || {}).title || m.title, phase: extraPhase.has(m.id) ? extraPhase.get(m.id) : (own ? own.get(m.id).phase : m.phase), stage: m.stage, format: m.format,
+      description: m.description || null, addedByOffice: !!m.addedByOffice,
+      minutes: m.minutes, host: (extraOf.get(m.id) || {}).host || m.host, signoff: m.signoff,
+      fromLibrary: extraOf.has(m.id),
+      policyOverride: extraOf.has(m.id) && 'policy' in extraOf.get(m.id) ? extraOf.get(m.id).policy : undefined,
       requiredFor: m.requiredFor, sopRefs: m.sopRefs, manualRefs: m.manualRefs,
       unlocksAfter: m.unlocksAfter, ref: m.libraryRef,
       carriedOver: carried.byModule[m.id] || [],
@@ -628,10 +673,16 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     return out;
   });
 
-  const phases = ch.PHASES.concat(custom.length ? [Object.assign({ number: ch.PHASES.length + 1 }, CUSTOM_PHASE)] : []).map(p => {
+  const phases = ch.PHASES.map(p => {
     const its = items.filter(x => x.phase === p.id);
-    const mods = phaseModules(p.id, i).map(m => m.id);
-    const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
+    const mods = phaseModules(p.id, i).map(m => m.id).concat(extras.filter(x => x.phase === p.id).map(x => x.module.id));
+    // A library training with no material yet doesn't hold the phase open
+    // (owner, 2026-11-10). The chapter's own curriculum still does.
+    const modsOpen = mods.filter(id => {
+      const x = modules.find(y => y.id === id) || {};
+      if (x.complete) return false;
+      return !(x.fromLibrary && materialReady && !materialReady(id));
+    });
     const itemsOpen = its.filter(x => x.status !== STATUS.COMPLETE && x.status !== STATUS.NOT_APPLICABLE).map(x => x.id);
     return {
       id: p.id, number: p.number, label: p.label, plainWhen: p.plainWhen,
@@ -694,8 +745,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 }
 
 module.exports = {
+  chapterBaseIds,
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
-  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID, customItem, customItemsFor, CUSTOM_PHASE
+  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID, customItem, customItemsFor, CUSTOM_PHASE, phaseForCustom
 };

@@ -28,6 +28,7 @@
 <script type="text/babel" src="/welcome-packet-ui.js"></script>
 <script type="text/babel" src="/account-cards.js"></script>
 <script type="text/babel" src="/my-pay.js"></script>
+<script type="text/babel" src="/document-sign-ui.js"></script>
 <script type="text/babel" src="/my-gfc.js"></script>
 <script type="text/babel">
 const { Shell, Section, StaffTiles, StaffView, useStaffData, staffSectionsFor, OnboardingSummary, LiaisonClients, Tile } = window.MyGFC;
@@ -37,7 +38,19 @@ const { Shell, Section, StaffTiles, StaffView, useStaffData, staffSectionsFor, O
 function App() {
   const data = useStaffData();
   const { profile, fatal, onboarding, err } = data;
-  const [view, setView] = React.useState(() => (window.location.hash || '').slice(1) || 'home');
+  // #view, or #view/part to land on one block of it (an onboarding item's link).
+  const [view, setView] = React.useState(() => (window.location.hash || '').slice(1).split('/')[0] || 'home');
+  const part = React.useRef((window.location.hash || '').slice(1).split('/')[1] || null);
+  React.useEffect(() => {
+    if (!part.current || !profile) return;
+    const id = `mg-${part.current}`;
+    let tries = 0;
+    const t = setInterval(() => {
+      const el = document.getElementById(id);
+      if (el || ++tries > 20) { clearInterval(t); if (el) { el.scrollIntoView({ block: 'start' }); part.current = null; } }
+    }, 150);
+    return () => clearInterval(t);
+  }, [view, profile]);
   const go = (id) => { setView(id); window.history.replaceState(null, '', `#${id}`); window.scrollTo(0, 0); };
 
   if (fatal) return <div className="mygfc" style={{ padding: 24 }}><div className="mg-err">{fatal}</div><a className="mg-btn" href="/login">Back to sign in</a></div>;
@@ -69,6 +82,11 @@ function App() {
                 <button className="mg-btn" onClick={() => go('welcome')}><i className="ti ti-confetti" />Open Welcome Packet</button>
               </Section>
             )}
+            {(data.news || []).filter(a => !a.reviewedAt).slice(0, 3).map(a => (
+              <Section key={a.id} title={`New: ${a.title}`} sub="An announcement from the office.">
+                <button className="mg-btn" onClick={() => go('announcements')}><i className="ti ti-speakerphone" />Read It</button>
+              </Section>
+            ))}
             <StaffTiles data={data} go={go}
               extra={profile.isLiaison ? <Tile key="clients" icon="ti-users" title="My Clients" sub="Where each client is in enrollment" onClick={() => go('clients')} /> : null} />
             <Section title="Onboarding"><OnboardingSummary onboarding={onboarding} compact /></Section>

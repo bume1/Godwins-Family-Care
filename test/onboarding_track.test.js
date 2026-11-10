@@ -123,8 +123,9 @@ test('a module whose version moved on re-checks the learner who completed the ol
 
 test('modules follow the lanes and credentials: exams modules for IME, psychiatric ones for a PMHNP', () => {
   const ids = (inputs) => T.buildTrack({ inputs }).modules.map(m => m.id);
-  assert.ok(!ids({ serviceLines: ['PRIVATE_PAY'] }).includes('TRN-101'));
-  assert.ok(ids({ serviceLines: ['IME'] }).includes('TRN-101'));
+  assert.ok(!ids({ serviceLines: ['PRIVATE_PAY'] }).includes('TRN-104'));
+  assert.ok(ids({ serviceLines: ['IME'] }).includes('TRN-104'));
+  assert.ok(!ids({ serviceLines: ['IME'] }).includes('TRN-101'), 'TRN-101 was retired');
   assert.ok(!ids({ serviceLines: ['IME'] }).includes('TRN-205'));
   assert.ok(!ids({ serviceLines: ['BEHAVIORAL'] }).includes('TRN-211'));
   assert.ok(ids({ serviceLines: ['BEHAVIORAL'], credentials: ['PMHNP'] }).includes('TRN-211'));
@@ -144,11 +145,11 @@ test('the office sees who acts and on what basis, and the version flags; her vie
 
 test('readiness: eligible is not opened, and opening needs every condition, the scope and (for insured) the payer', () => {
   const inputs = { serviceLines: ['IME'] };
-  const allIme = ['TRN-101', 'TRN-102', 'TRN-103', 'TRN-104', 'TRN-105'];
+  const allIme = ['TRN-102', 'TRN-103', 'TRN-104', 'TRN-105'];
   const det = C.DETERMINATIONS.find(d => d.id === 'IME');
   assert.throws(() => T.openDetermination('IME', inputs, {}, {}, HER, {}, NOW), (e) => e.code === 'DETERMINATION_OFFICE_ONLY');
   assert.throws(() => T.openDetermination('PRIVATE_PAY', inputs, {}, {}, OFFICE, {}, NOW), (e) => e.code === 'DETERMINATION_NOT_IN_SCOPE');
-  assert.throws(() => T.openDetermination('IME', inputs, {}, {}, OFFICE, {}, NOW), (e) => e.code === 'DETERMINATION_NOT_READY' && e.outstanding.length === 5);
+  assert.throws(() => T.openDetermination('IME', inputs, {}, {}, OFFICE, {}, NOW), (e) => e.code === 'DETERMINATION_NOT_READY' && e.outstanding.length === 4);
   const record = { training: Object.fromEntries(allIme.map(id => [id, { completedAt: NOW, version: '1' }])) };
   const t = T.buildTrack({ inputs, record });
   const st = t.determinations.find(d => d.id === 'IME');

@@ -28,6 +28,10 @@ const { SOURCES } = require('../onboarding/sources');
 const attestations = require('../caregiverAttestations');
 const wp = require('../welcomePacketRepository');
 const welcomePacketPdf = require('../welcomePacketPdf');
+const DS = require('../staffDocumentSends');
+const signedDocument = require('../onboarding/signedDocument');
+const staffDocs = require('../staffDocuments');
+const announcements = require('../staffAnnouncements');
 
 const FOLDERS = 'staff_portal_folders';
 const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'liaison']);
@@ -358,7 +362,7 @@ module.exports = function createStaffPortalRoutes(deps) {
         signed.push({ id: 'packet', title: 'Caregiver welcome packet', signedAt: packet.signed_at, pdf: 'packet' });
       }
       for (const a of ((await db.get('caregiver_attestations')) || []).filter(x => x && String(x.caregiver_id) === me && x.signed_at)) {
-        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: a.version, signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
+        signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: attestations.versionLabel(a.version), signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
       }
     }
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
@@ -399,6 +403,46 @@ module.exports = function createStaffPortalRoutes(deps) {
   });
 
   // ---- shared folders --------------------------------------------------------
+  // ---- announcements (owner, 2026-11-10) ----------------------------------------
+  // Office news and upgrade notes for every staff member, read from the same
+  // `caregiver_broadcasts` rows the caregiver Feed reads, through the same
+  // audience rule (staffAnnouncements.visibleTo). Posting and retiring stay on
+  // POST /api/caregiver/broadcasts, so there is one way to post.
+  const READS = 'staff_announcement_reads';
+  router.get('/api/my/announcements', authenticateToken, requireStaff, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const reads = (await db.get(READS)) || [];
+    return res.json({ announcements: announcements.forViewer(rows, reads, req.user, audienceOf(req.user)) });
+  });
+  // Always the signed-in person's own receipt: there is no user id to pass.
+  router.post('/api/my/announcements/:id/reviewed', authenticateToken, requireStaff, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const row = rows.find(r => r && r.id === req.params.id);
+    if (!row || !announcements.visibleTo(row, audienceOf(req.user), req.user.id)) {
+      return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
+    }
+    const reads = (await db.get(READS)) || [];
+    const had = reads.find(r => r && r.announcement_id === row.id && String(r.user_id) === String(req.user.id));
+    if (had) return res.json({ reviewedAt: had.reviewed_at });
+    const rec = { id: uuidv4(), announcement_id: row.id, user_id: req.user.id, user_name: req.user.name || req.user.email, reviewed_at: nowIso() };
+    reads.push(rec);
+    await db.set(READS, reads);
+    await logActivity(req.user.id, rec.user_name, 'announcement_reviewed', 'broadcast', row.id, {});
+    return res.json({ reviewedAt: rec.reviewed_at });
+  });
+  router.get('/api/my/admin/announcements', authenticateToken, requireAdmin, async (req, res) => {
+    const rows = (await db.get('caregiver_broadcasts')) || [];
+    const reads = (await db.get(READS)) || [];
+    const people = (await getUsers())
+      .filter(u => audienceOf(u) && u.accountStatus !== 'inactive')
+      .map(u => ({ id: u.id, name: u.name || u.email, type: audienceOf(u) }));
+    return res.json({
+      announcements: announcements.report(rows, reads, people),
+      roles: announcements.STAFF_TYPES.map(t => ({ value: t, label: TYPE_LABELS[t] })),
+      people: people.map(p => ({ id: p.id, name: p.name, typeLabel: TYPE_LABELS[p.type] })).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    });
+  });
+
   router.get('/api/my/folders', authenticateToken, requireStaff, async (req, res) => {
     const mine = (await folders()).filter(f => canSee(f, req.user))
       .map(f => ({ id: f.id, label: f.label, description: f.description || null }));
@@ -611,6 +655,193 @@ module.exports = function createStaffPortalRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'staff_portal_folder_removed', 'staff_folder', gone.id, { label: gone.label });
     return res.json({ ok: true });
   });
+
+  // ---- DOCUMENTS TO REVIEW OR SIGN (owner, 2026-11-09) -----------------------
+  // The office sends its own PDF to one person or to everyone of a type, at any
+  // time. The recipient opens it here and acknowledges or signs it alone. The
+  // signed copy is stored in Drive and filed to their Documents, where they and
+  // the admin team can open it. An onboarding task can carry one of these.
+  const SENDS = 'staff_document_sends';
+  const SIGNINGS = 'staff_document_signings';
+  const DOC_MAX = (() => { try { return require('../config').STAFF_DOCUMENT_MAX_SIZE || 25 * 1024 * 1024; } catch (_) { return 25 * 1024 * 1024; } })();
+  const docUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: DOC_MAX } });
+  const sends = async () => (await db.get(SENDS)) || [];
+  const signings = async () => (await db.get(SIGNINGS)) || [];
+  const hashIp = (req) => crypto.createHash('sha256').update(`gfc-sign:${req.ip || ''}`).digest('hex').slice(0, 24);
+  const chapterOf = async (userId) => {
+    const r = ((await db.get('onboarding_records')) || []).find(x => String(x.userId) === String(userId));
+    return (r && r.inputs && r.inputs.chapter) || null;
+  };
+  const personOf = async (u) => ({ userId: String(u.id), name: u.name || u.email, audience: audienceOf(u), chapter: await chapterOf(u.id) });
+  const staffPeople = async () => {
+    const recs = (await db.get('onboarding_records')) || [];
+    return (await getUsers()).filter(u => audienceOf(u) && u.accountStatus !== 'inactive').map(u => {
+      const r = recs.find(x => String(x.userId) === String(u.id));
+      return { userId: String(u.id), name: u.name || u.email, audience: audienceOf(u), chapter: (r && r.inputs && r.inputs.chapter) || null };
+    });
+  };
+  const sendView = (s, people, rows) => ({
+    id: s.id, title: s.title, note: s.note || null, action: s.action, fileName: s.fileName, scope: s.scope,
+    createdAt: s.createdAt, createdByName: s.createdByName, recipients: DS.recipients(s, people, rows)
+  });
+
+  // The office: send, list (with who has and hasn't), withdraw.
+  router.post('/api/my/admin/document-sends', authenticateToken, requireAdmin, docUpload.single('file'), async (req, res) => {
+    const b = req.body || {};
+    const title = String(b.title || '').trim().slice(0, 200);
+    if (!title) return res.status(400).json({ error: 'Give the document a name.', code: 'DOC_TITLE_REQUIRED' });
+    if (!DS.ACTIONS.includes(b.action)) return res.status(400).json({ error: 'Choose whether they acknowledge it or sign it.', code: 'DOC_ACTION_REQUIRED' });
+    if (!req.file) return res.status(400).json({ error: 'Attach the PDF to send.', code: 'NO_FILE' });
+    const type = detectFileType ? detectFileType(req.file.buffer) : null;
+    if (type !== 'application/pdf' && !String(req.file.buffer.slice(0, 5)).startsWith('%PDF')) {
+      return res.status(400).json({ error: 'Send a PDF, so it can be signed and filed as one document.', code: 'DOC_NOT_PDF' });
+    }
+    let scopeRaw = b.scope; try { if (typeof scopeRaw === 'string') scopeRaw = JSON.parse(scopeRaw); } catch (_) { scopeRaw = null; }
+    const users = await getUsers();
+    const chapters = Object.keys(require('../onboarding/track').CHAPTERS);
+    const scope = DS.scopeFrom(scopeRaw, { staffTypes: STAFF_TYPES, chapters, userExists: (id) => users.some(u => String(u.id) === id && audienceOf(u)) });
+    if (!scope) return res.status(400).json({ error: 'Choose who receives it: one staff member, or everyone of a type.', code: 'DOC_SCOPE_REQUIRED' });
+    const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: DOC_MAX, keyPrefix: 'sent' });
+    if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    let stored;
+    try {
+      stored = await drive.uploadStaffDocumentFile('GFC Documents to Sign', 'Sent', prepared.safeName, req.file.buffer, 'application/pdf');
+    } catch (err) {
+      return res.status(502).json({ error: 'We could not store that document. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE',
+        detail: drive.describeDriveError ? drive.describeDriveError(err).reason : null });
+    }
+    const row = { id: `send_${uuidv4().replace(/-/g, '').slice(0, 12)}`, title, note: String(b.note || '').trim().slice(0, 1000) || null,
+      action: b.action, fileName: String(req.file.originalname || prepared.safeName).slice(0, 200), driveFileId: stored.fileId || stored.id || null,
+      sha256: signedDocument.sha256(req.file.buffer), scope, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
+      createdAt: nowIso(), removedAt: null };
+    const all = await sends(); all.push(row); await db.set(SENDS, all);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_sent', 'staff_document', row.id, { scope, action: row.action });
+    return res.json({ ok: true, send: sendView(row, await staffPeople(), await signings()) });
+  });
+  router.get('/api/my/admin/document-sends', authenticateToken, requireAdmin, async (req, res) => {
+    const people = await staffPeople(); const rows = await signings();
+    let list = (await sends()).filter(s => !s.removedAt).map(s => sendView(s, people, rows));
+    if (req.query.userId) list = list.filter(s => s.recipients.some(r => r.userId === String(req.query.userId)));
+    return res.json({ sends: list, types: STAFF_TYPES.map(t => ({ id: t, label: TYPE_LABELS[t] })) });
+  });
+  router.delete('/api/my/admin/document-sends/:id', authenticateToken, requireAdmin, async (req, res) => {
+    const all = await sends(); const s = all.find(x => x.id === req.params.id && !x.removedAt);
+    if (!s) return res.status(404).json({ error: 'No such document.', code: 'DOC_UNKNOWN' });
+    // Withdrawn from whoever has not done it yet; signed copies stay filed.
+    Object.assign(s, { removedAt: nowIso(), removedByName: req.user.name || req.user.email });
+    await db.set(SENDS, all);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_withdrawn', 'staff_document', s.id, {});
+    return res.json({ ok: true });
+  });
+
+  // The recipient: what is waiting on them, open it, acknowledge or sign it.
+  router.get('/api/my/document-sends', authenticateToken, requireStaff, async (req, res) => {
+    return res.json(DS.forPerson(await sends(), await signings(), await personOf(req.user)));
+  });
+  // The original, for a recipient or the admin team. Through the app, audited.
+  router.get('/api/my/document-sends/:id/file', authenticateToken, requireStaff, async (req, res) => {
+    const s = (await sends()).find(x => x.id === req.params.id);
+    if (!s || (!isAdminTeam(req.user) && !DS.reaches(s, await personOf(req.user)))) return res.status(404).json({ error: 'No such document.', code: 'DOC_UNKNOWN' });
+    try {
+      const buf = await drive.downloadFileBuffer(s.driveFileId);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'document_opened', 'staff_document', s.id, {});
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', s.fileName || 'document.pdf'));
+      return res.send(buf);
+    } catch (err) {
+      return res.status(502).json({ error: 'That document could not be opened just now.', code: 'FILE_STORAGE_UNAVAILABLE' });
+    }
+  });
+  router.post('/api/my/document-sends/:id/sign', authenticateToken, requireStaff, async (req, res) => {
+    const s = (await sends()).find(x => x.id === req.params.id);
+    const me = await personOf(req.user);
+    if (!s || !DS.reaches(s, me)) return res.status(404).json({ error: 'No such document.', code: 'DOC_UNKNOWN' });
+    const rows = await signings();
+    if (DS.signingFor(rows, s.id, me.userId)) return res.status(409).json({ error: s.action === 'sign' ? 'You have already signed this document.' : 'You have already acknowledged this document.', code: 'DOC_ALREADY_DONE' });
+    const b = req.body || {};
+    const printedName = String(b.printedName || '').trim().slice(0, 160);
+    if (!printedName) return res.status(400).json({ error: 'Type your full name.', code: 'NAME_REQUIRED' });
+    if (s.action === 'acknowledge' && b.acknowledged !== true) return res.status(400).json({ error: 'Tick the box to confirm you have read it.', code: 'ACK_REQUIRED' });
+    const sig = String(b.signaturePng || '');
+    if (s.action === 'sign') {
+      if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig)) return res.status(400).json({ error: 'Please sign in the box.', code: 'SIGNATURE_REQUIRED' });
+      if (sig.length > 400000) return res.status(413).json({ error: 'That signature is too large to store.', code: 'SIGNATURE_TOO_LARGE' });
+    }
+    let original;
+    try { original = await drive.downloadFileBuffer(s.driveFileId); } catch (err) {
+      return res.status(502).json({ error: 'That document could not be opened just now. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE' });
+    }
+    // The document they were shown must be the one the office sent.
+    if (s.sha256 && signedDocument.sha256(original) !== s.sha256) return res.status(409).json({ error: 'This document changed after it was sent. Ask the office to send it again.', code: 'DOC_CHANGED' });
+    const signedAt = nowIso();
+    const ipHash = hashIp(req);
+    const built = await signedDocument.buildSignedCopy(original, {
+      action: s.action, title: s.title, printedName, email: req.user.email, signedAt, ipHash,
+      signedAtLabel: new Date(signedAt).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'long', timeStyle: 'short' }) + ' Eastern',
+      signaturePng: s.action === 'sign' ? sig : null
+    });
+    const fileName = `${s.title} - ${s.action === 'sign' ? 'signed' : 'acknowledged'} ${signedAt.slice(0, 10)}.pdf`.replace(/[\\/:*?"<>|]/g, '-');
+    let stored;
+    try {
+      // Stored in Drive with their other staff paperwork.
+      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter(me.chapter || 'C'), staffFolders.personFolderName(me.name, me.userId), fileName, built.bytes, 'application/pdf');
+    } catch (err) {
+      return res.status(502).json({ error: 'We could not file your signed copy. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE' });
+    }
+    // Filed to their Documents: they and the admin team see it there.
+    const documentId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const docs = (await db.get('caregiver_documents')) || [];
+    docs.push(staffDocs.buildStaffDocumentRow({
+      id: documentId, ownerId: me.userId, ownerName: me.name, kind: 'signed_document', fileName, storedName: fileName,
+      mime: 'application/pdf', sizeBytes: built.bytes.length, driveFileId: stored.fileId || stored.id || null, driveUrl: null,
+      note: `${s.action === 'sign' ? 'Signed' : 'Acknowledged'}: ${s.title}`, status: 'accepted',
+      uploadedById: req.user.id, uploadedByName: printedName, uploadedByOffice: false,
+      extra: { document_send_id: s.id }
+    }));
+    await db.set('caregiver_documents', docs);
+    rows.push({ id: uuidv4(), sendId: s.id, userId: me.userId, action: s.action, printedName, signedAt, ipHash, documentId, originalSha256: built.originalSha256 });
+    await db.set(SIGNINGS, rows);
+    // An onboarding task that carries this document is done when it is.
+    await completeOnboardingTasks(s, me, req.user, signedAt, documentId);
+    await logActivity(req.user.id, req.user.name || req.user.email, s.action === 'sign' ? 'document_signed' : 'document_acknowledged', 'staff_document', s.id, { documentId });
+    return res.json({ ok: true, documentId });
+  });
+
+  async function completeOnboardingTasks(send, me, user, at, documentId) {
+    const tasks = ((await db.get('onboarding_custom_tasks')) || []).filter(t => !t.removedAt && t.documentSendId === send.id);
+    const recs = (await db.get('onboarding_records')) || [];
+    const rec = recs.find(r => String(r.userId) === me.userId);
+    if (!rec) return;
+    const T = require('../onboarding/track');
+    rec.items = rec.items || {};
+    // Any of her own items this document was attached to (2026-11-10): her
+    // first step is done, and the signed copy sits on the item.
+    for (const [itemId, st] of Object.entries(rec.items)) {
+      if (!st || !st.document || st.document.sendId !== send.id) continue;
+      const def = T.findItem(itemId);
+      if (!def) continue;
+      const idx = def.steps.findIndex(s => s.actor === 'NEW_HIRE');
+      if (idx < 0 || (st.steps && st.steps[idx])) continue;
+      try {
+        Object.assign(st, T.recordStep(def, st, idx, { id: user.id, name: user.name || user.email, isOffice: false }, {}, at));
+      } catch (_) { /* the signing stands; the step can be recorded by hand */ }
+      st.files = (st.files || []).concat([{ id: uuidv4(), name: `${send.title} (${send.action === 'sign' ? 'signed' : 'acknowledged'})`,
+        documentId, uploadedAt: at, uploadedById: user.id, uploadedByName: user.name || user.email, filedBy: 'SELF' }]);
+    }
+    if (!tasks.length) { rec.updatedAt = nowIso(); await db.set('onboarding_records', recs); return; }
+    const mine = T.customItemsFor(tasks, rec.inputs, rec.userId);
+    for (const item of mine) {
+      const st = rec.items[item.id] || {};
+      if (st.steps && st.steps[0]) continue;
+      try {
+        rec.items[item.id] = Object.assign(st, T.recordStep(item, st, 0, { id: user.id, name: user.name || user.email, isOffice: false }, {}, at, { viaDocument: true }));
+        rec.items[item.id].files = (rec.items[item.id].files || []).concat([{ id: uuidv4(), name: `${send.title} (${send.action === 'sign' ? 'signed' : 'acknowledged'})`,
+          documentId, uploadedAt: at, uploadedById: user.id, uploadedByName: user.name || user.email, filedBy: 'SELF' }]);
+      } catch (_) { /* the signing stands; the task can be recorded by hand */ }
+    }
+    rec.updatedAt = nowIso();
+    await db.set('onboarding_records', recs);
+  }
 
   return router;
 };

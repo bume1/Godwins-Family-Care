@@ -132,8 +132,11 @@ test('C.9 recurring rows carry the table\'s own classification', () => {
 test('module ids are the Library\'s and are never renumbered', () => {
   const ids = MODULES.map(m => m.id);
   assert.strictEqual(new Set(ids).size, ids.length);
-  const expected = ['TRN-101', 'TRN-102', 'TRN-103', 'TRN-104', 'TRN-105', 'TRN-106',
+  // TRN-101 was retired and TRN-009, TRN-501–503 added (owner's Training
+  // Material Tracker, 2026-11-10). A retired id is never reused.
+  const expected = ['TRN-102', 'TRN-103', 'TRN-104', 'TRN-105', 'TRN-106',
     'TRN-001', 'TRN-002', 'TRN-003', 'TRN-004', 'TRN-005', 'TRN-006', 'TRN-007', 'TRN-008',
+    'TRN-009', 'TRN-501', 'TRN-502', 'TRN-503',
     ...Array.from({ length: 20 }, (_, i) => `TRN-2${String(i + 1).padStart(2, '0')}`),
     'TRN-301', 'TRN-302', 'TRN-303', 'TRN-304', 'TRN-401', 'TRN-402', 'TRN-403', 'TRN-404', 'TRN-405'];
   assert.deepStrictEqual(ids, expected);
@@ -141,8 +144,12 @@ test('module ids are the Library\'s and are never renumbered', () => {
 
 test('every module phase is a Chapter C phase, and required_for parses', () => {
   const phases = new Set(C.PHASES.map(p => p.id));
+  const LT = require('../onboarding/libraryTrainings');
   for (const m of MODULES) {
-    assert.ok(phases.has(m.phase), `${m.id} ${m.phase}`);
+    // A module scoped to account types sits in each role's own training
+    // phase; its catalog phase is the first of those.
+    if (m.audience) assert.ok(Object.values(LT.TRAINING_PHASE).includes(m.phase), `${m.id} ${m.phase}`);
+    else assert.ok(phases.has(m.phase), `${m.id} ${m.phase}`);
     for (const r of m.requiredFor) assert.ok(['phase', 'determination', 'privilege'].includes(r.kind));
   }
   assert.throws(() => V.parseRequiredFor('gate:G2'), /Unrecognised/);
@@ -196,7 +203,9 @@ test('a module with no confirmed manual references reads PENDING, never cleared 
 });
 
 test('every pending module carries proposed sections: SOP Set 2\'s planned table first, else a draft for the Clinical Director', () => {
-  for (const m of MODULES.filter(x => !x.manualRefs.length && !x.flagsOnAnyManualChange)) {
+  // Role-scoped owner additions (TRN-501–503) teach the home care manual, not
+  // the clinical one, so they carry no clinical manual sections.
+  for (const m of MODULES.filter(x => !x.manualRefs.length && !x.flagsOnAnyManualChange && !x.audience)) {
     assert.ok(Array.isArray(m.proposedManualRefs), `${m.id} has no proposed references`);
     assert.ok(['SOP_SET2_PLANNED', 'DRAFT_FOR_CLINICAL_DIRECTOR'].includes(m.proposedBasis), m.id);
   }

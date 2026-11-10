@@ -41,6 +41,7 @@ const { contentDisposition } = require('../contentDisposition');
 const staffDocs = require('../staffDocuments');
 
 const accountTypes = require('../accountTypes');
+const announcements = require('../staffAnnouncements');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
@@ -898,8 +899,10 @@ module.exports = function createCaregiverRoutes(deps) {
       const events = await readRows('escalation_events');
       const mine = events.filter(e => e && e.caregiver_id === req.user.id);
       const items = broadcasts
-        .filter(b => b && b.active !== false)
-        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, at: b.posted_at, byName: b.posted_by_name }))
+        // Caregiver posts and all-staff announcements (2026-11-10), through the
+        // same audience rule My GFC → Announcements reads.
+        .filter(b => announcements.visibleTo(b, 'caregiver', req.user.id))
+        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
         .concat(mine.map(e => ({
           id: e.id, kind: 'escalation', title: `${e.concern_type.replace(/_/g, ' ')} concern — ${e.client_name}`,
           body: `Status: ${String(e.status).replace(/_/g, ' ')}. ${cg.describeRecipients(e.notified) === 'no one — this concern could not be routed' ? '' : `Sent to ${cg.describeRecipients(e.notified)}.`}`.trim(),
@@ -919,11 +922,21 @@ module.exports = function createCaregiverRoutes(deps) {
     try {
       const { title, body } = req.body || {};
       if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.', code: 'TITLE_REQUIRED' });
+      // Who it is for (2026-11-10). No audience means caregivers, as before.
+      const staffIds = (await getUsers()).filter(u => announcements.STAFF_TYPES.includes(accountTypes.accountTypeOf(u)))
+        .filter(u => u.accountStatus !== 'inactive').map(u => u.id);
+      const aud = announcements.parseAudience((req.body || {}).audience, (req.body || {}).userIds, staffIds);
+      if (!aud.ok) return res.status(400).json({ error: aud.error, code: aud.code });
+      const lnk = announcements.parseLink((req.body || {}).link);
+      if (!lnk.ok) return res.status(400).json({ error: lnk.error, code: lnk.code });
       const rows = await readRows('caregiver_broadcasts');
       const row = {
         id: uuidv4(),
-        title: String(title).trim().slice(0, 200),
-        body: String(body || '').trim().slice(0, 4000),
+        title: String(title).trim().slice(0, announcements.TITLE_MAX),
+        body: String(body || '').trim().slice(0, announcements.BODY_MAX),
+        audience: aud.audience,
+        user_ids: aud.userIds,
+        link: lnk.link,
         active: true,
         posted_at: nowIso(),
         posted_by: req.user.id,
@@ -932,9 +945,44 @@ module.exports = function createCaregiverRoutes(deps) {
       rows.push(row);
       await db.set('caregiver_broadcasts', rows);
       await logActivity(req.user.id, row.posted_by_name, 'caregiver_broadcast_posted', 'broadcast', row.id, { title: row.title });
-      res.json({ broadcast: row });
+      // Everyone it reaches gets it by email too, word for word (owner,
+      // 2026-11-10). Through the queue, so an unsubscribe or an inactive
+      // account is honoured. A failed send never undoes the post.
+      let emailed = 0;
+      const recipients = (await getUsers()).filter(u => u && u.email && u.accountStatus !== 'inactive'
+        && String(u.id) !== String(req.user.id)
+        && announcements.visibleTo(row, accountTypes.accountTypeOf(u), u.id));
+      for (const u of recipients) {
+        try {
+          const q = await queueNotification('staff_announcement', u.id, u.email, u.name || u.email,
+            announcements.emailFor(row, links.announcementsFor(u)),
+            { relatedEntityId: row.id, relatedEntityType: 'announcement', createdBy: req.user.id });
+          if (q && !q.skipped) emailed++;
+        } catch (e) { console.error('Announcement email failed:', e.message); }
+      }
+      res.json({ broadcast: row, emailed });
     } catch (error) {
       console.error('Broadcast error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/caregiver/broadcasts/:id/retire — take a post down. The row is
+  // kept (active: false) with who retired it and when, never deleted.
+  router.post('/api/caregiver/broadcasts/:id/retire', authenticateToken, requireCaregiverOffice, async (req, res) => {
+    try {
+      const rows = await readRows('caregiver_broadcasts');
+      const row = rows.find(b => b && b.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
+      if (row.active === false) return res.json({ broadcast: row });
+      row.active = false;
+      row.retired_at = nowIso();
+      row.retired_by_name = req.user.name || req.user.email;
+      await db.set('caregiver_broadcasts', rows);
+      await logActivity(req.user.id, row.retired_by_name, 'caregiver_broadcast_retired', 'broadcast', row.id, { title: row.title });
+      res.json({ broadcast: row });
+    } catch (error) {
+      console.error('Broadcast retire error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -1226,10 +1274,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // that names kinds is a page that drifts from the validator that refuses them.
   //
   // `payroll: true` marks the onboarding paperwork (2026-09-13, owner request).
-  // GUSTO IS THE SYSTEM OF RECORD for these — the caregiver submits them there,
-  // and what the app holds is the office's copy. Nothing here transmits to
-  // Gusto and no screen may imply it does, or someone will believe their W9 is
-  // filed because they uploaded it here.
+  // These are the office's copies. The pay and tax paperwork itself (W-4, G-4,
+  // I-9, W-9, direct deposit) is filled in by the person in My GFC → Hours &
+  // Pay (owner, 2026-11-10: Gusto is no longer part of onboarding).
   const BASE_DOC_KINDS = [
     { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true,  payroll: false },
     { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false, payroll: false },
@@ -1258,6 +1305,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // `id_document` and `certification` ALREADY EXIST above and are deliberately
   // reused rather than duplicated: a photo ID is a photo ID, and two buckets
   // for one document is how the office ends up chasing a file it already has.
+  // Kinds only the app files, never chosen on an upload form: a signed copy
+  // of a document the office sent comes only from the sign route (2026-11-09).
+  const FILED_ONLY_KIND_LABELS = { signed_document: 'Signed or acknowledged document' };
   const CAREGIVER_DOC_KINDS = [
     ...BASE_DOC_KINDS,
     ...wp.PACKET_DOCUMENT_KINDS
@@ -1577,7 +1627,7 @@ module.exports = function createCaregiverRoutes(deps) {
     caregiverId: r.caregiver_id,
     caregiverName: r.caregiver_name,
     kind: r.kind,
-    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || r.kind,
+    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || FILED_ONLY_KIND_LABELS[r.kind] || r.kind,
     fileName: r.file_name,
     sizeBytes: r.size_bytes,
     note: r.note || null,

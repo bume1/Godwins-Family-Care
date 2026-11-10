@@ -131,12 +131,12 @@ const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-US', { mont
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: TZ }) : '');
 
 const KIND_LABELS = { timesheet: 'Timesheet', visit_note: 'Signed visit note', mileage: 'Mileage or expense', certification: 'Certification',
-  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', other: 'Other' };
+  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', signed_document: 'Signed document', other: 'Other' };
 const STATUS_PILL = { accepted: ['mg-ok', 'Accepted'], received: ['mg-wait', 'With the office'], rejected: ['mg-bad', 'Sent back'] };
 
-function Section({ title, sub, children, right }) {
+function Section({ title, sub, children, right, id }) {
   return (
-    <div className="mg-card">
+    <div className="mg-card" id={id}>
       {(title || right) && <div className="mg-card-h">{title ? <h2>{title}</h2> : <span />}{right}</div>}
       {sub && <p className="mg-lead">{sub}</p>}
       {children}
@@ -609,11 +609,118 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
   );
 }
 
+// ---- Announcements (owner, 2026-11-10) -----------------------------------------
+// Office news and upgrade notes. The rows are the caregiver Feed's, read
+// through one audience rule on the server, so caregivers see the same posts in
+// their Feed. One composer for everyone who posts: the admin team.
+function AnnouncementList({ items, onReviewed, onError }) {
+  if (!items) return <p className="mg-note">Loading…</p>;
+  if (!items.length) return <p className="mg-note">No announcements right now.</p>;
+  const mark = (id) => call(`/api/my/announcements/${id}/reviewed`, { method: 'POST' }).then(onReviewed).catch(e => onError(e.message));
+  return items.map(a => (
+    <div className="mg-row" key={a.id} style={{ alignItems: 'flex-start' }}>
+      <i className="ti ti-speakerphone mg-big" />
+      <div className="mg-grow">
+        <b>{a.title}</b>
+        <small>{fmtDate(a.at)}{a.byName ? ` · ${a.byName}` : ''}</small>
+        {a.body && <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.body}</p>}
+        {a.link && <a className="mg-btn mg-ghost mg-sm" href={a.link} target="_blank" rel="noopener noreferrer">Open the guide</a>}
+      </div>
+      {a.reviewedAt
+        ? <span className="mg-pill mg-ok">Reviewed</span>
+        : <button className="mg-btn mg-sm" onClick={() => mark(a.id)}>I've Reviewed This</button>}
+    </div>
+  ));
+}
+
+function ManageAnnouncements({ onChanged }) {
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState({ title: '', body: '', link: '', everyone: true, roles: [], userIds: [] });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(null);
+  const load = useCallback(() => call('/api/my/admin/announcements').then(setData).catch(e => setErr(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  const post = async () => {
+    setBusy(true); setErr('');
+    try {
+      await call('/api/caregiver/broadcasts', { method: 'POST', body: {
+        title: form.title, body: form.body, link: form.link,
+        audience: form.everyone ? 'all_staff' : form.roles,
+        userIds: form.everyone ? [] : form.userIds
+      } });
+      setForm({ title: '', body: '', link: '', everyone: true, roles: [], userIds: [] });
+      await load(); onChanged();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const retire = async (id) => {
+    if (!window.confirm('Take this announcement down? It stays in the record.')) return;
+    try { await call(`/api/caregiver/broadcasts/${id}/retire`, { method: 'POST' }); await load(); onChanged(); } catch (e) { setErr(e.message); }
+  };
+  if (!data) return err ? <div className="mg-err">{err}</div> : <p className="mg-note">Loading…</p>;
+  const label = Object.fromEntries(data.roles.map(r => [r.value, r.label]));
+  const toggle = (v) => setForm(f => ({ ...f, roles: f.roles.includes(v) ? f.roles.filter(x => x !== v) : f.roles.concat([v]) }));
+  const togglePerson = (v) => setForm(f => ({ ...f, userIds: f.userIds.includes(v) ? f.userIds.filter(x => x !== v) : f.userIds.concat([v]) }));
+  const nameOf = Object.fromEntries((data.people || []).map(p => [String(p.id), p.name]));
+  return (
+    <div>
+      {err && <div className="mg-err">{err}</div>}
+      <p className="mg-note">An announcement reaches everyone you choose, on their My GFC Home and, for caregivers, their Feed. Each person also gets it by email, word for word. Write it for the whole team: no client names or health details.</p>
+      <label>Title</label>
+      <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="App update: what's new this week" />
+      <label>Message</label>
+      <textarea rows={5} value={form.body} onChange={e => setForm({ ...form, body: e.target.value })} />
+      <label>Link to a guide (optional)</label>
+      <input type="text" value={form.link} onChange={e => setForm({ ...form, link: e.target.value })} placeholder="https://docs.google.com/…" />
+      <label>Who sees it</label>
+      <div className="mg-checks">
+        <label><input type="checkbox" checked={form.everyone} onChange={() => setForm(f => ({ ...f, everyone: !f.everyone }))} />Everyone on the team</label>
+        {!form.everyone && data.roles.map(r => (
+          <label key={r.value}><input type="checkbox" checked={form.roles.includes(r.value)} onChange={() => toggle(r.value)} />{r.label}</label>
+        ))}
+      </div>
+      {!form.everyone && (
+        <div>
+          <label>Or these people</label>
+          <div className="mg-checks">
+            {(data.people || []).map(p => (
+              <label key={p.id}><input type="checkbox" checked={form.userIds.includes(p.id)} onChange={() => togglePerson(p.id)} />{p.name}{p.typeLabel ? ` (${p.typeLabel})` : ''}</label>
+            ))}
+          </div>
+        </div>
+      )}
+      <button className="mg-btn" style={{ marginTop: 10 }} disabled={busy || !form.title.trim() || (!form.everyone && !form.roles.length && !form.userIds.length)} onClick={post}><i className="ti ti-send" />Post Announcement</button>
+
+      <h3 style={{ marginTop: 22, fontSize: 19 }}>Posted</h3>
+      {!data.announcements.length && <p className="mg-note">Nothing posted yet.</p>}
+      {data.announcements.map(a => (
+        <div className="mg-row" key={a.id} style={{ alignItems: 'flex-start', opacity: a.active ? 1 : 0.6 }}>
+          <div className="mg-grow">
+            <b>{a.title}</b>
+            <small>{fmtDate(a.at)} · {a.audience === 'all_staff' ? 'Everyone' : a.audience.map(t => label[t] || t).concat((a.userIds || []).map(id => nameOf[String(id)] || 'a former staff member')).join(', ')}{a.active ? '' : ' · Taken down'} · {a.reviewed.length} reviewed, {a.notReviewed.length} not yet</small>
+            {open === a.id && (
+              <div style={{ marginTop: 6 }}>
+                <div><small><b>Not yet:</b> {a.notReviewed.join(', ') || 'Everyone has reviewed it.'}</small></div>
+                <div><small><b>Reviewed:</b> {a.reviewed.join(', ') || 'No one yet.'}</small></div>
+              </div>
+            )}
+          </div>
+          <button className="mg-btn mg-ghost mg-sm" onClick={() => setOpen(open === a.id ? null : a.id)}>{open === a.id ? 'Hide' : 'Who'}</button>
+          {a.active && <button className="mg-btn mg-warn mg-sm" onClick={() => retire(a.id)}>Take Down</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---- What every staff member has ---------------------------------------------------
 const STAFF_SECTIONS = [
   // The staff welcome packet (owner, 2026-11-09): not for caregivers, whose
   // welcome packet is in the caregiver app.
   { id: 'welcome', label: 'Welcome Packet', icon: 'ti-confetti', short: 'Welcome', notCaregiver: true, subtitle: 'How to reach you, your emergency contact, your availability, and how you like to learn.' },
+  // Caregivers read announcements in their Feed, so the section is not theirs.
+  { id: 'announcements', label: 'Announcements', icon: 'ti-speakerphone', short: 'News', notCaregiver: true, subtitle: 'News and app updates from the office.' },
   { id: 'onboarding', label: 'Onboarding', icon: 'ti-route', subtitle: 'Your checklist, uploads and training.' },
   { id: 'documents', label: 'My Documents', icon: 'ti-file-text', short: 'Documents', subtitle: 'What you signed, and every file on record for you.' },
   { id: 'policies', label: 'Policies', icon: 'ti-book', subtitle: 'The latest version of every policy you work under.' },
@@ -642,8 +749,10 @@ function useStaffData() {
   const [stubs, setStubs] = useState(null);
   const [folders, setFolders] = useState(null);
   const [hours, setHours] = useState(null);
+  const [news, setNews] = useState(null);
   const [err, setErr] = useState('');
   const loadFolders = useCallback(() => call('/api/my/folders').then(d => setFolders(d.folders)).catch(e => setErr(e.message)), []);
+  const loadNews = useCallback(() => call('/api/my/announcements').then(d => setNews(d.announcements)).catch(e => setErr(e.message)), []);
   useEffect(() => {
     if (!getToken()) { window.location.href = '/login'; return; }
     call('/api/my/profile').then(p => {
@@ -653,14 +762,17 @@ function useStaffData() {
       call('/api/my/policies').then(d => setPolicies(d.policies)).catch(e => setErr(e.message));
       call('/api/my/paystubs').then(d => setStubs(d.paystubs)).catch(e => setErr(e.message));
       loadFolders();
+      loadNews();
       if (p.isCaregiver) {
         const from = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
         call(`/api/scheduling/time-logs?from=${from}`).then(setHours).catch(() => setHours({ timeLogs: [], totalHours: 0 }));
       }
     }).catch(e => setFatal(e.code === 'STAFF_PORTAL_STAFF_ONLY' ? 'My GFC is for GFC staff.' : e.message));
-  }, [loadFolders]);
+  }, [loadFolders, loadNews]);
   const reloadProfile = useCallback(() => call('/api/my/profile').then(setProfile).catch(() => {}), []);
-  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, err, setErr, loadFolders, reloadProfile };
+  // A document signed here files a copy; the list below shows it at once.
+  const reloadDocs = useCallback(() => call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)), []);
+  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, news, loadNews, err, setErr, loadFolders, reloadProfile, reloadDocs };
 }
 
 // The tiles on Home that lead to the staff sections.
@@ -688,8 +800,18 @@ function StaffView({ view, data }) {
   if (view === 'documents') {
     return (
       <div>
+        {/* Documents the office sent to sign or acknowledge (owner, 2026-11-09). */}
+        {window.GFCDocSign && <Section title="Waiting on You" sub="Documents the office sent you to read and sign or acknowledge. Your copy files below."><window.GFCDocSign.WaitingOnYou onChanged={data.reloadDocs} /></Section>}
         <Section title="What You Signed" sub="Policies and forms you signed, with the version and date."><Signed signed={signed} onError={setErr} /></Section>
         <Section title="Files on Record" sub="Everything on file for you, whether you sent it or the office filed it."><Documents docs={docs} onError={setErr} /></Section>
+      </div>
+    );
+  }
+  if (view === 'announcements' && !profile.isCaregiver) {
+    return (
+      <div>
+        <Section><AnnouncementList items={data.news} onReviewed={data.loadNews} onError={setErr} /></Section>
+        {profile.isAdmin && <Section title="Post an Announcement" sub="One place to post for the whole team, caregivers included."><ManageAnnouncements onChanged={data.loadNews} /></Section>}
       </div>
     );
   }
@@ -705,15 +827,15 @@ function StaffView({ view, data }) {
   if (view === 'hours') {
     return (
       <div>
-        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
-        {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
-        {!profile.isCaregiver && profile.employmentType === '1099' && <Section title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
-        {!profile.isCaregiver && <Section title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
+        {!profile.isCaregiver && (profile.employmentType === 'W2' || !profile.employmentType) && <Section id="mg-clock" title="Time Clock and Shifts" sub="Clock in when you start work and out when you stop. Shifts the office assigns you are here to accept and clock in on."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section id="mg-clock" title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
+        {!profile.isCaregiver && profile.employmentType === '1099' && <Section id="mg-clock" title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
+        {!profile.isCaregiver && <Section id="mg-availability" title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected in Staff Scheduling → Time Logs. Payroll is run, and the hours file exported, in Payroll.</p><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="mg-btn mg-ghost" href="/scheduling">Open Staff Scheduling</a><a className="mg-btn mg-ghost" href="/payroll">Open Payroll</a></div></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
-        {window.MyPay && <Section title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
+        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
         {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>
@@ -734,6 +856,6 @@ function StaffView({ view, data }) {
   return null;
 }
 
-window.MyGFC = { Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor,
+window.MyGFC = { Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor, AnnouncementList,
   OnboardingSummary, LiaisonClients, call, getToken, openFile };
 })();
