@@ -227,7 +227,7 @@ function ackStatus(item, state) {
 // read from the packet's own checklist, never stored here. An entry the
 // packet marks not required does not hold the item open; a missing packet
 // fails closed (every entry reads missing).
-const PACKET_HERS = ['caregiver', 'gfc_sign', 'gusto'];
+const PACKET_HERS = ['caregiver', 'gfc_sign'];
 function packetEvidence(item, packetRows) {
   if (!item.packet) return null;
   const rows = Array.isArray(packetRows) ? packetRows : [];

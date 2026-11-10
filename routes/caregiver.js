@@ -1201,10 +1201,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // that names kinds is a page that drifts from the validator that refuses them.
   //
   // `payroll: true` marks the onboarding paperwork (2026-09-13, owner request).
-  // GUSTO IS THE SYSTEM OF RECORD for these — the caregiver submits them there,
-  // and what the app holds is the office's copy. Nothing here transmits to
-  // Gusto and no screen may imply it does, or someone will believe their W9 is
-  // filed because they uploaded it here.
+  // These are the office's copies. The pay and tax paperwork itself (W-4, G-4,
+  // I-9, W-9, direct deposit) is filled in by the person in My GFC → Hours &
+  // Pay (owner, 2026-11-10: Gusto is no longer part of onboarding).
   const BASE_DOC_KINDS = [
     { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true,  payroll: false },
     { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false, payroll: false },

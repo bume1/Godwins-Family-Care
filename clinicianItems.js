@@ -26,10 +26,8 @@ const O = require('./clinicianOnboarding');
 const { OWNERS: OW, OWNER_ROLES: OR, ACTIONS: A, VERIFY_SOURCES: V } = O;
 
 // ---- 2.1 CORE · Every new team member -------------------------------------
-// Pulled from the Gusto document set, tagged by relationship. Items move out of
-// Gusto into the app as that transition completes. GUSTO REMAINS THE SYSTEM OF
-// RECORD for payroll paperwork and nothing here transmits to it — the same rule
-// the caregiver packet's Section E follows, build-enforced.
+// Pulled from the original HR document set, tagged by relationship. Payroll
+// paperwork is filled in in the app (My GFC → Hours & Pay) since 2026-11-10.
 const CORE = [
   { id: 'CORE-01', block: 'CORE', title: 'Accepted offer',
     when: { relationship: ['W2', 'HYBRID'] }, owner: OW.CLINICIAN, action: A.UPLOAD,
@@ -168,7 +166,7 @@ const CLIN = [
   { id: 'CLIN-20', block: 'CLIN', title: 'Time tracking live in the app, tested before the first paid hour',
     when: { relationship: ['W2', 'HYBRID'] }, owner: OW.GFC, action: A.CONFIGURE,
     proof: 'Test entry confirmed', gates: ['G2'], repeats: 'once',
-    detail: 'Clinician time and availability live in the app, not in Gusto.' }
+    detail: 'Clinician time and availability live in the app.' }
 ];
 
 // ---- 2.3 NP · Nurse practitioner role -------------------------------------
