@@ -824,7 +824,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
       {!m.complete && !m.underReview && (office
         ? <button className="btn sm" style={{ marginTop: 6 }} onClick={complete}>Sign Off</button>
         : selfAttest ? <button className="btn sm" style={{ marginTop: 6 }} onClick={complete}>I Completed This</button>
-          : <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 4 }}>{m.signoff === 'CERTIFICATE' ? 'Send your certificate to the office. The office signs this off.' : `The ${['SELF_PACED', 'SYSTEM'].includes(m.host) ? 'office' : (HOST[m.host] || 'office')} signs this off.`}</div>)}
+          : <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 4 }}>{m.signoff === 'CERTIFICATE' ? 'Submit Your Certificate To Office' : `The ${['SELF_PACED', 'SYSTEM'].includes(m.host) ? 'office' : (HOST[m.host] || 'office')} signs this off.`}</div>)}
     </div>
   );
 };
