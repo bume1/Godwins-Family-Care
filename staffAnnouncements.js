@@ -131,7 +131,8 @@ const emailFor = (row, ctaUrl) => ({
   subject: row.title,
   body: [row.body || '', row.link ? `Guide: ${row.link}` : ''].filter(Boolean).join('\n\n') || row.title,
   ctaUrl,
-  ctaLabel: 'Open in the app'
+  ctaLabel: 'Open in the app',
+  format: 'announcement'
 });
 
 module.exports = {

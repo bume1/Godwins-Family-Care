@@ -684,7 +684,9 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
         body: templateData.body,
         htmlBody: templateData.htmlBody || null,
         ctaUrl: templateData.ctaUrl || null,
-        ctaLabel: templateData.ctaLabel || null
+        ctaLabel: templateData.ctaLabel || null,
+        // 'announcement': keep line breaks and draw ALL CAPS lines as headings.
+        format: templateData.format || null
       },
       sentAt: null,
       failedAt: null,
@@ -943,9 +945,11 @@ function buildQueuedEmail(templateData, baseUrl) {
   const text = String(t.body || '');
   if (t.htmlBody) return { html: t.htmlBody, text };
   const ctaUrl = absoluteEmailUrl(t.ctaUrl, baseUrl);
-  const rendered = emailTemplates.renderGfcEmail(
-    emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null)
-  );
+  const pieces = emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null);
+  // An office announcement keeps its line breaks and its ALL CAPS headings
+  // (owner, 2026-11-10). Other notices are unchanged.
+  if (t.format === 'announcement') { pieces.lineBreaks = true; pieces.capsHeadings = true; }
+  const rendered = emailTemplates.renderGfcEmail(pieces);
   return { html: rendered.html, text: rendered.text };
 }
 
