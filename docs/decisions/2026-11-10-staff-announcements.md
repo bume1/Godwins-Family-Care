@@ -8,7 +8,7 @@
 - Two duplicate composers posted to it: Admin Hub → Inbox → Caregiver Feed, and Caregiver Management → Feed post.
 
 ## What changed
-- **One store.** `caregiver_broadcasts` rows now carry `audience` (`'all_staff'` or a list of account types) and an optional https `link`.
+- **One store.** `caregiver_broadcasts` rows now carry `audience` (`'all_staff'` or a list of account types), `user_ids` (named team members, alone or beside roles; owner, same day), and an optional https `link`.
   - A row with no audience stays caregivers-only. Every post made before today keeps the readers it was written for.
 - **One rule.** `staffAnnouncements.visibleTo` decides who sees a post. The caregiver Feed and My GFC both read through it.
 - **Two places to read.**
@@ -29,8 +29,8 @@
 - **The composer says no client names.** Every reader in the audience sees the post.
 
 ## Verified
-- `test/staff_announcements.test.js`: 6 tests through the real routers.
-- 6 of 6 mutations caught:
+- `test/staff_announcements.test.js`: 7 tests through the real routers, including posts to named people.
+- 9 of 9 mutations caught (three more for named people: ignored, leaking to caregivers, a non-staff person accepted):
   - the Feed ignoring audience
   - a receipt written for someone else
   - old posts widened to everyone

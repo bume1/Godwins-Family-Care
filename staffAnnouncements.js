@@ -8,6 +8,7 @@
 //
 //   audience: 'all_staff'          every staff account type, caregivers too
 //   audience: ['rn', 'manager']    only those account types
+//   user_ids: ['u1', 'u7']         also (or only) these named people
 //   audience: absent               caregivers only — every post made before
 //                                  2026-11-10 was a caregiver Feed post, and
 //                                  reading it any wider would show it to
@@ -31,34 +32,51 @@ const LEGACY_AUDIENCE = Object.freeze(['caregiver']);
 const TITLE_MAX = 200;
 const BODY_MAX = 4000;
 
+const userIdsOf = (row) => (row && Array.isArray(row.user_ids) ? row.user_ids.map(String) : []);
+
 const audienceOf = (row) => {
   if (!row) return [];
   if (row.audience === ALL_STAFF) return ALL_STAFF;
   if (Array.isArray(row.audience) && row.audience.length) return row.audience;
+  // A post for named people only reaches no role. Absent everything, it is an
+  // old caregiver Feed post.
+  if (userIdsOf(row).length) return [];
   return LEGACY_AUDIENCE;
 };
 
-/** May a staff member of this account type see this post? */
-const visibleTo = (row, type) => {
+/** May this staff member (account type, and their id) see this post? */
+const visibleTo = (row, type, userId) => {
   if (!row || row.active === false || !STAFF_TYPES.includes(type)) return false;
   const a = audienceOf(row);
-  return a === ALL_STAFF || a.includes(type);
+  if (a === ALL_STAFF || a.includes(type)) return true;
+  return userId != null && userIdsOf(row).includes(String(userId));
 };
 
 /**
- * Validate what a composer sent. An absent audience keeps the old meaning
+ * Validate what a composer sent: roles (`'all_staff'` or a list of account
+ * types) and/or named people. `staffIds` is the set of active staff user ids a
+ * named person must be one of. Nothing at all keeps the old meaning
  * (caregivers), so a caller that never heard of audiences behaves as before.
- * → { ok, audience } | { ok: false, code, error }
+ * → { ok, audience, userIds } | { ok: false, code, error }
  */
-const parseAudience = (input) => {
-  if (input === undefined || input === null || input === '') return { ok: true, audience: [...LEGACY_AUDIENCE] };
-  if (input === ALL_STAFF) return { ok: true, audience: ALL_STAFF };
-  if (!Array.isArray(input) || !input.length) {
-    return { ok: false, code: 'AUDIENCE_INVALID', error: 'Choose everyone on the team, or at least one role.' };
+const parseAudience = (input, userIdsInput, staffIds) => {
+  const ids = Array.isArray(userIdsInput) ? [...new Set(userIdsInput.map(String))] : [];
+  if (ids.length) {
+    const known = new Set((staffIds || []).map(String));
+    const bad = ids.filter(id => !known.has(id));
+    if (bad.length) return { ok: false, code: 'AUDIENCE_PERSON_UNKNOWN', error: 'One of the people chosen is not on staff.' };
   }
+  const none = input === undefined || input === null || input === '' || (Array.isArray(input) && !input.length);
+  if (none) {
+    if (ids.length) return { ok: true, audience: [], userIds: ids };
+    if (Array.isArray(input)) return { ok: false, code: 'AUDIENCE_INVALID', error: 'Choose everyone, at least one role, or at least one person.' };
+    return { ok: true, audience: [...LEGACY_AUDIENCE], userIds: [] };
+  }
+  if (input === ALL_STAFF) return { ok: true, audience: ALL_STAFF, userIds: [] };
+  if (!Array.isArray(input)) return { ok: false, code: 'AUDIENCE_INVALID', error: 'Choose everyone, at least one role, or at least one person.' };
   const bad = input.filter(t => !STAFF_TYPES.includes(t));
   if (bad.length) return { ok: false, code: 'AUDIENCE_INVALID', error: `Not a staff role: ${bad.join(', ')}.` };
-  return { ok: true, audience: [...new Set(input)] };
+  return { ok: true, audience: [...new Set(input)], userIds: ids };
 };
 
 /** An optional link to a guide or SOP. https only, or nothing. */
@@ -75,7 +93,7 @@ const parseLink = (input) => {
 const forViewer = (rows, reads, user, type) => {
   const mine = new Map((reads || []).filter(r => r && String(r.user_id) === String(user.id)).map(r => [r.announcement_id, r]));
   return (rows || [])
-    .filter(r => visibleTo(r, type))
+    .filter(r => visibleTo(r, type, user.id))
     .map(r => ({
       id: r.id, title: r.title, body: r.body, link: r.link || null,
       at: r.posted_at, byName: r.posted_by_name,
@@ -90,13 +108,14 @@ const forViewer = (rows, reads, user, type) => {
  */
 const report = (rows, reads, people) => (rows || [])
   .map(r => {
-    const reached = (people || []).filter(p => visibleTo({ ...r, active: true }, p.type));
+    const reached = (people || []).filter(p => visibleTo({ ...r, active: true }, p.type, p.id));
     const done = new Set((reads || []).filter(x => x && x.announcement_id === r.id).map(x => String(x.user_id)));
     const audience = audienceOf(r);
     return {
       id: r.id, title: r.title, body: r.body, link: r.link || null,
       at: r.posted_at, byName: r.posted_by_name, active: r.active !== false,
       audience,
+      userIds: userIdsOf(r),
       reviewed: reached.filter(p => done.has(String(p.id))).map(p => p.name),
       notReviewed: reached.filter(p => !done.has(String(p.id))).map(p => p.name)
     };
@@ -105,5 +124,5 @@ const report = (rows, reads, people) => (rows || [])
 
 module.exports = {
   ALL_STAFF, STAFF_TYPES, LEGACY_AUDIENCE, TITLE_MAX, BODY_MAX,
-  audienceOf, visibleTo, parseAudience, parseLink, forViewer, report
+  audienceOf, userIdsOf, visibleTo, parseAudience, parseLink, forViewer, report
 };

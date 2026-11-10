@@ -891,7 +891,7 @@ module.exports = function createCaregiverRoutes(deps) {
       const items = broadcasts
         // Caregiver posts and all-staff announcements (2026-11-10), through the
         // same audience rule My GFC → Announcements reads.
-        .filter(b => announcements.visibleTo(b, 'caregiver'))
+        .filter(b => announcements.visibleTo(b, 'caregiver', req.user.id))
         .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
         .concat(mine.map(e => ({
           id: e.id, kind: 'escalation', title: `${e.concern_type.replace(/_/g, ' ')} concern — ${e.client_name}`,
@@ -913,7 +913,9 @@ module.exports = function createCaregiverRoutes(deps) {
       const { title, body } = req.body || {};
       if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.', code: 'TITLE_REQUIRED' });
       // Who it is for (2026-11-10). No audience means caregivers, as before.
-      const aud = announcements.parseAudience((req.body || {}).audience);
+      const staffIds = (await getUsers()).filter(u => announcements.STAFF_TYPES.includes(accountTypes.accountTypeOf(u)))
+        .filter(u => u.accountStatus !== 'inactive').map(u => u.id);
+      const aud = announcements.parseAudience((req.body || {}).audience, (req.body || {}).userIds, staffIds);
       if (!aud.ok) return res.status(400).json({ error: aud.error, code: aud.code });
       const lnk = announcements.parseLink((req.body || {}).link);
       if (!lnk.ok) return res.status(400).json({ error: lnk.error, code: lnk.code });
@@ -923,6 +925,7 @@ module.exports = function createCaregiverRoutes(deps) {
         title: String(title).trim().slice(0, announcements.TITLE_MAX),
         body: String(body || '').trim().slice(0, announcements.BODY_MAX),
         audience: aud.audience,
+        user_ids: aud.userIds,
         link: lnk.link,
         active: true,
         posted_at: nowIso(),

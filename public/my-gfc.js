@@ -635,7 +635,7 @@ function AnnouncementList({ items, onReviewed, onError }) {
 
 function ManageAnnouncements({ onChanged }) {
   const [data, setData] = useState(null);
-  const [form, setForm] = useState({ title: '', body: '', link: '', everyone: true, roles: [] });
+  const [form, setForm] = useState({ title: '', body: '', link: '', everyone: true, roles: [], userIds: [] });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(null);
@@ -646,9 +646,10 @@ function ManageAnnouncements({ onChanged }) {
     try {
       await call('/api/caregiver/broadcasts', { method: 'POST', body: {
         title: form.title, body: form.body, link: form.link,
-        audience: form.everyone ? 'all_staff' : form.roles
+        audience: form.everyone ? 'all_staff' : form.roles,
+        userIds: form.everyone ? [] : form.userIds
       } });
-      setForm({ title: '', body: '', link: '', everyone: true, roles: [] });
+      setForm({ title: '', body: '', link: '', everyone: true, roles: [], userIds: [] });
       await load(); onChanged();
     } catch (e) { setErr(e.message); }
     setBusy(false);
@@ -660,6 +661,8 @@ function ManageAnnouncements({ onChanged }) {
   if (!data) return err ? <div className="mg-err">{err}</div> : <p className="mg-note">Loading…</p>;
   const label = Object.fromEntries(data.roles.map(r => [r.value, r.label]));
   const toggle = (v) => setForm(f => ({ ...f, roles: f.roles.includes(v) ? f.roles.filter(x => x !== v) : f.roles.concat([v]) }));
+  const togglePerson = (v) => setForm(f => ({ ...f, userIds: f.userIds.includes(v) ? f.userIds.filter(x => x !== v) : f.userIds.concat([v]) }));
+  const nameOf = Object.fromEntries((data.people || []).map(p => [String(p.id), p.name]));
   return (
     <div>
       {err && <div className="mg-err">{err}</div>}
@@ -677,7 +680,17 @@ function ManageAnnouncements({ onChanged }) {
           <label key={r.value}><input type="checkbox" checked={form.roles.includes(r.value)} onChange={() => toggle(r.value)} />{r.label}</label>
         ))}
       </div>
-      <button className="mg-btn" style={{ marginTop: 10 }} disabled={busy || !form.title.trim() || (!form.everyone && !form.roles.length)} onClick={post}><i className="ti ti-send" />Post Announcement</button>
+      {!form.everyone && (
+        <div>
+          <label>Or these people</label>
+          <div className="mg-checks">
+            {(data.people || []).map(p => (
+              <label key={p.id}><input type="checkbox" checked={form.userIds.includes(p.id)} onChange={() => togglePerson(p.id)} />{p.name}{p.typeLabel ? ` (${p.typeLabel})` : ''}</label>
+            ))}
+          </div>
+        </div>
+      )}
+      <button className="mg-btn" style={{ marginTop: 10 }} disabled={busy || !form.title.trim() || (!form.everyone && !form.roles.length && !form.userIds.length)} onClick={post}><i className="ti ti-send" />Post Announcement</button>
 
       <h3 style={{ marginTop: 22, fontSize: 19 }}>Posted</h3>
       {!data.announcements.length && <p className="mg-note">Nothing posted yet.</p>}
@@ -685,7 +698,7 @@ function ManageAnnouncements({ onChanged }) {
         <div className="mg-row" key={a.id} style={{ alignItems: 'flex-start', opacity: a.active ? 1 : 0.6 }}>
           <div className="mg-grow">
             <b>{a.title}</b>
-            <small>{fmtDate(a.at)} · {a.audience === 'all_staff' ? 'Everyone' : a.audience.map(t => label[t] || t).join(', ')}{a.active ? '' : ' · Taken down'} · {a.reviewed.length} reviewed, {a.notReviewed.length} not yet</small>
+            <small>{fmtDate(a.at)} · {a.audience === 'all_staff' ? 'Everyone' : a.audience.map(t => label[t] || t).concat((a.userIds || []).map(id => nameOf[String(id)] || 'a former staff member')).join(', ')}{a.active ? '' : ' · Taken down'} · {a.reviewed.length} reviewed, {a.notReviewed.length} not yet</small>
             {open === a.id && (
               <div style={{ marginTop: 6 }}>
                 <div><small><b>Not yet:</b> {a.notReviewed.join(', ') || 'Everyone has reviewed it.'}</small></div>

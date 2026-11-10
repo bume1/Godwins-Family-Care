@@ -754,8 +754,10 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
 // ---- tasks the office adds (owner, 2026-11-09) ----------------------------------
 // One person, or everyone onboarding under a chapter, now and later. She marks
 // it done; if the office ticks "reviews it", it is complete once reviewed.
-const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
-  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', review: false, askForFile: false });
+// It lands INSIDE a phase (owner, 2026-11-10): the phase being viewed when it
+// is added from someone's checklist, or the one picked here.
+const AddTaskForm = ({ person, chapters, phase, phases, onAdded, onCancel }) => {
+  const [f, setF] = useState({ title: '', details: '', who: person ? 'person' : 'chapter', chapter: (person && person.chapter) || '', phase: phase || '', review: false, askForFile: false });
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
   const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
   const chapterLabel = (id) => ((chapters || []).find(c => c[0] === id) || [id, id])[1];
@@ -763,7 +765,7 @@ const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
     setBusy(true); setErr('');
     try {
       await call('/api/onboarding/admin/custom-tasks', { method: 'POST', body: { title: f.title, details: f.details, review: f.review, askForFile: f.askForFile,
-        scope: f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter } } });
+        phase: f.phase || null, scope: f.who === 'person' ? { userId: person.userId } : { chapter: f.chapter } } });
       await onAdded();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -782,6 +784,16 @@ const AddTaskForm = ({ person, chapters, onAdded, onCancel }) => {
           {(chapters || []).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
         </select>
       )}
+      {!phase && phases && f.chapter && (
+        <div>
+          <label className="f">Which phase it goes in</label>
+          <select value={f.phase} onChange={e => set('phase', e.target.value)}>
+            <option value="">The last phase</option>
+            {(phases[f.chapter] || []).map(p => <option key={p.id} value={p.id}>Phase {p.number} · {p.label}</option>)}
+          </select>
+        </div>
+      )}
+      {phase && <div className="note" style={{ marginTop: 6 }}>It goes in this phase, as a task beside the others.</div>}
       <label style={{ display: 'block', fontSize: 14, marginTop: 10 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.review} onChange={e => set('review', e.target.checked)} /> Office reviews it after it is marked done</label>
       <label style={{ display: 'block', fontSize: 14 }}><input type="checkbox" style={{ width: 'auto' }} checked={f.askForFile} onChange={e => set('askForFile', e.target.checked)} /> Ask them to attach a file</label>
       {err && <div className="err">{err}</div>}
@@ -805,7 +817,7 @@ const CustomTaskList = () => {
     <div className="card">
       <div className="card-h"><h2>Tasks Added by GFC</h2>{!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
       {err && <div className="err">{err}</div>}
-      {adding && <AddTaskForm chapters={CHAPTER_CHOICES} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
+      {adding && <AddTaskForm chapters={CHAPTER_CHOICES} phases={d && d.phases} onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
       {d && d.tasks.length === 0 && !adding && <div className="note">No tasks added yet. Add one here for everyone of a type, or from a person's checklist for just them.</div>}
       {d && d.tasks.map(t => (
         <div key={t.id} className="item" style={{ cursor: 'default' }}>
@@ -870,8 +882,8 @@ const Person = ({ userId, onBack }) => {
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
             {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}
             {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
-          {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES}
-            onAdded={async () => { setAdding(false); await load(); setPhase('GFC'); }} onCancel={() => setAdding(false)} />}
+          {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES} phase={ph.id}
+            onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
           {items.map(i => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>

@@ -780,7 +780,9 @@ module.exports = function createOnboardingRoutes(deps) {
     const users = await getUsers();
     const tasks = (await customTasks()).filter(t => !t.removedAt)
       .map(t => Object.assign({}, t, { scopeLabel: scopeLabel(t, users) }));
-    return res.json({ tasks, chapters: CHAPTER_CHOICES });
+    // The phases of each chapter, so the office picks where a task sits.
+    const phases = Object.fromEntries(CHAPTER_CHOICES.map(c => [c.id, ((T.CHAPTERS[c.id] || {}).PHASES || []).map(p => ({ id: p.id, number: p.number, label: p.label }))]));
+    return res.json({ tasks, chapters: CHAPTER_CHOICES, phases });
   });
   router.post('/api/onboarding/admin/custom-tasks', authenticateToken, requireOffice, async (req, res) => {
     const b = req.body || {};
@@ -800,7 +802,13 @@ module.exports = function createOnboardingRoutes(deps) {
     } else {
       return res.status(400).json({ error: 'Choose who gets this task: one person, or everyone of a type.', code: 'TASK_SCOPE_REQUIRED' });
     }
-    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope,
+    // Which phase it sits in, on that chapter's own checklist (2026-11-10).
+    let chapterId = scope.chapter;
+    if (scope.userId) { const r = find(await all(), scope.userId); chapterId = (r && r.inputs && r.inputs.chapter) || 'C'; }
+    const phaseIds = ((T.CHAPTERS[chapterId] || {}).PHASES || []).map(p => p.id);
+    const phase = b.phase ? String(b.phase) : null;
+    if (phase && !phaseIds.includes(phase)) return res.status(400).json({ error: 'That phase is not on this checklist.', code: 'TASK_PHASE_UNKNOWN' });
+    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope, phase,
       review: !!b.review, askForFile: !!b.askForFile, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
       createdAt: nowIso(), removedAt: null };
     const rows = await customTasks(); rows.push(task); await db.set(CUSTOM, rows);

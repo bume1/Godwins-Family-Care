@@ -173,13 +173,23 @@ const findItem = (id) => ALL_ITEMS.find(it => it.id === String(id || '')) || nul
 // door (steps, files, notes, not applicable) treats it the same, and it is
 // never a Playbook item: no classification is claimed for it. She marks it
 // done; if the office asked to review it, it is complete only once reviewed.
+// OWNER, 2026-11-10: a task lands INSIDE a phase of the person's own
+// checklist, never in a phase of its own. The office picks the phase; a task
+// with no phase, or one naming a phase this chapter does not have (a task
+// saved before this change, or one for another chapter's person), sits in the
+// chapter's last phase.
 const CUSTOM_PHASE = Object.freeze({ id: 'GFC', label: 'Added by GFC', plainWhen: 'Tasks added by the office',
-  title: 'Added by GFC', when: 'Added by the office', ref: null });
-function customItem(row) {
+  title: 'Added by GFC', when: 'Added by the office', ref: null }); // retired 2026-11-10; kept for old references
+function phaseForCustom(row, phases) {
+  const ids = (phases || []).map(p => p.id);
+  if (row && row.phase && ids.includes(row.phase)) return row.phase;
+  return ids.length ? ids[ids.length - 1] : CUSTOM_PHASE.id;
+}
+function customItem(row, phases) {
   const steps = [Object.freeze({ actor: ACTORS.NEW_HIRE, action: ACTIONS.COMPLETE, actorBasis: 'STATED' })];
   if (row.review) steps.push(Object.freeze({ actor: ACTORS.OFFICE, action: ACTIONS.REVIEW, actorBasis: 'STATED' }));
   return Object.freeze({
-    id: String(row.id), chapter: 'GFC', phase: CUSTOM_PHASE.id, title: String(row.title || 'Task'), ref: null,
+    id: String(row.id), chapter: 'GFC', phase: phaseForCustom(row, phases), title: String(row.title || 'Task'), ref: null,
     elements: row.details ? [String(row.details)] : undefined,
     steps: Object.freeze(steps), classifications: [], classificationNote: 'Added by the office; not a Playbook item.',
     custom: true, askForFile: !!row.askForFile,
@@ -189,9 +199,10 @@ function customItem(row) {
 /** The office-added tasks that apply to this person: theirs, or their chapter's. Removed ones never. */
 function customItemsFor(rows, inputs, userId) {
   const ch = normalizeInputs(inputs).chapter || 'C';
+  const phases = (CHAPTERS[ch] || C).PHASES;
   return (rows || []).filter(r => r && !r.removedAt && r.scope
     && ((r.scope.userId && String(r.scope.userId) === String(userId)) || (!r.scope.userId && r.scope.chapter === ch)))
-    .map(customItem);
+    .map(r => customItem(r, phases));
 }
 
 // ---- one item's state ------------------------------------------------------
@@ -628,7 +639,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     return out;
   });
 
-  const phases = ch.PHASES.concat(custom.length ? [Object.assign({ number: ch.PHASES.length + 1 }, CUSTOM_PHASE)] : []).map(p => {
+  const phases = ch.PHASES.map(p => {
     const its = items.filter(x => x.phase === p.id);
     const mods = phaseModules(p.id, i).map(m => m.id);
     const modsOpen = mods.filter(id => !(modules.find(x => x.id === id) || {}).complete);
@@ -697,5 +708,5 @@ module.exports = {
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,
   moduleApplies, moduleState, determinationStatus, openDetermination, buildTrack,
-  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID, customItem, customItemsFor, CUSTOM_PHASE
+  CHAPTERS, ALL_ACKS, chapterOf, packetEvidence, STAFF_WELCOME_ITEM_ID, customItem, customItemsFor, CUSTOM_PHASE, phaseForCustom
 };

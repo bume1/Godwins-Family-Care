@@ -122,3 +122,20 @@ test('a post someone cannot see cannot be marked reviewed; a taken-down post dis
   h.as(RN);
   assert.strictEqual((await h.call('GET', '/api/my/announcements')).data.announcements.length, 0);
 });
+
+test('a post can name individual team members, alone or beside roles', async (t) => {
+  const h = await mount(t);
+  const only = await h.call('POST', '/api/caregiver/broadcasts', { title: 'Just Rae', audience: [], userIds: ['r1'] });
+  assert.strictEqual(only.status, 200);
+  h.as(RN); assert.strictEqual((await h.call('GET', '/api/my/announcements')).data.announcements.length, 1, 'the named person sees it');
+  h.as(COORD); assert.strictEqual((await h.call('GET', '/api/my/announcements')).data.announcements.length, 0, 'nobody else does');
+  h.as(CG); assert.strictEqual((await h.call('GET', '/api/caregiver/feed')).data.items.length, 0, 'it is not an old caregiver post');
+  h.as(ADMIN);
+  await h.call('POST', '/api/caregiver/broadcasts', { title: 'Nurses plus Cara', audience: ['rn'], userIds: ['c1'] });
+  h.as(CG); assert.ok((await h.call('GET', '/api/caregiver/feed')).data.items.some(i => i.title === 'Nurses plus Cara'), 'a named caregiver sees it in Feed');
+  h.as(ADMIN);
+  assert.strictEqual((await h.call('POST', '/api/caregiver/broadcasts', { title: 'x', userIds: ['p1'] })).status, 400, 'a client is never a named recipient');
+  assert.strictEqual((await h.call('POST', '/api/caregiver/broadcasts', { title: 'x', audience: [] })).status, 400, 'an empty choice is refused');
+  const rep = (await h.call('GET', '/api/my/admin/announcements')).data.announcements.find(a => a.title === 'Just Rae');
+  assert.deepStrictEqual(rep.notReviewed, ['Rae Nurse'], 'the report counts only who it reaches');
+});

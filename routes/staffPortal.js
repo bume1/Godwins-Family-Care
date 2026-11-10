@@ -415,7 +415,7 @@ module.exports = function createStaffPortalRoutes(deps) {
   router.post('/api/my/announcements/:id/reviewed', authenticateToken, requireStaff, async (req, res) => {
     const rows = (await db.get('caregiver_broadcasts')) || [];
     const row = rows.find(r => r && r.id === req.params.id);
-    if (!row || !announcements.visibleTo(row, audienceOf(req.user))) {
+    if (!row || !announcements.visibleTo(row, audienceOf(req.user), req.user.id)) {
       return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
     }
     const reads = (await db.get(READS)) || [];
@@ -435,7 +435,8 @@ module.exports = function createStaffPortalRoutes(deps) {
       .map(u => ({ id: u.id, name: u.name || u.email, type: audienceOf(u) }));
     return res.json({
       announcements: announcements.report(rows, reads, people),
-      roles: announcements.STAFF_TYPES.map(t => ({ value: t, label: TYPE_LABELS[t] }))
+      roles: announcements.STAFF_TYPES.map(t => ({ value: t, label: TYPE_LABELS[t] })),
+      people: people.map(p => ({ id: p.id, name: p.name, typeLabel: TYPE_LABELS[p.type] })).sort((a, b) => String(a.name).localeCompare(String(b.name)))
     });
   });
 
