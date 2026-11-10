@@ -435,6 +435,12 @@ module.exports = function createOnboardingRoutes(deps) {
   async function doStep(req, res, rec, actor) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    // A document attached to her item is done by signing it, never by Mark Done.
+    const linked = ((rec.items || {})[item.id] || {}).document;
+    const idx = Number(req.params.index);
+    if (linked && item.steps[idx] && item.steps[idx].actor === 'NEW_HIRE' && idx === item.steps.findIndex(s => s.actor === 'NEW_HIRE')) {
+      return res.status(409).json({ error: 'This step is done by signing the attached document.', code: 'DOCUMENT_SIGN_ROUTE' });
+    }
     try {
       rec.items = rec.items || {};
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
@@ -615,9 +621,16 @@ module.exports = function createOnboardingRoutes(deps) {
     const f = (st.files || []).find(x => x.id === req.params.fileId);
     if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
     try {
-      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      // A signed copy points at her Documents row, where the Drive file is.
+      let driveId = f.driveFileId; let mime = f.mime;
+      if (!driveId && f.documentId) {
+        const row = ((await db.get('caregiver_documents')) || []).find(d => d.id === f.documentId && String(d.caregiver_id) === String(rec.userId));
+        driveId = row && row.drive_file_id; mime = mime || (row && row.mime_type) || 'application/pdf';
+      }
+      if (!driveId) return res.status(404).json({ error: 'No stored file is attached to that record.', code: 'DOC_FILE_MISSING' });
+      const buf = await drive.downloadFileBuffer(driveId);
       await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
-      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Type', mime || 'application/octet-stream');
       res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
       return res.send(buf);
     } catch (e) {
@@ -927,6 +940,26 @@ module.exports = function createOnboardingRoutes(deps) {
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
     if (isNew) await notifyStarted(rec);
+    return res.json({ ok: true });
+  });
+  // Attach a document the office sent this person to one of her items
+  // (owner, 2026-11-10). She signs it from the item; signing completes her
+  // step and files the signed copy. documentSendId null detaches it.
+  router.put('/api/onboarding/admin/people/:userId/items/:itemId/document', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const item = await itemFor(rec, req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    if (!item.steps.some(s => s.actor === 'NEW_HIRE')) return res.status(409).json({ error: 'This item has no step for her to sign.', code: 'ITEM_NOT_HERS' });
+    rec.items = rec.items || {};
+    const st = rec.items[item.id] = rec.items[item.id] || {};
+    const sendId = (req.body || {}).documentSendId;
+    if (!sendId) { delete st.document; await save(rec); return res.json({ ok: true }); }
+    const s = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(sendId) && !x.removedAt);
+    if (!s) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'ITEM_DOCUMENT_UNKNOWN' });
+    if (!s.scope || String(s.scope.userId) !== String(rec.userId)) return res.status(400).json({ error: 'That document was not sent to this person.', code: 'ITEM_DOCUMENT_NOT_THEIRS' });
+    st.document = { sendId: s.id, action: s.action, title: s.title };
+    await save(rec);
+    await event({ userId: rec.userId, type: 'document_attached', itemId: item.id, sendId: s.id, byId: req.user.id, byName: req.user.name });
     return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/steps/:index', authenticateToken, requireOffice, async (req, res) => {
