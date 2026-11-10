@@ -126,7 +126,8 @@ test('a contracted provider defaults to D, and the record is stamped 1099', () =
 test('the page offers D, shows its Training tab, and names it Contracted (1099)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(src, /\['D', 'Clinician \(NP, PA\), contracted only \(1099\)'\]/);
-  assert.match(src, /k === 'training' \? \(\['C', 'D', 'E'\]\.includes\(t\.chapter\.id\)/);
+  // Every chapter with trainings shows the tab (2026-11-10), D included.
+  assert.match(src, /k === 'training' \? \(\(t\.modules \|\| \[\]\)\.length > 0/);
   assert.match(src, /Contracted \(1099\)/);
 });
 
