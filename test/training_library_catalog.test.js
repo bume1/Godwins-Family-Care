@@ -107,3 +107,43 @@ test('a training whose next step is "attach" reads covered once material is atta
   assert.strictEqual(after.nextStep, 'done');
   assert.strictEqual(after.material.ready, true);
 });
+
+test('the office can edit the policy line a training ties to, and staff see the edit', async (t) => {
+  const h = await mount(t);
+  assert.strictEqual((await h.call('PUT', `/api/onboarding/admin/people/${CG.id}/inputs`, { chapter: 'A' })).status, 200);
+  const url = '/api/onboarding/admin/library/TRN-216/office';
+  const pol = { document: 'Mandatory Reporting Policy v1', sections: '4.1 to 4.3', url: 'https://docs.google.com/document/d/abc' };
+  const libRow = async () => (await h.call('GET', '/api/onboarding/admin/library')).data.modules.find(m => m.id === 'TRN-216');
+  const staffRow = async () => { h.as(CG); const r = (await h.call('GET', '/api/onboarding/me')).data.track.modules.find(m => m.id === 'TRN-216'); h.as(OFFICE); return r; };
+  const original = (await libRow()).policy;
+  const staffOriginal = (await staffRow()).policy; // a caregiver's own line can differ (Private Home Care manual)
+  assert.strictEqual((await libRow()).policyEdited, false);
+
+  // Bad input is refused and nothing is stored.
+  assert.strictEqual((await h.call('PUT', url, { policy: { document: 'x', url: 'http://plain.example' } })).status, 400);
+  assert.strictEqual((await h.call('PUT', url, { policy: { document: 'x', url: 'javascript:alert(1)' } })).status, 400);
+  assert.strictEqual((await h.call('PUT', url, { policy: { document: '  ', sections: '1' } })).status, 400);
+  assert.strictEqual((await libRow()).policyEdited, false);
+
+  // Only the office can change it.
+  h.as(CG);
+  assert.strictEqual((await h.call('PUT', url, { policy: pol })).status, 403);
+  h.as(OFFICE);
+
+  assert.strictEqual((await h.call('PUT', url, { policy: pol })).status, 200);
+  const row = await libRow();
+  assert.deepStrictEqual(row.policy, { document: pol.document, sections: pol.sections, url: pol.url });
+  assert.strictEqual(row.policyEdited, true);
+  assert.deepStrictEqual(row.catalogPolicy, original, 'the original is kept for "Use the Original"');
+  assert.strictEqual((await staffRow()).policy.document, pol.document, 'staff see the edited line');
+
+  // Saving only a next step or note leaves the policy edit in place.
+  assert.strictEqual((await h.call('PUT', url, { nextStep: 'write', note: 'n' })).status, 200);
+  assert.strictEqual((await libRow()).policy.document, pol.document);
+
+  // null goes back to the catalog's line.
+  assert.strictEqual((await h.call('PUT', url, { policy: null })).status, 200);
+  assert.deepStrictEqual((await libRow()).policy, original);
+  assert.strictEqual((await libRow()).policyEdited, false);
+  assert.deepStrictEqual((await staffRow()).policy, staffOriginal);
+});

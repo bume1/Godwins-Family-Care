@@ -218,6 +218,9 @@ module.exports = function createOnboardingRoutes(deps) {
   // What each module teaches from: a written SOP read live from Drive, or
   // material the office added. A module with neither is greyed out for staff.
   const materials = async () => (await db.get(MATERIALS)) || {};
+  // Which policy line a training shows (2026-11-10): the office's own edit,
+  // else what an office-added training was given, else the catalog's.
+  const effectivePolicy = (id, mod, matRow) => TM.policyOverride(matRow) || (mod && mod.policy) || LC.policyFor(id);
   async function sopState() {
     if (!loader.sops) return { ok: false, ids: null, sections: {}, reason: 'SOP reader unavailable' };
     try { return await loader.sops(); } catch (e) { return { ok: false, ids: null, sections: {}, reason: e.message }; }
@@ -295,8 +298,9 @@ module.exports = function createOnboardingRoutes(deps) {
       const mat = mm.byModule[x.id];
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
       // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
+      // The office's own edit wins; then the chapter's own line; then the default.
       const mod = findModule(x.id);
-      x.policy = x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id));
+      x.policy = TM.policyOverride(mats[x.id]) || (x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id)));
       delete x.policyOverride;
       x.waitingOnSop = !x.complete && waitingOnSop(x.id, mats, mat);
       if (x.waitingOnSop) x.available = false;
@@ -1124,7 +1128,9 @@ module.exports = function createOnboardingRoutes(deps) {
         sopRefs: x.sopRefs, material: mm.byModule[x.id],
         // The tracker's fields (2026-11-10). Status is the material above, never typed.
         group: (LC.entryFor(x.id) || {}).group || 'Added by GFC',
-        policy: x.policy || LC.policyFor(x.id),
+        policy: effectivePolicy(x.id, x, mats[x.id]),
+        policyEdited: !!TM.policyOverride(mats[x.id]),
+        catalogPolicy: x.policy || LC.policyFor(x.id),
         // The office's own choice wins. Otherwise the catalog's, except that an
         // "attach" once something is attached reads as covered.
         nextStep: nextStepFor(x.id, mats, mm.byModule[x.id], !!x.addedByOffice),
@@ -1214,7 +1220,6 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true, material: TM.materialFor(m, all[m.id], sops.ids) });
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
-  // The office's next step and note for a training (2026-11-10).
   // The office edits what an item or a training tells the person to do.
   // Blank goes back to the default wording.
   router.put('/api/onboarding/admin/instructions/:id', authenticateToken, requireOffice, async (req, res) => {
@@ -1227,6 +1232,7 @@ module.exports = function createOnboardingRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'onboarding_instructions_edited', 'onboarding', id, {});
     return res.json({ ok: true });
   });
+  // The office's next step, note and policy line for a training (2026-11-10).
   router.put('/api/onboarding/admin/library/:moduleId/office', authenticateToken, requireOffice, async (req, res) => {
     const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.setOffice(e, req.body, officeActor(req), nowIso()), { action: 'office_fields_set' });
