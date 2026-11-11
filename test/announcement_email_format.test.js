@@ -41,6 +41,7 @@ test('an announcement message is never cut short (owner, 2026-11-10)', () => {
 test('a caregiver\'s Home shows new announcements, like everyone else\'s My GFC Home', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
   assert.match(page, /\(announcements \|\| \[\]\)\.filter\(a => !a\.reviewedAt\)/);
-  assert.match(page, /<h3>New: \{a\.title\}<\/h3>/);
+  assert.match(page, /New announcement: \$\{news\[0\]\.title\}/);
+  assert.match(page, /<button onClick=\{onOpenFeed\}/, 'the banner itself opens the Feed');
   assert.match(page, /announcements=\{announcements\} onOpenFeed=\{\(\) => setTab\('feed'\)\}/);
 });

@@ -4,7 +4,7 @@
 
 ## What changed
 - Other staff's My GFC Home shows "New: <title>" with a Read It button for each announcement they haven't reviewed. The caregiver app's Home showed nothing; announcements appeared only in the Feed tab.
-- Caregiver Home now shows the same card (up to 3). Read It opens the Feed, and the card goes once they tap "I've Reviewed This."
+- Caregiver Home now shows one slim banner (owner: "a simple banner"): "New announcement: <title>", or "N new announcements" when there are several. Tapping it opens the Feed, and it goes once they tap "I've Reviewed This."
 - It reads `/api/my/announcements`, the same list other staff's Home reads. The caregiver Feed is closed until the welcome packet is finished, so building the card from the Feed would show nothing for a caregiver still in their packet.
 
 ## Also fixed

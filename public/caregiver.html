@@ -544,17 +544,18 @@ const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalati
   const open = escalations.filter(e => e.status !== 'resolved');
   // New announcements, from the same list everyone else's My GFC Home reads
   // (owner, 2026-11-11).
-  const news = (announcements || []).filter(a => !a.reviewedAt).slice(0, 3);
+  const news = (announcements || []).filter(a => !a.reviewedAt);
   return (
     <div>
       {/* The My GFC frame says hello above this, over the banner. */}
-      {news.map(a => (
-        <div className="card" key={`new-${a.id}`}>
-          <h3>New: {a.title}</h3>
-          <p className="mu" style={{ fontSize: 14 }}>An announcement from the office.</p>
-          <button className="btn" style={{ marginTop: 8 }} onClick={onOpenFeed}><i className="ti ti-speakerphone"></i> Read It</button>
-        </div>
-      ))}
+      {/* One banner, straight to the Feed (owner, 2026-11-11). */}
+      {news.length > 0 && (
+        <button onClick={onOpenFeed} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', margin: '0 0 14px', padding: '12px 14px', borderRadius: 14, border: 'none', background: '#033D50', color: '#fff', fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
+          <i className="ti ti-speakerphone" style={{ fontSize: 20, color: '#F5CD85' }}></i>
+          <span style={{ flex: 1 }}>{news.length === 1 ? `New announcement: ${news[0].title}` : `${news.length} new announcements`}</span>
+          <i className="ti ti-chevron-right"></i>
+        </button>
+      )}
 
       <ShiftCard clients={clients} shifts={shifts} onSchedule={onSchedule} />
 
