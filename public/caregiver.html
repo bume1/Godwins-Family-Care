@@ -540,11 +540,22 @@ const ShiftCard = ({ clients, shifts, onSchedule }) => {
   );
 };
 
-const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalations }) => {
+const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalations, announcements, onOpenFeed }) => {
   const open = escalations.filter(e => e.status !== 'resolved');
+  // New announcements, from the same list everyone else's My GFC Home reads
+  // (owner, 2026-11-11).
+  const news = (announcements || []).filter(a => !a.reviewedAt);
   return (
     <div>
       {/* The My GFC frame says hello above this, over the banner. */}
+      {/* One banner, straight to the Feed (owner, 2026-11-11). */}
+      {news.length > 0 && (
+        <button onClick={onOpenFeed} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', margin: '0 0 14px', padding: '12px 14px', borderRadius: 14, border: 'none', background: '#033D50', color: '#fff', fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
+          <i className="ti ti-speakerphone" style={{ fontSize: 20, color: '#F5CD85' }}></i>
+          <span style={{ flex: 1 }}>{news.length === 1 ? `New announcement: ${news[0].title}` : `${news.length} new announcements`}</span>
+          <i className="ti ti-chevron-right"></i>
+        </button>
+      )}
 
       <ShiftCard clients={clients} shifts={shifts} onSchedule={onSchedule} />
 
@@ -2050,8 +2061,9 @@ const App = () => {
   const [escalations, setEscalations] = useState([]);
   const [feed, setFeed] = useState([]);
   const [reviewed, setReviewed] = useState({});
+  const [announcements, setAnnouncements] = useState([]);
   const loadReviewed = useCallback(() => api('/api/my/announcements')
-    .then(d => setReviewed(Object.fromEntries((d.announcements || []).filter(a => a.reviewedAt).map(a => [a.id, true]))))
+    .then(d => { setAnnouncements(d.announcements || []); setReviewed(Object.fromEntries((d.announcements || []).filter(a => a.reviewedAt).map(a => [a.id, true]))); })
     .catch(() => {}), []);
   // Read so Home can show the caregiver's ACTUAL clock state. Session 7's
   // component owns every clock ACTION; this is the same board, read only.
@@ -2203,6 +2215,7 @@ const App = () => {
     content = <FlagConcern clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
   } else if (tab === 'home') {
     content = <HomeTab me={me} clients={clients} escalations={escalations} shifts={shifts}
+      announcements={announcements} onOpenFeed={() => setTab('feed')}
       onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')}
       onSchedule={() => setTab('schedule')} />;
   } else if (tab === 'schedule') {

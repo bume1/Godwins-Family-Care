@@ -30,7 +30,6 @@ const ALL_STAFF = 'all_staff';
 const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'liaison']);
 const LEGACY_AUDIENCE = Object.freeze(['caregiver']);
 const TITLE_MAX = 200;
-const BODY_MAX = 4000;
 
 const userIdsOf = (row) => (row && Array.isArray(row.user_ids) ? row.user_ids.map(String) : []);
 
@@ -131,10 +130,11 @@ const emailFor = (row, ctaUrl) => ({
   subject: row.title,
   body: [row.body || '', row.link ? `Guide: ${row.link}` : ''].filter(Boolean).join('\n\n') || row.title,
   ctaUrl,
-  ctaLabel: 'Open in the app'
+  ctaLabel: 'Open in the app',
+  format: 'announcement'
 });
 
 module.exports = {
-  ALL_STAFF, STAFF_TYPES, LEGACY_AUDIENCE, TITLE_MAX, BODY_MAX,
+  ALL_STAFF, STAFF_TYPES, LEGACY_AUDIENCE, TITLE_MAX,
   audienceOf, userIdsOf, visibleTo, emailFor, parseAudience, parseLink, forViewer, report
 };

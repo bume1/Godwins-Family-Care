@@ -933,7 +933,8 @@ module.exports = function createCaregiverRoutes(deps) {
       const row = {
         id: uuidv4(),
         title: String(title).trim().slice(0, announcements.TITLE_MAX),
-        body: String(body || '').trim().slice(0, announcements.BODY_MAX),
+        // No length limit on the message (owner, 2026-11-10: it cut one off).
+        body: String(body || '').trim(),
         audience: aud.audience,
         user_ids: aud.userIds,
         link: lnk.link,
