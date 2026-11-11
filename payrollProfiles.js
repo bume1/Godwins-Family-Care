@@ -267,6 +267,17 @@ function missingForPay(p, { asContractor = false } = {}) {
   return out;
 }
 
+// What the office's People list shows (2026-11-11): a W-2 employee owes the
+// employee forms, a 1099 contractor owes a W-9 and how they are paid, and a
+// hybrid owes both. Listing W-4, G-4 and I-9 against a pure contractor sent
+// the office chasing forms that person never files.
+function missingForPerson(p) {
+  if (!p) return missingForPay(p);
+  const out = isEmployee(p) ? missingForPay(p) : [];
+  if (isContractor(p)) for (const m of missingForPay(p, { asContractor: true })) if (!out.includes(m)) out.push(m);
+  return out;
+}
+
 // The paperwork checklist the person sees on My Pay.
 function checklist(p, opts = {}) {
   const rows = [];
@@ -314,5 +325,5 @@ module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature,
   normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
-  defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, checklist, publicProfile
+  defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

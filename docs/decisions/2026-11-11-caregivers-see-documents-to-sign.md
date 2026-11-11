@@ -17,3 +17,9 @@
 - Mutation caught: removing the list fails the test.
 - Full suite: 3680, 0 failing.
 - Chromium at phone width: a document sent to All staff shows on the caregiver's My Documents with a Sign button, and the sign panel opens.
+
+## Also in this branch: a contractor's missing paperwork
+- **Payroll → People** listed W-4, G-4, I-9 and SSN as missing for a pure 1099 contractor, who files a W-9 instead.
+- New `missingForPerson` in `payrollProfiles.js`: employee forms for W-2, W-9 and pay method for 1099, both for hybrid (pay method listed once). The People list and the two office save routes use it.
+- Run approval is unchanged: it already checks contractors with `{ asContractor: true }`.
+- Test `test/payroll_missing_for_person.test.js`; a mutation listing employee forms for everyone fails it. Full suite 3682, 0 failing.
