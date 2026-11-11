@@ -6,9 +6,28 @@ Owner: *"If I send an announcement via the my gfc area, will it email the contac
 
 ## My own mistake first, because it is the reason this took four attempts
 
-I told the owner three times that the My GFC Announcements screen was not in this repository, and that I had searched 129 branches for it. **It was on `main` the whole time** — `a4593a8`, PR #299, merged the day before. My `git fetch` was a day stale and I kept reasoning from the old copy instead of fetching again. It took *"why can't you just view main"* to make me look.
+I told the owner three times that the My GFC Announcements screen was not in this repository, and that I had searched 129 branches for it. It was on `main`. The timeline, measured from `git reflog` rather than recalled:
 
-*A stale checkout answers confidently and wrongly, and nothing about the answer reveals which it is.* Fetch before concluding a feature does not exist — the same family as *an empty result is not a diagnosis*.
+| when (UTC) | what |
+|---|---|
+| **2026-11-09 18:39** | my last fetch of *all* refs — `origin/main` pinned at `79d33b9` |
+| **2026-11-10 14:35** | `e9aa432` authored, adding `staffAnnouncements.js` and the My GFC section |
+| **2026-11-10 17:27** | merged to `main` as **PR #292** |
+| **2026-11-10 21:57** | I finally refetched, after the third correction |
+
+`git merge-base --is-ancestor e9aa432 79d33b9` answers **no**, so the feature genuinely was not in anything I could see. My search was accurate about data roughly 27 hours old.
+
+**The 129 is the finding, not the staleness.** That number is what made me confident, and it was worth nothing: every one of those refs was frozen at the same 18:39 fetch, so I searched one snapshot from 129 angles and counted it as 129 pieces of evidence. And `e9aa432` is reachable only from `origin/main` (its source branch was merged and cleaned up), so the single ref that could ever have shown me this was the one that was stale. The breadth was decorative.
+
+**Three layers, and only the first is fixed by refetching.**
+
+1. The ref was stale.
+2. I turned "my search found nothing" into "it does not exist", with no positive control on the search and no date on the evidence. **An absence claim needs proof the instrument could have found the thing.**
+3. When the owner corrected me, I treated it as a misunderstanding to re-explain rather than as evidence my premise was wrong. They were looking at the running product; I was looking at a cache. I ranked the cache higher, twice more.
+
+**This failure class is already in `CLAUDE.md` twelve times** — *an empty result is not a diagnosis*, *a 404 is not proof a file is missing*, *a 401 is not proof a route exists*, *a signal that cannot distinguish two states is not evidence for either*, and at line 30, four days before this, ***a grep bounded to one file is not a search***, recorded about me reporting a route as uncalled when it was called from `admin-hub.html:2102`. So the cause is not ignorance of the rule. It is that the rule is written as a rule about **code** and I did not apply it to **a claim made to the owner**. The rule that was missing: before claiming something is absent, run the same search for something known to be present — if the control does not come back, the instrument is broken rather than the codebase. And date the evidence out loud, because "not on `main` as of my fetch yesterday at 18:39" invites a refetch where "not on `main`" invites agreement.
+
+*A stale checkout answers confidently and wrongly, and nothing about the answer reveals which it is.*
 
 ## Why a client cannot receive one
 
