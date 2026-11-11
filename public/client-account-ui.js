@@ -252,24 +252,44 @@
     fnps: users.filter(u => u.role === 'user' && u.hasClinicalAccess),
     coordinators: users.filter(u => u.clinicalRole === 'coordinator' && u.accountStatus !== 'inactive')
   });
-  const EMPTY_TEAM = { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [] };
+  const EMPTY_TEAM = { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [], leadCaregivers: [] };
 
   const CareTeamFields = ({ team, setTeam, users }) => {
     const c = careTeamChoices(users);
     const t = Object.assign({}, EMPTY_TEAM, team || {});
-    const pick = (k, v) => setTeam(Object.assign({}, t, { [k]: v }));
+    // A lead caregiver must still be this client's caregiver: changing the
+    // primary or backup drops anyone who is no longer either from the leads.
+    const pick = (k, v) => {
+      const next = Object.assign({}, t, { [k]: v });
+      const onTeam = [next.primaryCaregiver, next.backupCaregiver].filter(Boolean);
+      next.leadCaregivers = (next.leadCaregivers || []).filter(id => onTeam.includes(id));
+      setTeam(next);
+    };
     const multi = (k) => (e) => pick(k, Array.from(e.target.selectedOptions).map(o => o.value));
+    // Owner, 2026-11-11: a GFC caregiver an admin names here also sees what
+    // was shared with the patient (shared documents, medicines and allergies,
+    // visit summaries, appointments) in the caregiver app. Never clinical notes.
+    const leads = t.leadCaregivers || [];
+    const leadTick = (id) => id ? (
+      <label className="flex items-start gap-2 text-xs text-gray-600 -mt-1 mb-3">
+        <input type="checkbox" className="mt-0.5" checked={leads.includes(id)}
+          onChange={e => setTeam(Object.assign({}, t, { leadCaregivers: e.target.checked ? [...leads.filter(x => x !== id), id] : leads.filter(x => x !== id) }))} />
+        <span>Lead caregiver: can also see what was shared with the patient (documents, medicines, visit summaries, appointments). Not clinical notes or results.</span>
+      </label>
+    ) : null;
     return (
       <div className="grid md:grid-cols-2 gap-x-4">
         <Field label="Primary Caregiver">
           <select className="input" value={t.primaryCaregiver} onChange={e => pick('primaryCaregiver', e.target.value)}>
             <option value="">None</option>{c.caregivers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
+          {leadTick(t.primaryCaregiver)}
         </Field>
         <Field label="Backup Caregiver">
           <select className="input" value={t.backupCaregiver} onChange={e => pick('backupCaregiver', e.target.value)}>
             <option value="">None</option>{c.caregivers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
+          {leadTick(t.backupCaregiver)}
         </Field>
         <Field label="Assigned Case Manager">
           <select className="input" value={t.assignedCaseManager} onChange={e => pick('assignedCaseManager', e.target.value)}>
