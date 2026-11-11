@@ -281,3 +281,13 @@ test('the screens: My GFC waits on them, the staff record and Admin Hub send, on
     assert.match(read(f), /src="\/document-sign-ui\.js"/, f);
   }
 });
+
+test('a caregiver can reach documents sent to them, in the caregiver app', () => {
+  const fs = require('fs'); const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8')
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\/[^\n]*/g, '');
+  const start = src.indexOf("} else if (tab === 'documents') {");
+  const end = src.indexOf('} else if (', start + 10);
+  assert.ok(start > 0 && end > start, 'the My Documents tab is found');
+  assert.match(src.slice(start, end), /<window\.GFCDocSign\.WaitingOnYou\b/, 'Waiting on You is on the caregiver My Documents tab');
+});

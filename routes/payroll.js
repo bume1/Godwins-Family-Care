@@ -325,7 +325,7 @@ module.exports = function createPayrollRoutes(deps) {
         taxTables: allTables.map(t => ({ id: t.id, year: t.year, jurisdiction: t.jurisdiction, status: t.status, source: t.source, stagedAt: t.stagedAt, approvedAt: t.approvedAt || null, approvedBy: t.approvedBy || null, data: t.data })),
         people: people.map(({ user, profile }) => ({
           userId: String(user.id), name: user.name || user.email, accountType: accountTypeOf(user), email: user.email,
-          profile: pp.publicProfile(profile), missing: pp.missingForPay(profile), missingContractor: pp.isContractor(profile) ? pp.missingForPay(profile, { asContractor: true }) : [],
+          profile: pp.publicProfile(profile), missing: pp.missingForPerson(profile), missingContractor: pp.isContractor(profile) ? pp.missingForPay(profile, { asContractor: true }) : [],
           caregiverPayRate: profile.isCaregiver ? (user.payRate || null) : null,
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
@@ -412,7 +412,7 @@ module.exports = function createPayrollRoutes(deps) {
     const p = await profileFor(user);
     Object.assign(p, n.value);
     const saved = await saveProfile(user.id, p, `Pay setup: ${Object.keys(n.value).join(', ')}`, req.user);
-    res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPay(saved) });
+    res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
   });
 
   router.put('/api/payroll/admin/people/:userId/i9-section2', authenticateToken, requireAdmin, async (req, res) => {
@@ -424,7 +424,7 @@ module.exports = function createPayrollRoutes(deps) {
     if (n.error) return res.status(400).json(n);
     p.i9 = { ...p.i9, section2: n.value };
     const saved = await saveProfile(user.id, p, 'I-9 Section 2 completed', req.user);
-    res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPay(saved) });
+    res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
   });
 
   router.post('/api/payroll/admin/people/:userId/new-hire-reported', authenticateToken, requireAdmin, async (req, res) => {

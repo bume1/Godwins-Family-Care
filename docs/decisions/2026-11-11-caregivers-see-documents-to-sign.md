@@ -1,0 +1,25 @@
+# Caregivers see documents sent to them to sign
+
+**Date:** 2026-11-11 · Found while writing the document-signing SOP.
+
+## What was wrong
+- A document the office sent to caregivers (by type, or to one caregiver) never reached them.
+- The caregiver app's My Documents tab drew What You Signed and the upload card, but not the shared **Waiting on You** list that My GFC shows staff.
+- Caregivers could only sign a document attached to an onboarding item, from the onboarding page.
+- The 2026-11-09 decision said the caregiver app carried the list; it loaded the script but never rendered it.
+
+## What changed
+- `public/caregiver.html`, My Documents tab: renders `GFCDocSign.WaitingOnYou` above What You Signed, the same list and sign panel staff use.
+- It reloads the caregiver's documents after signing, so the signed copy shows at once.
+
+## Verified
+- New test in `test/staff_document_sends.test.js`: the caregiver My Documents tab renders Waiting on You (comments stripped first).
+- Mutation caught: removing the list fails the test.
+- Full suite: 3680, 0 failing.
+- Chromium at phone width: a document sent to All staff shows on the caregiver's My Documents with a Sign button, and the sign panel opens.
+
+## Also in this branch: a contractor's missing paperwork
+- **Payroll → People** listed W-4, G-4, I-9 and SSN as missing for a pure 1099 contractor, who files a W-9 instead.
+- New `missingForPerson` in `payrollProfiles.js`: employee forms for W-2, W-9 and pay method for 1099, both for hybrid (pay method listed once). The People list and the two office save routes use it.
+- Run approval is unchanged: it already checks contractors with `{ asContractor: true }`.
+- Test `test/payroll_missing_for_person.test.js`; a mutation listing employee forms for everyone fails it. Full suite 3682, 0 failing.
