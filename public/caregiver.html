@@ -2251,6 +2251,14 @@ const App = () => {
       <div>
         <h2 className="pg">My Documents</h2>
         <p className="sub">What you signed, and the documents you send the office.</p>
+        {/* Documents the office sent to sign or acknowledge (2026-11-11): the
+            same list staff see in My GFC, so a document sent to caregivers
+            reaches them here. Without it a caregiver had no way to sign one. */}
+        {window.GFCDocSign && (
+          <window.MyGFC.Section title="Waiting on You" sub="Documents the office sent you to read and sign or acknowledge. Your copy files below.">
+            <window.GFCDocSign.WaitingOnYou onChanged={staff.reloadDocs} />
+          </window.MyGFC.Section>
+        )}
         <window.MyGFC.Section title="What You Signed" sub="Your welcome packet and forms, with the date you signed.">
           <window.MyGFC.Signed signed={staff.signed} onError={staff.setErr} />
         </window.MyGFC.Section>
