@@ -704,14 +704,53 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
   }
 };
 
+// ⚠️ ONE ANNOUNCEMENT SENT EVERY RECIPIENT THREE EMAILS (owner report, 2026-11-10).
+// This function was a read-modify-write across a network call: it read the
+// pending rows, awaited `sendBatchEmails` (seconds, with retries), and only
+// THEN marked them sent. Nothing claimed the rows in between and nothing
+// stopped a second run entering, so two overlapping runs each read the same
+// rows and each sent them. Three runs, three emails.
+//
+// It had three doors and no lock — the boot timer, the 15-minute interval, and
+// the admin hub's "Process Queue" button, which had no in-flight guard at all.
+// Mail does not arrive for up to 15 minutes, which is exactly what invites
+// pressing that button again, so the design encouraged the bug.
+//
+// TWO independent fixes, because they cover different cases: this flag stops
+// overlap inside one process, and the CLAIM below (rows written as `sending`
+// BEFORE the network call) stops it even across processes, which a flag cannot.
+let queueDraining = false;
+
+// How long a row may sit claimed before another run may take it back. If the
+// process dies mid-send, a claimed row would otherwise never be sent again.
+// The trade is stated rather than hidden: reclaiming risks ONE duplicate after
+// a crash, while never reclaiming guarantees permanent loss — and for a
+// password reset, silence is the worse failure.
+const QUEUE_CLAIM_STALE_MS = 15 * 60 * 1000;
+
 // Process the notification queue — sends pending notifications whose triggerDate has passed
 const processNotificationQueue = async () => {
+  if (queueDraining) {
+    console.log('[QUEUE] A drain is already running; skipping this one.');
+    return { skipped: 'already_draining' };
+  }
+  queueDraining = true;
   try {
     const settings = (await db.get('notification_settings')) || { enabled: true };
     if (!settings.enabled) return;
 
     const queue = (await db.get('pending_notifications')) || [];
     const now = new Date();
+    // A row claimed by a run that died is taken back; one claimed moments ago
+    // belongs to a live run and is left alone.
+    for (const n of queue) {
+      if (n.status === 'sending'
+        && (!n.claimedAt || (now.getTime() - new Date(n.claimedAt).getTime()) > QUEUE_CLAIM_STALE_MS)) {
+        n.status = 'pending';
+        n.reclaimedAt = now.toISOString();
+        n.claimedAt = null;
+      }
+    }
     const pending = queue.filter(n => n.status === 'pending' && new Date(n.triggerDate) <= now);
 
     if (pending.length === 0) return;
@@ -752,6 +791,19 @@ const processNotificationQueue = async () => {
     }
 
     if (emailPayloads.length > 0) {
+      // ⚠️ CLAIM THE ROWS BEFORE THE NETWORK CALL. This write is the whole fix
+      // for the owner's triple email: once these rows read `sending`, another
+      // run's `status === 'pending'` filter no longer selects them, so it
+      // cannot send the same mail again while this send is in flight. Marking
+      // them AFTER `sendBatchEmails` — which is what the code did — leaves the
+      // entire duration of the send as a window in which every concurrent run
+      // sees them as unsent.
+      for (const idx of queueIndices) {
+        queue[idx].status = 'sending';
+        queue[idx].claimedAt = new Date().toISOString();
+      }
+      await db.set('pending_notifications', queue);
+
       const batchResult = await sendBatchEmails(emailPayloads);
 
       batchResult.results.forEach((result, i) => {
@@ -767,15 +819,33 @@ const processNotificationQueue = async () => {
           queue[idx].failureReason = result.error;
           if (queue[idx].retryCount >= queue[idx].maxRetries) {
             queue[idx].status = 'failed';
+          } else {
+            // ⚠️ RELEASE THE CLAIM ON FAILURE. Before the claim existed this
+            // branch could leave the status alone, because it was still
+            // `pending`. Now it is `sending`, so saying nothing would strand
+            // the row until the 15-minute staleness sweep — turning every
+            // transient send failure into a 15-minute delay. Found by running
+            // the probe against a sandbox with no mail transport, not by
+            // reading the diff.
+            queue[idx].status = 'pending';
+            queue[idx].claimedAt = null;
           }
           failCount++;
         }
       });
     }
 
-    // Move sent/failed/cancelled notifications to log archive
-    const completed = queue.filter(n => n.status === 'sent' || n.status === 'failed' || n.status === 'cancelled');
-    const remaining = queue.filter(n => n.status === 'pending');
+    // Move sent/failed/cancelled notifications to log archive.
+    // ⚠️ `remaining` KEEPS EVERYTHING NOT ARCHIVED, and that is load-bearing.
+    // It used to keep only `pending`, so any row in another state was dropped
+    // from the store entirely on the next drain. Introducing `sending` above
+    // without this would have silently DELETED the very notifications the
+    // claim exists to protect. It also fixes a live loss that predates this
+    // change: a `held` row (see the project notice near line 1300) was being
+    // discarded the same way.
+    const ARCHIVED = new Set(['sent', 'failed', 'cancelled']);
+    const completed = queue.filter(n => ARCHIVED.has(n.status));
+    const remaining = queue.filter(n => !ARCHIVED.has(n.status));
     if (completed.length > 0) {
       log.unshift(...completed);
       if (log.length > config.NOTIFICATION_LOG_MAX_ENTRIES) {
@@ -790,6 +860,11 @@ const processNotificationQueue = async () => {
     }
   } catch (err) {
     console.error('[QUEUE] Processing error:', err);
+  } finally {
+    // In a `finally`, so a throw anywhere above cannot wedge the queue shut
+    // for the life of the process. A claimed row that was mid-send when it
+    // threw is recovered by the staleness check at the top of the next run.
+    queueDraining = false;
   }
 };
 

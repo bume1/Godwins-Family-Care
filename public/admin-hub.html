@@ -4960,9 +4960,21 @@
         await apiFetch(`/api/admin/notifications/retry/${id}`, { method: 'POST' });
         loadData();
       };
+      // ⚠️ This button had no in-flight guard, and each press started another
+      // drain. Mail does not arrive for up to 15 minutes, so pressing it again
+      // is the natural thing to do — and that is how one announcement went out
+      // three times (owner, 2026-11-10). The server now refuses to overlap, but
+      // the button should not ask it to, and should say what it is doing.
+      const [processing, setProcessing] = useState(false);
       const handleProcessQueue = async () => {
-        await apiFetch('/api/admin/notifications/process', { method: 'POST' });
-        loadData();
+        if (processing) return;
+        setProcessing(true);
+        try {
+          await apiFetch('/api/admin/notifications/process', { method: 'POST' });
+          await loadData();
+        } finally {
+          setProcessing(false);
+        }
       };
       const handleTriggerScan = async () => {
         await apiFetch('/api/admin/reminders/trigger', { method: 'POST' });
@@ -5152,7 +5164,7 @@
             </div>
             <div className="flex gap-2">
               <button onClick={handleTriggerScan} className="px-3 py-1.5 text-sm bg-amber-500 text-white rounded-lg hover:bg-amber-600">Run Scan</button>
-              <button onClick={handleProcessQueue} className="px-3 py-1.5 text-sm bg-gradient-to-r from-primary-500 to-accent text-white rounded-lg hover:opacity-90">Process Queue</button>
+              <button onClick={handleProcessQueue} disabled={processing} className={`px-3 py-1.5 text-sm rounded-lg text-white ${processing ? 'bg-gray-400 cursor-not-allowed' : 'bg-gradient-to-r from-primary-500 to-accent hover:opacity-90'}`}>{processing ? 'Sending…' : 'Process Queue'}</button>
             </div>
           </div>
 
