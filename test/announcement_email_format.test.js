@@ -37,3 +37,10 @@ test('an announcement message is never cut short (owner, 2026-11-10)', () => {
   const long = 'x'.repeat(9000);
   assert.strictEqual(A.emailFor({ title: 'T', body: long }, null).body.length, 9000, 'the email carries all of it');
 });
+
+test('a caregiver\'s Home shows new announcements, like everyone else\'s My GFC Home', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
+  assert.match(page, /\(announcements \|\| \[\]\)\.filter\(a => !a\.reviewedAt\)/);
+  assert.match(page, /<h3>New: \{a\.title\}<\/h3>/);
+  assert.match(page, /announcements=\{announcements\} onOpenFeed=\{\(\) => setTab\('feed'\)\}/);
+});

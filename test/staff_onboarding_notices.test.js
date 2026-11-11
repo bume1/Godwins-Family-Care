@@ -252,8 +252,9 @@ test('S7 a digest with nothing in it is never sent', async (t) => {
 test('S8 an expiring credential reaches the office at its milestones, and her in the digest', async (t) => {
   const h = await mount(t);
   await start(h);
-  // 14 days out: a milestone.
-  const soon = new Date(Date.now() + 14 * 864e5).toISOString().slice(0, 10);
+  // 14 days out: a milestone. Georgia's date, not UTC's: in the evening the
+  // UTC date is already tomorrow, and the app counts days in Georgia.
+  const soon = new Date(Date.now() + 14 * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   h.as(OFFICE);
   const e = await h.call('PUT', `/api/onboarding/admin/people/${NP.id}/items/C.4.01/expiry`, { expiresOn: soon });
   assert.strictEqual(e.status, 200, JSON.stringify(e.data));
