@@ -291,6 +291,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'notification_settings', phi: false, owner: 'core' },
   { key: 'reminder_settings', phi: false, owner: 'core' },
   { key: 'email_templates', phi: false, owner: 'core' },
+  // The admin's edits to the wording of a notice. Sparse: only the fields
+  // somebody changed, so "reset to the built-in" is a delete and a built-in
+  // is never copied anywhere it can go stale (2026-11-09).
+  { key: 'email_copy_overrides', phi: false, owner: 'core' },
   { key: 'announcements', phi: false, owner: 'core' },
   // ---- lab-era, retained (Session 2 strip list keeps the code dormant) ----
   { key: 'projects', phi: false, owner: 'lab', note: 'deactivated tracker' },

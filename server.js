@@ -41,6 +41,7 @@ const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
+const emailCopy = require('./emailCopy');             // the editable wording of every notice (2026-11-09)
 const enrollmentGate = require('./enrollmentGate');
 const { createNotifier } = require('./notifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
@@ -703,14 +704,53 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
   }
 };
 
+// ⚠️ ONE ANNOUNCEMENT SENT EVERY RECIPIENT THREE EMAILS (owner report, 2026-11-10).
+// This function was a read-modify-write across a network call: it read the
+// pending rows, awaited `sendBatchEmails` (seconds, with retries), and only
+// THEN marked them sent. Nothing claimed the rows in between and nothing
+// stopped a second run entering, so two overlapping runs each read the same
+// rows and each sent them. Three runs, three emails.
+//
+// It had three doors and no lock — the boot timer, the 15-minute interval, and
+// the admin hub's "Process Queue" button, which had no in-flight guard at all.
+// Mail does not arrive for up to 15 minutes, which is exactly what invites
+// pressing that button again, so the design encouraged the bug.
+//
+// TWO independent fixes, because they cover different cases: this flag stops
+// overlap inside one process, and the CLAIM below (rows written as `sending`
+// BEFORE the network call) stops it even across processes, which a flag cannot.
+let queueDraining = false;
+
+// How long a row may sit claimed before another run may take it back. If the
+// process dies mid-send, a claimed row would otherwise never be sent again.
+// The trade is stated rather than hidden: reclaiming risks ONE duplicate after
+// a crash, while never reclaiming guarantees permanent loss — and for a
+// password reset, silence is the worse failure.
+const QUEUE_CLAIM_STALE_MS = 15 * 60 * 1000;
+
 // Process the notification queue — sends pending notifications whose triggerDate has passed
 const processNotificationQueue = async () => {
+  if (queueDraining) {
+    console.log('[QUEUE] A drain is already running; skipping this one.');
+    return { skipped: 'already_draining' };
+  }
+  queueDraining = true;
   try {
     const settings = (await db.get('notification_settings')) || { enabled: true };
     if (!settings.enabled) return;
 
     const queue = (await db.get('pending_notifications')) || [];
     const now = new Date();
+    // A row claimed by a run that died is taken back; one claimed moments ago
+    // belongs to a live run and is left alone.
+    for (const n of queue) {
+      if (n.status === 'sending'
+        && (!n.claimedAt || (now.getTime() - new Date(n.claimedAt).getTime()) > QUEUE_CLAIM_STALE_MS)) {
+        n.status = 'pending';
+        n.reclaimedAt = now.toISOString();
+        n.claimedAt = null;
+      }
+    }
     const pending = queue.filter(n => n.status === 'pending' && new Date(n.triggerDate) <= now);
 
     if (pending.length === 0) return;
@@ -751,6 +791,19 @@ const processNotificationQueue = async () => {
     }
 
     if (emailPayloads.length > 0) {
+      // ⚠️ CLAIM THE ROWS BEFORE THE NETWORK CALL. This write is the whole fix
+      // for the owner's triple email: once these rows read `sending`, another
+      // run's `status === 'pending'` filter no longer selects them, so it
+      // cannot send the same mail again while this send is in flight. Marking
+      // them AFTER `sendBatchEmails` — which is what the code did — leaves the
+      // entire duration of the send as a window in which every concurrent run
+      // sees them as unsent.
+      for (const idx of queueIndices) {
+        queue[idx].status = 'sending';
+        queue[idx].claimedAt = new Date().toISOString();
+      }
+      await db.set('pending_notifications', queue);
+
       const batchResult = await sendBatchEmails(emailPayloads);
 
       batchResult.results.forEach((result, i) => {
@@ -766,15 +819,33 @@ const processNotificationQueue = async () => {
           queue[idx].failureReason = result.error;
           if (queue[idx].retryCount >= queue[idx].maxRetries) {
             queue[idx].status = 'failed';
+          } else {
+            // ⚠️ RELEASE THE CLAIM ON FAILURE. Before the claim existed this
+            // branch could leave the status alone, because it was still
+            // `pending`. Now it is `sending`, so saying nothing would strand
+            // the row until the 15-minute staleness sweep — turning every
+            // transient send failure into a 15-minute delay. Found by running
+            // the probe against a sandbox with no mail transport, not by
+            // reading the diff.
+            queue[idx].status = 'pending';
+            queue[idx].claimedAt = null;
           }
           failCount++;
         }
       });
     }
 
-    // Move sent/failed/cancelled notifications to log archive
-    const completed = queue.filter(n => n.status === 'sent' || n.status === 'failed' || n.status === 'cancelled');
-    const remaining = queue.filter(n => n.status === 'pending');
+    // Move sent/failed/cancelled notifications to log archive.
+    // ⚠️ `remaining` KEEPS EVERYTHING NOT ARCHIVED, and that is load-bearing.
+    // It used to keep only `pending`, so any row in another state was dropped
+    // from the store entirely on the next drain. Introducing `sending` above
+    // without this would have silently DELETED the very notifications the
+    // claim exists to protect. It also fixes a live loss that predates this
+    // change: a `held` row (see the project notice near line 1300) was being
+    // discarded the same way.
+    const ARCHIVED = new Set(['sent', 'failed', 'cancelled']);
+    const completed = queue.filter(n => ARCHIVED.has(n.status));
+    const remaining = queue.filter(n => !ARCHIVED.has(n.status));
     if (completed.length > 0) {
       log.unshift(...completed);
       if (log.length > config.NOTIFICATION_LOG_MAX_ENTRIES) {
@@ -789,6 +860,11 @@ const processNotificationQueue = async () => {
     }
   } catch (err) {
     console.error('[QUEUE] Processing error:', err);
+  } finally {
+    // In a `finally`, so a throw anywhere above cannot wedge the queue shut
+    // for the life of the process. A claimed row that was mid-send when it
+    // threw is recovered by the staleness check at the top of the next run.
+    queueDraining = false;
   }
 };
 
@@ -3024,6 +3100,10 @@ const buildConsentSignature = (args) =>
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
 app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify, getAppBaseUrl,
   drive: googledrive,
   // Wrapped, not passed by reference: `detectFileType` is a `const` declared
   // ~7000 lines below this mount, so naming it here reads it in its temporal
@@ -3039,7 +3119,11 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
 // Caregiver welcome packet — the onboarding wizard, the document checklist and
 // the gate that opens the caregiver app. Mounted after the caregiver routes so
 // the two share one document store and one checklist builder.
-app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+app.use(welcomePacketRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify, getAppBaseUrl,
   drive: googledrive,
   detectFileType: (buf) => detectFileType(buf),
   // The signer's own address, hashed — the chain is not the signer, the same
@@ -3076,6 +3160,10 @@ const qbo = quickbooks.createQbo({ db, uuid: uuidv4, logActivity, getUsers: () =
   getRuns: async () => (await db.get('payroll_runs')) || [] });
 app.use(payrollRoutes({
   db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
+  // The notifier reaches these routes as a GETTER: `notify` is built far below
+  // this mount, so naming it here reads it in its temporal dead zone. A
+  // missing notifier is LOUD at the call site and never throws (2026-11-09).
+  notify: () => notify,
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
@@ -4543,6 +4631,14 @@ app.post('/api/auth/self-signup/verify', async (req, res) => {
       rows[f.idx] = { ...f.row, status: 'verified', verifiedAt: new Date().toISOString() };
       await db.set('signup_requests', rows);
       await logActivity('self_signup', 'Self sign-up', 'signup_email_verified', 'signup', f.row.id, { who: f.row.who });
+      // They are told the office will review it and email them. Nothing told
+      // the office (2026-11-09 audit), so nothing happened next.
+      await notify.selfSignupVerified({
+        name: f.row.name, email: f.row.email, signupId: f.row.id,
+        accountTypeLabel: f.row.who === 'loved_one' ? 'care for a loved one' : 'care for themselves',
+        ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+        actorId: 'self_signup'
+      });
     }
     res.json({ message: 'Your email is confirmed. Our office will review your account and email you when it is ready.' });
   } catch (error) {
@@ -4582,8 +4678,16 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       status: 'pending'
     });
     await db.set('password_reset_requests', resetRequests);
-    
-    console.log('Password reset requested - admin action required');
+
+    // The person is told an administrator will reach out. Until the
+    // 2026-11-09 audit nothing told an administrator, so a console line was
+    // the only signal and self-service reset was a dead end.
+    await notify.passwordResetRequested({
+      requesterName: user.name, requesterEmail: user.email,
+      requestId: resetRequests[resetRequests.length - 1].id,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+      actorId: user.id
+    });
     res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -4781,6 +4885,16 @@ app.post('/api/feedback', authenticateToken, async (req, res) => {
     feedbackRequests.unshift(newFeedback);
     await db.set('feedback_requests', feedbackRequests);
 
+    // A report landed in a collection with an admin-only screen in front of
+    // it and nothing to say it had arrived (2026-11-09 audit).
+    await notify.feedbackSubmitted({
+      fromName: newFeedback.userName, fromEmail: newFeedback.userEmail,
+      category: newFeedback.type, message: newFeedback.description,
+      feedbackId: newFeedback.id,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
+      actorId: req.user.id
+    });
+
     res.json({ message: 'Feedback submitted successfully', id: newFeedback.id });
   } catch (error) {
     console.error('Feedback submission error:', error);
@@ -4970,6 +5084,12 @@ app.post('/api/users/:userId/mfa/reset', authenticateToken, requireAdmin, async 
     await db.set('users', users); invalidateUsersCache();
     const revoked = await sessions.revokeAllForUser(users[idx].id, 'mfa_reset_by_admin');
     await logActivity(req.user.id, req.user.name || req.user.email, 'mfa_reset', 'user', users[idx].id, { targetEmail: users[idx].email, hadEnrollment: had, sessionsRevoked: revoked });
+    // Their authenticator is gone and every session with it, and nothing told
+    // them (audit, 2026-11-09). sendPasswordChangedEmail is the precedent.
+    await notify.accountAccessChanged({
+      user: users[idx], change: 'mfa_reset', byName: req.user.name || req.user.email,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+    });
     res.json({ ok: true, hadEnrollment: had, sessionsRevoked: revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -4977,6 +5097,13 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
   try {
     const revoked = await sessions.revokeAllForUser(req.params.userId, 'revoked_by_admin');
     await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
+    const signedOut = (await getUsers()).find(u => u && u.id === req.params.userId);
+    if (signedOut) {
+      await notify.accountAccessChanged({
+        user: signedOut, change: 'sessions_revoked', byName: req.user.name || req.user.email,
+        ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+      });
+    }
     res.json({ ok: true, revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -4997,6 +5124,16 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    // Snapshotted BEFORE anything is written. A person whose access changes is
+    // told about it (audit, 2026-11-09), and the only way to know it changed
+    // is to hold what it was. A shallow read of users[idx] afterwards would
+    // compare the row to itself — the aliasing trap this repo has paid for.
+    const accessBefore = {
+      accountStatus: users[idx].accountStatus || 'active',
+      role: users[idx].role,
+      accountType: accountTypes.accountTypeOf(users[idx]),
+      clinicalRole: users[idx].clinicalRole || null
+    };
 
     // A patient's account stays a patient (owner, 2026-10-20). Changing it to
     // Family or anything else hides their care team, schedule and records,
@@ -5301,6 +5438,27 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
         fields: Object.keys(req.body || {}).filter(k => req.body[k] !== undefined && k !== 'password')
       });
     }
+    // Deactivation and a change of role or clinical authority are the person's
+    // to know about. One notice each, from the snapshot taken before the
+    // write, and never to somebody editing their own account.
+    if (users[idx].id !== req.user.id) {
+      const nowStatus = users[idx].accountStatus || 'active';
+      if (accessBefore.accountStatus !== 'inactive' && nowStatus === 'inactive') {
+        await notify.accountAccessChanged({
+          user: users[idx], change: 'deactivated', byName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+        });
+      } else if (nowStatus !== 'inactive' && (
+        accessBefore.role !== users[idx].role ||
+        accessBefore.accountType !== accountTypes.accountTypeOf(users[idx]) ||
+        accessBefore.clinicalRole !== (users[idx].clinicalRole || null))) {
+        await notify.accountAccessChanged({
+          user: users[idx], change: 'role_changed', byName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.LOGIN}`, actorId: req.user.id
+        });
+      }
+    }
+
     // A manager's or coordinator's money fields were held by guardUserWrite.
     const financial = await raiseFinancialRequests(req, users[idx], req.heldFinancial, (req.body || {}).financialChangeReason);
 
@@ -7184,7 +7342,7 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
         }
 
         // Queue one notification per recipient with recipient-specific rendered content
-        let queued = 0;
+        let queued = 0, skipped = 0;
         for (const user of recipients) {
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
@@ -7209,17 +7367,25 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
             { subject, body: textBody, htmlBody },
             { relatedEntityId: newAnnouncement.id, relatedEntityType: 'announcement', createdBy: req.user.id }
           );
-          if (result) queued++;
+          // `queueNotification` answers a TRUTHY `{ skipped: true, reason }`
+          // for somebody who has unsubscribed, been deactivated, or holds a
+          // placeholder login — so `if (result)` counted them as sent and this
+          // figure overstated every time. The staff announcement route already
+          // reads `!q.skipped`; same rule here, and the skips are counted
+          // separately rather than dropped, because "9 of 12, 3 unsubscribed"
+          // is the sentence somebody needs.
+          if (result && !result.skipped) queued++;
+          else if (result && result.skipped) skipped++;
         }
 
-        console.log(`[ANNOUNCEMENTS] Queued ${queued}/${recipients.length} notifications for: ${newAnnouncement.title}`);
+        console.log(`[ANNOUNCEMENTS] Queued ${queued}/${recipients.length} notifications (${skipped} skipped) for: ${newAnnouncement.title}`);
 
         // Save queue stats on announcement record
         try {
           const current = (await db.get('announcements')) || [];
           const idx = current.findIndex(a => a.id === newAnnouncement.id);
           if (idx !== -1) {
-            current[idx].emailQueued = { queued, total: recipients.length, queuedAt: new Date().toISOString() };
+            current[idx].emailQueued = { queued, skipped, total: recipients.length, queuedAt: new Date().toISOString() };
             await db.set('announcements', current);
           }
         } catch (dbErr) {
@@ -7227,7 +7393,7 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
         }
 
         await logActivity(req.user.id, req.user.name, 'announcement_queued', 'announcement', newAnnouncement.id,
-          { title: newAnnouncement.title, emailsQueued: queued, totalRecipients: recipients.length });
+          { title: newAnnouncement.title, emailsQueued: queued, emailsSkipped: skipped, totalRecipients: recipients.length });
       }
     } catch (emailError) {
       console.error('Announcement email notification error:', emailError);
@@ -9792,6 +9958,16 @@ app.post('/api/gfc/family/invites', authenticateToken, requireEnrolledClient, as
     // The audit row says an invite was made, never who it names.
     await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_requested', 'client', client.id,
       { role: req.user.role, actingFor: acting.actingFor, inviteId: row.id, saysPoa: row.saysPoa });
+    // The reply promises we will confirm it and email them. The approval leg
+    // does email; nothing told the office there was anything to approve
+    // (2026-11-09 audit).
+    await notify.familyInviteRequested({
+      client, inviteId: row.id,
+      inviteeName: n.value.name, inviteeEmail: n.value.email, relationship: n.value.relationship,
+      requestedByName: req.user.name || req.user.email,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ENROLLMENT}?client=${encodeURIComponent(client.id)}`,
+      actorId: req.user.id
+    });
     res.json({ invite: familyInvites.publicInvite(row), message: 'Invite sent to the office. We will confirm it and email them their sign-in details.' });
   } catch (error) {
     console.error('GFC family invite error:', error);
@@ -10977,6 +11153,26 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     await db.set('users', users);
     invalidateUsersCache();
 
+    // The plan is written and held for signatures, and nobody was told
+    // (audit, 2026-11-09). The client signs theirs in the portal; an IHPC
+    // plan is additionally held for a provider's co-signature, and the
+    // providers are resolved HERE rather than inside the notifier, which must
+    // not restate the clinical role vocabulary.
+    await notify.carePlanAwaitingCoSign({
+      client, version: plan.version, authorName: req.user.name || req.user.email, actorId: req.user.id
+    });
+    if (pendingProviderCoSign) {
+      const providers = users.filter(u => u && u.email && u.accountStatus !== 'inactive'
+        && clinicalRoles.resolveClinicalRole(u) === 'provider');
+      for (const prov of providers) {
+        await notify.carePlanAwaitingProviderCoSign({
+          provider: prov, client, version: plan.version,
+          authorName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
+
     // OpenEMR-side record: authored care-plan PDF into patient Documents
     // (structured CarePlan resources are read-only on OpenEMR 7.0.4 — the
     // approved transport deviation; the final signed PDF follows at co-sign).
@@ -11087,9 +11283,21 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
-    // The co-signature is what makes the plan active and visible in the portal,
-    // so this is the moment the client is told it is ready to sign. Not if they
-    // have already signed this version.
+    // Two people are waiting on this signature and they are told separately.
+    // The author was blocked on it and was not told it landed (audit,
+    // 2026-11-09). Never to the signer themselves.
+    if (plan.authoredById && plan.authoredById !== req.user.id) {
+      const author = users.find(u => u && u.id === plan.authoredById);
+      if (author) {
+        await notify.carePlanProviderCoSigned({
+          user: author, client, version: plan.version, providerName: req.user.name || req.user.email,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
+    // And the co-signature is what makes the plan active and visible in the
+    // portal, so this is the moment the client is told it is ready to sign.
+    // Not if they have already signed this version.
     if (!(client.carePlanCoSign || {})[`v${plan.version}`]) {
       await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
     }
@@ -11275,6 +11483,9 @@ app.post('/api/clinical/patients/:clientId/activate', authenticateToken, require
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_activated', 'client', client.id, {});
+    // The PHC arm emails on approval; this one said "ACTIVATED" to a screen
+    // and nobody else (audit, 2026-11-09).
+    await notify.clinicalEnrollmentActivated({ client, actorId: req.user.id });
     res.json({ message: 'IHPC enrollment ACTIVATED', activatedAt: at });
   } catch (error) {
     console.error('Clinical activate error:', error);
@@ -15025,6 +15236,19 @@ const internalReferralStep = (apply, verb) => async (req, res) => {
     await logActivity(req.user.id, req.user.name || req.user.email, `internal_referral_${verb}`, 'client', client.id, {
       orderId: order.id, orderReference: order.orderReference, completionNoted: verb === 'completed'
     });
+    // "The referring clinician can read your note on the order" is to say
+    // they find out by looking (audit, 2026-11-09). Now they are told.
+    const referrerId = (order.orderingClinician || {}).id;
+    if (referrerId && referrerId !== req.user.id) {
+      const referrer = (await getUsers()).find(u => u && u.id === referrerId);
+      if (referrer) {
+        await notify.referralStepTaken({
+          user: referrer, step: verb, colleagueName: req.user.name || req.user.email,
+          specialty: (applied.order.referral || {}).specialty || null, orderId: order.id,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.CLINICAL}`, actorId: req.user.id
+        });
+      }
+    }
     res.json({
       message: verb === 'accepted' ? 'Accepted. Complete it with a note when you are done.' : 'Completed. The referring clinician can read your note on the order.',
       order: orderReq.publicOrder(applied.order)
@@ -15827,6 +16051,20 @@ const receiveClinicalResult = async (req, res, { order, rows, idx, client }) => 
         subject: notice.subject, heading: notice.heading, body: notice.body,
         ctaLabel: notice.ctaLabel, ctaUrl: appLinks.PATHS.CLINICAL
       }, { relatedEntityId: result.id });
+    }
+  }
+
+  // An ABNORMAL result sat in the inbox with nobody emailed (audit,
+  // 2026-11-09). Like the critical notice above, it carries no patient, no
+  // value and no interpretation: the builder is handed none of them.
+  if (result.interpretation === 'abnormal' && result.routeTo && result.routeTo.userId) {
+    const users = await getUsers();
+    const to = users.find(u => u && u.id === result.routeTo.userId);
+    if (to) {
+      await notify.abnormalResultWaiting({
+        user: to, resultId: result.id,
+        ctaPath: appLinks.PATHS.CLINICAL, actorId: req.user.id
+      });
     }
   }
 
@@ -18023,6 +18261,16 @@ app.post('/api/webhooks/stripe', async (req, res) => {
     await db.set('patient_invoices', rows);
     await logActivity('stripe', 'Stripe', 'invoice_paid_online', 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
     qbo.invoicePaid(t.inv).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
+    // They paid money and got nothing back (audit, 2026-11-09). The amount
+    // rides only where the transport can carry it.
+    const payer = (await getUsers()).find(u => u && u.id === t.inv.clientId);
+    if (payer) {
+      await notify.paymentReceived({
+        client: payer, invoiceId: t.inv.id,
+        amountLabel: Number.isFinite(Number(t.inv.totalCents)) ? `$${(Number(t.inv.totalCents) / 100).toFixed(2)}` : null,
+        actorId: 'stripe'
+      });
+    }
     res.json({ received: true });
   } catch (error) {
     console.error('Stripe webhook error:', error);
@@ -21166,7 +21414,10 @@ const notify = createNotifier({
   getUsers, queueNotification, getAppBaseUrl, emailTransport,
   staffRoles: ENROLLMENT_STAFF_ROLES,
   clientRole: config.ROLES.CLIENT,
-  familyRole: config.ROLES.FAMILY
+  familyRole: config.ROLES.FAMILY,
+  // The admin's edits to the wording. Read through the notifier's own short
+  // cache, so a notice to twelve people is one read of the store.
+  getCopyOverrides: async () => (await db.get('email_copy_overrides')) || {}
 });
 const requireEnrollmentStaff = (req, res, next) => {
   const role = req.user.role;
@@ -24531,6 +24782,18 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/remove', authe
 
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId);
+    // Removal REQUIRES a reason and the client was never told any of it
+    // (2026-11-09 audit). Only for a document they could actually see: a
+    // notice about an office-filed document nobody shared with them would be
+    // news of a file they never knew existed.
+    if (client && docRules.patientCanSee(row)) {
+      await notify.clientDocumentRemoved({
+        client, uploadId: row.id,
+        label: row.label || row.fileName || row.kind,
+        reason: check.reason, removedByName: req.user.name || req.user.email,
+        actorId: req.user.id
+      });
+    }
     const requests = (await db.get('client_document_requests')) || [];
     res.json({
       removed: { id: row.id, fileName: row.fileName, ...uploads[i].removed },
@@ -24565,6 +24828,19 @@ app.put('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/share', authent
     await db.set('client_document_uploads', uploads);
     await logActivity(req.user.id, req.user.name || req.user.email, shared ? 'client_document_shared' : 'client_document_unshared',
       'document', req.params.clientId, { uploadId: uploads[i].id, kind: uploads[i].kind || null });
+    // Sharing makes it readable in the portal. They were never told it was
+    // there, so it sat unread behind a tab (audit, 2026-11-09). Unsharing is
+    // deliberately silent: there is nothing for them to do about it.
+    if (shared) {
+      const owner = (await getUsers()).find(u => u && u.id === req.params.clientId);
+      if (owner) {
+        await notify.documentSharedToPortal({
+          client: owner, uploadId: uploads[i].id,
+          label: uploads[i].label || uploads[i].fileName || uploads[i].kind,
+          sharedByName: req.user.name || req.user.email, actorId: req.user.id
+        });
+      }
+    }
     res.json({ id: uploads[i].id, sharedWithPatient: shared });
   } catch (error) {
     console.error('Share client document error:', error);
@@ -31743,6 +32019,173 @@ app.put('/api/admin/notification-settings', authenticateToken, requireAdminHubAc
 // ============================================================
 
 // List all email templates
+// ============================================================================
+// THE EMAIL LIBRARY (2026-11-09) — every notice's wording, editable in place
+// ============================================================================
+// Owner: "update our email template library in-full so we can easily edit ANY
+// email." The editable unit is the PIECES the house template already takes —
+// subject, headline, paragraphs, the callout and its label, the button label
+// — never HTML. `emailCopy.js` holds the built-in wording and the rules; this
+// store holds only what somebody changed.
+//
+// Gated the same way the old template screen is: Super Admin. Editing the
+// words the practice says to patients is not a routine admin action.
+const EMAIL_COPY_OVERRIDES = 'email_copy_overrides';
+const readCopyOverrides = async () => (await db.get(EMAIL_COPY_OVERRIDES)) || {};
+
+const copyRowFor = (id, overrides) => {
+  const notice = emailCopy.listNotices().find(x => x.id === id);
+  if (!notice) return null;
+  const saved = overrides[id] || {};
+  return {
+    ...notice,
+    // What is actually in force per variant, and what the built-in says, so
+    // the editor can show both and offer a reset.
+    saved: emailCopy.VARIANTS.reduce((acc, v) => (saved[v] ? { ...acc, [v]: saved[v] } : acc), {}),
+    edited: !!(saved.updatedAt),
+    updatedAt: saved.updatedAt || null,
+    updatedBy: saved.updatedByName || null
+  };
+};
+
+app.get('/api/admin/email-copy', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const overrides = await readCopyOverrides();
+    const rows = emailCopy.listNotices().map(n => copyRowFor(n.id, overrides));
+    const audiences = Object.entries(emailCopy.AUDIENCES).map(([key, label]) => ({
+      key, label, notices: rows.filter(r => r.audience === key)
+    })).filter(g => g.notices.length);
+    res.json({ audiences, count: rows.length, editableFields: emailCopy.EDITABLE_FIELDS });
+  } catch (error) {
+    console.error('Email copy list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/admin/email-copy/:id', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const row = copyRowFor(req.params.id, await readCopyOverrides());
+    if (!row) return res.status(404).json({ error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' });
+    res.json(row);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Save an edit. The allow-list and every refusal live in emailCopy.js, so the
+// screen, this route and the send path cannot disagree about what is legal.
+app.put('/api/admin/email-copy/:id/:variant', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const { id, variant } = req.params;
+    const patch = (req.body || {}).copy;
+    const check = emailCopy.validateOverride(id, variant, patch);
+    if (!check.ok) {
+      return res.status(400).json({
+        error: check.errors[0].message, code: check.errors[0].code, errors: check.errors
+      });
+    }
+    const overrides = await readCopyOverrides();
+    const row = overrides[id] || {};
+    // Only the fields they changed are kept. A field set back to the built-in
+    // is removed rather than stored as a copy of it, which is what stops the
+    // store drifting from the code the way the lab library did.
+    const kept = {};
+    for (const f of emailCopy.EDITABLE_FIELDS) {
+      if (f in patch) kept[f] = patch[f];
+    }
+    overrides[id] = {
+      ...row, [variant]: kept,
+      updatedAt: new Date().toISOString(),
+      updatedById: req.user.id, updatedByName: req.user.name || req.user.email
+    };
+    await db.set(EMAIL_COPY_OVERRIDES, overrides);
+    // WHICH fields changed, never the words: an audit trail of email copy is
+    // a second copy of anything somebody typed into it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_edited', 'email_copy', id,
+      { variant, fields: Object.keys(kept) });
+    res.json(copyRowFor(id, overrides));
+  } catch (error) {
+    console.error('Email copy save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reset is a DELETE, not a write of the built-in back over itself.
+app.delete('/api/admin/email-copy/:id', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    if (!emailCopy.has(req.params.id)) return res.status(404).json({ error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' });
+    const overrides = await readCopyOverrides();
+    const variant = (req.query || {}).variant;
+    if (variant && emailCopy.VARIANTS.includes(variant) && overrides[req.params.id]) {
+      delete overrides[req.params.id][variant];
+      const left = emailCopy.VARIANTS.some(v => overrides[req.params.id][v]);
+      if (!left) delete overrides[req.params.id];
+    } else {
+      delete overrides[req.params.id];
+    }
+    await db.set(EMAIL_COPY_OVERRIDES, overrides);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_reset', 'email_copy', req.params.id, { variant: variant || 'all' });
+    res.json(copyRowFor(req.params.id, overrides));
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Preview an UNSAVED draft. The old template screen SAVED before previewing,
+// so half-finished wording went live and then sent; this takes the draft in
+// the request and writes nothing.
+const previewCopy = async (id, variant, draft) => {
+  const notice = emailCopy.listNotices().find(x => x.id === id);
+  if (!notice) return { error: { status: 404, body: { error: 'There is no email by that name.', code: 'NOTICE_UNKNOWN' } } };
+  const useVariant = emailCopy.VARIANTS.includes(variant) && notice.variants.includes(variant) ? variant : notice.variants[0];
+  if (draft) {
+    const check = emailCopy.validateOverride(id, useVariant, draft);
+    if (!check.ok) return { error: { status: 400, body: { error: check.errors[0].message, code: check.errors[0].code, errors: check.errors } } };
+  }
+  const data = {};
+  for (const p of notice.placeholders) data[p.key] = p.example;
+  // Resolved through the SAME function `send()` uses, then rendered through
+  // the SAME house template, so a preview cannot disagree with what sends.
+  const resolved = emailCopy.resolve(id, {
+    variant: useVariant, data,
+    overrides: draft ? { [id]: { [useVariant]: draft } } : await readCopyOverrides()
+  });
+  const base = await getAppBaseUrl();
+  const rendered = emailTemplates.renderGfcEmail({
+    greeting: 'Ada', headline: resolved.headline, paragraphs: resolved.paragraphs,
+    callout: resolved.callout, calloutLabel: resolved.calloutLabel,
+    ctaUrl: `${base}${appLinks.PATHS.PORTAL}`, ctaLabel: resolved.ctaLabel
+  });
+  return { subject: resolved.subject, text: rendered.text, html: rendered.html, variant: useVariant };
+};
+
+app.post('/api/admin/email-copy/:id/preview', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    const out = await previewCopy(req.params.id, (req.body || {}).variant, (req.body || {}).copy || null);
+    if (out.error) return res.status(out.error.status).json(out.error.body);
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.json(out);
+  } catch (error) {
+    console.error('Email copy preview error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Send the draft to the person editing it, and only ever to them.
+app.post('/api/admin/email-copy/:id/test-send', authenticateToken, requireAdminHubAccess, async (req, res) => {
+  try {
+    if (!req.user.email) return res.status(400).json({ error: 'Your account has no email address on file.', code: 'NO_ADDRESS' });
+    const out = await previewCopy(req.params.id, (req.body || {}).variant, (req.body || {}).copy || null);
+    if (out.error) return res.status(out.error.status).json(out.error.body);
+    const sent = await sendEmail(req.user.email, `[TEST] ${out.subject}`, out.text, { htmlBody: out.html });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'email_copy_test_sent', 'email_copy', req.params.id, { variant: out.variant });
+    res.json({ sent: !!(sent && !sent.skipped), to: req.user.email, reason: (sent && sent.reason) || null });
+  } catch (error) {
+    console.error('Email copy test-send error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/admin/email-templates', authenticateToken, requireAdminHubAccess, async (req, res) => {
   try {
     const templates = await getEmailTemplates();

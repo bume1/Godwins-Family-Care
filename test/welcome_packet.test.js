@@ -651,7 +651,27 @@ const mount = async (t, { as = CAREGIVER, users = [CAREGIVER, OTHER_CG, ADMIN], 
   const router = require('../routes/welcomePacket')({
     db, config,
     logActivity: async (...a) => { activity.push(a); },
-    queueNotification: async (n) => { notifications.push(n); },
+    // THE REAL NOTIFIER, built the way server.js builds it. The old harness
+    // passed `queueNotification: async (n) => notifications.push(n)` — a
+    // SINGLE-ARGUMENT fake, which is exactly the shape the buggy call site
+    // used, while the real queue is positional. So the fake and the bug agreed
+    // with each other and the test went green on a notice that never sent
+    // once. A harness that does not match what production supplies exercises
+    // a different function (fourth time in this repo).
+    notify: () => require('../notifications').createNotifier({
+      getUsers: async () => users,
+      queueNotification: async (type, recipientUserId, recipientEmail, recipientName, templateData, options = {}) => {
+        if (!recipientEmail) return { skipped: true, reason: 'no email address on file' };
+        notifications.push({ type, recipientUserId, recipientEmail, recipientName, ...templateData, ...options });
+        return { queued: true };
+      },
+      getAppBaseUrl: async () => 'https://app.test.local',
+      emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+      staffRoles: [config.ROLES.ADMIN],
+      clientRole: config.ROLES.CLIENT,
+      familyRole: config.ROLES.FAMILY
+    }),
+    getAppBaseUrl: async () => 'https://app.test.local',
     getUsers: async () => users,
     authenticateToken: (req, _res, next) => { req.user = as; next(); },
     uuidv4: () => 'x',
@@ -768,8 +788,17 @@ test('a signed packet opens the app, and cannot then be edited', async (t) => {
   assert.strictEqual((await edit.json()).code, 'PACKET_SIGNED',
     'a correction after signing is a new signature on a changed document');
 
-  assert.ok(h.notifications.some(n => n.type === 'caregiver_packet_submitted'),
-    'the office is told, and through the queue so an unsubscribe is honoured');
+  // Repointed, not patched to pass: this used to assert only that the queue
+  // had been CALLED, which a call with no recipient satisfies. It now asserts
+  // the office is a real recipient with an address, which is the thing that
+  // was broken for as long as this notice has existed.
+  const told = h.notifications.filter(n => n.type === 'caregiver_packet_submitted');
+  assert.ok(told.length >= 1, 'the office is told a packet landed');
+  assert.ok(told.every(n => n.recipientEmail && n.recipientUserId),
+    'every recipient resolves to a real account, which the old object-shaped call never did');
+  assert.ok(told.some(n => n.recipientEmail === ADMIN.email), 'the admin is one of them');
+  assert.match(told[0].subject, /Ada Lovelace/, 'and it names the caregiver whose packet it is');
+  assert.match(String(told[0].htmlBody), /Godwins/, 'through the house template');
 });
 
 test('importing a packet stores the file FIRST and prefills what it could read', async (t) => {

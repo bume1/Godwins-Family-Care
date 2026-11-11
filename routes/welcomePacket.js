@@ -32,9 +32,17 @@ const { contentDisposition } = require('../contentDisposition');
 
 module.exports = function createWelcomePacketRoutes(deps) {
   const {
-    db, config, logActivity, queueNotification, getUsers, authenticateToken,
-    drive, detectFileType, hashIp
+    db, config, logActivity, getUsers, authenticateToken,
+    drive, detectFileType, hashIp, getAppBaseUrl
   } = deps;
+  // A getter, because the notifier is built far below this router's mount in
+  // server.js. A missing one is LOUD and never throws: a notice must not undo
+  // a packet somebody just signed.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : deps.notify;
+    if (!n) console.error('[WELCOME PACKET] no notifier injected — the office was NOT emailed');
+    return n;
+  };
   const router = express.Router();
   const ROLES = config.ROLES;
   const nowIso = () => new Date().toISOString();
@@ -404,16 +412,24 @@ module.exports = function createWelcomePacketRoutes(deps) {
 
       // The office is told a packet landed. Queued like every other notice, so
       // an unsubscribe is honoured and the mail carries the house template.
-      if (queueNotification) {
-        queueNotification({
-          type: 'caregiver_packet_submitted',
-          recipientRole: ROLES.ADMIN,
-          subject: `Welcome packet submitted — ${caregiver.name || printed}`,
-          body: `${caregiver.name || printed} has completed their caregiver welcome packet. Their document checklist is in the admin hub.`,
-          relatedEntityId: packet.id,
-          ctaLabel: 'Open the caregiver queue',
-          ctaUrl: links.PATHS.ADMIN
-        }).catch(e => console.error('[WELCOME PACKET] notify failed (non-fatal):', e.message));
+      //
+      // ⚠️ THIS HAD NEVER SENT (found by the 2026-11-09 notification audit).
+      // It called queueNotification with a single OBJECT where the signature
+      // is positional `(type, userId, email, name, templateData, options)`, so
+      // the object landed in `type`, the recipient address was undefined, and
+      // the eligibility gate refused every submission. A refusal is logged as
+      // a skip rather than an error, so nothing ever surfaced. There is also
+      // no `recipientRole` fan-out anywhere in the queue — resolving the
+      // office is the notifier's job, which is why the copy lives there now.
+      const n = notifier();
+      if (n) {
+        await n.caregiverPacketSubmitted({
+          caregiverName: caregiver.name || printed,
+          packetId: packet.id,
+          outstandingCount: checklist.filter(r => r && r.required && r.status !== 'accepted').length,
+          ctaUrl: `${await getAppBaseUrl()}${links.PATHS.ADMIN}`,
+          actorId: caregiver.id
+        });
       }
 
       res.json({
