@@ -42,7 +42,7 @@
 
 'use strict';
 
-const { ref } = require('./sources');
+const { ref, PAY_GUIDE } = require('./sources');
 const V = require('./vocabulary');
 const { ACTORS: A, ACTIONS: X, classification: cls } = V;
 const C = require('./chapterC');
@@ -98,7 +98,7 @@ const ITEMS = Object.freeze([
     counselReview: true,
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED), step(A.NEW_HIRE, X.SIGN, INFERRED)],
     classifications: [], classificationNote: NO_CLASS },
-  { id: 'D.4.03', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'D.4', title: 'Tax and confidentiality documentation', ref: P('D.4'),
+  { id: 'D.4.03', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'D.4', title: 'Tax and confidentiality documentation', ref: P('D.4'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, INFERRED)],
     elements: ['Form W-9', 'Vendor payment setup'],
     classifications: [], classificationNote: NO_CLASS },

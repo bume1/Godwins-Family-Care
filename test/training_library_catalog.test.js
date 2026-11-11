@@ -147,3 +147,43 @@ test('the office can edit the policy line a training ties to, and staff see the 
   assert.strictEqual((await libRow()).policyEdited, false);
   assert.deepStrictEqual((await staffRow()).policy, staffOriginal);
 });
+
+test('the app training and the office payroll SOP link the right Drive files (owner, 2026-11-11)', () => {
+  const LC = require('../onboarding/libraryCatalog');
+  const p = LC.policyFor('TRN-004');
+  assert.match(p.document, /Administrative SOPs Set 1/);
+  assert.strictEqual(p.url, 'https://drive.google.com/file/d/1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma/view');
+  assert.match(p.sections, /SOP-ACC-01.*SOP-ONB-01.*SOP-SIG-02/);
+  assert.match(LC.entryFor('TRN-004').note, /SOP-SCH-01/, 'scheduling is still owed');
+  const set3 = LC.referenceRows().find(r => r.id === 'SOP Set 3');
+  assert.strictEqual(set3.policy.url, 'https://drive.google.com/file/d/15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY/view');
+  assert.match(set3.title, /admins and managers/);
+});
+
+test('the Staff Pay Guide sits on the pay setup step of every onboarding list (owner, 2026-11-11)', () => {
+  const URL = 'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view';
+  const want = { A: 'A.5.02', B: 'B.5.02', C: 'C.5.03', D: 'D.4.03', E: 'E.2.02', F: 'F.5.03' };
+  for (const [ch, id] of Object.entries(want)) {
+    const mod = require(`../onboarding/chapter${ch}`);
+    const items = Object.values(mod).filter(Array.isArray).flat();
+    const it = items.find(x => x && x.id === id);
+    assert.ok(it, `${id} exists`);
+    assert.strictEqual(it.guide && it.guide.url, URL, `${id} carries the pay guide`);
+  }
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(html, /item\.guide && <div[^>]*><a [^>]*href=\{item\.guide\.url\}/, 'the onboarding page shows it');
+});
+
+test('the pay guide button goes away once pay setup is done; the library keeps the guide', () => {
+  const T = require('../onboarding/track');
+  const { PAY_GUIDE } = require('../onboarding/sources');
+  const inputs = { chapter: 'B' };
+  const open = T.buildTrack({ inputs }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(open.guide.url, PAY_GUIDE.url, 'shown while the step is open');
+  const done = { at: '2026-11-11T12:00:00Z', byId: 'x', byName: 'X' };
+  const closed = T.buildTrack({ inputs, record: { items: { 'B.5.02': { steps: { 0: done, 1: done } } } } }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(closed.status, 'COMPLETE');
+  assert.strictEqual(closed.guide, null, 'gone once complete');
+  const na = T.buildTrack({ inputs, record: { items: { 'B.5.02': { notApplicable: true } } } }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(na.guide, null, 'gone when it does not apply');
+});

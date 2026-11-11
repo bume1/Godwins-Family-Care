@@ -103,6 +103,45 @@ const SOURCES = Object.freeze({
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '2.3'
+  }),
+  // The app SOP sets and the staff pay guide (owner, 2026-11-11). One .docx
+  // per set, each with its own document number; the bundled admin SOP v1 they
+  // replace is retired.
+  ADMIN_SOPS_SET1: Object.freeze({
+    key: 'ADMIN_SOPS_SET1',
+    title: 'Administrative SOPs Set 1: Signing In and Onboarding',
+    docNumber: 'GFC-ADMIN-SOP-S1',
+    driveFileId: '1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
+  ADMIN_SOPS_SET2: Object.freeze({
+    key: 'ADMIN_SOPS_SET2',
+    title: 'Administrative SOPs Set 2: Documents to Sign',
+    docNumber: 'GFC-ADMIN-SOP-S2',
+    driveFileId: '1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
+  ADMIN_SOPS_SET3: Object.freeze({
+    key: 'ADMIN_SOPS_SET3',
+    title: 'Administrative SOPs Set 3: Payroll Records, Gusto to the App',
+    docNumber: 'GFC-ADMIN-SOP-S3',
+    driveFileId: '15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
+  STAFF_PAY_GUIDE: Object.freeze({
+    key: 'STAFF_PAY_GUIDE',
+    title: 'Staff Guide: Setting Up Your Pay',
+    docNumber: 'GFC-STAFF-GUIDE-PAY',
+    driveFileId: '1pdgksZaDfczISVC6uTV20bMT0MKaHWVv',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '06 People / Training',
+    transcribedFromVersion: '1.0'
   })
 });
 
@@ -121,4 +160,8 @@ function ref(source, section, extra) {
   return Object.freeze(Object.assign({ source, section: String(section) }, extra || {}));
 }
 
-module.exports = { SOURCES, driveViewUrl, ref };
+// The staff pay guide, on the pay setup step of every onboarding list
+// (owner, 2026-11-11): the guide sits where the work is done, not in a training.
+const PAY_GUIDE = Object.freeze({ label: 'Read the Staff Pay Guide', url: driveViewUrl('STAFF_PAY_GUIDE') });
+
+module.exports = { SOURCES, driveViewUrl, ref, PAY_GUIDE };

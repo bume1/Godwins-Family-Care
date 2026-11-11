@@ -37,14 +37,14 @@ const e = (group, policy, next, note) => Object.freeze({ group, policy: policy ?
 const CATALOG = Object.freeze({
   'TRN-001': e(ALL, { doc: 'TEAM_ROLES', sections: 'Whole guide' }, 'attach', 'Attached: Team Roles & Responsibilities v2. The Team Onboarding Deck slides 2 to 17 cover the same ground.'),
   'TRN-002': e(ALL, { doc: 'TEAM_ROLES', sections: 'Role cards, pages 12 to 21' }, 'attach', 'Attached: the guide. Split per role later if wanted.'),
-  'TRN-004': e(ALL, null, 'write', 'One module, several guides (Manage Material holds up to 20 files and links). Has SOP 1: Signing In and Onboarding. Still to add: an app guide for Hours & Pay, and one for Scheduling & Availability.'),
+  'TRN-004': e(ALL, { doc: 'ADMIN_SOPS_SET1', sections: 'SOP-ACC-01 signing in, SOP-ONB-01 onboarding · Set 2 SOP-SIG-02 signing documents · Admin Manual 3' }, 'write', 'Attached: SOP Set 1, SOP Set 2 and the Staff Pay Guide (in Drive). The same pay guide is also on the pay setup step of every onboarding list. The working SOP 1 Google Doc is retired. Still to write: SOP-SCH-01 Scheduling & Availability.'),
   'TRN-005': e(ALL, SOP('SOP-SYS-01', '3, 10.7–10.10, 21'), 'done'),
   'TRN-216': e(ALL, M('19.1–19.3'), 'write', 'Hole: 19.2 says report to the authority Georgia law requires, within the time it requires, and names neither. Verify against primary sources.'),
   'TRN-217': e(ALL, M('24.1–24.3 clinical · 21.5 privacy · 10.10 AI'), 'write', 'Three separate reporting paths. The SOP has to unify them into one decision point.'),
 
   'TRN-501': e(CG, PHC('11.1 scheduling, 11.2 attendance, 11.3 timekeeping'), 'done', 'Video: Accepting Shifts, Clocking In - GFC App.'),
   'TRN-502': e(CG, PHC('9.2 documenting services, 9.3 corrections, 11.3 timekeeping'), 'done', 'Video: Submitting Visit Report, Clocking Out - GFC App.'),
-  'TRN-503': e(CG, PHC('17.1 qualification before client contact, 17.3 orientation'), 'done', 'Video: Home Care Staff Onboarding-Documents.'),
+  'TRN-503': e(CG, PHC('17.1 qualification before client contact, 17.3 orientation'), 'done', 'Video: Home Care Staff Onboarding-Documents. Also attached: the Staff Pay Guide and SOP Set 2 (SOP-SIG-02, signing from the app). The same pay guide is on the pay step of the onboarding list.'),
 
   'TRN-102': e(EX, null, 'external'),
   'TRN-103': e(EX, null, 'external'),
@@ -93,7 +93,11 @@ const CATALOG = Object.freeze({
 // in the app and are listed so a role's path reads complete.
 const REFERENCE_ROWS = Object.freeze([
   Object.freeze({ id: 'Care Courses', title: 'Forty-hour training program and annual refresher (Care Courses)', group: CG,
-    policy: Object.freeze(PHC('17.2 the forty-hour training program')), where: "Each caregiver's onboarding, Training tab" })
+    policy: Object.freeze(PHC('17.2 the forty-hour training program')), where: "Each caregiver's onboarding, Training tab" }),
+  // Office only: moving payroll records off Gusto (owner, 2026-11-11). Not a
+  // staff training, so it is a reference row rather than a module.
+  Object.freeze({ id: 'SOP Set 3', title: 'Payroll records, Gusto to the app (admins and managers)', group: SY,
+    policy: Object.freeze({ doc: 'ADMIN_SOPS_SET3', sections: 'SOP-PAY-01 moving the records, SOP-PAY-02 what staff set up' }), where: 'Admin hub, User Management and Payroll' })
 ]);
 
 const entryFor = (id) => CATALOG[id] || null;
