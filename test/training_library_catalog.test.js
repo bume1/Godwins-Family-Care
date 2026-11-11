@@ -147,3 +147,15 @@ test('the office can edit the policy line a training ties to, and staff see the 
   assert.strictEqual((await libRow()).policyEdited, false);
   assert.deepStrictEqual((await staffRow()).policy, staffOriginal);
 });
+
+test('the app training and the office payroll SOP link the right Drive files (owner, 2026-11-11)', () => {
+  const LC = require('../onboarding/libraryCatalog');
+  const p = LC.policyFor('TRN-004');
+  assert.match(p.document, /Administrative SOPs Set 1/);
+  assert.strictEqual(p.url, 'https://drive.google.com/file/d/1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma/view');
+  assert.match(p.sections, /SOP-ACC-01.*SOP-ONB-01.*SOP-SIG-02/);
+  assert.match(LC.entryFor('TRN-004').note, /SOP-SCH-01/, 'scheduling is still owed');
+  const set3 = LC.referenceRows().find(r => r.id === 'SOP Set 3');
+  assert.strictEqual(set3.policy.url, 'https://drive.google.com/file/d/15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY/view');
+  assert.match(set3.title, /admins and managers/);
+});

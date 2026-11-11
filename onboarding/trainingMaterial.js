@@ -202,16 +202,32 @@ const drive = (id) => `https://drive.google.com/file/d/${id}/view`;
 // replaces never comes back, and a default added later still reaches a
 // module that was seeded before it existed.
 const DEFAULT_MATERIAL = Object.freeze({
+  // The app training (owner, 2026-11-11): the controlled SOP sets in Drive,
+  // replacing the working SOP 1 Google Doc, which is retired (RETIRED_URLS).
   'TRN-004': Object.freeze([
-    Object.freeze({ key: 'sop1', label: 'SOP 1: Signing In and Onboarding', kind: 'document',
-      url: 'https://docs.google.com/document/d/1Bs-wgsurXK3SbJt2aLFD1AtmUEqp2FPqapqM_OA0oFw/view' })
+    Object.freeze({ key: 'sop-set1', label: 'Administrative SOPs Set 1: Signing In and Onboarding', kind: 'document', url: drive('1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma') }),
+    Object.freeze({ key: 'sop-set2', label: 'Administrative SOPs Set 2: Documents to Sign', kind: 'document', url: drive('1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j') }),
+    Object.freeze({ key: 'pay-guide', label: 'Staff Guide: Setting Up Your Pay', kind: 'document', url: drive('1pdgksZaDfczISVC6uTV20bMT0MKaHWVv') })
   ]),
   // Material that already exists in Drive (owner's Training Material Tracker).
   'TRN-001': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
   'TRN-002': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2: your role card (pages 12 to 21)', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
   'TRN-501': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Accepting Shifts, Clocking In', url: drive('1YcwdwNhYIa1NKqmEdibsAYKlhekcQgHA'), kind: 'video' })]),
   'TRN-502': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Submitting the Visit Report, Clocking Out', url: drive('1wWRk_njfMZIeJH0ogOwxheEXjv2fS04P'), kind: 'video' })]),
-  'TRN-503': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' })])
+  'TRN-503': Object.freeze([
+    Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' }),
+    // Caregivers sign and set up pay in the same app (owner, 2026-11-11).
+    Object.freeze({ key: 'pay-guide', label: 'Staff Guide: Setting Up Your Pay', kind: 'document', url: drive('1pdgksZaDfczISVC6uTV20bMT0MKaHWVv') }),
+    Object.freeze({ key: 'sop-set2', label: 'Administrative SOPs Set 2: Documents to Sign (SOP-SIG-02 is yours)', kind: 'document', url: drive('1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j') })
+  ])
+});
+
+// Material the app once seeded and has since replaced. Taken off a module once,
+// keeping the row with who and when, so a training does not keep pointing at a
+// withdrawn document. A link the office added by hand to the same document is
+// taken off too: the document itself is withdrawn.
+const RETIRED_URLS = Object.freeze({
+  'TRN-004': Object.freeze(['https://docs.google.com/document/d/1Bs-wgsurXK3SbJt2aLFD1AtmUEqp2FPqapqM_OA0oFw/view'])
 });
 function seedDefaults(all, now) {
   const out = Object.assign({}, all || {});
@@ -221,6 +237,13 @@ function seedDefaults(all, now) {
     // Seeded before keys existed (the first SOP 1 seed, 2026-11-10).
     const done = new Set((e && e.defaultKeysSeeded) || (e && e.defaultSeededAt && moduleId === 'TRN-004' ? ['sop1'] : []));
     let changed = false;
+    for (const url of RETIRED_URLS[moduleId] || []) {
+      if (e && (e.links || []).some(x => x.url === url && !x.removedAt)) e = Object.assign({}, e, { links: e.links.map(x => Object.assign({}, x)) });
+      for (const l of ((e && e.links) || []).filter(x => x.url === url && !x.removedAt)) {
+        e = remove(e, 'links', l.id, { id: 'system', name: 'GFC (retired, replaced by the SOP sets)' }, now);
+        changed = true;
+      }
+    }
     for (const d of defaults) {
       if (done.has(d.key)) continue;
       const already = e && (e.links || []).some(l => l.url === d.url);
@@ -240,5 +263,5 @@ module.exports = {
   COLLECTION, STATUS, LINK_KINDS,
   hasAddedMaterial, materialFor, forStaff, validateLink,
   addLink, addFile, remove, setNote, findFile,
-  DEFAULT_MATERIAL, seedDefaults, NEXT_STEPS, setOffice, policyOverride
+  DEFAULT_MATERIAL, RETIRED_URLS, seedDefaults, NEXT_STEPS, setOffice, policyOverride
 };
