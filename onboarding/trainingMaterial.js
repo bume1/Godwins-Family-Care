@@ -204,10 +204,10 @@ const drive = (id) => `https://drive.google.com/file/d/${id}/view`;
 const DEFAULT_MATERIAL = Object.freeze({
   // The app training (owner, 2026-11-11): the controlled SOP sets in Drive,
   // replacing the working SOP 1 Google Doc, which is retired (RETIRED_URLS).
+  // The Staff Pay Guide sits on each onboarding list's pay setup step instead.
   'TRN-004': Object.freeze([
     Object.freeze({ key: 'sop-set1', label: 'Administrative SOPs Set 1: Signing In and Onboarding', kind: 'document', url: drive('1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma') }),
-    Object.freeze({ key: 'sop-set2', label: 'Administrative SOPs Set 2: Documents to Sign', kind: 'document', url: drive('1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j') }),
-    Object.freeze({ key: 'pay-guide', label: 'Staff Guide: Setting Up Your Pay', kind: 'document', url: drive('1pdgksZaDfczISVC6uTV20bMT0MKaHWVv') })
+    Object.freeze({ key: 'sop-set2', label: 'Administrative SOPs Set 2: Documents to Sign', kind: 'document', url: drive('1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j') })
   ]),
   // Material that already exists in Drive (owner's Training Material Tracker).
   'TRN-001': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
@@ -216,8 +216,8 @@ const DEFAULT_MATERIAL = Object.freeze({
   'TRN-502': Object.freeze([Object.freeze({ key: 'video', label: 'Video: Submitting the Visit Report, Clocking Out', url: drive('1wWRk_njfMZIeJH0ogOwxheEXjv2fS04P'), kind: 'video' })]),
   'TRN-503': Object.freeze([
     Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' }),
-    // Caregivers sign and set up pay in the same app (owner, 2026-11-11).
-    Object.freeze({ key: 'pay-guide', label: 'Staff Guide: Setting Up Your Pay', kind: 'document', url: drive('1pdgksZaDfczISVC6uTV20bMT0MKaHWVv') }),
+    // Caregivers sign documents in the same app (owner, 2026-11-11). The pay
+    // guide is on the pay setup step of the onboarding list, not here.
     Object.freeze({ key: 'sop-set2', label: 'Administrative SOPs Set 2: Documents to Sign (SOP-SIG-02 is yours)', kind: 'document', url: drive('1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j') })
   ])
 });

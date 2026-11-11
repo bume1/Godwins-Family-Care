@@ -620,6 +620,9 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.link && !(office && item.link.url.startsWith('/')) && <div style={{ margin: '6px 0 10px' }}>{item.link.url.startsWith('/')
           ? <a className="btn gold sm" href={item.link.url}><i className="ti ti-arrow-right" />{item.link.label}</a>
           : <a className="btn gold sm" href={item.link.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-external-link" />{item.link.label}</a>}</div>}
+        {/* A how-to guide for the step (the Staff Pay Guide, 2026-11-11). Shown to
+            the office too, so they can send it on. */}
+        {item.guide && <div style={{ margin: '6px 0 10px' }}><a className="btn ghost sm" href={item.guide.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-book" />{item.guide.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
           <div><label className="f">From the welcome packet</label>

@@ -160,4 +160,8 @@ function ref(source, section, extra) {
   return Object.freeze(Object.assign({ source, section: String(section) }, extra || {}));
 }
 
-module.exports = { SOURCES, driveViewUrl, ref };
+// The staff pay guide, on the pay setup step of every onboarding list
+// (owner, 2026-11-11): the guide sits where the work is done, not in a training.
+const PAY_GUIDE = Object.freeze({ label: 'Read the Staff Pay Guide', url: driveViewUrl('STAFF_PAY_GUIDE') });
+
+module.exports = { SOURCES, driveViewUrl, ref, PAY_GUIDE };

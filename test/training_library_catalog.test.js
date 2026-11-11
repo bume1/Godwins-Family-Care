@@ -159,3 +159,17 @@ test('the app training and the office payroll SOP link the right Drive files (ow
   assert.strictEqual(set3.policy.url, 'https://drive.google.com/file/d/15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY/view');
   assert.match(set3.title, /admins and managers/);
 });
+
+test('the Staff Pay Guide sits on the pay setup step of every onboarding list (owner, 2026-11-11)', () => {
+  const URL = 'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view';
+  const want = { A: 'A.5.02', B: 'B.5.02', C: 'C.5.03', D: 'D.4.03', E: 'E.2.02', F: 'F.5.03' };
+  for (const [ch, id] of Object.entries(want)) {
+    const mod = require(`../onboarding/chapter${ch}`);
+    const items = Object.values(mod).filter(Array.isArray).flat();
+    const it = items.find(x => x && x.id === id);
+    assert.ok(it, `${id} exists`);
+    assert.strictEqual(it.guide && it.guide.url, URL, `${id} carries the pay guide`);
+  }
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(html, /item\.guide && <div[^>]*><a [^>]*href=\{item\.guide\.url\}/, 'the onboarding page shows it');
+});

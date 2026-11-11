@@ -620,6 +620,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       returned: st && st.returned ? st.returned : null,
       acknowledgments: ackStatus(it, st),
       link: it.link || null,
+      guide: it.guide || null,
       elements: it.elements
         ? it.elements.filter(e => typeof e === 'string' || matchesWhen(e.when, i)).map(e => (typeof e === 'string' ? { row: e } : { row: e.row, ref: e.ref }))
         : null,

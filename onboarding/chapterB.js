@@ -22,7 +22,7 @@
 
 'use strict';
 
-const { ref, SOURCES } = require('./sources');
+const { ref, SOURCES, PAY_GUIDE } = require('./sources');
 const V = require('./vocabulary');
 const { ACTORS: A, ACTIONS: X, classification: cls } = V;
 const { ACKNOWLEDGMENTS: C_ACKS } = require('./chapterC');
@@ -88,7 +88,7 @@ const ITEMS = Object.freeze([
   { id: 'B.5.01', phase: 'B.5', title: 'Offer letter and employment agreement', ref: P('B.5'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED), step(A.NEW_HIRE, X.SIGN, INFERRED)],
     classifications: [], classificationNote: NO_B2_ROW },
-  { id: 'B.5.02', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'B.5', title: 'Employment and tax documentation', ref: P('B.5'),
+  { id: 'B.5.02', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'B.5', title: 'Employment and tax documentation', ref: P('B.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9 within three business days of the start date', 'Form W-4', 'Direct deposit authorization', 'Emergency contact information'],
     classifications: [], classificationNote: NO_B2_ROW },
