@@ -3032,7 +3032,11 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
   detectFileType: (buf) => detectFileType(buf),
   // The visit-log download (2026-10-03). `pdfGenerator` is required at the top
   // of this file, so this one is safe to pass by reference.
-  pdfGenerator }));
+  pdfGenerator,
+  // A lead caregiver's view of what was shared with the patient (2026-11-11).
+  // Arrows for the same temporal-dead-zone reason as detectFileType.
+  sharedForLeadCaregiver: (client) => sharedForLeadCaregiver(client),
+  serveSharedDocument: (res, client, docId, actor) => serveSharedDocument(res, client, docId, actor) }));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
@@ -12845,6 +12849,58 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
 // the encounter (portalPublished false + the reason) and surfaced as a
 // warning, and the Publish button on the encounter is the retry.
 const loadPublishedVisits = async () => loadRows('patient_published_visits');
+
+// What a LEAD caregiver sees of the patient's record (owner, 2026-11-11). The
+// same published copies and filters the patient's own portal reads, at the
+// patient's level, minus everything a caregiver is never shown: the clinician's
+// note, results, problems, vitals, billing and messages. A section nothing
+// has been shared into yet says so (`source: null`), never "none".
+const sharedForLeadCaregiver = async (client) => {
+  const [chart, visitRows, apptRow, uploads] = await Promise.all([
+    loadPublishedChart(client.id), loadPublishedVisits(), loadPublishedAppointments(client.id), loadRows('client_document_uploads')
+  ]);
+  const held = patientPublish.appHeldHealth(client);
+  const section = (key, kind) => {
+    if (chart && chart[key]) return { rows: patientRead.filterRows(kind, 'full', chart[key]), source: 'published', at: chart.publishedAt || null };
+    if (held[key]) return { rows: patientRead.filterRows(kind, 'full', held[key].rows), source: held[key].source, at: held[key].at || null };
+    return { rows: [], source: null, at: null };
+  };
+  const visits = visitRows.filter(r => r && r.clientId === client.id)
+    // The patient-facing summary only; visitForAudience would add the note.
+    // Diagnoses and tests ordered stay with the patient: a caregiver needs
+    // what happened, what to watch for and any new medicine, no more.
+    .map(r => { const v = patientRead.filterRow('visit', 'full', r.visit); if (v) { delete v.diagnosesAddressed; delete v.testsOrdered; delete v.summary; } return v; })
+    .filter(Boolean)
+    .sort((a, b) => (!a.date) - (!b.date) || String(b.date || '').localeCompare(String(a.date || '')));
+  const apptOk = !!(apptRow && apptRow.sourcePuuid === client.openEmrPatientId);
+  const today = practiceToday();   // Georgia's date, not UTC's
+  const appointments = apptOk
+    ? patientRead.filterRows('appointment', 'full', apptRow.appointments || []).filter(a => !a.date || String(a.date) >= today)
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) || String(a.startTime || '').localeCompare(String(b.startTime || '')))
+    : [];
+  const documents = docRules.liveUploads(uploads)
+    .filter(u => u.clientId === client.id && docRules.patientCanSee(u))
+    .map(u => ({ id: u.id, title: u.fileName || 'Document', kind: u.kind || null, uploadedAt: u.uploadedAt || null,
+      from: u.source === 'staff' ? 'From the care team' : 'From the patient or family' }))
+    .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
+  return {
+    clientName: client.preferredName || client.name,
+    documents,
+    medications: section('medications', 'medication'),
+    allergies: section('allergies', 'allergy'),
+    visits,
+    appointments,
+    appointmentsShared: apptOk
+  };
+};
+// Opens one of those documents. The same rule as the patient's own download:
+// only what the patient can see, and a 404 rather than a 403 otherwise.
+const serveSharedDocument = async (res, client, docId, actor) => {
+  const uploads = await loadRows('client_document_uploads');
+  const row = uploads.find(u => u && u.id === docId && u.clientId === client.id);
+  if (!row || !docRules.patientCanSee(row)) return res.status(404).json({ error: 'Document not found' });
+  await serveStoredDocument(res, row, actor);
+};
 // Keyed on the CLIENT and the encounter, never the encounter alone: a published
 // row is only ever replaced by a publish for the same patient.
 const upsertPublishedVisit = async (row) => {

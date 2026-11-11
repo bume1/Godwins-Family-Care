@@ -1052,6 +1052,87 @@ const FeedTab = ({ items, reviewed, onReviewed }) => (
   </div>
 );
 
+// What a LEAD caregiver sees of what was shared with the patient (owner,
+// 2026-11-11): the documents on the patient's portal, medicines and allergies,
+// the patient-facing visit summaries and upcoming appointments. Read only, and
+// only for a caregiver the office named as lead for this client; the server
+// refuses everyone else. Never clinical notes or results. Module scope.
+const sharedDay = (ymd) => {
+  if (!ymd) return '';
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(ymd)) ? `${ymd}T12:00:00Z` : ymd);
+  return isNaN(d.getTime()) ? String(ymd) : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+};
+const openSharedDocument = async (clientId, docId) => {
+  const res = await fetch(`${API}/api/caregiver/clients/${encodeURIComponent(clientId)}/shared/documents/${encodeURIComponent(docId)}/file`, {
+    headers: { Authorization: `Bearer ${getToken()}` }
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error((body && body.error) || 'That file could not be opened.');
+  }
+  const url = URL.createObjectURL(await res.blob());
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+};
+const SharedWithPatientCard = ({ clientId, name }) => {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [openErr, setOpenErr] = useState('');
+  useEffect(() => {
+    let live = true;
+    setData(null); setErr('');
+    api(`/api/caregiver/clients/${encodeURIComponent(clientId)}/shared`)
+      .then(d => { if (live) setData(d); })
+      .catch(e => { if (live) setErr(e.message || 'This could not be loaded.'); });
+    return () => { live = false; };
+  }, [clientId]);
+  const first = String(name || 'the client').split(' ')[0];
+  if (err) return <div className="card"><h3>Shared with {first}</h3><p style={{ fontSize: 15, color: 'var(--mut)' }}>{err}</p></div>;
+  if (!data) return <div className="card"><h3>Shared with {first}</h3><p style={{ fontSize: 15, color: 'var(--mut)' }}>Loading…</p></div>;
+  const notYet = (what) => <p style={{ fontSize: 14, color: 'var(--mut)' }}>No {what} shared yet.</p>;
+  return (
+    <div className="card">
+      <h3>Shared with {first}</h3>
+      <p style={{ fontSize: 13, color: 'var(--mut)', marginTop: -4 }}>You are a lead caregiver for {first}, so you can see what the care team shared with them. Read only.</p>
+
+      <div className="grp">Upcoming appointments</div>
+      {data.appointments.length === 0 ? notYet('appointments') : data.appointments.map(a => (
+        <div className="row" key={a.id}><span>{sharedDay(a.date)}{a.startTime ? ` · ${a.startTime}` : ''}{a.title ? ` · ${a.title}` : ''}</span><b>{a.provider || ''}{a.hasVideo ? ' (video)' : ''}</b></div>
+      ))}
+
+      <div className="grp">Medicines</div>
+      {data.medications.rows.length === 0 ? notYet('medicines') : data.medications.rows.map((m, i) => (
+        <div className="row" key={m.id || i}><span>{m.name}</span><b>{m.instructions || ''}</b></div>
+      ))}
+
+      <div className="grp">Allergies</div>
+      {data.allergies.rows.length === 0 ? notYet('allergies') : data.allergies.rows.map((a, i) => (
+        <div className="row" key={a.id || i}><span>{a.name}</span><b>{a.severity || ''}</b></div>
+      ))}
+
+      <div className="grp">Visit summaries</div>
+      {data.visits.length === 0 ? notYet('visit summaries') : data.visits.map((v, i) => (
+        <div key={v.id || i} style={{ padding: '8px 0', borderTop: '1px solid var(--line, #eee)' }}>
+          <div style={{ fontWeight: 600 }}>{sharedDay(v.date)}{v.provider ? ` · ${v.provider}` : ''}</div>
+          {v.reason && <div style={{ fontSize: 14 }}>{v.reason}</div>}
+          {v.overview && <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginTop: 4 }}>{v.overview}</div>}
+          {Array.isArray(v.newPrescriptions) && v.newPrescriptions.length > 0 && <div style={{ fontSize: 14, marginTop: 4 }}><b>New medicines:</b> {v.newPrescriptions.map(p => typeof p === 'string' ? p : (p.name || p.drug || '')).filter(Boolean).join(', ')}</div>}
+          {v.followUp && <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginTop: 4 }}><b>Follow-up:</b> {v.followUp}</div>}
+        </div>
+      ))}
+
+      <div className="grp">Documents</div>
+      {openErr && <p style={{ fontSize: 14, color: 'var(--red, #b42318)' }}>{openErr}</p>}
+      {data.documents.length === 0 ? notYet('documents') : data.documents.map(d => (
+        <button key={d.id} className="opt" onClick={() => { setOpenErr(''); openSharedDocument(clientId, d.id).catch(e => setOpenErr(e.message)); }}>
+          <i className="ti ti-file-text"></i>
+          <div><b>{d.title}</b><span style={{ display: 'block', fontSize: 13, color: 'var(--mut)' }}>{d.from}{d.uploadedAt ? ` · ${sharedDay(d.uploadedAt)}` : ''}</span></div>
+        </button>
+      ))}
+    </div>
+  );
+};
+
 const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
   if (detail) {
     const c = detail.client;
@@ -1119,6 +1200,8 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
             {c.standingInstructions.map(s => <div className="row" key={s.id}>{s.label}</div>)}
           </div>
         )}
+
+        {detail.leadAccess && <SharedWithPatientCard clientId={c.id} name={c.name} />}
 
         <MessagingEntry onOpen={onMessages} />
       </div>

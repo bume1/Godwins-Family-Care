@@ -50,7 +50,10 @@ module.exports = function createCaregiverRoutes(deps) {
     // module keeps no I/O of its own and the tests can drive a fake Drive.
     drive, detectFileType,
     // The visit-log PDF download (2026-10-03), injected for the same reason.
-    pdfGenerator
+    pdfGenerator,
+    // What a lead caregiver sees of the patient's shared record (2026-11-11).
+    // Built in server.js from the same published copies the patient's portal reads.
+    sharedForLeadCaregiver, serveSharedDocument
   } = deps;
   const router = express.Router();
 
@@ -277,10 +280,53 @@ module.exports = function createCaregiverRoutes(deps) {
         { role: 'caregiver', licenseLevel: caregiver.licenseLevel, resource: 'care_plan' });
       res.json({
         client: cg.caregiverClientView(client),
-        schema: cg.visitLogSchemaFor(caregiver, client)
+        schema: cg.visitLogSchemaFor(caregiver, client),
+        // Whether this caregiver may also open what was shared with the patient.
+        leadAccess: cg.isLeadCaregiver(caregiver, client)
       });
     } catch (error) {
       console.error('Caregiver client read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // GET /api/caregiver/clients/:clientId/shared — a LEAD caregiver's view of
+  // what was shared with the patient (owner, 2026-11-11): the documents on the
+  // patient's portal, medicines and allergies, the patient-facing visit
+  // summaries and appointments. Read only. Never clinical notes, results,
+  // billing or provider-to-family messages. Every read is logged.
+  // ==========================================================================
+  const loadLeadClient = async (req, res) => {
+    const caregiver = await freshCaregiver(req);
+    const { client, error } = await loadAssignedClient(caregiver, req.params.clientId);
+    if (error) { res.status(403).json({ error: 'You are not assigned to this client.', code: error }); return null; }
+    if (!cg.isLeadCaregiver(caregiver, client)) {
+      res.status(403).json({ error: 'Only a lead caregiver for this client can see what was shared with them. The office sets this.', code: 'NOT_LEAD_CAREGIVER' });
+      return null;
+    }
+    return { caregiver, client };
+  };
+  router.get('/api/caregiver/clients/:clientId/shared', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
+    try {
+      const ctx = await loadLeadClient(req, res);
+      if (!ctx) return;
+      const shared = await sharedForLeadCaregiver(ctx.client);
+      await logActivity(ctx.caregiver.id, ctx.caregiver.name, 'caregiver_shared_record_read', 'client', ctx.client.id,
+        { role: 'caregiver', lead: true, counts: { documents: shared.documents.length, visits: shared.visits.length, medications: shared.medications.rows.length, appointments: shared.appointments.length } });
+      res.json(shared);
+    } catch (error) {
+      console.error('Lead caregiver shared read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  router.get('/api/caregiver/clients/:clientId/shared/documents/:docId/file', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
+    try {
+      const ctx = await loadLeadClient(req, res);
+      if (!ctx) return;
+      await serveSharedDocument(res, ctx.client, req.params.docId, ctx.caregiver);
+    } catch (error) {
+      console.error('Lead caregiver document error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
