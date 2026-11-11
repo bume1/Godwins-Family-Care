@@ -173,3 +173,17 @@ test('the Staff Pay Guide sits on the pay setup step of every onboarding list (o
   const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(html, /item\.guide && <div[^>]*><a [^>]*href=\{item\.guide\.url\}/, 'the onboarding page shows it');
 });
+
+test('the pay guide button goes away once pay setup is done; the library keeps the guide', () => {
+  const T = require('../onboarding/track');
+  const { PAY_GUIDE } = require('../onboarding/sources');
+  const inputs = { chapter: 'B' };
+  const open = T.buildTrack({ inputs }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(open.guide.url, PAY_GUIDE.url, 'shown while the step is open');
+  const done = { at: '2026-11-11T12:00:00Z', byId: 'x', byName: 'X' };
+  const closed = T.buildTrack({ inputs, record: { items: { 'B.5.02': { steps: { 0: done, 1: done } } } } }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(closed.status, 'COMPLETE');
+  assert.strictEqual(closed.guide, null, 'gone once complete');
+  const na = T.buildTrack({ inputs, record: { items: { 'B.5.02': { notApplicable: true } } } }).items.find(i => i.id === 'B.5.02');
+  assert.strictEqual(na.guide, null, 'gone when it does not apply');
+});
