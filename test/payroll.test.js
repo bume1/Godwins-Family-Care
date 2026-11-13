@@ -502,3 +502,21 @@ test('the owner sets each schedule\'s first Monday on Settings, and a non-Monday
   assert.match(page, /First Monday of a pay period<input type="date"/);
   assert.match(page, /v\.anchor && v\.anchor !== was\.anchor \? \{ anchor: v\.anchor \}/, 'an unchanged date is not sent, so a frequency change still starts at the next period');
 });
+
+// An I-9 already on file from Gusto or paper (owner, 2026-11-13): the
+// employee does not fill it in again, and the copy must be on their record.
+test('an I-9 on file from before counts as complete; the copy must be filed first', () => {
+  const pp = require('../payrollProfiles');
+  const base = { ...pp.defaultProfile({ id: 'x', role: 'user' }), w4: {}, g4: {}, ssn: { last4: '1' }, payMethod: { method: 'check' } };
+  assert.ok(pp.missingForPay(base).includes('I-9'));
+  assert.equal(pp.normalizeI9OnFile({ firstDay: '2025-03-03' }, { at: 'now', by: 'A' }).code, 'I9_COPY_NOT_FILED');
+  assert.equal(pp.normalizeI9OnFile({ copyFiled: true }, { at: 'now', by: 'A' }).code, 'I9_FIRST_DAY');
+  const n = pp.normalizeI9OnFile({ firstDay: '2025-03-03', copyFiled: true, source: 'gusto' }, { at: 'now', by: 'A' });
+  const p = { ...base, i9: { onFile: n.value } };
+  assert.ok(!pp.missingForPay(p).some(m => /I-9/.test(m)), 'no I-9 left to do');
+  const row = pp.checklist(p).find(r => r.key === 'i9');
+  assert.equal(row.done, true); assert.equal(row.locked, true);
+  assert.match(row.note, /Already on file/);
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'payroll.js'), 'utf8');
+  assert.match(src, /router\.put\('\/api\/payroll\/admin\/people\/:userId\/i9-on-file', authenticateToken, requireAdmin,/);
+});

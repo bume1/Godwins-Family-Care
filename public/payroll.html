@@ -303,6 +303,8 @@ const Person = ({ p, data, reload }) => {
   const pr = p.profile;
   const [f, setF] = useState({ paySchedule: pr.paySchedulePinned ? pr.paySchedule : '', workState: pr.workState || 'GA', workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
   const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
+  const [onFile, setOnFile] = useState({ source: 'gusto', firstDay: '', completedOn: '', copyFiled: false, note: '' });
+  const i9Done = !!(pr.i9 && ((pr.i9.section1 && pr.i9.section2) || pr.i9.onFile));
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
   return (
@@ -329,7 +331,21 @@ const Person = ({ p, data, reload }) => {
       </div>
       <div><button className="btn" onClick={save}>Save Pay Setup</button>
         {!pr.newHireReportedAt && pr.workerType !== '1099' && <button className="btn ghost ml-2" onClick={() => post(`/api/payroll/admin/people/${enc(p.userId)}/new-hire-reported`).then(() => { setMsg('Recorded.'); reload(); }).catch(e => setErr(e.message))}>Mark {stName(pr.workState || 'GA')} New Hire Reported</button>}</div>
-      {pr.i9 && pr.i9.section1 && !pr.i9.section2 && (
+      {pr.i9 && pr.i9.onFile && <p className="text-[12.5px] text-stone-500 border-t border-stone-100 pt-3">I-9 on file from {pr.i9.onFile.source === 'paper' ? 'a paper form' : 'Gusto'}: first day of work {day(pr.i9.onFile.firstDay)}, recorded by {pr.i9.onFile.recordedBy}.</p>}
+      {!i9Done && (
+        <div className="border-t border-stone-100 pt-3">
+          <div className="lblu mb-1">I-9 already on file</div>
+          <p className="text-[12.5px] text-stone-500 mb-2">For someone hired before payroll moved into the app. Their completed I-9 stays valid, so they do not fill it in again. Download it from Gusto (their profile → Documents), file it on their Staff Record as Work authorization documents, then record it here.</p>
+          <div className="flex flex-wrap gap-2 items-end">
+            <label>From<select className="inp !w-36" value={onFile.source} onChange={e => setOnFile({ ...onFile, source: e.target.value })}><option value="gusto">Gusto</option><option value="paper">Paper form</option></select></label>
+            <label>First day of work (on the I-9)<input type="date" className="inp !w-44" value={onFile.firstDay} onChange={e => setOnFile({ ...onFile, firstDay: e.target.value })} /></label>
+            <label>Section 2 completed on (optional)<input type="date" className="inp !w-44" value={onFile.completedOn} onChange={e => setOnFile({ ...onFile, completedOn: e.target.value })} /></label>
+          </div>
+          <label className="flex gap-2 items-center mt-2 text-[13px]"><input type="checkbox" checked={onFile.copyFiled} onChange={e => setOnFile({ ...onFile, copyFiled: e.target.checked })} />Their signed I-9 is filed on their Staff Record.</label>
+          <button className="btn ghost mt-2" disabled={!onFile.firstDay || !onFile.copyFiled} onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-on-file`, onFile).then(() => { setMsg('I-9 recorded as on file.'); reload(); }).catch(e => setErr(e.message))}>Record I-9 On File</button>
+        </div>
+      )}
+      {pr.i9 && pr.i9.section1 && !pr.i9.section2 && !pr.i9.onFile && (
         <div className="border-t border-stone-100 pt-3">
           <div className="lblu mb-1">I-9 Section 2: documents you examined</div>
           {i9.docs.map((d, k) => (

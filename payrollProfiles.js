@@ -134,6 +134,25 @@ function normalizeI9Section2(b, { at, by }) {
   if (!isYmd(b.firstDay)) return { error: 'Give the employee\'s first day of work.', code: 'I9_FIRST_DAY' };
   return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by } };
 }
+// An I-9 already on file (owner, 2026-11-13). Someone hired before GFC moved
+// payroll into the app has a completed Form I-9 from Gusto or on paper. That
+// form stays valid: changing payroll provider does not call for a new one.
+// The office records that it is on file, and where, instead of asking the
+// employee to fill Section 1 again. Required: their first day of work as the
+// form shows it, and confirmation the signed copy is filed on their Staff
+// Record, so the form itself can always be produced on request.
+const I9_ON_FILE_SOURCES = Object.freeze({ gusto: 'Gusto', paper: 'Paper form' });
+function normalizeI9OnFile(b, { at, by }) {
+  b = b || {};
+  if (!isYmd(b.firstDay)) return { error: 'Give the first day of work shown on their I-9.', code: 'I9_FIRST_DAY' };
+  if (b.completedOn !== undefined && b.completedOn !== null && b.completedOn !== '' && !isYmd(b.completedOn)) return { error: 'The date Section 2 was completed is not a date.', code: 'I9_COMPLETED_ON' };
+  if (b.copyFiled !== true) return { error: 'File their signed I-9 on their Staff Record (Documents → Work authorization documents) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
+  const source = I9_ON_FILE_SOURCES[b.source] ? b.source : 'gusto';
+  return { value: { source, firstDay: b.firstDay, completedOn: isYmd(b.completedOn) ? b.completedOn : null, note: str(b.note, 300) || null, recordedAt: at, recordedBy: by } };
+}
+// The I-9 is complete when both sections were done in the app, or a completed
+// form is on file from before.
+const i9Complete = (p) => !!(p && p.i9 && ((p.i9.section1 && p.i9.section2) || p.i9.onFile));
 function normalizeW9(b, ctx) {
   b = b || {};
   const name = str(b.name, 160);
@@ -260,7 +279,7 @@ function missingForPay(p, { asContractor = false } = {}) {
   if (!p.ssn) out.push('SSN');
   if (!p.w4) out.push('W-4');
   if (!p.g4 && (p.workState || 'GA') === 'GA') out.push('G-4');
-  if (!(p.i9 && p.i9.section1 && p.i9.section2)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
+  if (!i9Complete(p)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
   if (p.payType === 'hourly' && !p.isCaregiver && !(p.hourlyRateCents > 0)) out.push('Hourly rate');
   if (p.payType === 'salary' && !(p.salaryAnnualCents > 0)) out.push('Salary');
   if (p.payType === 'per_visit' && !(p.perVisitRateCents > 0)) out.push('Per-visit rate');
@@ -291,7 +310,8 @@ function checklist(p, opts = {}) {
     // where that state taxes wages (Texas does not).
     if ((p.workState || 'GA') === 'GA') rows.push({ key: 'g4', label: 'Form G-4 (Georgia withholding)', done: !!p.g4 });
     else if (opts.stateIncomeTax) rows.push({ key: 'statecert', label: `${STATE_NAMES[p.workState] || p.workState} withholding certificate`, done: !!(p.stateCert && p.stateCert.state === p.workState) });
-    rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && p.i9.section1), note: p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
+    rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && (p.i9.section1 || p.i9.onFile)), locked: !!(p.i9 && p.i9.onFile && !p.i9.section1),
+      note: p.i9 && p.i9.onFile && !p.i9.section1 ? 'Already on file from your earlier hire paperwork. Nothing to do.' : p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
     rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   }
   if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
@@ -324,6 +344,6 @@ function publicProfile(p, opts = {}) {
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature,
-  normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

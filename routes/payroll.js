@@ -436,6 +436,20 @@ module.exports = function createPayrollRoutes(deps) {
     res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
   });
 
+  // An I-9 already on file from Gusto or paper (owner, 2026-11-13). The
+  // Super Admin records it once the signed copy is on their Staff Record.
+  router.put('/api/payroll/admin/people/:userId/i9-on-file', authenticateToken, requireAdmin, async (req, res) => {
+    const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
+    if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+    const p = await profileFor(user);
+    if (pp.i9Complete(p)) return res.status(409).json({ error: 'Their I-9 is already complete.', code: 'I9_ALREADY_COMPLETE' });
+    const n = pp.normalizeI9OnFile(req.body, { at: nowIso(), by: req.user.name || req.user.email });
+    if (n.error) return res.status(400).json(n);
+    p.i9 = { ...(p.i9 || {}), onFile: n.value };
+    const saved = await saveProfile(user.id, p, `I-9 on file from ${pp.I9_ON_FILE_SOURCES[n.value.source]}`, req.user);
+    res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+  });
+
   router.post('/api/payroll/admin/people/:userId/new-hire-reported', authenticateToken, requireAdmin, async (req, res) => {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
