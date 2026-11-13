@@ -184,6 +184,9 @@ function landingFor(u) {
   if (!type) return (u && (u.clinicalRole || u.role === 'caseManager')) ? '/clinical' : null;
   if (type === TYPES.CLIENT) return u.slug ? `/portal/${u.slug}` : '/portal';
   if (type === TYPES.FAMILY) return '/portal';
+  // A caregiver or liaison the Super Admin granted a module lands on the hub,
+  // where that module's tile is (owner, 2026-11-13).
+  if ((type === TYPES.CAREGIVER || type === TYPES.LIAISON) && moduleAccessOf(u).granted.length) return null;
   if (type === TYPES.CAREGIVER) return u.licenseLevel ? '/caregiver' : null;
   // A liaison lands straight in My GFC (owner, 2026-11-08).
   if (type === TYPES.LIAISON) return '/my';
@@ -234,39 +237,141 @@ const CLIENT_PORTAL_ADMIN = link('clientPortalAdmin', 'Client Portal Admin', '/p
 
 const OFFICE_TYPES = [TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR];
 
-function hubAreasFor(u) {
+// ---- Modules, and the per-person grid (owner, 2026-11-13) ------------------
+// Each account type comes with a set of modules (its DEFAULTS, below). A Super
+// Admin can add a module a person's type does not include (a GRANT) or take
+// away one it does (a REMOVAL), from the Modules grid on Edit User. Both are
+// stored on the user as `moduleAccess: { granted: [], removed: [] }` and read
+// fresh on every request, so a change applies on the person's next click.
+//
+// hasModule() is the ONE answer. The hub, the staff bar and every module's
+// route gate read it, so a tile and the screen behind it cannot disagree.
+//
+// Locked rows cannot be changed per person:
+//   My GFC and Messages — everyone on the team has them.
+//   Admin Hub — it holds User Management and this grid, so whoever could open
+//     it could give themselves any other module.
+//   Service Portal, Client Portal Admin — lab-era screens, Super Admin only.
+// Two grants are narrower than the module itself, and the grid says so:
+//   Clinical Workspace — view only; writing follows the clinical licence.
+//   Payroll — prepare only; approving a run and full bank numbers stay with
+//     the Super Admin.
+const AREA_NAMES = Object.freeze({ myGfc: 'My GFC', people: 'People', clients: 'Clients', clinical: 'Clinical', billing: 'Billing', adminCompliance: 'Admin & Compliance' });
+const MODULES = Object.freeze([
+  { id: 'myGfc', area: 'myGfc', link: MY_GFC, locked: 'Everyone on the team has My GFC.' },
+  { id: 'messages', area: 'myGfc', link: MESSAGES, locked: 'Messages follow the person\'s role.' },
+  { id: 'users', area: 'people', link: link('users', 'User Management', '/admin?view=users&group=staff', 'Add and edit caregiver accounts') },
+  { id: 'onboarding', area: 'people', link: STAFF_ONBOARDING },
+  { id: 'caregiverManagement', area: 'people', link: CAREGIVER_MANAGEMENT },
+  { id: 'caregiverScheduling', area: 'people', link: CAREGIVER_SCHEDULING },
+  { id: 'clients', area: 'clients', link: CLIENTS },
+  { id: 'clinical', area: 'clinical', link: CLINICAL, grantNote: 'View only. Writing notes, orders and prescriptions follows their clinical license.' },
+  { id: 'ime', area: 'clinical', link: IME, grantNote: 'The exam-day list. The AI case review stays with examiners.' },
+  { id: 'billing', area: 'billing', link: BILLING },
+  { id: 'payroll', area: 'billing', link: PAYROLL, grantNote: 'Prepare only. Approving a run and full bank numbers stay with the Super Admin.' },
+  { id: 'admin', area: 'adminCompliance', link: ADMIN_HUB, locked: 'Super Admin only. It holds User Management and this grid.' },
+  { id: 'audit', area: 'adminCompliance', link: AUDIT_LOG },
+  { id: 'incidents', area: 'adminCompliance', link: INCIDENT_LOG },
+  { id: 'service', area: 'adminCompliance', link: SERVICE_PORTAL, locked: 'Super Admin only (lab-era screen).' },
+  { id: 'clientPortalAdmin', area: 'adminCompliance', link: CLIENT_PORTAL_ADMIN, locked: 'Super Admin only (lab-era screen).' }
+]);
+const MODULE_IDS = Object.freeze(MODULES.map(m => m.id));
+const GRANTABLE_MODULES = Object.freeze(MODULES.filter(m => !m.locked).map(m => m.id));
+// Who the grid applies to: anyone on the team. Clients and family have none.
+const isTeamType = (type) => !!type && type !== TYPES.CLIENT && type !== TYPES.FAMILY;
+
+// What the person's account type includes. This is the hub as it stood before
+// the grid, unchanged, so nobody gained or lost anything when it shipped.
+function moduleDefault(u, id) {
   const type = accountTypeOf(u);
   const isAdmin = type === TYPES.ADMIN;
   const office = OFFICE_TYPES.includes(type);
-  const areas = [];
-  const add = (id, name, links) => { const l = links.filter(Boolean); if (l.length) areas.push({ id, name, links: l }); };
+  const clinician = CLINICIAN_TYPES.includes(type);
+  // The Super Admin has every module but Messages, which the office uses to
+  // reach the Super Admin (unchanged from the hub before the grid).
+  if (isAdmin) return id !== 'messages';
+  switch (id) {
+    case 'myGfc': return type === TYPES.CAREGIVER ? !!(u && u.licenseLevel) : (type === TYPES.LIAISON || clinician || office);
+    case 'messages': return office;
+    case 'users': case 'caregiverManagement': case 'caregiverScheduling': case 'clients': case 'billing': case 'incidents': return office;
+    case 'onboarding': return office && !!u && u.isManager === true;
+    case 'clinical': return clinician || type === TYPES.COORDINATOR ||
+      (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
+    case 'ime': return office || clinician;
+    default: return false;   // payroll, admin, audit, service, clientPortalAdmin
+  }
+}
 
-  if (type === TYPES.CAREGIVER) {
+// The stored overrides, cleaned: only real, grantable module ids, each list
+// de-duplicated. Anything else on the record is ignored, never trusted.
+function moduleAccessOf(u) {
+  const ma = (u && u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {};
+  const clean = (v) => [...new Set((Array.isArray(v) ? v : []).map(String))].filter(id => GRANTABLE_MODULES.includes(id));
+  return { granted: clean(ma.granted), removed: clean(ma.removed) };
+}
+
+function hasModule(u, id) {
+  if (!u || !MODULE_IDS.includes(id)) return false;
+  const type = accountTypeOf(u);
+  const def = moduleDefault(u, id);
+  if (type === TYPES.ADMIN) return def;
+  // Belt and braces: moduleAccessOf already drops locked ids, so a locked
+  // row cannot move even without this line (a mutation removing it survives).
+  if (!isTeamType(type) || !GRANTABLE_MODULES.includes(id)) return def;
+  const ma = moduleAccessOf(u);
+  return def ? !ma.removed.includes(id) : ma.granted.includes(id);
+}
+
+// The ids this person can open, in hub order.
+function modulesFor(u) { return MODULE_IDS.filter(id => hasModule(u, id)); }
+
+// What a save stores: a grant only where the type does NOT include the module,
+// a removal only where it DOES. Unknown and locked ids are dropped, so a body
+// can never widen the Admin Hub. `checked` is the grid's ticks: an array of
+// module ids the person should have.
+function moduleAccessFromChecks(u, checked) {
+  const want = new Set((Array.isArray(checked) ? checked : []).map(String));
+  const granted = [], removed = [];
+  for (const id of GRANTABLE_MODULES) {
+    const def = moduleDefault(u, id);
+    if (def && !want.has(id)) removed.push(id);
+    if (!def && want.has(id)) granted.push(id);
+  }
+  return { granted, removed };
+}
+
+// The grid for one person, for the Edit User form.
+function moduleGridFor(u) {
+  const type = accountTypeOf(u);
+  if (!isTeamType(type)) return [];
+  const isAdmin = type === TYPES.ADMIN;
+  return MODULES.map(m => {
+    const byRole = moduleDefault(u, m.id);
+    const has = hasModule(u, m.id);
+    return {
+      id: m.id, name: m.link.name, area: AREA_NAMES[m.area], description: m.link.description,
+      byRole, has,
+      locked: isAdmin ? 'A Super Admin has every module.' : (m.locked || null),
+      note: (!byRole && m.grantNote) || null,
+      state: byRole ? (has ? 'role' : 'removed') : (has ? 'granted' : 'off')
+    };
+  });
+}
+
+function hubAreasFor(u) {
+  const type = accountTypeOf(u);
+  const isAdmin = type === TYPES.ADMIN;
+  const areas = [];
+  for (const m of MODULES) {
+    if (!hasModule(u, m.id)) continue;
+    let l = m.link;
     // A caregiver's My GFC is the caregiver app.
-    if (u.licenseLevel) add('myGfc', 'My GFC', [Object.assign({}, MY_GFC, { path: '/caregiver' })]);
-    return areas;
+    if (m.id === 'myGfc' && type === TYPES.CAREGIVER) l = Object.assign({}, MY_GFC, { path: '/caregiver' });
+    if (m.id === 'users' && isAdmin) l = Object.assign({}, l, { description: 'Add and edit staff, clinicians and caregivers' });
+    let area = areas.find(a => a.id === m.area);
+    if (!area) { area = { id: m.area, name: AREA_NAMES[m.area], links: [] }; areas.push(area); }
+    area.links.push(l);
   }
-  if (type === TYPES.LIAISON || CLINICIAN_TYPES.includes(type) || office) add('myGfc', 'My GFC', [MY_GFC, !isAdmin && office && MESSAGES]);
-  if (office) {
-    // A manager or coordinator manages caregiver, client and family accounts
-    // only (accountTypes E1), so "our team" for them is the caregivers.
-    add('people', 'People', [
-      link('users', 'User Management', '/admin?view=users&group=staff',
-        isAdmin ? 'Add and edit staff, clinicians and caregivers' : 'Add and edit caregiver accounts'),
-      (isAdmin || u.isManager === true) && STAFF_ONBOARDING,
-      CAREGIVER_MANAGEMENT, CAREGIVER_SCHEDULING
-    ]);
-    add('clients', 'Clients', [CLIENTS]);
-  }
-  const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
-    (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
-  add('clinical', 'Clinical', [clinicalOpen && CLINICAL, (office || CLINICIAN_TYPES.includes(type)) && IME]);
-  if (office) add('billing', 'Billing', [BILLING, isAdmin && PAYROLL]);
-  // The Incident Log is the caregiver office's (owner, 2026-11-09): managers
-  // and care coordinators run home care, so they get Admin & Compliance with
-  // the Incident Log alone; the rest of it stays the Super Admin's.
-  if (isAdmin) add('adminCompliance', 'Admin & Compliance', [ADMIN_HUB, AUDIT_LOG, INCIDENT_LOG, SERVICE_PORTAL, CLIENT_PORTAL_ADMIN]);
-  else if (office) add('adminCompliance', 'Admin & Compliance', [INCIDENT_LOG]);
   return areas;
 }
 
@@ -304,13 +409,16 @@ const OFFICE_MANAGEABLE_ROLES = Object.freeze(['vendor', 'client', 'family']);
 function canManageAccountType(actor, targetType) {
   const a = accountTypeOf(actor);
   if (a === TYPES.ADMIN) return true;
-  if (a === TYPES.MANAGER || a === TYPES.COORDINATOR) return OFFICE_MANAGEABLE_TYPES.includes(String(targetType || ''));
+  // User Management in the Modules grid (owner, 2026-11-13): whoever holds it
+  // and is not the Super Admin manages caregiver, client and family accounts
+  // (E1), never staff. The office has it by default; a grant adds it.
+  if (hasModule(actor, 'users')) return OFFICE_MANAGEABLE_TYPES.includes(String(targetType || ''));
   return false;
 }
 
 // The access fields a body may carry, and the staff-only credential fields
 // that mean nothing on a caregiver, client or family record.
-const ACCESS_FIELDS = Object.freeze(['role', 'isManager', 'clinicalRole', 'hasClinicalAccess', 'accountType', 'managerClinicalAccess']);
+const ACCESS_FIELDS = Object.freeze(['role', 'isManager', 'clinicalRole', 'hasClinicalAccess', 'accountType', 'managerClinicalAccess', 'moduleAccess', 'modules']);
 const CREDENTIAL_FIELDS = Object.freeze(['npi', 'prescriberCredential', 'deaNumber', 'deaSchedules', 'deaExpiresAt',
   'medicareEnrollment', 'openEmrProviderId', 'hasImplementationsAccess']);
 const blank = (v) => v === undefined || v === null || v === '' || v === false ||
@@ -326,7 +434,7 @@ function checkUserWrite(actor, { existing, body }) {
   const b = { ...(body || {}) };
   const a = accountTypeOf(actor);
   if (a === TYPES.ADMIN) return { ok: true, body: b };
-  if (a !== TYPES.MANAGER && a !== TYPES.COORDINATOR) {
+  if (!hasModule(actor, 'users')) {
     return { ok: false, status: 403, code: 'USER_ADMIN_FORBIDDEN', error: 'Only a Super Admin, a manager or a care coordinator manages accounts.' };
   }
   if (existing && actor && String(existing.id) === String(actor.id)) {
@@ -424,6 +532,7 @@ module.exports = {
   CLINICIAN_TYPES, LEGACY_FLAGS,
   fieldsFor, deriveType, accountTypeOf, managerAccessOf, isConsistent,
   landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
+  MODULES, MODULE_IDS, GRANTABLE_MODULES, moduleDefault, moduleAccessOf, hasModule, modulesFor, moduleAccessFromChecks, moduleGridFor,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
 };

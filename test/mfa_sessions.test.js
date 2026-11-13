@@ -132,6 +132,17 @@ test('every door the server opens to manager-level access is a door MFA covers',
     seen++;
     assert.ok(covered.has(flag), `GET /api/users admits req.user.${flag}, which mfaRequiredFor does not cover`);
   }
+  // Since the Modules grid (owner, 2026-11-13) the office gates read
+  // accountTypes.hasModule instead of the flag. That is covered by the account
+  // types MFA already gates plus the rule that a GRANTED module requires MFA.
+  for (const anchor of gates) {
+    const i = serverSrc.indexOf(anchor);
+    seen += (strip(serverSrc.slice(i, serverSrc.indexOf('\n};', i))).match(/accountTypes\.hasModule\(/g) || []).length;
+  }
+  seen += (strip(usersList).match(/accountTypes\.hasModule\(/g) || []).length;
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', licenseLevel: 'cna', moduleAccess: { granted: ['billing'] } }, ['admin', 'user', 'caseManager']), true,
+    'a caregiver granted a module signs in with MFA');
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', licenseLevel: 'cna' }, ['admin', 'user', 'caseManager']), false, 'a caregiver without one does not');
   // The three lab-era access checkboxes were retired (owner, 2026-10-15), so
   // the gates now name only isManager. Still non-zero, or the scan proves nothing.
   assert.ok(seen >= 3, `expected the gates to name their flags (found ${seen}); a scan that finds nothing proves nothing`);

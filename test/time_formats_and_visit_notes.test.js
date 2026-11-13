@@ -432,8 +432,11 @@ test('a manager is review staff; a caregiver and a client are not', () => {
   const src = read('routes/caregiver.js');
   const line = src.split('\n').find(l => l.includes('const isReviewStaff ='));
   const impl = src.slice(src.indexOf(line), src.indexOf(';', src.indexOf(line)) + 1);
-  assert.ok(/isManager/.test(impl),
+  // Since the Modules grid (owner, 2026-11-13) the office half is Home Care
+  // Oversight, which a manager holds by default.
+  assert.ok(/accountTypes\.hasModule\(u, 'caregiverManagement'\)/.test(impl),
     'a manager runs the scheduling board and should read the supervision queue');
+  assert.equal(require('../accountTypes').hasModule(require('../accountTypes').fieldsFor('manager'), 'caregiverManagement'), true);
   // The four who already had it keep it.
   ['ROLES.ADMIN', 'hasClinicalAccess', 'ROLES.CASE_MANAGER'].forEach(k =>
     assert.ok(impl.includes(k), `${k} lost review access`));

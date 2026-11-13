@@ -117,7 +117,9 @@ module.exports = function createSchedulingRoutes(deps) {
   //                    scheduling one.
   // A manager who tries one is refused by the route, not merely by a hidden
   // button, and every one of those lines is build-enforced.
-  const isScheduleManager = (u) => !!u && (u.role === ROLES.ADMIN || !!u.isManager);
+  // Whoever holds Staff Scheduling in the Modules grid (owner, 2026-11-13):
+  // the office by default, plus a grant, minus a removal.
+  const isScheduleManager = (u) => !!u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'caregiverScheduling'));
 
   const requireScheduleManager = (req, res, next) => {
     if (isScheduleManager(req.user)) return next();
@@ -146,7 +148,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // handing the permission to LMSWs, who are the caseManager role. An LMSW is
   // deliberately left out: the owner did not ask for it, and case management
   // is clinical work, not the scheduling office.
-  const isAvailabilityRecorder = (u) => accountTypes.isHomeCareOffice(u);
+  const isAvailabilityRecorder = (u) => accountTypes.hasModule(u, 'caregiverScheduling');
 
   // MIDDLEWARE, not a check inside the handler, and that is deliberate. The
   // route sweep in test/scheduling.test.js proves every /api/scheduling route
@@ -3418,7 +3420,10 @@ module.exports = function createSchedulingRoutes(deps) {
   };
 
   // GET /api/scheduling/payroll.csv — the FILE, Super Admin only.
-  router.get('/api/scheduling/payroll.csv', authenticateToken, requireAdmin, async (req, res) => {
+  // The hours file is payroll's: the Super Admin, or a payroll preparer
+  // (the Payroll module granted in the Modules grid, owner 2026-11-13).
+  const requireHoursExport = (req, res, next) => (req.user && (req.user.role === ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll')) ? next() : requireAdmin(req, res, next));
+  router.get('/api/scheduling/payroll.csv', authenticateToken, requireHoursExport, async (req, res) => {
     try {
       const from = String(req.query.from || '');
       const to = String(req.query.to || '');

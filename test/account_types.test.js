@@ -160,7 +160,19 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   const routes = fs.readFileSync(path.join(root, 'routes', 'payroll.js'), 'utf8');
   const regs = routes.match(/router\.(get|post|put|delete)\('\/api\/payroll\/admin[^\n]*/g) || [];
   assert.ok(regs.length > 10, 'the admin routes were found');
-  for (const r of regs) assert.match(r, /authenticateToken, requireAdmin\b/, r);
+  // Every admin route is the Super Admin's or a preparer's (a Payroll grant);
+  // none is open to anyone else.
+  for (const r of regs) assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  // What a preparer must never reach: approving, paying, bank numbers,
+  // settings, people's pay setup, tax tables, contractor approvals, the Gusto
+  // import and year-end release (owner, 2026-11-13: "prepare only").
+  const superOnly = ['/runs/:id/approve', '/people/:userId/reveal', '/settings', "/people/:userId'", '/people/:userId/i9-section2',
+    '/tax-tables/:id/approve', "/tax-tables'", '/runs/:id/payments/:userId', '/contractor-invoices/:id/:action', '/import/gusto', '/year-end/:year/release'];
+  for (const tail of superOnly) {
+    const line = regs.find(r => r.includes(`/api/payroll/admin${tail.replace(/'$/, '')}'`) || (tail.endsWith("'") && r.includes(`/api/payroll/admin${tail}`)));
+    assert.ok(line, tail);
+    assert.match(line, /authenticateToken, requireAdmin\b/, tail);
+  }
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
@@ -183,7 +195,7 @@ test('every enrollment workflow write is open to a manager and a coordinator, an
   // canManageEnrollment is the one predicate requireEnrollmentManager calls; run it.
   assert.match(serverSrc, /const requireEnrollmentManager = \(req, res, next\) => \{\s*if \(canManageEnrollment\(req\.user\)\) return next\(\);/);
   const i = serverSrc.indexOf('const canManageEnrollment = ');
-  const pred = new Function('config', `${serverSrc.slice(i, serverSrc.indexOf(';', i) + 1)} return canManageEnrollment;`)(require('../config'));
+  const pred = new Function('config', 'accountTypes', `${serverSrc.slice(i, serverSrc.indexOf(';', i) + 1)} return canManageEnrollment;`)(require('../config'), at);
   const can = (u) => pred(u);
   assert.equal(can({ role: 'admin' }), true);
   assert.equal(can(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), true);
@@ -198,7 +210,9 @@ test('a manager and a coordinator can correct the enrollment submission too', ()
 
 test('the enrollment page offers the workflow buttons to managers and coordinators', () => {
   const page = fs.readFileSync(path.join(root, 'public', 'admin-enrollment.html'), 'utf8');
-  assert.match(page, /const canManageRole = \(user\) => !!user && \(user\.role === 'admin' \|\| user\.isManager === true\);/);
+  // Since the Modules grid (owner, 2026-11-13) it reads the Clients module, falling back to the manager flag.
+  assert.match(page, /const canManageRole = \(user\) => !!user && \(user\.role === 'admin' \|\| hasClients\(user\)\);/);
+  assert.match(page, /const hasClients = \(user\) => !!user && \(Array\.isArray\(user\.modules\) \? user\.modules\.includes\('clients'\) : user\.isManager === true\);/);
   assert.match(page, /const canEdit = canManageRole\(user\);/);
   assert.ok(!/isAdmin=\{isAdminRole\(user\)\}/.test(page), 'documents and family invites follow the same rule');
 });

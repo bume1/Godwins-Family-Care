@@ -323,12 +323,15 @@
     };
 
     const STAFF_ROLES = ['admin', 'user', 'caseManager'];
-    const isStaff = (user) => !!user && (STAFF_ROLES.includes(user.role) || user.isManager || user.hasClientPortalAdminAccess);
+    // The Clients module (owner, 2026-11-13): the record's `modules` when the
+    // server sent it decides the office half; clinicians still read by role.
+    const hasClients = (user) => !!user && (Array.isArray(user.modules) ? user.modules.includes('clients') : user.isManager === true);
+    const isStaff = (user) => !!user && (STAFF_ROLES.includes(user.role) || hasClients(user) || user.hasClientPortalAdminAccess);
     const isAdminRole = (user) => !!user && user.role === 'admin';
     // Who runs a patient's account (owner, 2026-10-15): the Super Admin, a
     // manager or a care coordinator. Mirrors the server's canManageEnrollment;
     // the routes refuse anyone else whatever this page shows.
-    const canManageRole = (user) => !!user && (user.role === 'admin' || user.isManager === true);
+    const canManageRole = (user) => !!user && (user.role === 'admin' || hasClients(user));
 
     const FILTERS = [
       { key: 'all', label: 'All' },
@@ -2659,12 +2662,12 @@
             <div className="lg:col-span-2">
               <div id="cl-documents" style={{ scrollMarginTop: 64 }}><DocumentExchange clientId={clientId} canEdit={canEdit} isAdmin={canManageRole(user)} /></div>
             </div>
-            {user && (user.role === 'admin' || user.isManager) && (
+            {user && (user.role === 'admin' || (Array.isArray(user.modules) ? user.modules.includes('billing') : user.isManager)) && (
               <div className="lg:col-span-2">
                 <EligibilityCard clientId={clientId} />
               </div>
             )}
-            {user && (user.role === 'admin' || user.isManager) && (
+            {user && (user.role === 'admin' || (Array.isArray(user.modules) ? user.modules.includes('billing') : user.isManager)) && (
               <div className="lg:col-span-2">
                 <BillingCard clientId={clientId} />
               </div>

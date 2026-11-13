@@ -170,7 +170,8 @@ const RunDetail = ({ id, onBack, reload }) => {
             </div>
             <div className="flex gap-2">
               <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
-              <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
+              {SUPER ? <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
+                : <span className="text-[12.5px] text-stone-500 self-center">Ready? Tell the Super Admin to approve it.</span>}
             </div>
           </div>
         )}
@@ -194,13 +195,13 @@ const PaymentRow = ({ runId, s, onDone }) => {
         <b className="text-primary">{s.name}</b> · <b>{s.net}</b> <Copy text={(s.netCents / 100).toFixed(2)} />
         <div className="text-[12.5px] text-stone-500">
           {s.method === 'direct_deposit' ? <>
-            {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : <button className="underline" onClick={() => reveal('routing')}>show</button>}
-            {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : <button className="underline" onClick={() => reveal('account')}>show</button>}
+            {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : SUPER && <button className="underline" onClick={() => reveal('routing')}>show</button>}
+            {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : SUPER && <button className="underline" onClick={() => reveal('account')}>show</button>}
           </> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
         </div>
         {err && <div className="text-red-700 text-[12px]">{err}</div>}
       </div>
-      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : (
+      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : !SUPER ? <span className="text-[12.5px] text-stone-500">Not paid yet</span> : (
         <div className="flex gap-2"><input className="inp !w-44" placeholder="Confirmation #" value={conf} onChange={e => setConf(e.target.value)} />
           <button className="btn" disabled={!conf.trim()} onClick={() => post(`/api/payroll/admin/runs/${enc(runId)}/payments/${enc(s.userId)}`, { confirmation: conf }).then(onDone).catch(e => setErr(e.message))}>Mark Paid</button></div>
       )}
@@ -275,7 +276,7 @@ const Runs = ({ data, reload }) => {
   const schedLabel = (k) => { const x = scheds.find(y => y.key === k); return x ? `${x.label} · ${x.frequency === 'weekly' ? 'weekly' : 'every two weeks'}` : ''; };
   return (
     <>
-    <GustoImport reload={reload} />
+    {SUPER && <GustoImport reload={reload} />}
     <HoursExport />
     <Card title="Payroll Runs">
       <Err e={err} />
@@ -359,7 +360,7 @@ const People = ({ data, reload }) => {
             {p.missing.length ? <span className="chip bg-red-50 text-red-700">Missing {p.missing.length}</span> : <span className="chip bg-emerald-50 text-emerald-700">Ready to pay</span>}
           </button>
           {p.missing.length > 0 && <div className="text-[12.5px] text-stone-500">{p.missing.join(' · ')}</div>}
-          {open === p.userId && <Person p={p} data={data} reload={reload} />}
+          {SUPER && open === p.userId && <Person p={p} data={data} reload={reload} />}
         </div>
       ))}
     </Card>
@@ -398,8 +399,8 @@ const Contractors = ({ data, reload }) => {
           <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}</span><b>{usd(i.totalCents)}</b></div>
           {i.lines.map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
           <div className="flex gap-2 mt-2">
-            {i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
-            {i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
+            {SUPER && i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
+            {SUPER && i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
           </div>
         </div>
       ))}
@@ -706,10 +707,16 @@ const Settings = ({ data, reload }) => {
 };
 
 const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+// A payroll PREPARER (the Payroll module granted in the Modules grid, owner
+// 2026-11-13) drafts and reviews runs and records tax payments. These tabs and
+// the Super Admin's buttons are not drawn for them; the server refuses them
+// whatever this page shows. Set once the overview says who is looking.
+const PREPARER_TABS = ['runs', 'people', 'contractors', 'taxes'];
+let SUPER = true;
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
-  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; setData(d); }).catch(e => {
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
     if (e.status === 401) { window.location.replace('/login'); return; }
     setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
   }), []);
@@ -722,11 +729,12 @@ const App = () => {
           <span className="font-serif text-[24px] font-semibold">Payroll</span>
           <span className="flex items-center gap-4 text-[13.5px] font-semibold"><a className="text-[#F5CD85]" href="/billing">Billing</a><a className="text-[#F5CD85]" href="/my">My GFC</a><a className="text-[#F5CD85]" href="/login">Portal Hub</a></span>
         </div>
-        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => SUPER || PREPARER_TABS.includes(k)).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
       </div>
       <div className="max-w-[1300px] mx-auto px-4 lg:px-8 py-5">
         <Err e={err} />
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
+        {data && !SUPER && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
         {data && tab === 'people' && <People data={data} reload={load} />}
         {data && tab === 'contractors' && <Contractors data={data} reload={load} />}

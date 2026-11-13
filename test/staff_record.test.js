@@ -147,12 +147,12 @@ test('every staff member gets a full record; caregivers and clinicians get their
   const sections = sectionsFn();
   const ids = (u, sa) => sections(u, sa).map(s => s.id);
   assert.deepStrictEqual(ids({ role: 'vendor', licenseLevel: 'cna' }, true),
-    ['sr-account', 'sr-credentials', 'sr-bio', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-welcome', 'sr-activity', 'sr-recovery']);
+    ['sr-account', 'sr-modules', 'sr-credentials', 'sr-bio', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-welcome', 'sr-activity', 'sr-recovery']);
   assert.deepStrictEqual(ids({ role: 'user', hasClinicalAccess: true }, false),
-    ['sr-account', 'sr-credentials', 'sr-bio', 'sr-documents', 'sr-onboarding', 'sr-welcome'], 'no pay or activity for a clinician; recovery is the Super Admin\'s');
+    ['sr-account', 'sr-credentials', 'sr-bio', 'sr-documents', 'sr-onboarding', 'sr-welcome'], 'no pay or activity for a clinician; recovery and modules are the Super Admin\'s');
   assert.deepStrictEqual(ids({ role: 'liaison' }, false), ['sr-account', 'sr-bio', 'sr-documents', 'sr-onboarding', 'sr-welcome']);
   // Every anchor the menu jumps to exists on the page.
-  for (const id of ['sr-account', 'sr-credentials', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-welcome', 'sr-bio', 'sr-activity', 'sr-recovery']) {
+  for (const id of ['sr-account', 'sr-modules', 'sr-credentials', 'sr-pay', 'sr-documents', 'sr-onboarding', 'sr-welcome', 'sr-bio', 'sr-activity', 'sr-recovery']) {
     assert.ok(HUB.includes(`id="${id}"`) || HUB.includes(`'${id}' : undefined`), `nothing on the page carries ${id}`);
   }
 });

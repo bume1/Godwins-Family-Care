@@ -122,7 +122,17 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       // Staff land on the hub (landing null). A caregiver, liaison, client or
       // family member lands somewhere of their own and gets no bar.
-      .then(function (d) { if (d && d.landing === null && Array.isArray(d.areas)) render(d.areas); })
+      .then(function (d) {
+        // Keep the signed-in record's module list current (owner, 2026-11-13):
+        // the Admin Hub and the Clients page read it to decide what to draw,
+        // so a grant shows without signing out. The server decides access.
+        if (d && Array.isArray(d.modules)) {
+          ['admin_user', 'unified_user', 'portal_user'].forEach(function (k) {
+            try { var raw = localStorage.getItem(k); if (!raw) return; var u = JSON.parse(raw); if (!u || typeof u !== 'object') return; u.modules = d.modules; localStorage.setItem(k, JSON.stringify(u)); } catch (e) { /* storage blocked */ }
+          });
+        }
+        if (d && d.landing === null && Array.isArray(d.areas)) render(d.areas);
+      })
       .catch(function () { /* no bar is better than a broken one */ });
   }
 

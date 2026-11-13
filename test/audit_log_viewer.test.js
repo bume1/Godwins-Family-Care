@@ -67,7 +67,7 @@ test('the audit log has a page, and /audit serves it', () => {
   // The trailing comma matters: `requireAdminHubAccess` CONTAINS the string
   // `requireAdmin`, so a bare match could not tell the Super Admin gate from
   // the wider hub gate — it survived that mutation until this was tightened.
-  assert.match(api.slice(0, 200), /authenticateToken, requireAdmin,/,
+  assert.match(api.slice(0, 200), /authenticateToken, requireAuditReader,/,
     'the audit-log read is no longer requireAdmin');
 });
 
