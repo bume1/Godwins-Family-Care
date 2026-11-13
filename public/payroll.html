@@ -134,6 +134,8 @@ const RunDetail = ({ id, onBack, reload }) => {
         <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
         {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
+        {run.status === 'draft' && (run.unapprovedTimesheets || []).length > 0 && <Warn><b>Timesheets not approved yet:</b> {run.unapprovedTimesheets.map(x => x.name).join(', ')}. Approve them on the Timesheets tab. Their clocked hours are still paid if you approve payroll; you will be asked why.</Warn>}
+        {run.timesheetOverride && <p className="text-[12.5px] text-stone-500 mb-2">Approved with timesheets not approved ({run.timesheetOverride.people.join(', ')}): {run.timesheetOverride.reason}</p>}
         {(run.stateRatesMissing || []).length > 0 && <Warn>Set GFC's unemployment rate for {run.stateRatesMissing.map(stName).join(', ')} under Settings before approving.</Warn>}
         <div className="grid sm:grid-cols-4 gap-3 mb-4">
           {[['Gross pay', t.grossCents], ['Net pay', t.netCents], ['Taxes withheld', t.federalCents + t.socialSecurityCents + t.medicareCents + t.georgiaCents + (t.stateWithholdingCents || 0)], ['Cash needed', t.cashNeededCents]].map(([k, v]) => (
@@ -170,7 +172,15 @@ const RunDetail = ({ id, onBack, reload }) => {
             </div>
             <div className="flex gap-2">
               <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
-              {SUPER ? <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
+              {SUPER ? <button className="btn gold" disabled={busy} onClick={() => {
+                const pending = run.unapprovedTimesheets || [];
+                let timesheetReason;
+                if (pending.length) {
+                  timesheetReason = window.prompt(`${pending.length} timesheet(s) are not approved: ${pending.map(x => x.name).join(', ')}. Their clocked hours will be paid. Why go ahead now?`);
+                  if (!timesheetReason || !timesheetReason.trim()) return;
+                }
+                if (window.confirm('Approve this payroll? Its hours lock and pay stubs go out.')) act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`, pending.length ? { timesheetReason } : undefined), 'Approved. Pay stubs are out.');
+              }}>Approve Payroll</button>
                 : <span className="text-[12.5px] text-stone-500 self-center">Ready? Tell the Super Admin to approve it.</span>}
             </div>
           </div>
@@ -262,6 +272,73 @@ const HoursExport = () => {
         <div><div className="lblu mb-1">To</div><input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div>
         <button className="btn ghost" disabled={!from || !to} onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${from}&to=${to}`, `payroll-hours-${from}-to-${to}.csv`, setErr); }}>Export Hours CSV</button>
       </div>
+    </Card>
+  );
+};
+
+// ---- Timesheets (owner, 2026-11-13) -------------------------------------------
+// Everyone's hours for one period, before payroll: what they said, and the
+// Super Admin's Approve or Send Back (with what to correct). A preparer reads.
+const OFFICE_CHIP = { approved: ['APPROVED', 'bg-emerald-50 text-emerald-700'], changed: ['CHANGED SINCE APPROVED', 'bg-amber-50 text-amber-800'], sent_back: ['SENT BACK', 'bg-red-50 text-red-700'], waiting: ['WAITING', 'bg-stone-100 text-stone-600'] };
+const EMP_TEXT = { confirmed: 'Confirmed by them', flagged: 'Flagged by them', changed: 'Hours changed since they confirmed', not_yet: 'Not confirmed by them' };
+const hm = (m) => `${Math.floor((m || 0) / 60)}h ${String((m || 0) % 60).padStart(2, '0')}m`;
+const Timesheets = ({ data }) => {
+  const scheds = data.schedules || [];
+  const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'caregivers');
+  const [date, setDate] = useState('');
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const [open, setOpen] = useState(null); const [busy, setBusy] = useState(false);
+  const load = (sch = schedule, dt = date) => call(`/api/payroll/admin/timesheets?schedule=${enc(sch)}${dt ? `&date=${enc(dt)}` : ''}`).then(x => { setD(x); if (!dt) setDate(x.period.start); }).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const decide = async (t, decision) => {
+    let note = '';
+    if (decision === 'send_back') { note = window.prompt(`What should ${t.name} correct?`) || ''; if (!note.trim()) return; }
+    setBusy(true); setErr(''); setMsg('');
+    try { await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision, note }); setMsg(decision === 'approve' ? `${t.name}: approved.` : `${t.name}: sent back.`); await load(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const waiting = d ? d.timesheets.filter(t => !t.paid && !t.status.approved && t.status.office !== 'sent_back' && t.status.employee !== 'flagged') : [];
+  const approveAll = async () => {
+    if (!window.confirm(`Approve ${waiting.length} timesheet(s) nobody flagged or sent back?`)) return;
+    setBusy(true); setErr('');
+    try { for (const t of waiting) await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision: 'approve' }); setMsg(`${waiting.length} approved.`); await load(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <Card title="Timesheets">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">Approve each person's hours before you draft payroll, or send them back with what to correct. Employees can confirm or flag their own hours in My GFC first.</p>
+      <div className="flex flex-wrap gap-2 items-end mb-4">
+        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); setDate(''); load(e.target.value, ''); }}>{scheds.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}</select></div>
+        <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} /></div>
+        <button className="btn ghost" onClick={() => load()}>Show</button>
+        {d && d.superAdmin && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
+      </div>
+      {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· paid {day(d.period.payDate)}{d.ended ? '' : ' · this period is still going'}</span></p>}
+      {d && d.timesheets.length === 0 && <p className="text-stone-500">Nobody has hours in this period yet.</p>}
+      {d && d.timesheets.map(t => {
+        const [lbl, cls] = t.paid ? ['PAID', 'bg-emerald-50 text-emerald-700'] : (OFFICE_CHIP[t.status.office] || OFFICE_CHIP.waiting);
+        return (
+          <div key={t.userId} className="py-2 border-b border-stone-100">
+            <div className="flex flex-wrap justify-between gap-2 items-center">
+              <button className="text-left" onClick={() => setOpen(open === t.userId ? null : t.userId)}>
+                <b className="text-primary">{t.name}</b> <span className="text-stone-500 text-[12.5px]">· {hm(t.paid && t.paidMinutes !== null ? t.paidMinutes : t.totals.minutes)}{t.totals.visits ? ` · ${t.totals.visits} visits` : ''}{t.totals.exams ? ` · ${t.totals.exams} exams` : ''} · {EMP_TEXT[t.status.employee]}</span>
+              </button>
+              <span className="flex gap-2 items-center"><span className={`chip ${cls}`}>{lbl}</span>
+                {d.superAdmin && !t.paid && !t.status.approved && <button className="btn !py-1" disabled={busy} onClick={() => decide(t, 'approve')}>Approve</button>}
+                {d.superAdmin && !t.paid && <button className="btn ghost !py-1" disabled={busy} onClick={() => decide(t, 'send_back')}>Send Back</button>}</span>
+            </div>
+            {t.employee && t.employee.status === 'flagged' && <div className="text-[12.5px] text-red-700 mt-1">They say: {t.employee.note}</div>}
+            {t.office && t.office.status === 'sent_back' && <div className="text-[12.5px] text-stone-500 mt-1">You sent it back: {t.office.note}</div>}
+            {t.openClockIns.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Still clocked in from {t.openClockIns.map(o => o.date).join(', ')}: not in payroll until clocked out.</div>}
+            {t.cannotPay.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Payroll cannot pay: {t.cannotPay.join(' ')}</div>}
+            {open === t.userId && t.lines.map(l => <div key={l.ref} className="text-[12.5px] text-stone-600 flex justify-between pl-3"><span>{day(l.date)} · {l.source}</span><span>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</span></div>)}
+          </div>
+        );
+      })}
+      <p className="text-[12.5px] text-stone-500 mt-3">Fix hours in Staff Scheduling → Time Logs. An approval no longer counts if the hours change afterwards. Unapproved hours are still paid on payday; approving payroll asks you why.</p>
     </Card>
   );
 };
@@ -722,12 +799,12 @@ const Settings = ({ data, reload }) => {
   );
 };
 
-const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+const TABS = [['runs', 'Runs'], ['timesheets', 'Timesheets'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
 // A payroll PREPARER (the Payroll module granted in the Modules grid, owner
 // 2026-11-13) drafts and reviews runs and records tax payments. These tabs and
 // the Super Admin's buttons are not drawn for them; the server refuses them
 // whatever this page shows. Set once the overview says who is looking.
-const PREPARER_TABS = ['runs', 'people', 'contractors', 'taxes'];
+const PREPARER_TABS = ['runs', 'timesheets', 'people', 'contractors', 'taxes'];
 let SUPER = true;
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
@@ -752,6 +829,7 @@ const App = () => {
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && !SUPER && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
+        {data && tab === 'timesheets' && <Timesheets data={data} />}
         {data && tab === 'people' && <People data={data} reload={load} />}
         {data && tab === 'contractors' && <Contractors data={data} reload={load} />}
         {data && tab === 'taxes' && <Taxes />}

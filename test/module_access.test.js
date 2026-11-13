@@ -128,7 +128,7 @@ test('the grid routes are the Super Admin\'s, and every module gate reads hasMod
 test('a payroll preparer sees no Super Admin button on the page', () => {
   const page = read('public/payroll.html');
   assert.match(page, /SUPER = d\.superAdmin !== false;/);
-  assert.match(page, /\{SUPER \? <button className="btn gold"[^\n]*Approve Payroll/);
+  assert.match(page, /\{SUPER \? <button className="btn gold"[\s\S]{0,1400}?Approve Payroll<\/button>/);
   assert.match(page, /SUPER && <button className="underline" onClick=\{\(\) => reveal\('routing'\)\}>show<\/button>/);
   assert.match(page, /\{SUPER && <GustoImport/);
   assert.match(read('routes/payroll.js'), /superAdmin: !!req\.user && req\.user\.role === 'admin',/);

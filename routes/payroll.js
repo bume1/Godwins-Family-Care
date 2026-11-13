@@ -26,6 +26,7 @@ const tables = require('../payrollTaxTables');
 const links = require('../appLinks');
 const ye = require('../payrollYearEnd');
 const gusto = require('../payrollGustoImport');
+const ts = require('../payrollTimesheets');
 const { ORG } = require('../public/consent-text');
 const { contentDisposition } = require('../contentDisposition');
 
@@ -34,6 +35,7 @@ const SETTINGS = 'payroll_settings';
 const TAX_TABLES = 'payroll_tax_tables';
 const RUNS = 'payroll_runs';
 const CONTRACTOR_INVOICES = 'contractor_invoices';
+const TIMESHEETS = 'payroll_timesheets';
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
 const YEAR_END = 'payroll_year_end';          // one row per released tax year
@@ -535,8 +537,151 @@ module.exports = function createPayrollRoutes(deps) {
     });
     run.skippedItems = gathered.skipped;
     run.tableIds = tbl.ids;
-    return { run };
+    // Whose hours are not approved yet (owner, 2026-11-13). A warning, never a
+    // hold: hours worked are paid on payday.
+    run.unapprovedTimesheets = await unapprovedFor(period, run.workers, gathered);
+    return { run, gathered };
   };
+  const printsFrom = (gathered) => new Map([...gathered.byUser.entries()].map(([uid, items]) => [String(uid), ts.fingerprint(items)]));
+  const sheetsFor = async (period) => (await rows(TIMESHEETS)).filter(x => x.schedule === (period.schedule || 'staff') && x.periodStart === period.start);
+  const unapprovedFor = async (period, workers, gathered) => {
+    const prints = printsFrom(gathered);
+    const empty = ts.fingerprint([]);
+    const withPrint = new Map((workers || []).map(w => [String(w.userId), prints.get(String(w.userId)) || empty]));
+    return ts.unapproved(workers, await sheetsFor(period), withPrint);
+  };
+
+  // ---- Timesheets: hours approved before payroll (owner, 2026-11-13) -----------------
+  // One person's timesheet for one period: their hour items as payroll would
+  // pay them, still clocked in, anything payroll cannot pay, and where it stands.
+  const today = () => (localDate(nowIso()) || nowIso().slice(0, 10));
+  const sheetView = async (user, period, gathered, sheets, runs) => {
+    const uid = String(user.id);
+    const run = runs.find(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void');
+    const worker = run && (run.workers || []).find(w => String(w.userId) === uid);
+    const items = gathered.byUser.get(uid) || [];
+    const sheet = sheets.find(x => String(x.userId) === uid) || null;
+    const print = ts.fingerprint(items);
+    const openLogs = (await rows('time_logs')).filter(l => l && String(l.caregiver_id) === uid && !l.clock_out_at && (() => { const d = localDate(l.clock_in_at); return d && d >= period.start && d <= period.end; })())
+      .map(l => ({ id: l.id, date: localDate(l.clock_in_at) }));
+    return {
+      schedule: period.schedule || 'staff', period, userId: uid, name: user.name || user.email,
+      paid: !!run, paidMinutes: worker ? (worker.earnings || []).reduce((a, e) => a + (Number(e.minutes) || 0), 0) : null,
+      lines: ts.lines(items), totals: ts.totals(items), openClockIns: openLogs,
+      cannotPay: gathered.skipped.filter(x => String(x.userId) === uid).map(x => x.reason),
+      ended: period.end < today(),
+      status: ts.statusOf(sheet, print),
+      employee: sheet && sheet.employee ? { status: sheet.employee.status, note: sheet.employee.note, at: sheet.employee.at } : null,
+      office: sheet && sheet.office ? { status: sheet.office.status, note: sheet.office.note, at: sheet.office.at, by: sheet.office.by } : null
+    };
+  };
+  const paidRuns = async () => (await rows(RUNS)).filter(r => r.status !== 'draft');
+  const userFor = async (id) => (await getUsers()).find(u => u && String(u.id) === String(id)) || null;
+
+  // The employee's own: this period and the two before it.
+  router.get('/api/my/timesheets', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const p = await profileFor(req.user);
+      if (!pp.isEmployee(p)) return res.json({ employee: false, timesheets: [] });
+      const settings = await readSettings();
+      const schedule = pp.scheduleFor(p);
+      const cur = tax.periodFor(today(), settings, schedule);
+      const periods = [cur];
+      for (let k = 0; k < 2; k++) periods.push(tax.periodFor(tax.addDays(periods[periods.length - 1].start, -1), settings, schedule));
+      const runs = await rows(RUNS); const paid = runs.filter(r => r.status !== 'draft');
+      const all = await rows(TIMESHEETS);
+      const out = [];
+      for (const period of periods) {
+        const gathered = await gatherFor(period, paid);
+        out.push(await sheetView(req.user, period, gathered, all.filter(x => x.schedule === schedule && x.periodStart === period.start), runs));
+      }
+      res.json({ employee: true, timesheets: out });
+    } catch (e) { console.error('My timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // "Looks right" or "Something is wrong" (with a note), once the period ends.
+  router.post('/api/my/timesheets/:schedule/:periodStart', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const p = await profileFor(req.user);
+      const schedule = pp.scheduleFor(p);
+      if (!pp.isEmployee(p) || req.params.schedule !== schedule) return res.status(404).json({ error: 'No such timesheet.', code: 'TIMESHEET_UNKNOWN' });
+      const settings = await readSettings();
+      if (!tax.isYmd(req.params.periodStart)) return res.status(400).json({ error: 'No such period.', code: 'TIMESHEET_UNKNOWN' });
+      const period = tax.periodFor(req.params.periodStart, settings, schedule);
+      if (period.start !== req.params.periodStart) return res.status(404).json({ error: 'No such period.', code: 'TIMESHEET_UNKNOWN' });
+      if (!(period.end < today())) return res.status(409).json({ error: 'You can confirm your hours once the pay period ends.', code: 'TIMESHEET_PERIOD_OPEN' });
+      const runs = await rows(RUNS);
+      if (runs.some(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void')) return res.status(409).json({ error: 'This period is already paid. Tell the office about anything wrong; it is corrected on your next pay.', code: 'TIMESHEET_PAID' });
+      const n = ts.normalizeEmployee(req.body); if (n.error) return res.status(400).json(n);
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const print = ts.fingerprint(gathered.byUser.get(String(req.user.id)) || []);
+      const all = await rows(TIMESHEETS);
+      const id = ts.sheetId(schedule, period.start, req.user.id);
+      const i = all.findIndex(x => x.id === id);
+      const next = ts.record(i === -1 ? null : all[i], { id, schedule, periodStart: period.start, periodEnd: period.end, userId: String(req.user.id), name: req.user.name || req.user.email }, 'employee', n.value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
+      if (i === -1) all.push(next); else all[i] = next;
+      await db.set(TIMESHEETS, all);
+      await logActivity(req.user.id, req.user.name, `timesheet_${n.value.status}`, 'payroll_timesheet', id, { period: period.start });
+      if (n.value.status === 'flagged') await tellOwner('timesheet_flagged', `${req.user.name || 'An employee'} flagged their hours`, `${req.user.name || 'An employee'} says something is wrong with their hours for ${period.start} to ${period.end}. Review it under Payroll → Timesheets.`, `ts-flag:${id}:${next.employee.at}`).catch(() => {});
+      res.json({ timesheet: await sheetView(req.user, period, gathered, [next], runs) });
+    } catch (e) { console.error('Timesheet confirm error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // The office's view of one period: everyone on the schedule.
+  router.get('/api/payroll/admin/timesheets', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const settings = await readSettings();
+      const schedule = tax.PAY_SCHEDULES[req.query.schedule] ? req.query.schedule : 'caregivers';
+      const date = tax.isYmd(req.query.date) ? req.query.date : tax.addDays(tax.periodFor(today(), settings, schedule).start, -1);
+      const period = tax.periodFor(date, settings, schedule);
+      const runs = await rows(RUNS);
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const sheets = await sheetsFor(period);
+      const people = (await staffPeople()).filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === schedule);
+      const out = [];
+      for (const x of people) {
+        const u = x.user;
+        const v = await sheetView(u, period, gathered, sheets, runs);
+        if (v.lines.length || v.openClockIns.length || v.cannotPay.length || v.employee || v.office || v.paid) out.push(v);
+      }
+      res.json({ period, schedule, ended: period.end < today(), superAdmin: !!req.user && req.user.role === 'admin', timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
+    } catch (e) { console.error('Office timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // Approve, or send back with what to correct. The Super Admin's alone.
+  router.post('/api/payroll/admin/timesheets/decide', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const b = req.body || {};
+      if (!tax.PAY_SCHEDULES[b.schedule] || !tax.isYmd(b.periodStart)) return res.status(400).json({ error: 'Which schedule and period?', code: 'TIMESHEET_UNKNOWN' });
+      const settings = await readSettings();
+      const period = tax.periodFor(b.periodStart, settings, b.schedule);
+      if (period.start !== b.periodStart) return res.status(400).json({ error: 'No such period.', code: 'TIMESHEET_UNKNOWN' });
+      const user = await userFor(b.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const n = ts.normalizeOffice(b); if (n.error) return res.status(400).json(n);
+      const runs = await rows(RUNS);
+      if (runs.some(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void')) return res.status(409).json({ error: 'This period is already paid. A correction goes on the next run as an adjustment.', code: 'TIMESHEET_PAID' });
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const print = ts.fingerprint(gathered.byUser.get(String(user.id)) || []);
+      const all = await rows(TIMESHEETS);
+      const id = ts.sheetId(b.schedule, period.start, user.id);
+      const i = all.findIndex(x => x.id === id);
+      const next = ts.record(i === -1 ? null : all[i], { id, schedule: b.schedule, periodStart: period.start, periodEnd: period.end, userId: String(user.id), name: user.name || user.email }, 'office', n.value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
+      if (i === -1) all.push(next); else all[i] = next;
+      await db.set(TIMESHEETS, all);
+      await logActivity(req.user.id, req.user.name, `timesheet_${n.value.status}`, 'payroll_timesheet', id, { period: period.start, userId: String(user.id) });
+      // The note stays in the app: it can name a client. The email only says where to look.
+      if (n.value.status === 'sent_back' && user.email && queueNotification) {
+        const base = getAppBaseUrl ? await getAppBaseUrl().catch(() => '') : '';
+        await queueNotification('timesheet_sent_back', user.id, user.email, user.name, {
+          subject: 'Your hours need a correction',
+          body: `The office sent back your hours for ${period.start} to ${period.end}. Open My GFC, then Hours & Pay, to see what to correct.`,
+          ctaUrl: base ? `${base}/${accountTypeOf(user) === 'caregiver' ? 'caregiver' : 'my'}#hours` : undefined, ctaLabel: 'Open Hours & Pay'
+        }, { relatedEntityId: `ts-back:${id}:${next.office.at}` }).catch(e => console.error('Timesheet notice (non-fatal):', e.message));
+      }
+      res.json({ timesheet: await sheetView(user, period, gathered, [next], runs) });
+    } catch (e) { console.error('Timesheet decide error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
 
   router.post('/api/payroll/admin/runs', authenticateToken, requirePayrollPreparer, async (req, res) => {
     try {
@@ -632,8 +777,14 @@ module.exports = function createPayrollRoutes(deps) {
       if (d.run.blocked.length) return res.status(409).json({ error: `${d.run.blocked.length} ${d.run.blocked.length === 1 ? 'person is' : 'people are'} missing paperwork. Nobody can be paid until it is on file.`, code: 'RUN_BLOCKED', blocked: d.run.blocked });
       if (!d.run.workers.length) return res.status(409).json({ error: 'Nobody has pay in this period.', code: 'RUN_EMPTY' });
       if (d.run.sutaRateMissing) return res.status(409).json({ error: 'Set GFC\'s Georgia unemployment rate under Settings first. It is on the GA DOL notice.', code: 'RUN_NO_SUTA_RATE' });
+      // Unapproved timesheets (owner, 2026-11-13): never a hold, because hours
+      // worked are paid on payday, but the Super Admin says why they go ahead.
+      const pending = d.run.unapprovedTimesheets || [];
+      const overrideReason = String((req.body || {}).timesheetReason || '').trim().slice(0, 300);
+      if (pending.length && !overrideReason) return res.status(409).json({ error: `${pending.length} ${pending.length === 1 ? 'timesheet is' : 'timesheets are'} not approved: ${pending.map(x => x.name).join(', ')}. Approve them under Timesheets, or give a reason to pay the hours as clocked.`, code: 'RUN_TIMESHEETS_UNAPPROVED', unapproved: pending });
       const at = nowIso();
-      const approved = { ...runs[i], ...d.run, status: 'approved', approvedAt: at, approvedBy: req.user.name || req.user.email, payments: {} };
+      const approved = { ...runs[i], ...d.run, status: 'approved', approvedAt: at, approvedBy: req.user.name || req.user.email, payments: {},
+        timesheetOverride: pending.length ? { reason: overrideReason, by: req.user.name || req.user.email, at, people: pending.map(x => x.name) } : null };
       approved.liabilities = cal.liabilitiesForRun(approved, settings);
       runs[i] = approved;
       await db.set(RUNS, runs);

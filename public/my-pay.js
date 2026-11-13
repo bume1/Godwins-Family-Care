@@ -321,5 +321,70 @@ function TaxForms() {
   return <div>{err && <div className="mg-err">{err}</div>}<div className="mp-items">{d.forms.map(f => <div key={`${f.year}${f.form}`} className="mp-item"><div><b>{f.year} {f.label}{f.corrected ? ' (corrected)' : ''}</b><small>Print it and attach Copy B to your federal return. Keep Copy C.</small></div><button className="mg-btn mg-ghost mg-sm" onClick={() => open(f)}>Download</button></div>)}</div></div>;
 }
 
-window.MyPay = { PaySetup, ContractorInvoices, TaxForms };
+// ---- My Timesheets (owner, 2026-11-13) ------------------------------------
+// Each pay period's hours as payroll will pay them. Once the period ends the
+// person says they look right, or what is wrong. The Super Admin approves them
+// or sends them back with a note. Their pay is never held for it.
+const hm = (mins) => { const m = Math.round(Number(mins) || 0); return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`; };
+const OFFICE_LABEL = { approved: ['Approved', 'mg-ok'], changed: ['Changed since approved', 'mg-wait'], sent_back: ['Sent back to you', 'mg-bad'], waiting: ['Waiting for the office', 'mg-wait'] };
+const EMP_LABEL = { confirmed: 'You said they look right', flagged: 'You flagged a problem', changed: 'Hours changed since you confirmed', not_yet: 'Not confirmed yet' };
+function TimesheetCard({ t, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [flag, setFlag] = useState(false); const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const send = async (status) => {
+    setBusy(true); setErr('');
+    try { await call(`/api/my/timesheets/${encodeURIComponent(t.schedule)}/${encodeURIComponent(t.period.start)}`, { method: 'POST', body: { status, note } }); setFlag(false); setNote(''); await onSaved(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const [label, pill] = t.paid ? ['Paid', 'mg-ok'] : (OFFICE_LABEL[t.status.office] || OFFICE_LABEL.waiting);
+  const tot = t.paid && t.paidMinutes !== null ? t.paidMinutes : t.totals.minutes;
+  return (
+    <div className="mp-item" style={{ display: 'block' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+        <div><b>{t.period.start} to {t.period.end}</b>
+          <small>{hm(tot)}{t.totals.visits ? ` · ${t.totals.visits} visit${t.totals.visits === 1 ? '' : 's'}` : ''}{t.totals.exams ? ` · ${t.totals.exams} exam${t.totals.exams === 1 ? '' : 's'}` : ''} · paid {t.period.payDate}{!t.ended ? ' · this period is still going' : ''}</small></div>
+        <span className={`mg-pill ${pill}`}>{label}</span>
+      </div>
+      {t.office && t.office.status === 'sent_back' && !t.paid && <div className="mg-err" style={{ marginTop: 8 }}>The office says: {t.office.note}</div>}
+      {t.openClockIns.length > 0 && <div className="mg-note" style={{ marginTop: 8 }}>You are still clocked in from {t.openClockIns.map(o => o.date).join(', ')}. Clock out, or ask the office to fix it, or that shift is not paid.</div>}
+      {t.cannotPay.length > 0 && <div className="mg-note" style={{ marginTop: 8 }}>Not counted yet: {t.cannotPay.join(' ')}</div>}
+      {!t.paid && <small style={{ display: 'block', color: 'var(--mut)', marginTop: 6 }}>{EMP_LABEL[t.status.employee]}{t.employee && t.employee.note ? `: ${t.employee.note}` : ''}</small>}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+        <button className="mg-btn mg-ghost mg-sm" onClick={() => setOpen(!open)}>{open ? 'Hide Hours' : `See Hours (${t.lines.length})`}</button>
+        {!t.paid && t.ended && t.status.employee !== 'confirmed' && <button className="mg-btn mg-sm" disabled={busy} onClick={() => send('confirmed')}>Looks Right</button>}
+        {!t.paid && t.ended && !flag && <button className="mg-btn mg-ghost mg-sm" disabled={busy} onClick={() => setFlag(true)}>Something Is Wrong</button>}
+      </div>
+      {flag && (
+        <div style={{ marginTop: 8 }}>
+          <label>What is wrong? The office will correct it.</label>
+          <textarea rows={3} style={{ width: '100%', border: '1px solid var(--edge2)', borderRadius: 11, padding: 10, font: 'inherit' }} value={note} maxLength={600} onChange={e => setNote(e.target.value)} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+            <button className="mg-btn mg-sm" disabled={busy || !note.trim()} onClick={() => send('flagged')}>Send to the Office</button>
+            <button className="mg-btn mg-ghost mg-sm" onClick={() => { setFlag(false); setNote(''); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {err && <div className="mg-err" style={{ marginTop: 8 }}>{err}</div>}
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          {t.lines.length === 0 && <small style={{ color: 'var(--mut)' }}>No hours recorded{t.paid ? ' still waiting (this period is paid)' : ''}.</small>}
+          {t.lines.map(l => <div key={l.ref} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, padding: '4px 0', borderTop: '1px solid var(--edge)' }}><span>{l.date} · {l.source}</span><span>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</span></div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+function Timesheets() {
+  const [d, setD] = useState(null); const [err, setErr] = useState('');
+  const load = () => call('/api/my/timesheets').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  if (err) return <div className="mg-err">{err}</div>;
+  if (!d) return <p className="mg-note">Loading…</p>;
+  if (!d.employee) return <p className="mg-note">Contractors send invoices instead. See Contractor Invoices below.</p>;
+  return <div className="mp-items">{d.timesheets.map(t => <TimesheetCard key={t.period.start} t={t} onSaved={load} />)}</div>;
+}
+
+window.MyPay = { PaySetup, ContractorInvoices, TaxForms, Timesheets };
 })();
