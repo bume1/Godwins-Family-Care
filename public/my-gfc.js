@@ -835,7 +835,7 @@ function StaffView({ view, data }) {
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected in Staff Scheduling → Time Logs. Payroll is run, and the hours file exported, in Payroll.</p><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="mg-btn mg-ghost" href="/scheduling">Open Staff Scheduling</a><a className="mg-btn mg-ghost" href="/payroll">Open Payroll</a></div></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
-        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
+        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms and how you are paid. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
         {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>

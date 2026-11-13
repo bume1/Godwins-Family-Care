@@ -133,3 +133,16 @@ test('a payroll preparer sees no Super Admin button on the page', () => {
   assert.match(page, /\{SUPER && <GustoImport/);
   assert.match(read('routes/payroll.js'), /superAdmin: !!req\.user && req\.user\.role === 'admin',/);
 });
+
+// Owner report, 2026-11-13: "employees click the pay setup and don't get
+// anything". The form drew below the whole checklist, off-screen, so Start
+// looked dead. It opens under the item clicked now, and scrolls into view.
+test('Pay Setup opens each form under the item clicked, in view', () => {
+  const src = read('public/my-pay.js');
+  const list = src.indexOf('{p.checklist.map((c, i) => (');
+  const card = src.indexOf('{open === c.key && (');
+  const listEnd = src.indexOf('))}', card);
+  assert.ok(list > 0 && card > list && listEnd > card, 'the form renders inside the checklist, beside its item');
+  assert.ok(!/\n      \{open && \(\n        <div className="mg-card"/.test(src), 'not after the whole list');
+  assert.match(src, /openRef\.current\.scrollIntoView\(/, 'and it is brought into view');
+});

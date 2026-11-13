@@ -191,8 +191,11 @@ function PaySetup() {
   const [open, setOpen] = useState(null);
   const [form, setForm] = useState({});
   const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const openRef = React.useRef(null);
   const load = () => call('/api/my/pay-setup').then(setData).catch(e => setErr(e.message));
   useEffect(() => { load(); }, []);
+  // Bring the opened form into view, so a click always shows something.
+  useEffect(() => { if (open && openRef.current && openRef.current.scrollIntoView) openRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, [open]);
   if (!data) return err ? <div className="mg-err">{err}</div> : <p className="mg-note">Loading…</p>;
   const save = async () => {
     setBusy(true); setErr(''); setMsg('');
@@ -208,7 +211,7 @@ function PaySetup() {
     <div className="mp-form">
       <p className="mg-note" style={{ marginTop: 0 }}>What payroll needs to pay you and send your W-2 or 1099. Your other hiring paperwork is in onboarding.</p>
       {!data.secretsStorable && <div className="mg-note">Social Security and bank numbers can't be saved yet while the office finishes setting up payroll. You can fill in the other forms now and add those numbers later.</div>}
-      {err && <div className="mg-err">{err}</div>}
+      {err && !open && <div className="mg-err">{err}</div>}
       {msg && <p style={{ color: 'var(--green)', margin: '0 0 8px' }}>{msg}</p>}
       <div className="mp-items">
         {p.checklist.map((c, i) => (
@@ -221,18 +224,22 @@ function PaySetup() {
               <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>
             </div>
           </div>
+          {/* The form opens right under the item clicked (owner report,
+              2026-11-13): drawn below the whole list it landed off-screen,
+              and Start looked like it did nothing. */}
+          {open === c.key && (
+            <div className="mg-card mp-open" ref={openRef} style={{ boxShadow: 'none', margin: '4px 0 10px' }}>
+              <FormBody which={open} data={data} form={form} set={setForm} />
+              {err && <div className="mg-err">{err}</div>}
+              <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                <button className="mg-btn" disabled={busy} onClick={save}>{['w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
+                <button className="mg-btn mg-ghost" onClick={() => { setOpen(null); setForm({}); }}>Cancel</button>
+              </div>
+            </div>
+          )}
           </React.Fragment>
         ))}
       </div>
-      {open && (
-        <div className="mg-card" style={{ boxShadow: 'none' }}>
-          <FormBody which={open} data={data} form={form} set={setForm} />
-          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-            <button className="mg-btn" disabled={busy} onClick={save}>{['w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
-            <button className="mg-btn mg-ghost" onClick={() => { setOpen(null); setForm({}); }}>Cancel</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
