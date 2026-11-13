@@ -822,6 +822,7 @@ module.exports = function createPayrollRoutes(deps) {
           ssnLast4: p.ssn ? p.ssn.last4 : null,
           accountLast4: w.imported ? null : p.payMethod ? p.payMethod.accountLast4 : null,
           payMethod: w.imported ? w.payMethod : p.payMethod ? p.payMethod.method : null,
+          cashtag: w.imported ? null : p.payMethod ? p.payMethod.cashtag || null : null,
           workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
         const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
         driveFileId = stored.fileId || stored.id || null;
@@ -923,7 +924,7 @@ module.exports = function createPayrollRoutes(deps) {
       const pm = (all[w.userId] || {}).payMethod || {};
       const paid = (run.payments || {})[w.userId] || null;
       return { userId: w.userId, name: w.name, netCents: w.pay.netCents, net: usd(w.pay.netCents), method: pm.method || null,
-        bankName: pm.bankName || null, accountType: pm.accountType || null, routingLast4: pm.routingLast4 || null, accountLast4: pm.accountLast4 || null, paid };
+        bankName: pm.bankName || null, accountType: pm.accountType || null, routingLast4: pm.routingLast4 || null, accountLast4: pm.accountLast4 || null, cashtag: pm.cashtag || null, paid };
     });
     await logActivity(req.user.id, req.user.name, 'payment_sheet_opened', 'payroll_run', run.id, {});
     res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved') });

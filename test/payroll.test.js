@@ -570,3 +570,27 @@ test('timesheets: confirm or flag, approve or send back, and an approval goes st
   r = await req(me.app, 'POST', '/api/my/timesheets/caregivers/2026-11-02', { status: 'confirmed' });
   assert.equal(r.body.code, 'TIMESHEET_PAID', 'a paid period is closed');
 });
+
+// Cash App (owner, 2026-11-13): paid person to person until PNC direct deposit
+// is ready. The $Cashtag shows on the payment sheet and the pay stub.
+test('Cash App: a $Cashtag is the pay method, on the payment sheet and the pay stub', async () => {
+  assert.equal(pp.normalizeCashtag('JaneSmith'), '$JaneSmith');
+  assert.equal(pp.normalizeCashtag('$Jane_S1'), '$Jane_S1');
+  assert.equal(pp.normalizeCashtag('$1abc'), null, 'starts with a letter');
+  assert.equal(pp.normalizeCashtag('jane smith'), null);
+  const store = new Map();
+  const me = harness('cg1', store);
+  let r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'nope nope' });
+  assert.equal(r.body.code, 'CASHTAG');
+  r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'PatCare' });
+  assert.equal(r.status, 200); assert.deepEqual([r.body.profile.payMethod.method, r.body.profile.payMethod.cashtag], ['cashapp', '$PatCare']);
+  const stub = await require('../pdf-generator').generatePayStubPDF({
+    run: { period: { start: '2026-11-02', end: '2026-11-08', payDate: '2026-11-13' }, id: 'r1' },
+    worker: { userId: 'cg1', name: 'Pat Care', earnings: [{ code: 'regular', label: 'Regular', minutes: 480, rateCents: 1800, amountCents: 14400 }], pay: { grossCents: 14400, netCents: 13000, taxes: { federal: 0, socialSecurity: 893, medicare: 209, georgia: 298 }, deductions: [] } },
+    ytd: { grossCents: 14400, netCents: 13000, taxes: {} }, payMethod: 'cashapp', cashtag: '$PatCare', workState: 'GA'
+  });
+  const { execFileSync } = require('child_process');
+  const f = require('path').join(require('os').tmpdir(), `stub-${process.pid}.pdf`); require('fs').writeFileSync(f, stub);
+  let text = ''; try { text = execFileSync('pdftotext', [f, '-']).toString(); } catch (e) { text = stub.toString('latin1'); }
+  assert.match(text, /Cash App to \$PatCare/);
+});

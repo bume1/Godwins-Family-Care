@@ -2739,7 +2739,7 @@ async function generatePhcInvoicePDF(inv) {
 // Current and year-to-date for every line. Last four of the SSN and the
 // deposit account only. Drawn from the approved run's frozen numbers; nothing
 // is recalculated here.
-async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, workState, paidThrough }) {
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, cashtag, workState, paidThrough }) {
   return new Promise((resolve, reject) => {
     try {
       const ORG = consentText.ORG;
@@ -2804,7 +2804,7 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
       y0 += 10;
-      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : 'Payment method not set';
+      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : payMethod === 'cashapp' ? `Cash App to ${cashtag || 'your $Cashtag'}` : 'Payment method not set';
       doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}`, L, y0);
       doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
       doc.page.margins.bottom = 0;   // the footer sits below the margin

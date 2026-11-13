@@ -188,7 +188,7 @@ const RunDetail = ({ id, onBack, reload }) => {
       </Card>
       {sheet && (
         <Card title="Payment Sheet (PNC)" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
-          <p className="mb-3 text-stone-500">Send each payment in the PNC app, then paste its confirmation number here. The run is paid when everyone has one.</p>
+          <p className="mb-3 text-stone-500">Send each payment in the PNC app, or in Cash App for anyone paid by $Cashtag, then paste its confirmation or transaction ID here. The run is paid when everyone has one.</p>
           {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} />)}
         </Card>
       )}
@@ -207,7 +207,7 @@ const PaymentRow = ({ runId, s, onDone }) => {
           {s.method === 'direct_deposit' ? <>
             {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : SUPER && <button className="underline" onClick={() => reveal('routing')}>show</button>}
             {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : SUPER && <button className="underline" onClick={() => reveal('account')}>show</button>}
-          </> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
+          </> : s.method === 'cashapp' ? <>Cash App · <b>{s.cashtag}</b> <Copy text={s.cashtag} /></> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
         </div>
         {err && <div className="text-red-700 text-[12px]">{err}</div>}
       </div>

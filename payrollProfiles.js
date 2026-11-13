@@ -19,7 +19,11 @@ const { STATE_NAMES } = require('./payrollTaxTables');
 
 const WORKER_TYPES = Object.freeze({ W2: 'W2', C1099: '1099', HYBRID: 'HYBRID' });
 const PAY_TYPES = Object.freeze(['hourly', 'salary', 'per_visit']);
-const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise']);
+// Cash App (owner, 2026-11-13): GFC pays person to person from its Cash App
+// until PNC direct deposit is set up, and may keep it as an option after.
+const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise', 'cashapp']);
+// A $Cashtag: a letter, then letters, numbers or underscores (Cash App rules).
+const normalizeCashtag = (v) => { const t = String(v || '').trim().replace(/^\$/, ''); return /^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t) ? `$${t}` : null; };
 const WAGE_ACCOUNTS = Object.freeze(['home_care', 'clinical']);
 const W4_FILING = Object.freeze({ single: 'Single or Married filing separately', mfj: 'Married filing jointly', hoh: 'Head of household' });
 // Georgia Form G-4 (rev. 06/03/26), line 3.
@@ -170,7 +174,12 @@ function normalizeW9(b, ctx) {
 function normalizePayMethod(b) {
   b = b || {};
   const method = b.method;
-  if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, paper check or Wise.', code: 'PAY_METHOD' };
+  if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, Cash App, paper check or Wise.', code: 'PAY_METHOD' };
+  if (method === 'cashapp') {
+    const cashtag = normalizeCashtag(b.cashtag);
+    if (!cashtag) return { error: 'Give your $Cashtag, for example $JaneSmith.', code: 'CASHTAG' };
+    return { value: { method, cashtag } };
+  }
   if (method !== 'direct_deposit') return { value: { method, wiseEmail: method === 'wise' ? str(b.wiseEmail, 200) : null } };
   const r = checkRouting(b.routing), a = checkAccount(b.account);
   if (r) return { error: r, code: 'BANK_ROUTING' };
@@ -335,7 +344,7 @@ function publicProfile(p, opts = {}) {
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
     payMethod: payMethod ? {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
-      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null
+      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null, cashtag: payMethod.cashtag || null
     } : null,
     checklist: checklist(p, opts)
   };
@@ -343,7 +352,7 @@ function publicProfile(p, opts = {}) {
 
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
-  checkSsn, checkEin, checkRouting, checkAccount, signature,
+  checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
   normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };
