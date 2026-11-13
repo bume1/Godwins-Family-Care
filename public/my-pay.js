@@ -328,8 +328,50 @@ function TaxForms() {
 const hm = (mins) => { const m = Math.round(Number(mins) || 0); return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`; };
 const OFFICE_LABEL = { approved: ['Approved', 'mg-ok'], changed: ['Changed since approved', 'mg-wait'], sent_back: ['Sent back to you', 'mg-bad'], waiting: ['Waiting for the office', 'mg-wait'] };
 const EMP_LABEL = { confirmed: 'You said they look right', flagged: 'You flagged a problem', changed: 'Hours changed since you confirmed', not_yet: 'Not confirmed yet' };
+// One shift on your timesheet. "Request a Change" sends the right times to the
+// Super Admin with why; nothing changes until they approve it, and the office's
+// Timesheets screen shows the same request (owner, 2026-11-13).
+const GT = window.GFC_TIME;
+const clockOf = (iso) => (iso && GT ? GT.fmtTime(iso) : '');
+const hhmm = (iso) => { const p = iso && GT ? GT.zonedParts(iso) : null; return p ? `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}` : ''; };
+function MyLine({ l, paid, onSaved }) {
+  const [ask, setAsk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const date = l.clockIn && GT ? GT.zonedParts(l.clockIn).isoDate : l.date;
+  const [f, setF] = useState({ date, tin: hhmm(l.clockIn), tout: hhmm(l.clockOut), reason: '' });
+  const send = async () => {
+    const a = GT.instantFromZoned(f.date, f.tin); let b = GT.instantFromZoned(f.date, f.tout);
+    if (a && b && b <= a) b = GT.instantFromZoned(GT.addDays(f.date, 1), f.tout);
+    if (!a || !b) { setErr('Give the date and both times.'); return; }
+    setBusy(true); setErr('');
+    try { await call(`/api/my/time-logs/${encodeURIComponent(l.timeLogId)}/adjustment-requests`, { method: 'POST', body: { clockInAt: a, clockOutAt: b, reason: f.reason } }); setAsk(false); await onSaved(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 13.5, padding: '4px 0', borderTop: '1px solid var(--edge)', alignItems: 'center' };
+  return (
+    <div>
+      <div style={row}>
+        <span>{l.date} · {l.source}{l.clockIn ? ` · ${clockOf(l.clockIn)} to ${clockOf(l.clockOut)}` : ''}{l.edited ? ' · corrected' : ''}</span>
+        <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><b>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</b>
+          {!paid && l.timeLogId && l.editable && !l.pendingChange && !ask && <button className="mg-btn mg-ghost mg-sm" onClick={() => setAsk(true)}>Request a Change</button>}</span>
+      </div>
+      {l.edited && l.editReason && <small style={{ color: 'var(--mut)', display: 'block' }}>Changed by the office: {l.editReason}</small>}
+      {l.pendingChange && <div className="mg-note" style={{ marginTop: 4 }}>{l.pendingChange.self ? 'You asked' : `${l.pendingChange.by} asked`} to change this to {clockOf(l.pendingChange.clockIn)} to {clockOf(l.pendingChange.clockOut)}. Waiting on the office.</div>}
+      {ask && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(130px,1fr))', gap: 8, margin: '6px 0' }}>
+          <div><label>Date</label><input type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></div>
+          <div><label>Clock in</label><input type="time" value={f.tin} onChange={e => setF({ ...f, tin: e.target.value })} /></div>
+          <div><label>Clock out</label><input type="time" value={f.tout} onChange={e => setF({ ...f, tout: e.target.value })} /></div>
+          <div style={{ gridColumn: '1 / -1' }}><label>Why</label><input type="text" maxLength={1000} placeholder="I forgot to clock out at 5:00" value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} /></div>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8 }}><button className="mg-btn mg-sm" disabled={busy || !f.reason.trim()} onClick={send}>Send to the Office</button><button className="mg-btn mg-ghost mg-sm" onClick={() => setAsk(false)}>Cancel</button></div>
+        </div>
+      )}
+      {err && <div className="mg-err">{err}</div>}
+    </div>
+  );
+}
 function TimesheetCard({ t, onSaved }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => t.lines.some(l => l.pendingChange));
   const [flag, setFlag] = useState(false); const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
   const send = async (status) => {
@@ -370,7 +412,7 @@ function TimesheetCard({ t, onSaved }) {
       {open && (
         <div style={{ marginTop: 8 }}>
           {t.lines.length === 0 && <small style={{ color: 'var(--mut)' }}>No hours recorded{t.paid ? ' still waiting (this period is paid)' : ''}.</small>}
-          {t.lines.map(l => <div key={l.ref} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, padding: '4px 0', borderTop: '1px solid var(--edge)' }}><span>{l.date} · {l.source}</span><span>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</span></div>)}
+          {t.lines.map(l => <MyLine key={l.ref} l={l} paid={t.paid} onSaved={onSaved} />)}
         </div>
       )}
     </div>

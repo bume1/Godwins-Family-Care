@@ -162,7 +162,12 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   assert.ok(regs.length > 10, 'the admin routes were found');
   // Every admin route is the Super Admin's or a preparer's (a Payroll grant);
   // none is open to anyone else.
-  for (const r of regs) assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  // The one exception: managers and care coordinators view and edit HOURS
+  // (owner, 2026-11-13), so the overview and Timesheets admit them, and the
+  // overview tells them it is timesheets only.
+  const timesheetViewer = ["/api/payroll/admin/overview'", "/api/payroll/admin/timesheets'"];
+  for (const r of regs) assert.match(r, timesheetViewer.some(t => r.includes(t)) ? /authenticateToken, requireTimesheetViewer\b/ : /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
   // What a preparer must never reach: approving, paying, bank numbers,
   // settings, people's pay setup, tax tables, contractor approvals, the Gusto
   // import and year-end release (owner, 2026-11-13: "prepare only").

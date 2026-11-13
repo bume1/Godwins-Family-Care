@@ -2787,14 +2787,16 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       };
       const hrs = (m) => (m ? (m / 60).toFixed(2) : '');
       table('EARNINGS', worker.earnings.map(e => ({
-        label: e.label + (e.note ? ` · ${e.note}` : ''),
+        label: e.label + (e.minutes && e.rateCents ? ` @ ${usd(e.rateCents)}/hr` : '') + (e.note ? ` · ${e.note}` : ''),
         cells: [e.minutes ? hrs(e.minutes) : e.count ? String(e.count) : '', usd(e.amountCents), usd((y.earnings || {})[e.code] || 0)]
       })).concat(p.reimbursementsCents ? [{ label: 'Reimbursements (not taxed)', cells: ['', usd(p.reimbursementsCents), usd(y.reimbursementsCents)] }] : []),
       [['HOURS / QTY', 330, 70], ['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const stCode = (worker.pay && worker.pay.workState) || workState || 'GA';
       const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'],
         stCode === 'GA' ? ['Georgia income tax', 'georgia'] : [`${payrollStateName(stCode)} income tax`, 'state']];
-      table('TAXES WITHHELD', tl.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      // A state with no income tax (Texas) and nothing withheld shows no line for it.
+      const tlShown = tl.filter(([, k]) => k !== 'state' || (p.taxes || {}).state || (y.taxes || {}).state);
+      table('TAXES WITHHELD', tlShown.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
       table('TOTALS', [
         { label: 'Gross pay', cells: [usd(p.grossCents), usd(y.grossCents)] },

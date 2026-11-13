@@ -314,6 +314,70 @@ const HoursExport = () => {
 const OFFICE_CHIP = { approved: ['APPROVED', 'bg-emerald-50 text-emerald-700'], changed: ['CHANGED SINCE APPROVED', 'bg-amber-50 text-amber-800'], sent_back: ['SENT BACK', 'bg-red-50 text-red-700'], waiting: ['WAITING', 'bg-stone-100 text-stone-600'] };
 const EMP_TEXT = { confirmed: 'Confirmed by them', flagged: 'Flagged by them', changed: 'Hours changed since they confirmed', not_yet: 'Not confirmed by them' };
 const hm = (m) => `${Math.floor((m || 0) / 60)}h ${String((m || 0) % 60).padStart(2, '0')}m`;
+
+// ---- One clocked line, and changing it (owner, 2026-11-13) -------------------
+// Times are Georgia's. The Super Admin's change applies at once (with a reason
+// kept on the log). A manager's or care coordinator's goes to the Super Admin
+// as a time adjustment request, the same queue Staff Scheduling shows.
+const T = window.GFC_TIME;
+const clock = (iso) => (iso ? T.fmtTime(iso) : '');
+const partsOf = (iso) => { const p = iso ? T.zonedParts(iso) : null; return p ? { date: p.isoDate, time: `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}` } : { date: '', time: '' }; };
+// The clock-out is on the same day, or the next one when it is earlier than the clock-in.
+const toTimes = (date, tin, tout) => { const a = T.instantFromZoned(date, tin); let b = T.instantFromZoned(date, tout); if (a && b && b <= a) b = T.instantFromZoned(T.addDays(date, 1), tout); return { clockInAt: a, clockOutAt: b }; };
+const HoursLine = ({ l, mode, onDone }) => {
+  const [edit, setEdit] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const start = partsOf(l.clockIn);
+  const [f, setF] = useState({ date: start.date, tin: start.time, tout: partsOf(l.clockOut).time, reason: '' });
+  const save = async () => {
+    const t = toTimes(f.date, f.tin, f.tout);
+    if (!t.clockInAt || !t.clockOutAt) { setErr('Give the date and both times.'); return; }
+    setBusy(true); setErr('');
+    try {
+      if (mode === 'direct') await put(`/api/scheduling/time-logs/${enc(l.timeLogId)}`, { ...t, reason: f.reason });
+      else await post(`/api/scheduling/time-logs/${enc(l.timeLogId)}/adjustment-requests`, { ...t, reason: f.reason });
+      setEdit(false); await onDone(mode === 'direct' ? 'Hours changed.' : 'Sent to the Super Admin to approve.');
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const decide = async (decision) => {
+    const note = decision === 'declined' ? (window.prompt('Why not? They will see this.') || '') : '';
+    if (decision === 'declined' && !note.trim()) return;
+    setBusy(true); setErr('');
+    try { await post(`/api/scheduling/adjustment-requests/${enc(l.pendingChange.id)}/decide`, { decision, note }); await onDone(decision === 'approved' ? 'Change approved; the hours are updated.' : 'Change declined.'); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div className="pl-3 py-1 border-t border-stone-100 text-[12.5px] text-stone-600">
+      <div className="flex flex-wrap justify-between gap-2 items-center">
+        <span>{day(l.date)} · {l.source}{l.clockIn ? ` · ${clock(l.clockIn)} to ${clock(l.clockOut)}` : ''}{l.client ? ` · ${l.client}` : ''}{l.edited ? <span className="chip bg-stone-100 text-stone-600 ml-1">EDITED{l.editedBy ? ` BY ${String(l.editedBy).toUpperCase()}` : ''}</span> : null}</span>
+        <span className="flex gap-2 items-center"><b>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</b>
+          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}</span>
+      </div>
+      {l.edited && l.editReason && <div className="text-stone-500">Changed: {l.editReason}</div>}
+      {!l.editable && l.timeLogId && <div className="text-stone-500">Paid and locked. A correction goes on the next payroll.</div>}
+      {!l.timeLogId && mode && <div className="text-stone-500">Visit times come from the clinician's note and are corrected there.</div>}
+      {l.pendingChange && (
+        <div className="rounded-lg bg-amber-50 text-amber-900 p-2 mt-1">
+          {l.pendingChange.self ? 'They asked' : `${l.pendingChange.by} asked`} to change this to {clock(l.pendingChange.clockIn)} to {clock(l.pendingChange.clockOut)}: "{l.pendingChange.reason}"
+          {SUPER && <span className="ml-2 inline-flex gap-1"><button className="btn !py-0.5 !px-2" disabled={busy} onClick={() => decide('approved')}>Approve Change</button><button className="btn ghost !py-0.5 !px-2" disabled={busy} onClick={() => decide('declined')}>Decline</button></span>}
+          {!SUPER && <span className="ml-1">Waiting on the Super Admin.</span>}
+        </div>
+      )}
+      {edit && (
+        <div className="flex flex-wrap gap-2 items-end mt-1">
+          <label>Date<input type="date" className="inp !w-40" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></label>
+          <label>Clock in<input type="time" className="inp !w-32" value={f.tin} onChange={e => setF({ ...f, tin: e.target.value })} /></label>
+          <label>Clock out<input type="time" className="inp !w-32" value={f.tout} onChange={e => setF({ ...f, tout: e.target.value })} /></label>
+          <label className="flex-1 min-w-[200px]">Why<input className="inp" value={f.reason} maxLength={1000} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="Forgot to clock out at 5:00" /></label>
+          <button className="btn" disabled={busy || !f.reason.trim()} onClick={save}>{mode === 'direct' ? 'Save' : 'Send for Approval'}</button>
+          <button className="btn ghost" onClick={() => setEdit(false)}>Cancel</button>
+        </div>
+      )}
+      {err && <div className="text-red-700 mt-1">{err}</div>}
+    </div>
+  );
+};
 const Timesheets = ({ data }) => {
   const scheds = data.schedules || [];
   const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'caregivers');
@@ -341,11 +405,12 @@ const Timesheets = ({ data }) => {
   return (
     <Card title="Timesheets">
       <Err e={err} /><Ok m={msg} />
-      <p className="text-stone-500 mb-3">Approve each person's hours before you draft payroll, or send them back with what to correct. Employees can confirm or flag their own hours in My GFC first.</p>
+      <p className="text-stone-500 mb-3">Everyone's hours for the pay period, the same hours they see in My GFC. Check them, fix them, then approve each person before you draft payroll, or send them back with what to correct.</p>
       <div className="flex flex-wrap gap-2 items-end mb-4">
         <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); setDate(''); load(e.target.value, ''); }}>{scheds.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}</select></div>
         <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} /></div>
         <button className="btn ghost" onClick={() => load()}>Show</button>
+        {d && SUPER !== null && !TIMESHEETS_ONLY && <button className="btn ghost" onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${d.period.start}&to=${d.period.end}`, `payroll-hours-${d.period.start}-to-${d.period.end}.csv`, setErr); }}>Export Hours CSV</button>}
         {d && d.superAdmin && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
       </div>
       {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· paid {day(d.period.payDate)}{d.ended ? '' : ' · this period is still going'}</span></p>}
@@ -366,11 +431,11 @@ const Timesheets = ({ data }) => {
             {t.office && t.office.status === 'sent_back' && <div className="text-[12.5px] text-stone-500 mt-1">You sent it back: {t.office.note}</div>}
             {t.openClockIns.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Still clocked in from {t.openClockIns.map(o => o.date).join(', ')}: not in payroll until clocked out.</div>}
             {t.cannotPay.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Payroll cannot pay: {t.cannotPay.join(' ')}</div>}
-            {open === t.userId && t.lines.map(l => <div key={l.ref} className="text-[12.5px] text-stone-600 flex justify-between pl-3"><span>{day(l.date)} · {l.source}</span><span>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</span></div>)}
+            {(open === t.userId || t.lines.some(l => l.pendingChange)) && t.lines.filter(l => open === t.userId || l.pendingChange).map(l => <HoursLine key={l.ref} l={l} mode={t.paid ? null : d.editHours} onDone={async (m) => { setMsg(`${t.name}: ${m}`); await load(); }} />)}
           </div>
         );
       })}
-      <p className="text-[12.5px] text-stone-500 mt-3">Fix hours in Staff Scheduling → Time Logs. An approval no longer counts if the hours change afterwards. Unapproved hours are still paid on payday; approving payroll asks you why.</p>
+      <p className="text-[12.5px] text-stone-500 mt-3">Open a name to see each shift and edit it. {d && d.editHours === 'request' ? 'Your edits go to the Super Admin to approve.' : 'Edits by managers, care coordinators and employees wait for your approval here.'} An approval no longer counts if the hours change afterwards. Unapproved hours are still paid on payday; approving payroll asks why.</p>
     </Card>
   );
 };
@@ -839,10 +904,12 @@ const TABS = [['runs', 'Runs'], ['timesheets', 'Timesheets'], ['people', 'People
 // whatever this page shows. Set once the overview says who is looking.
 const PREPARER_TABS = ['runs', 'timesheets', 'people', 'contractors', 'taxes'];
 let SUPER = true;
+// A manager or care coordinator without the Payroll module sees Timesheets only.
+let TIMESHEETS_ONLY = false;
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
-  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; TIMESHEETS_ONLY = !!d.timesheetsOnly; if (TIMESHEETS_ONLY) setTab('timesheets'); else if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
     if (e.status === 401) { window.location.replace('/login'); return; }
     setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
   }), []);
@@ -855,12 +922,13 @@ const App = () => {
           <span className="font-serif text-[24px] font-semibold">Payroll</span>
           <span className="flex items-center gap-4 text-[13.5px] font-semibold"><a className="text-[#F5CD85]" href="/billing">Billing</a><a className="text-[#F5CD85]" href="/my">My GFC</a><a className="text-[#F5CD85]" href="/login">Portal Hub</a></span>
         </div>
-        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => SUPER || PREPARER_TABS.includes(k)).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => (TIMESHEETS_ONLY ? k === 'timesheets' : SUPER || PREPARER_TABS.includes(k))).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
       </div>
       <div className="max-w-[1300px] mx-auto px-4 lg:px-8 py-5">
         <Err e={err} />
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
-        {data && !SUPER && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
+        {data && !SUPER && !TIMESHEETS_ONLY && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
+        {data && TIMESHEETS_ONLY && <Warn>You can check and edit hours here. Your edits go to the Super Admin to approve before payroll.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
         {data && tab === 'timesheets' && <Timesheets data={data} />}
         {data && tab === 'people' && <People data={data} reload={load} />}

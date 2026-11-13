@@ -69,6 +69,14 @@ module.exports = function createPayrollRoutes(deps) {
   // pay setup, contractor approvals and year-end release stay requireAdmin.
   // Without the dependency (an older caller, a test harness), it is admin only.
   const requirePayrollPreparer = deps.requirePayrollPreparer || requireAdmin;
+  // Timesheets (owner, 2026-11-13): managers and care coordinators (the Staff
+  // Scheduling module) also view hours and edit them. Their edit goes to the
+  // Super Admin as a time adjustment request; the Super Admin's applies.
+  const accountTypes = require('../accountTypes');
+  const isPreparer = (u) => !!u && (u.role === 'admin' || (!!deps.requirePayrollPreparer && accountTypes.hasModule(u, 'payroll')));
+  const isHoursEditor = (u) => !!u && accountTypes.hasModule(u, 'caregiverScheduling');
+  const requireTimesheetViewer = (req, res, next) => (isPreparer(req.user) || isHoursEditor(req.user) ? next()
+    : res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' }));
 
   // ---- storage helpers --------------------------------------------------------------
   const rows = async (k) => (await db.get(k)) || [];
@@ -319,9 +327,16 @@ module.exports = function createPayrollRoutes(deps) {
     return out;
   };
 
-  router.get('/api/payroll/admin/overview', authenticateToken, requirePayrollPreparer, async (req, res) => {
+  router.get('/api/payroll/admin/overview', authenticateToken, requireTimesheetViewer, async (req, res) => {
     try {
       const settings = await readSettings();
+      // A manager or care coordinator without the Payroll module: timesheets only.
+      if (!isPreparer(req.user)) {
+        return res.json({
+          superAdmin: false, timesheetsOnly: true, stateNames: tables.STATE_NAMES,
+          schedules: Object.entries(tax.PAY_SCHEDULES).map(([key, v]) => ({ key, label: v.label, ...tax.scheduleSettings(settings, key), current: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings, key) }))
+        });
+      }
       const people = await staffPeople();
       const runs = await rows(RUNS);
       const allTables = await rows(TAX_TABLES);
@@ -563,12 +578,29 @@ module.exports = function createPayrollRoutes(deps) {
     const items = gathered.byUser.get(uid) || [];
     const sheet = sheets.find(x => String(x.userId) === uid) || null;
     const print = ts.fingerprint(items);
-    const openLogs = (await rows('time_logs')).filter(l => l && String(l.caregiver_id) === uid && !l.clock_out_at && (() => { const d = localDate(l.clock_in_at); return d && d >= period.start && d <= period.end; })())
+    const allLogs = await rows('time_logs');
+    const openLogs = allLogs.filter(l => l && String(l.caregiver_id) === uid && !l.clock_out_at && (() => { const d = localDate(l.clock_in_at); return d && d >= period.start && d <= period.end; })())
       .map(l => ({ id: l.id, date: localDate(l.clock_in_at) }));
+    // Each clocked line carries its times and any change waiting on the Super
+    // Admin, so the employee, the managers and the office see the same thing.
+    const logById = new Map(allLogs.filter(Boolean).map(l => [String(l.id), l]));
+    const pendingByLog = new Map((await rows('time_log_adjustment_requests')).filter(r => r && r.status === 'pending').map(r => [String(r.time_log_id), r]));
+    const sheetLines = ts.lines(items).map(line => {
+      if (!String(line.ref).startsWith('log:')) return { ...line, editable: false };
+      const l = logById.get(String(line.ref).slice(4));
+      if (!l) return { ...line, editable: false };
+      const pr = pendingByLog.get(String(l.id));
+      return {
+        ...line, timeLogId: l.id, clockIn: l.clock_in_at, clockOut: l.clock_out_at, client: l.client_name || null,
+        edited: !!l.edited, editReason: l.edited ? (l.edit_reason || null) : null, editedBy: l.edited ? (l.edited_by_name || null) : null,
+        editable: !l.payroll_run_id,
+        pendingChange: pr ? { id: pr.id, clockIn: pr.requested_clock_in, clockOut: pr.requested_clock_out, reason: pr.reason, by: pr.requested_by_name, self: pr.requested_by_role === 'self', at: pr.requested_at } : null
+      };
+    });
     return {
       schedule: period.schedule || 'staff', period, userId: uid, name: user.name || user.email,
       paid: !!run, paidMinutes: worker ? (worker.earnings || []).reduce((a, e) => a + (Number(e.minutes) || 0), 0) : null,
-      lines: ts.lines(items), totals: ts.totals(items), openClockIns: openLogs,
+      lines: sheetLines, totals: ts.totals(items), openClockIns: openLogs,
       cannotPay: gathered.skipped.filter(x => String(x.userId) === uid).map(x => x.reason),
       ended: period.end < today(),
       status: ts.statusOf(sheet, print),
@@ -629,7 +661,7 @@ module.exports = function createPayrollRoutes(deps) {
   });
 
   // The office's view of one period: everyone on the schedule.
-  router.get('/api/payroll/admin/timesheets', authenticateToken, requirePayrollPreparer, async (req, res) => {
+  router.get('/api/payroll/admin/timesheets', authenticateToken, requireTimesheetViewer, async (req, res) => {
     try {
       const settings = await readSettings();
       const schedule = tax.PAY_SCHEDULES[req.query.schedule] ? req.query.schedule : 'caregivers';
@@ -645,7 +677,10 @@ module.exports = function createPayrollRoutes(deps) {
         const v = await sheetView(u, period, gathered, sheets, runs);
         if (v.lines.length || v.openClockIns.length || v.cannotPay.length || v.employee || v.office || v.paid) out.push(v);
       }
-      res.json({ period, schedule, ended: period.end < today(), superAdmin: !!req.user && req.user.role === 'admin', timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
+      // How this viewer edits hours: the Super Admin directly (with a reason),
+      // a manager or coordinator by request, a preparer not at all.
+      const isSuper = !!req.user && req.user.role === 'admin';
+      res.json({ period, schedule, ended: period.end < today(), superAdmin: isSuper, editHours: isSuper ? 'direct' : isHoursEditor(req.user) ? 'request' : null, timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
     } catch (e) { console.error('Office timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
