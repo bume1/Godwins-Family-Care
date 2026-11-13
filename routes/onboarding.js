@@ -19,6 +19,7 @@
 
 const express = require('express');
 const multer = require('multer');
+const packetSync = require('../onboarding/packetSync');
 const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
 const accountTypes = require('../accountTypes');
@@ -153,6 +154,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // Chapter A reads the caregiver's welcome packet checklist, derived the
   // same way the caregiver app and the scheduling gate derive it. Never
   // stored here: a stored copy goes stale the moment a document is accepted.
+  const isChapterA = (rec) => !!(rec && rec.inputs && rec.inputs.chapter === 'A');
+
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
   async function packetFor(rec) {
     if (!rec) return { rows: undefined, certified: false, licenseLevel: null };
@@ -190,7 +193,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const uploads = pk.docs.filter(d => kinds.includes(d.kind) && !d.deleted_at && d.status !== 'rejected')
       .map(d => ({ id: `packet:${d.id}`, name: d.file_name || 'Document', uploadedAt: d.uploaded_at,
         uploadedByName: d.uploaded_by_name || null, filedBy: d.uploaded_by_office ? 'OFFICE_ON_BEHALF' : 'SELF',
-        fromWelcomePacket: true, status: d.status }));
+        fromWelcomePacket: true, status: d.status, documentId: d.id }));
     const forms = (pk.atts || []).filter(a => kinds.includes(a.kind) && a.signed_at)
       .map(a => ({ id: `form:${a.kind}`, name: `${attestations.titleFor(a.kind) || a.kind} (signed)`, uploadedAt: a.signed_at,
         filedBy: 'SELF', fromWelcomePacket: true, status: 'signed' }));
@@ -282,8 +285,21 @@ module.exports = function createOnboardingRoutes(deps) {
       // Chapter A: what she sent or signed in the welcome wizard shows on the
       // item it belongs to (owner, 2026-11-09), read from the stores the
       // welcome packet writes, never copied. Opened through doDownload.
-      if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
+      if (pk.docs) {
+        // A file uploaded here is also a packet row now: list it once, with
+        // its review status, so the office can accept it right here.
+        it.files = (st.files || []).map(f => {
+          const row = f.documentId ? pk.docs.find(d => d.id === f.documentId && !d.deleted_at) : null;
+          const out = { id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy };
+          if (row && row.kind !== 'clinician_onboarding') { out.status = row.status; out.documentId = row.id; }
+          return out;
+        });
+        const own = new Set((st.files || []).map(f => f.documentId).filter(Boolean));
+        it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk).filter(f => !own.has(f.id.replace(/^packet:/, ''))));
+      }
       it.notes = st.notes || [];
+      // Which packet document a file uploaded here can be (a choice when several).
+      if (isChapterA(rec)) it.uploadKinds = packetSync.uploadKindsOf(T.findItem(it.id)).map(k => ({ kind: k, title: (pk.rows || []).find(r => r.kind === k)?.title || k }));
       // The Playbook is the office's working document (owner, 2026-11-09):
       // its link goes to admins and managers only, never to the person onboarding.
       it.sourceUrl = audience === 'office' && it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
@@ -450,6 +466,14 @@ module.exports = function createOnboardingRoutes(deps) {
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
         T.recordStep(item, rec.items[item.id], req.params.index, actor, req.body || {}, nowIso()));
       await save(rec);
+      // The office's approval reaches her welcome packet, which her clearance
+      // list and her own checklist read (owner, 2026-11-13). Only the office's
+      // own step: marking her step done for her is not an approval (no Chapter
+      // A item pairs her step with an upload today, so this is defensive).
+      if (actor.isOffice && isChapterA(rec) && item.steps[Number(req.params.index)].actor !== 'NEW_HIRE') {
+        try { await packetSync.syncApproval(db, { item, caregiverId: rec.userId, by: actor, now: nowIso() }); }
+        catch (e) { console.error('[ONB] packet sync failed (non-fatal):', e.message); }
+      }
       await event({ userId: rec.userId, type: 'step', itemId: item.id, step: Number(req.params.index), byId: actor.id, byName: actor.name, onBehalf: actor.isOffice && item.steps[Number(req.params.index)].actor === 'NEW_HIRE' });
       await logActivity(req.user.id, req.user.name, 'onboarding_step', 'onboarding', rec.userId, { itemId: item.id, step: Number(req.params.index) });
       await maybeNotifySubmitted(rec, item, actor);
@@ -479,6 +503,18 @@ module.exports = function createOnboardingRoutes(deps) {
       maxBytes: STAFF_MAX, keyPrefix: item.id
     });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    // A caregiver's file is filed under the welcome packet item it answers,
+    // so it ticks that item on her clearance list. One the office uploads is
+    // already reviewed. Anything else stays an onboarding file.
+    const kinds = isChapterA(rec) ? packetSync.uploadKindsOf(item) : [];
+    let kind = 'clinician_onboarding';
+    if (kinds.length === 1) kind = kinds[0];
+    else if (kinds.length > 1) {
+      const asked = String((req.body || {}).kind || '');
+      if (!kinds.includes(asked)) return res.status(400).json({ error: 'Choose which document this is.', code: 'PACKET_KIND_REQUIRED', kinds });
+      kind = asked;
+    }
+    const packetFile = kind !== 'clinician_onboarding';
     let stored;
     try {
       stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter((rec.inputs && rec.inputs.chapter) || 'C'),
@@ -494,10 +530,10 @@ module.exports = function createOnboardingRoutes(deps) {
     const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const docRows = (await db.get('caregiver_documents')) || [];
     docRows.push(staffDocs.buildStaffDocumentRow({
-      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind: 'clinician_onboarding',
+      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind,
       fileName: req.file.originalname || prepared.safeName, storedName: prepared.safeName, mime: prepared.mime,
       sizeBytes: req.file.buffer.length, driveFileId: stored.fileId || stored.id || null, driveUrl: stored.webViewLink || null,
-      note: `Onboarding: ${item.title}`, status: 'received',
+      note: `Onboarding: ${item.title}`, status: packetFile && actor.isOffice ? 'accepted' : 'received',
       uploadedById: req.user.id, uploadedByName: req.user.name || req.user.email, uploadedByOffice: actor.isOffice,
       extra: { onboarding_item_id: item.id }
     }));

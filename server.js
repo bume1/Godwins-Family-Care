@@ -32573,6 +32573,13 @@ app.listen(PORT, () => {
       console.error('Account-type migration failed (non-fatal):', err.message);
     }
     try {
+      // Office approvals made in onboarding reach the welcome packet (2026-11-13).
+      const r = await require('./onboarding/packetSync').repairOnce(db, { findItem: require('./onboarding/track').findItem, now: new Date().toISOString() });
+      if (!r.skipped) console.log(`[onboarding] packet sync: ${r.rekinded} file(s) refiled, ${r.accepted} accepted, ${r.officeDone} office item(s) done, ${r.unsure} file(s) left for the office to type.`);
+    } catch (err) {
+      console.error('Onboarding packet sync repair failed (non-fatal):', err.message);
+    }
+    try {
       await migrateFamilyLinks();
     } catch (err) {
       console.error('Family-link migration failed (non-fatal):', err.message);

@@ -157,6 +157,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // decision, so it is a durable row and never a recomputed view.
   { key: 'clinician_onboarding_events', phi: false, owner: 'clinician-onboarding', note: 'append-only: gate openings, verifications, privilege decisions' },
   { key: 'onboarding_records', phi: false, owner: 'onboarding', note: 'per person: inputs, item steps, acknowledgments at a version, files (pointers), training, readiness determinations' },
+  { key: 'onboarding_packet_sync_repair', phi: false, owner: 'onboarding', note: 'marker: the one-time sync of onboarding approvals into the welcome packet has run' },
   { key: 'onboarding_events', phi: false, owner: 'onboarding', note: 'append-only: steps, returns, filings on her behalf, sign-offs, determinations' },
   { key: 'staff_portal_folders', phi: false, owner: 'staff-portal', note: 'Drive folders the office assigned to roles or people in My GFC: folder id, label, audience' },
   { key: 'staff_paystubs', phi: false, owner: 'staff-portal', note: 'pay stubs imported from the payroll Apps Script: person, pay date, period, gross, net, hours, Drive pointer' },

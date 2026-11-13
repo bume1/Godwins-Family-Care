@@ -486,8 +486,11 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
   };
   const doStep = (s) => run(() => call(PATHS.step(base, item.id, s.index), { method: 'POST',
     body: s.action === 'VERIFY' ? verify : {} }), 'Recorded.');
+  const [upKind, setUpKind] = useState('');
+  const upKinds = item.uploadKinds || [];
   const upload = (file) => {
     const fd = new FormData(); fd.append('file', file);
+    if (upKinds.length > 1) fd.append('kind', upKind);
     return run(() => call(PATHS.files(base, item.id), { method: 'POST', body: fd }), 'File received.');
   };
   // A verification never comes before what it verifies (the server refuses
@@ -628,10 +631,27 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           <div><label className="f">From the welcome packet</label>
             <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>{item.id === 'WELCOME'
               ? (office ? 'This ticks itself when they sign their welcome packet in My GFC. Their staff record in User Management shows the signed packet.' : 'This ticks itself when you sign your welcome packet in My GFC.')
-              : "These come from the caregiver's welcome packet and update on their own. Review uploads on the Caregivers screen."}</div>
+              : "These are the same items as the caregiver's welcome packet. Done here is done there."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
-              <li key={r.kind}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b></li>
-            ))}</ul></div>
+              <li key={r.kind} style={{ marginBottom: 4 }}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b>
+                {office && r.office && r.status !== 'complete' && track.person && (
+                  <button className="btn sm" style={{ marginLeft: 8 }} disabled={busy} onClick={() => run(() => call(`/api/caregiver/admin/welcome-packets/${encodeURIComponent(track.person.userId)}/office-item`, { method: 'PUT', body: { kind: r.kind, status: 'done' } }), 'Marked done.')}>Mark Done</button>
+                )}</li>
+            ))}</ul>
+            {upKinds.length > 0 && !done(item.status) && (office || viewerIsSubject) && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '0 0 10px' }}>
+                {upKinds.length > 1 && (
+                  <select value={upKind} onChange={e => setUpKind(e.target.value)} style={{ maxWidth: 260 }}>
+                    <option value="">Which document?</option>
+                    {upKinds.map(k => <option key={k.kind} value={k.kind}>{k.title}</option>)}
+                  </select>
+                )}
+                <label className="btn sm gold" style={{ cursor: 'pointer', opacity: upKinds.length > 1 && !upKind ? 0.5 : 1 }}>
+                  <i className="ti ti-upload" />{office ? 'Upload For Her' : 'Upload'}
+                  <input type="file" style={{ display: 'none' }} disabled={upKinds.length > 1 && !upKind} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                </label>
+              </div>
+            )}</div>
         )}
 
         {item.elements && item.elements.length > 0 && (
@@ -642,9 +662,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.files.length > 0 && (
           <div><label className="f">Files</label>
             {item.files.map(f => (
-              <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '4px 0', fontSize: 14 }}>
+              <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '4px 0', fontSize: 14 }}>
                 <a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.file(base, item.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a>
-                <span className="meta" style={{ color: 'var(--mut)', fontSize: 12.5 }}>{fmtDate(f.uploadedAt)}{f.filedBy === 'OFFICE_ON_BEHALF' ? ` · filed by ${f.uploadedByName}` : ''}</span>
+                <span className="meta" style={{ color: 'var(--mut)', fontSize: 12.5 }}>{fmtDate(f.uploadedAt)}{f.filedBy === 'OFFICE_ON_BEHALF' ? ` · filed by ${f.uploadedByName}` : ''}{f.status === 'accepted' ? ' · Accepted' : ''}</span>
+                {office && f.documentId && f.status === 'received' && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', width: '100%' }}>
+                    <button className="btn sm" disabled={busy} onClick={() => run(() => call(`/api/caregiver/documents/${encodeURIComponent(f.documentId)}/review`, { method: 'POST', body: { decision: 'accepted' } }), 'Accepted.')}>Accept</button>
+                    <input placeholder="Reason, if sending back" value={reason} onChange={e => setReason(e.target.value)} style={{ flex: 1, minWidth: 140 }} />
+                    <button className="btn sm warn" disabled={busy || !reason.trim()} onClick={() => run(() => call(`/api/caregiver/documents/${encodeURIComponent(f.documentId)}/review`, { method: 'POST', body: { decision: 'rejected', reason } }).then(() => setReason('')), 'Sent back.')}>Send Back</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
