@@ -487,3 +487,18 @@ test('the run register CSV is the run: each line from the run, and its TOTAL row
   assert.equal(pat[col('Regular Hours')], '8.00');
   assert.ok(!/\b\d{9}\b/.test(text), 'no SSN or account number');
 });
+
+test('the owner sets each schedule\'s first Monday on Settings, and a non-Monday is refused', async () => {
+  const store = new Map();
+  const { app } = harness('own', store);
+  store.set('payroll_settings', { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5 });
+  let r = await req(app, 'PUT', '/api/payroll/admin/settings', { schedules: { staff: { anchor: '2026-01-14' } } });
+  assert.equal(r.body.code, 'PAY_ANCHOR');
+  r = await req(app, 'PUT', '/api/payroll/admin/settings', { schedules: { staff: { frequency: 'biweekly', anchor: '2026-01-12' } } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(tax.periodFor('2026-11-04', r.body.settings, 'staff').start, '2026-11-02', 'the biweekly weeks moved by one');
+  assert.equal(tax.scheduleSettings(r.body.settings, 'caregivers').anchor, '2026-01-05', 'the other schedule is untouched');
+  const page = read('public/payroll.html');
+  assert.match(page, /First Monday of a pay period<input type="date"/);
+  assert.match(page, /v\.anchor && v\.anchor !== was\.anchor \? \{ anchor: v\.anchor \}/, 'an unchanged date is not sent, so a frequency change still starts at the next period');
+});
