@@ -540,7 +540,7 @@ const ShiftCard = ({ clients, shifts, onSchedule }) => {
   );
 };
 
-const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalations, announcements, onOpenFeed }) => {
+const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalations, announcements, onOpenFeed, waitingDocs, onOpenDocs }) => {
   const open = escalations.filter(e => e.status !== 'resolved');
   // New announcements, from the same list everyone else's My GFC Home reads
   // (owner, 2026-11-11).
@@ -548,6 +548,8 @@ const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalati
   return (
     <div>
       {/* The My GFC frame says hello above this, over the banner. */}
+      {/* Documents the office sent to sign, straight to My Documents (owner, 2026-11-13). */}
+      <window.MyGFC.DocsWaitingBanner docs={waitingDocs} onOpen={onOpenDocs} />
       {/* One banner, straight to the Feed (owner, 2026-11-11). */}
       {news.length > 0 && (
         <button onClick={onOpenFeed} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', margin: '0 0 14px', padding: '12px 14px', borderRadius: 14, border: 'none', background: '#033D50', color: '#fff', fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
@@ -1408,7 +1410,7 @@ const DocumentsCard = () => {
 // The checklist stays reachable after the packet is signed — the uploads
 // outlive the wizard, and a caregiver chasing their own TB result needs
 // somewhere to send it that is not an email to the office.
-const OnboardingCard = ({ me, onChanged }) => {
+const OnboardingCard = ({ me, onChanged, waitingDocs }) => {
   const [packet, setPacket] = useState(null);
   const load = useCallback(async () => {
     try { setPacket(await api('/api/caregiver/welcome-packet')); } catch (e) { setPacket(null); }
@@ -1417,21 +1419,23 @@ const OnboardingCard = ({ me, onChanged }) => {
   if (!packet) return null;
 
   const outstanding = (me.onboarding && me.onboarding.outstanding) || [];
-  const theirs = outstanding.filter(o => o.waitingOn === 'you');
+  // Documents the office sent to sign count too (owner, 2026-11-13), or this
+  // card says nothing is waiting while one is.
+  const theirs = outstanding.filter(o => o.waitingOn === 'you').concat((waitingDocs || []).map(d => ({ title: d.title })));
 
   return (
     <div>
       <div className="card">
         <h3>Your onboarding</h3>
-        {me.onboarding && me.onboarding.cleared ? (
+        {me.onboarding && me.onboarding.cleared && !theirs.length ? (
           <p className="sub">You are cleared to work. Everything on your checklist is in.</p>
         ) : (
           <p className="sub">
             {theirs.length
               ? `${theirs.length} ${theirs.length === 1 ? 'item is' : 'items are'} waiting on you.`
               : 'Nothing is waiting on you — the rest is with the office.'}
-            {outstanding.length - theirs.length > 0
-              ? ` ${outstanding.length - theirs.length} with the office.`
+            {outstanding.filter(o => o.waitingOn !== 'you').length > 0
+              ? ` ${outstanding.filter(o => o.waitingOn !== 'you').length} with the office.`
               : ''}
           </p>
         )}
@@ -2299,6 +2303,7 @@ const App = () => {
   } else if (tab === 'home') {
     content = <HomeTab me={me} clients={clients} escalations={escalations} shifts={shifts}
       announcements={announcements} onOpenFeed={() => setTab('feed')}
+      waitingDocs={staff.waitingDocs} onOpenDocs={() => setTab('documents')}
       onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')}
       onSchedule={() => setTab('schedule')} />;
   } else if (tab === 'schedule') {
@@ -2319,7 +2324,7 @@ const App = () => {
     // the packet does not carry; those are signed on the onboarding page.
     content = (
       <>
-        <OnboardingCard me={me} />
+        <OnboardingCard me={me} waitingDocs={staff.waitingDocs} />
         <div className="card" style={{ marginTop: 12 }}>
           <b>Policies to read and sign</b>
           <p style={{ margin: '6px 0 10px', fontSize: 14 }}>The Field Addendum, the Private Home Care Policies and your job description, plus the drug testing consent. The office can also file these for you.</p>
@@ -2383,7 +2388,7 @@ const App = () => {
     { id: 'feed', icon: 'ti-news', label: 'Feed' },
     { id: 'more', icon: 'ti-messages', label: 'Logs & Messages' },
     { id: 'onboarding', icon: 'ti-route', label: 'Onboarding' },
-    { id: 'documents', icon: 'ti-file-text', label: 'My Documents' },
+    { id: 'documents', icon: 'ti-file-text', label: 'My Documents', count: staff.waitingDocs.length },
     { id: 'policies', icon: 'ti-book', label: 'Policies' },
     { id: 'folders', icon: 'ti-folders', label: 'Shared Folders' },
     { id: 'hours', icon: 'ti-clock', label: 'Hours & Pay' },
@@ -2394,7 +2399,7 @@ const App = () => {
     { id: 'schedule', icon: 'ti-calendar-event', label: 'Schedule' },
     { id: 'clients', icon: 'ti-users', label: 'Clients' },
     { id: 'feed', icon: 'ti-news', label: 'Feed' },
-    { id: 'more', icon: 'ti-dots', label: 'More', match: ['more', 'onboarding', 'documents', 'policies', 'folders', 'hours', 'account'] }
+    { id: 'more', icon: 'ti-dots', label: 'More', count: staff.waitingDocs.length, match: ['more', 'onboarding', 'documents', 'policies', 'folders', 'hours', 'account'] }
   ];
 
   return (

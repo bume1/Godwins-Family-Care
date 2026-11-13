@@ -1208,6 +1208,29 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- A document the office sent to sign or acknowledge (owner, 2026-11-13)
+  // The title only: never the file. One email per send per person.
+  async function staffDocumentSent({ user, title, action, sendId, ctaUrl, actorId }) {
+    try {
+      const verb = action === 'sign' ? 'sign' : 'acknowledge';
+      return { notified: await send({
+        type: 'staff_document_sent', user,
+        subject: `A document is waiting for you to ${verb}`,
+        headline: `A document to ${verb}`,
+        paragraphs: [
+          `The office sent you "${title}" to read and ${verb}.`,
+          'Open My Documents to read it. It takes a minute, and your copy files there once you are done.'
+        ],
+        ctaUrl, ctaLabel: 'Open My Documents',
+        relatedEntityId: `docsend:${sendId}:${user.id}`, relatedEntityType: 'staff_document',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[DOCS] document notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 2. The office sent an item back -------------------------------------
   // THE REASON IS THE WHOLE POINT OF THIS NOTICE. The route requires one and
   // was storing it where only a screen could show it.
@@ -1383,7 +1406,7 @@ function createNotifier(deps) {
     // clinical to-dos
     taskAssigned, taskDueToday, taskOverdue, taskCompleted,
     // staff onboarding and credentialing (2026-11-09)
-    staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
+    staffDocumentSent, staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
     staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly
   };
 }

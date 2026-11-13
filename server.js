@@ -3068,7 +3068,9 @@ app.use(onboardingRouter);
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
   detectFileType: (buf) => detectFileType(buf),
   // Wrapped: the enrollment helpers are declared further down this file.
-  enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
+  enrollmentSummary: (client) => liaisonEnrollmentView(client),
+  // Read lazily: `notify` is built further down this file.
+  notify: () => notify, getAppBaseUrl }));
 // Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
 // contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
 // approved runs write into the same staff_paystubs store the Apps Script

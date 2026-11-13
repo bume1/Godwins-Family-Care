@@ -685,6 +685,23 @@ module.exports = function createStaffPortalRoutes(deps) {
     createdAt: s.createdAt, createdByName: s.createdByName, recipients: DS.recipients(s, people, rows)
   });
 
+  const notifier = () => (typeof deps.notify === 'function' ? deps.notify() : deps.notify) || null;
+  async function emailRecipients(send, recipients, users, actor) {
+    const n = notifier();
+    if (!n || !n.staffDocumentSent) { console.error('[DOCS] no notifier injected: staff were NOT emailed'); return 0; }
+    const links = require('../appLinks');
+    const base = deps.getAppBaseUrl ? await deps.getAppBaseUrl() : '';
+    let count = 0;
+    for (const r of recipients) {
+      const u = users.find(x => String(x.id) === String(r.userId));
+      if (!u || !u.email || r.done) continue;
+      const out = await n.staffDocumentSent({ user: u, title: send.title, action: send.action, sendId: send.id,
+        ctaUrl: `${base}${links.documentsFor(u)}`, actorId: actor.id });
+      count += (out && out.notified) || 0;
+    }
+    return count;
+  }
+
   // The office: send, list (with who has and hasn't), withdraw.
   router.post('/api/my/admin/document-sends', authenticateToken, requireAdmin, docUpload.single('file'), async (req, res) => {
     const b = req.body || {};
@@ -716,7 +733,12 @@ module.exports = function createStaffPortalRoutes(deps) {
       createdAt: nowIso(), removedAt: null };
     const all = await sends(); all.push(row); await db.set(SENDS, all);
     await logActivity(req.user.id, req.user.name || req.user.email, 'document_sent', 'staff_document', row.id, { scope, action: row.action });
-    return res.json({ ok: true, send: sendView(row, await staffPeople(), await signings()) });
+    const people = await staffPeople();
+    const view = sendView(row, people, await signings());
+    // Each person it reaches today is emailed (owner, 2026-11-13); someone
+    // added to a type later sees it on their Home.
+    const emailed = await emailRecipients(row, view.recipients, users, req.user);
+    return res.json({ ok: true, send: view, emailed });
   });
   router.get('/api/my/admin/document-sends', authenticateToken, requireAdmin, async (req, res) => {
     const people = await staffPeople(); const rows = await signings();
