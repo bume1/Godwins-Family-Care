@@ -138,7 +138,7 @@ function FormBody({ which, data, form, set }) {
     <div>
       <label>How you are paid</label>
       <select value={form.method || ''} onChange={e => set({ ...form, method: e.target.value })}>
-        <option value="">Choose…</option><option value="direct_deposit">Direct deposit</option><option value="cashapp">Cash App</option><option value="check">Paper check</option>{data.contractor && <option value="wise">Wise (outside the US)</option>}
+        <option value="">Choose…</option><option value="direct_deposit">Direct deposit</option><option value="check">Paper check</option>{data.contractor && <option value="wise">Wise (outside the US)</option>}
       </select>
       {form.method === 'direct_deposit' && (
         <div>
@@ -152,7 +152,6 @@ function FormBody({ which, data, form, set }) {
           <p className="mg-note">I authorize Godwins Family Care to deposit my pay into this account. Stored encrypted; only the last four show after you save.</p>
         </div>
       )}
-      {form.method === 'cashapp' && <div><label>Your $Cashtag</label><input type="text" placeholder="$JaneSmith" value={form.cashtag || ''} onChange={e => set({ ...form, cashtag: e.target.value })} /><p className="mg-note">I authorize Godwins Family Care to send my pay to this Cash App account. Check it carefully: a payment sent to the wrong $Cashtag may not come back.</p></div>}
       {form.method === 'wise' && <div><label>Wise email</label><input type="email" value={form.wiseEmail || ''} onChange={e => set({ ...form, wiseEmail: e.target.value })} /></div>}
     </div>
   );
@@ -207,7 +206,7 @@ function PaySetup() {
     setBusy(false);
   };
   const p = data.profile;
-  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'cashapp' ? `Cash App ${p.payMethod.cashtag || ''}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : k === 'w9' && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
+  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : k === 'w9' && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
   return (
     <div className="mp-form">
       <p className="mg-note" style={{ marginTop: 0 }}>What payroll needs to pay you and send your W-2 or 1099. Your other hiring paperwork is in onboarding.</p>

@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   federalDepositSchedule: 'monthly',
   gaWithholdingFrequency: 'monthly',
   gaSutaRatePct: null,           // GFC's assigned rate, from the GA DOL notice
+  p2pAccount: '$GodwinsFamilyCare', // GFC's Cash App, for a payroll sent P2P (owner, 2026-11-13)
   reminderLeadBusinessDays: 5
 });
 
@@ -111,6 +112,11 @@ function normalizeSettings(b, current) {
     s.schedules = next;
     // The top-level fields mirror "staff", which older readers still use.
     s.frequency = next.staff.frequency; s.anchor = next.staff.anchor; s.payDateOffsetDays = next.staff.payDateOffsetDays;
+  }
+  if (b.p2pAccount !== undefined) {
+    const t = String(b.p2pAccount || '').trim().replace(/^\$/, '');
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t)) return { error: 'GFC\'s Cash App is a $Cashtag, for example $GodwinsFamilyCare.', code: 'P2P_ACCOUNT' };
+    s.p2pAccount = `$${t}`;
   }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);

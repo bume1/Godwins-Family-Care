@@ -19,10 +19,10 @@ const { STATE_NAMES } = require('./payrollTaxTables');
 
 const WORKER_TYPES = Object.freeze({ W2: 'W2', C1099: '1099', HYBRID: 'HYBRID' });
 const PAY_TYPES = Object.freeze(['hourly', 'salary', 'per_visit']);
-// Cash App (owner, 2026-11-13): GFC pays person to person from its Cash App
-// until PNC direct deposit is set up, and may keep it as an option after.
-const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise', 'cashapp']);
+const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise']);
 // A $Cashtag: a letter, then letters, numbers or underscores (Cash App rules).
+// Used for GFC's own P2P sending account (Payroll → Settings), never chosen
+// by an employee: how a payroll is sent is the office's choice per run.
 const normalizeCashtag = (v) => { const t = String(v || '').trim().replace(/^\$/, ''); return /^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t) ? `$${t}` : null; };
 const WAGE_ACCOUNTS = Object.freeze(['home_care', 'clinical']);
 const W4_FILING = Object.freeze({ single: 'Single or Married filing separately', mfj: 'Married filing jointly', hoh: 'Head of household' });
@@ -174,12 +174,7 @@ function normalizeW9(b, ctx) {
 function normalizePayMethod(b) {
   b = b || {};
   const method = b.method;
-  if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, Cash App, paper check or Wise.', code: 'PAY_METHOD' };
-  if (method === 'cashapp') {
-    const cashtag = normalizeCashtag(b.cashtag);
-    if (!cashtag) return { error: 'Give your $Cashtag, for example $JaneSmith.', code: 'CASHTAG' };
-    return { value: { method, cashtag } };
-  }
+  if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, paper check or Wise.', code: 'PAY_METHOD' };
   if (method !== 'direct_deposit') return { value: { method, wiseEmail: method === 'wise' ? str(b.wiseEmail, 200) : null } };
   const r = checkRouting(b.routing), a = checkAccount(b.account);
   if (r) return { error: r, code: 'BANK_ROUTING' };
@@ -277,10 +272,12 @@ const isContractor = (p) => p && (p.workerType === WORKER_TYPES.C1099 || p.worke
 // What still stops this person being paid. A run refuses anyone with an item
 // here (spec: a run cannot be approved if any worker is missing a W-4, G-4 or
 // bank details, unless paid by check).
-function missingForPay(p, { asContractor = false } = {}) {
+function missingForPay(p, { asContractor = false, p2p = false } = {}) {
   const out = [];
   if (!p) return ['Payroll record'];
-  if (!p.payMethod) out.push('How they are paid (bank details, check or Wise)');
+  // Paid P2P on this run (the office's choice, owner 2026-11-13): GFC sends it
+  // from its own Cash App, so their bank details are not needed for it.
+  if (!p.payMethod && !p2p) out.push('How they are paid (bank details, check or Wise)');
   if (asContractor) {
     if (!p.w9 && !(p.payMethod && p.payMethod.method === 'wise' && p.w8ben)) out.push('W-9');
     return out;
@@ -344,7 +341,7 @@ function publicProfile(p, opts = {}) {
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
     payMethod: payMethod ? {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
-      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null, cashtag: payMethod.cashtag || null
+      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null
     } : null,
     checklist: checklist(p, opts)
   };

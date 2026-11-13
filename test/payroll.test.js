@@ -571,26 +571,40 @@ test('timesheets: confirm or flag, approve or send back, and an approval goes st
   assert.equal(r.body.code, 'TIMESHEET_PAID', 'a paid period is closed');
 });
 
-// Cash App (owner, 2026-11-13): paid person to person until PNC direct deposit
-// is ready. The $Cashtag shows on the payment sheet and the pay stub.
-test('Cash App: a $Cashtag is the pay method, on the payment sheet and the pay stub', async () => {
-  assert.equal(pp.normalizeCashtag('JaneSmith'), '$JaneSmith');
-  assert.equal(pp.normalizeCashtag('$Jane_S1'), '$Jane_S1');
-  assert.equal(pp.normalizeCashtag('$1abc'), null, 'starts with a letter');
-  assert.equal(pp.normalizeCashtag('jane smith'), null);
+// P2P (owner, 2026-11-13): the Super Admin picks how a payroll is sent, direct
+// deposit or P2P from GFC's Cash App. Employees never pick Cash App.
+test('P2P: the Super Admin chooses it per run, it needs no bank details, and the stub says so', async () => {
+  assert.ok(!pp.PAY_METHODS.includes('cashapp'), 'an employee cannot choose Cash App');
   const store = new Map();
-  const me = harness('cg1', store);
-  let r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'nope nope' });
-  assert.equal(r.body.code, 'CASHTAG');
-  r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'PatCare' });
-  assert.equal(r.status, 200); assert.deepEqual([r.body.profile.payMethod.method, r.body.profile.payMethod.cashtag], ['cashapp', '$PatCare']);
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  const noBank = { ...cgProfile }; delete noBank.payMethod;
+  store.set('payroll_profiles', { cg1: noBank });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const me = harness('cg1', store); const own = harness('own', store);
+  let r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'PatCare' });
+  assert.equal(r.body.code, 'PAY_METHOD');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  assert.ok(r.body.run.workers[0].missing.some(m => /How they are paid/.test(m)), "direct deposit needs a pay method");
+  r = await req(me.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  assert.equal(r.status, 403, 'only the Super Admin chooses');
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'zelle' });
+  assert.equal(r.status, 400);
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const w = r.body.run.workers[0];
+  assert.equal(w.channel, 'p2p');
+  assert.ok(!w.missing.some(m => /How they are paid/.test(m)), 'P2P needs no bank details');
+  r = await req(own.app, 'PUT', '/api/payroll/admin/settings', { p2pAccount: 'bad tag' });
+  assert.equal(r.body.code, 'P2P_ACCOUNT');
   const stub = await require('../pdf-generator').generatePayStubPDF({
     run: { period: { start: '2026-11-02', end: '2026-11-08', payDate: '2026-11-13' }, id: 'r1' },
     worker: { userId: 'cg1', name: 'Pat Care', earnings: [{ code: 'regular', label: 'Regular', minutes: 480, rateCents: 1800, amountCents: 14400 }], pay: { grossCents: 14400, netCents: 13000, taxes: { federal: 0, socialSecurity: 893, medicare: 209, georgia: 298 }, deductions: [] } },
-    ytd: { grossCents: 14400, netCents: 13000, taxes: {} }, payMethod: 'cashapp', cashtag: '$PatCare', workState: 'GA'
+    ytd: { grossCents: 14400, netCents: 13000, taxes: {} }, payMethod: 'p2p', p2pAccount: '$GodwinsFamilyCare', workState: 'GA'
   });
   const { execFileSync } = require('child_process');
   const f = require('path').join(require('os').tmpdir(), `stub-${process.pid}.pdf`); require('fs').writeFileSync(f, stub);
   let text = ''; try { text = execFileSync('pdftotext', [f, '-']).toString(); } catch (e) { text = stub.toString('latin1'); }
-  assert.match(text, /Cash App to \$PatCare/);
+  assert.match(text, /P2P by Cash App from \$GodwinsFamilyCare/);
 });

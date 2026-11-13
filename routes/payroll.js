@@ -523,7 +523,7 @@ module.exports = function createPayrollRoutes(deps) {
   // "staff" (the single schedule it was cut from).
   const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
   const sameRun = (r, period) => r && r.period && r.period.start === period.start && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
-  const draftFor = async (period, settings, adjustments) => {
+  const draftFor = async (period, settings, adjustments, channels) => {
     const runs = await rows(RUNS);
     const tbl = await activeTables(Number(period.payDate.slice(0, 4)));
     if (!tbl) return { error: `No approved ${period.payDate.slice(0, 4)} tax tables. Approve the federal and Georgia tables under Taxes first.`, code: 'PAYROLL_NO_TABLES' };
@@ -533,8 +533,9 @@ module.exports = function createPayrollRoutes(deps) {
     const run = engine.buildRun({
       period, settings, people, gathered, tables: tbl,
       ytdByUser: engine.ytdFrom(runs, { year: period.payDate.slice(0, 4), beforePayDate: period.payDate }),
-      adjustments
+      adjustments, channels
     });
+    run.channels = channels || { default: 'direct_deposit', byUser: {} };
     run.skippedItems = gathered.skipped;
     run.tableIds = tbl.ids;
     // Whose hours are not approved yet (owner, 2026-11-13). A warning, never a
@@ -694,7 +695,7 @@ module.exports = function createPayrollRoutes(deps) {
       const runs = await rows(RUNS);
       const existing = runs.find(r => sameRun(r, period) && r.status !== 'void');
       if (existing && existing.status !== 'draft') return res.status(409).json({ error: 'That period is already approved.', code: 'RUN_ALREADY_APPROVED', runId: existing.id });
-      const d = await draftFor(period, settings, existing ? existing.adjustments : []);
+      const d = await draftFor(period, settings, existing ? existing.adjustments : [], existing ? existing.channels : null);
       if (d.error) return res.status(409).json(d);
       const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: req.user.name };
       const next = existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run];
@@ -743,6 +744,34 @@ module.exports = function createPayrollRoutes(deps) {
     res.send(lines.join('\r\n') + '\r\n');
   });
 
+  // How this payroll is sent (owner, 2026-11-13): Direct deposit or P2P
+  // (Cash App from GFC's account), chosen by the Super Admin on the draft, with
+  // a per-person override. The draft is rebuilt so blocking follows it: a
+  // person sent P2P needs no bank details.
+  router.put('/api/payroll/admin/runs/:id/channel', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      if (runs[i].status !== 'draft') return res.status(409).json({ error: 'This payroll is approved; how it was sent is on its pay stubs.', code: 'RUN_LOCKED' });
+      const b = req.body || {};
+      if (!engine.PAY_CHANNELS[b.default]) return res.status(400).json({ error: 'Choose Direct deposit or P2P.', code: 'RUN_CHANNEL' });
+      const byUser = {};
+      for (const [uid, ch] of Object.entries(b.byUser || {})) {
+        if (!engine.PAY_CHANNELS[ch]) return res.status(400).json({ error: 'Choose Direct deposit or P2P for each person.', code: 'RUN_CHANNEL' });
+        if (ch !== b.default) byUser[String(uid)] = ch;
+      }
+      const channels = { default: b.default, byUser };
+      const settings = await readSettings();
+      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], channels);
+      if (d.error) return res.status(409).json(d);
+      runs[i] = { ...runs[i], ...d.run, status: 'draft', rebuiltAt: nowIso() };
+      await db.set(RUNS, runs);
+      await logActivity(req.user.id, req.user.name, 'payroll_run_channel_set', 'payroll_run', runs[i].id, { default: channels.default, overrides: Object.keys(byUser).length });
+      res.json({ run: runs[i] });
+    } catch (e) { console.error('Payroll channel error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
   router.post('/api/payroll/admin/runs/:id/adjustments', authenticateToken, requirePayrollPreparer, async (req, res) => {
     const runs = await rows(RUNS);
     const i = runs.findIndex(r => r.id === req.params.id);
@@ -772,7 +801,7 @@ module.exports = function createPayrollRoutes(deps) {
       if (i === -1) return res.status(404).json({ error: 'Run not found.' });
       if (runs[i].status !== 'draft') return res.status(409).json({ error: 'Already approved.', code: 'RUN_LOCKED' });
       const settings = await readSettings();
-      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || []);
+      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], runs[i].channels);
       if (d.error) return res.status(409).json(d);
       if (d.run.blocked.length) return res.status(409).json({ error: `${d.run.blocked.length} ${d.run.blocked.length === 1 ? 'person is' : 'people are'} missing paperwork. Nobody can be paid until it is on file.`, code: 'RUN_BLOCKED', blocked: d.run.blocked });
       if (!d.run.workers.length) return res.status(409).json({ error: 'Nobody has pay in this period.', code: 'RUN_EMPTY' });
@@ -822,7 +851,7 @@ module.exports = function createPayrollRoutes(deps) {
           ssnLast4: p.ssn ? p.ssn.last4 : null,
           accountLast4: w.imported ? null : p.payMethod ? p.payMethod.accountLast4 : null,
           payMethod: w.imported ? w.payMethod : p.payMethod ? p.payMethod.method : null,
-          cashtag: w.imported ? null : p.payMethod ? p.payMethod.cashtag || null : null,
+          p2pAccount: w.channel === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
           workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
         const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
         driveFileId = stored.fileId || stored.id || null;
@@ -920,14 +949,16 @@ module.exports = function createPayrollRoutes(deps) {
     if (!run) return res.status(404).json({ error: 'Run not found.' });
     if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
     const all = await readProfiles();
+    const users = await getUsers();
     const sheet = run.workers.filter(w => w.pay).map(w => {
-      const pm = (all[w.userId] || {}).payMethod || {};
+      const pm = w.channel === 'p2p' ? { method: 'p2p' } : ((all[w.userId] || {}).payMethod || {});
+      const person = (users || []).find(u => u && String(u.id) === String(w.userId)) || {};
       const paid = (run.payments || {})[w.userId] || null;
       return { userId: w.userId, name: w.name, netCents: w.pay.netCents, net: usd(w.pay.netCents), method: pm.method || null,
-        bankName: pm.bankName || null, accountType: pm.accountType || null, routingLast4: pm.routingLast4 || null, accountLast4: pm.accountLast4 || null, cashtag: pm.cashtag || null, paid };
+        bankName: pm.bankName || null, accountType: pm.accountType || null, routingLast4: pm.routingLast4 || null, accountLast4: pm.accountLast4 || null, phone: w.channel === 'p2p' ? (person.phone || null) : null, paid };
     });
     await logActivity(req.user.id, req.user.name, 'payment_sheet_opened', 'payroll_run', run.id, {});
-    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved') });
+    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), p2pAccount: (await readSettings()).p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved') });
   });
   router.post('/api/payroll/admin/runs/:id/payments/:userId', authenticateToken, requireAdmin, async (req, res) => {
     const runs = await rows(RUNS);

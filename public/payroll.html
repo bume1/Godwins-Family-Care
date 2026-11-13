@@ -114,6 +114,36 @@ let STATE_NAMES = {};
 const stName = (c) => STATE_NAMES[c] || c;
 const statesGaFirst = () => ['GA', ...Object.keys(STATE_NAMES).filter(c => c !== 'GA').sort((a, b) => stName(a).localeCompare(stName(b)))];
 const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700' };
+// How this payroll is sent (owner, 2026-11-13): the Super Admin's choice on the
+// draft, Direct deposit or P2P from GFC's Cash App, with a per-person
+// override. Employees never choose it. The stubs say which.
+const ChannelPicker = ({ run, onSaved }) => {
+  const ch = run.channels || { default: 'direct_deposit', byUser: {} };
+  const [def, setDef] = useState(ch.default || 'direct_deposit');
+  const [by, setBy] = useState({ ...(ch.byUser || {}) });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const dirty = def !== (ch.default || 'direct_deposit') || JSON.stringify(by) !== JSON.stringify(ch.byUser || {});
+  const save = () => { setBusy(true); setErr(''); setMsg(''); call(`/api/payroll/admin/runs/${enc(run.id)}/channel`, { method: 'PUT', body: JSON.stringify({ default: def, byUser: by }) }).then(() => { setMsg('Saved.'); onSaved(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  const opt = (v) => (v === 'p2p' ? 'P2P (Cash App)' : 'Direct deposit');
+  return (
+    <div className="border border-stone-200 rounded-xl p-3 mb-3">
+      <Err e={err} /><Ok m={msg} />
+      <div className="flex flex-wrap gap-2 items-end">
+        <label>How this payroll is sent<select className="inp !w-56" value={def} onChange={e => { setDef(e.target.value); setBy({}); }}><option value="direct_deposit">Direct deposit</option><option value="p2p">P2P (Cash App)</option></select></label>
+        <button className="btn ghost" disabled={busy || !dirty} onClick={save}>Save</button>
+      </div>
+      <div className="mt-2 grid sm:grid-cols-2 gap-x-4">
+        {run.workers.map(w => {
+          const v = by[w.userId] || def;
+          return <label key={w.userId} className="flex justify-between items-center gap-2 text-[13px] py-0.5"><span>{w.name}</span>
+            <select className="inp !w-48 !py-1" value={v} onChange={e => { const n = { ...by }; if (e.target.value === def) delete n[w.userId]; else n[w.userId] = e.target.value; setBy(n); }}><option value="direct_deposit">{opt('direct_deposit')}</option><option value="p2p">{opt('p2p')}</option></select></label>;
+        })}
+      </div>
+      <p className="text-[12px] text-stone-500 mt-2">P2P is sent from GFC's Cash App (set under Settings). Anyone sent P2P does not need bank details on file. Their pay stub says how they were paid.</p>
+    </div>
+  );
+};
+
 const RunDetail = ({ id, onBack, reload }) => {
   const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
   const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
@@ -134,6 +164,8 @@ const RunDetail = ({ id, onBack, reload }) => {
         <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
         {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
+        {run.status === 'draft' && SUPER && <ChannelPicker run={run} onSaved={() => { load(); reload(); }} />}
+        {run.status !== 'draft' && run.channels && <p className="text-[12.5px] text-stone-500 mb-2">Sent by {run.channels.default === 'p2p' ? 'P2P (Cash App)' : 'direct deposit'}{Object.keys(run.channels.byUser || {}).length ? `, ${Object.keys(run.channels.byUser).length} person(s) the other way` : ''}.</p>}
         {run.status === 'draft' && (run.unapprovedTimesheets || []).length > 0 && <Warn><b>Timesheets not approved yet:</b> {run.unapprovedTimesheets.map(x => x.name).join(', ')}. Approve them on the Timesheets tab. Their clocked hours are still paid if you approve payroll; you will be asked why.</Warn>}
         {run.timesheetOverride && <p className="text-[12.5px] text-stone-500 mb-2">Approved with timesheets not approved ({run.timesheetOverride.people.join(', ')}): {run.timesheetOverride.reason}</p>}
         {(run.stateRatesMissing || []).length > 0 && <Warn>Set GFC's unemployment rate for {run.stateRatesMissing.map(stName).join(', ')} under Settings before approving.</Warn>}
@@ -187,16 +219,16 @@ const RunDetail = ({ id, onBack, reload }) => {
         )}
       </Card>
       {sheet && (
-        <Card title="Payment Sheet (PNC)" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
-          <p className="mb-3 text-stone-500">Send each payment in the PNC app, or in Cash App for anyone paid by $Cashtag, then paste its confirmation or transaction ID here. The run is paid when everyone has one.</p>
-          {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} />)}
+        <Card title="Payment Sheet" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
+          <p className="mb-3 text-stone-500">Send each payment in the PNC app, or from GFC's Cash App for anyone marked P2P, then paste its confirmation or Cash App payment ID here. The run is paid when everyone has one.</p>
+          {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} p2pAccount={sheet.p2pAccount} />)}
         </Card>
       )}
     </div>
   );
 };
 const Copy = ({ text }) => <button className="btn ghost !py-0.5 !px-2 !text-[11px]" onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(text))}>Copy</button>;
-const PaymentRow = ({ runId, s, onDone }) => {
+const PaymentRow = ({ runId, s, onDone, p2pAccount }) => {
   const [conf, setConf] = useState(''); const [full, setFull] = useState({}); const [err, setErr] = useState('');
   const reveal = (field) => post(`/api/payroll/admin/people/${enc(s.userId)}/reveal`, { field }).then(r => setFull(f => ({ ...f, [field]: r.value }))).catch(e => setErr(e.message));
   return (
@@ -207,7 +239,7 @@ const PaymentRow = ({ runId, s, onDone }) => {
           {s.method === 'direct_deposit' ? <>
             {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : SUPER && <button className="underline" onClick={() => reveal('routing')}>show</button>}
             {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : SUPER && <button className="underline" onClick={() => reveal('account')}>show</button>}
-          </> : s.method === 'cashapp' ? <>Cash App · <b>{s.cashtag}</b> <Copy text={s.cashtag} /></> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
+          </> : s.method === 'p2p' ? <>P2P · send from GFC's Cash App ({p2pAccount || '$GodwinsFamilyCare'}){s.phone ? <> · their phone {s.phone} <Copy text={s.phone} /></> : ''}</> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
         </div>
         {err && <div className="text-red-700 text-[12px]">{err}</div>}
       </div>
@@ -769,7 +801,7 @@ const Settings = ({ data, reload }) => {
   const s = data.settings;
   const [sch, setSch] = useState(Object.fromEntries((data.schedules || []).map(x => [x.key, { frequency: x.frequency, payDateOffsetDays: x.payDateOffsetDays, anchor: x.anchor }])));
   const setS = (k, field, v) => setSch({ ...sch, [k]: { ...sch[k], [field]: v } });
-  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
+  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare' });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   return (
     <Card title="Payroll Settings">
@@ -791,6 +823,7 @@ const Settings = ({ data, reload }) => {
         <label>Georgia unemployment rate (%)<input className="inp" value={f.gaSutaRatePct} onChange={e => setF({ ...f, gaSutaRatePct: e.target.value })} placeholder="from the GA DOL notice, e.g. 2.70" /></label>
         <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
+        <label>GFC's Cash App, for P2P payroll<input className="inp" value={f.p2pAccount} onChange={e => setF({ ...f, p2pAccount: e.target.value })} placeholder="$GodwinsFamilyCare" /></label>
       </div>
       <OtherStates data={data} reload={reload} />
       <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, schedules: Object.fromEntries(Object.entries(sch).map(([k, v]) => { const was = (data.schedules || []).find(x => x.key === k) || {}; return [k, { frequency: v.frequency, payDateOffsetDays: Number(v.payDateOffsetDays), ...(v.anchor && v.anchor !== was.anchor ? { anchor: v.anchor } : {}) }]; })), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
