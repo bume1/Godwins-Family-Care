@@ -222,6 +222,9 @@ const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, vi
 // case review of claim files. Each half is gated by its own route.
 const IME = link('ime', 'Independent Medical Examinations', '/ime', 'Exam-day veterans list and the AI case review of claim files');
 const BILLING = link('billing', 'Billing', '/billing', 'Claims waiting on billing, patient statements, copays and home care hours');
+// Payroll is the Super Admin's alone (its routes are requireAdmin). It had no
+// tile, so the only way in was typing /payroll (owner report, 2026-11-13).
+const PAYROLL = link('payroll', 'Payroll', '/payroll', 'Pay runs, pay stubs, payroll taxes, contractors and year-end forms');
 const ADMIN_HUB = link('admin', 'Admin Hub', '/admin', 'Settings, inbox, notifications and setup checks');
 // Falls and abuse/neglect, with a follow-up note and any state report.
 const INCIDENT_LOG = link('incidents', 'Incident Log', '/incidents', 'Falls and abuse or neglect reports, follow-up and state reports');
@@ -258,7 +261,7 @@ function hubAreasFor(u) {
   const clinicalOpen = CLINICIAN_TYPES.includes(type) || isAdmin || type === TYPES.COORDINATOR ||
     (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
   add('clinical', 'Clinical', [clinicalOpen && CLINICAL, (office || CLINICIAN_TYPES.includes(type)) && IME]);
-  if (office) add('billing', 'Billing', [BILLING]);
+  if (office) add('billing', 'Billing', [BILLING, isAdmin && PAYROLL]);
   // The Incident Log is the caregiver office's (owner, 2026-11-09): managers
   // and care coordinators run home care, so they get Admin & Compliance with
   // the Incident Log alone; the rest of it stays the Super Admin's.

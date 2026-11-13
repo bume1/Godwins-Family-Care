@@ -96,7 +96,7 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
     ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
     ['clients', ['clients']],
     ['clinical', ['clinical', 'ime']],
-    ['billing', ['billing']],
+    ['billing', ['billing', 'payroll']],
     ['adminCompliance', ['admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']]
   ]);
   assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
@@ -125,9 +125,9 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'clients', 'clinical', 'ime', 'billing', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
+    'clients', 'clinical', 'ime', 'billing', 'payroll', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
-    for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
+    for (const blocked of ['admin', 'service', 'clientPortalAdmin', 'payroll']) assert.ok(!ids(u).includes(blocked), blocked);
   }
 });
 
@@ -146,6 +146,21 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
   const tile = (id) => at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === id);
   assert.equal(tile('clients').path, '/clients');
   assert.equal(tile('billing').path, '/billing');
+});
+
+// Payroll had no tile anywhere on the hub (owner report, 2026-11-13). It is the
+// Super Admin's alone, matching its requireAdmin routes.
+test('the Super Admin has a Payroll tile under Billing; nobody else does', () => {
+  const pay = at.hubTilesFor(at.fieldsFor('admin')).find(t => t.id === 'payroll');
+  assert.ok(pay, 'admin sees Payroll');
+  assert.equal(pay.path, '/payroll');
+  for (const t of ['manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison', 'caregiver', 'client', 'family']) {
+    assert.ok(!ids({ ...at.fieldsFor(t), licenseLevel: t === 'caregiver' ? 'cna' : undefined }).includes('payroll'), t);
+  }
+  const routes = fs.readFileSync(path.join(root, 'routes', 'payroll.js'), 'utf8');
+  const regs = routes.match(/router\.(get|post|put|delete)\('\/api\/payroll\/admin[^\n]*/g) || [];
+  assert.ok(regs.length > 10, 'the admin routes were found');
+  for (const r of regs) assert.match(r, /authenticateToken, requireAdmin\b/, r);
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
