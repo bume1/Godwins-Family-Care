@@ -643,3 +643,47 @@ test('timesheets: each line carries its times and pending change; managers see t
   assert.match(page, /await post\(`\/api\/scheduling\/time-logs\/\$\{enc\(l\.timeLogId\)\}\/adjustment-requests`/);
   assert.match(read('public/my-pay.js'), /\/api\/my\/time-logs\/\$\{encodeURIComponent\(l\.timeLogId\)\}\/adjustment-requests/);
 });
+
+// Taxes entered by hand (owner, 2026-11-14): pay someone whose W-4 is not in
+// yet, P2P, with the office's withholding and a reason. Other missing
+// paperwork is listed as still owed, not holding pay. The timesheet warning
+// is read live, and adding a line keeps the run's P2P choice.
+test('taxes entered by hand: paid without a W-4, owed paperwork listed, banner live, P2P kept', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: { ...pp.defaultProfile(cgUser) } });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store), me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  let w = r.body.run.workers[0];
+  assert.equal(w.pay, undefined, 'not figured without a W-4');
+  assert.ok(w.missing.includes('W-4') && w.missing.includes('SSN'));
+  assert.equal((await req(me.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10', reason: 'x' })).status, 403, 'the Super Admin only');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10' })).body.code, 'MANUAL_TAX_REASON');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '9999', reason: 'x' })).body.code, 'MANUAL_TAX_TOO_HIGH');
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '12.50', socialSecurity: '14.51', medicare: '3.39', stateTax: '6.00', reason: 'W-4 not in yet' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  w = r.body.run.workers[0];
+  assert.deepEqual([w.pay.taxes.federal, w.pay.taxes.socialSecurity, w.pay.taxes.medicare, w.pay.taxes.georgia], [1250, 1451, 339, 600]);
+  assert.equal(w.pay.netCents, w.pay.grossCents - 1250 - 1451 - 339 - 600);
+  assert.ok(w.pay.employer.socialSecurity > 0, 'employer taxes still figured');
+  assert.deepEqual(w.missing, [], 'nothing holds pay');
+  assert.ok(w.paperworkOwed.includes('SSN') && w.paperworkOwed.some(m => /I-9/.test(m)), 'still owed, listed');
+  assert.ok(!w.paperworkOwed.includes('W-4'), 'the W-4 is what the hand entry stands in for');
+  assert.equal(w.manualTaxes.reason, 'W-4 not in yet');
+  // Adding a line keeps P2P and the hand-entered taxes.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '20', note: 'Holiday' });
+  assert.equal(r.body.run.workers[0].channel, 'p2p'); assert.ok(r.body.run.workers[0].manualTaxes);
+  // The timesheet banner reads live: approve it, and the draft stops listing it.
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 1);
+  await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 0);
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.workers[0].pay.taxes.federal, 1250, 'the approved run keeps the office\'s withholding');
+  // Clearing is refused once approved.
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { clear: true })).body.code, 'RUN_LOCKED');
+});

@@ -144,10 +144,44 @@ const ChannelPicker = ({ run, onSaved }) => {
   );
 };
 
+// Taxes entered by hand for one person (owner, 2026-11-14): prefilled with
+// what the app figured, or Social Security 6.2% and Medicare 1.45% of gross
+// when it could not figure them. Super Admin only; a reason is required.
+const ManualTaxes = ({ run, w, onSaved, onClose }) => {
+  const gross = w.pay ? w.pay.grossCents : (w.earnings || []).reduce((a, e) => a + (e.amountCents || 0), 0);
+  const cur = (run.manualTaxes || {})[w.userId];
+  const dol = (c) => ((c || 0) / 100).toFixed(2);
+  const t = (w.pay && w.pay.taxes) || {};
+  const [f, setF] = useState(cur ? { federal: dol(cur.federal), socialSecurity: dol(cur.socialSecurity), medicare: dol(cur.medicare), stateTax: dol(cur.stateTax), reason: cur.reason || '' }
+    : w.pay ? { federal: dol(t.federal), socialSecurity: dol(t.socialSecurity), medicare: dol(t.medicare), stateTax: dol((t.georgia || 0) + (t.state || 0)), reason: '' }
+    : { federal: '0.00', socialSecurity: dol(Math.round(gross * 0.062)), medicare: dol(Math.round(gross * 0.0145)), stateTax: '0.00', reason: '' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const send = (body) => { setBusy(true); setErr(''); put(`/api/payroll/admin/runs/${enc(run.id)}/manual-taxes/${enc(w.userId)}`, body).then(() => { onSaved(); onClose(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  const total = ['federal', 'socialSecurity', 'medicare', 'stateTax'].reduce((a, k) => a + (Number(f[k]) || 0), 0);
+  return (
+    <tr className="bg-stone-50"><td colSpan="9" className="p-3">
+      <Err e={err} />
+      <div className="text-[12.5px] text-stone-600 mb-2">Enter {w.name}'s withholding for this paycheck. Gross is {usd(gross)}. Employer taxes are still figured by the app.</div>
+      <div className="flex flex-wrap gap-2 items-end">
+        {[['federal', 'Federal $'], ['socialSecurity', 'Social Security $'], ['medicare', 'Medicare $'], ['stateTax', `${stName(w.workState || 'GA')} $`]].map(([k, l]) => (
+          <label key={k}>{l}<input className="inp !w-32" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value })} /></label>))}
+        <label className="flex-1 min-w-[220px]">Why<input className="inp" maxLength={300} value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="W-4 not in yet; withheld as single" /></label>
+      </div>
+      <div className="flex gap-2 items-center mt-2">
+        <span className="text-[12.5px] text-stone-500">Net would be {usd(gross - Math.round(total * 100) + ((w.pay && w.pay.reimbursementsCents) || 0))}</span>
+        <button className="btn !py-1" disabled={busy || !f.reason.trim()} onClick={() => send(f)}>Save Taxes</button>
+        {cur && <button className="btn ghost !py-1" disabled={busy} onClick={() => send({ clear: true })}>Go Back to Figured Taxes</button>}
+        <button className="btn ghost !py-1" onClick={onClose}>Cancel</button>
+      </div>
+    </td></tr>
+  );
+};
+
 const RunDetail = ({ id, onBack, reload }) => {
   const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
   const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
   const [adj, setAdj] = useState({ userId: '', type: 'bonus', amount: '', note: '' });
+  const [taxFor, setTaxFor] = useState(null);
   const load = useCallback(() => call(`/api/payroll/admin/runs/${enc(id)}`).then(r => {
     setRun(r.run);
     if (r.run.status !== 'draft') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
@@ -166,7 +200,7 @@ const RunDetail = ({ id, onBack, reload }) => {
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
         {run.status === 'draft' && SUPER && <ChannelPicker run={run} onSaved={() => { load(); reload(); }} />}
         {run.status !== 'draft' && run.channels && <p className="text-[12.5px] text-stone-500 mb-2">Sent by {run.channels.default === 'p2p' ? 'P2P (Cash App)' : 'direct deposit'}{Object.keys(run.channels.byUser || {}).length ? `, ${Object.keys(run.channels.byUser).length} person(s) the other way` : ''}.</p>}
-        {run.status === 'draft' && (run.unapprovedTimesheets || []).length > 0 && <Warn><b>Timesheets not approved yet:</b> {run.unapprovedTimesheets.map(x => x.name).join(', ')}. Approve them on the Timesheets tab. Their clocked hours are still paid if you approve payroll; you will be asked why.</Warn>}
+        {run.status === 'draft' && (run.unapprovedTimesheets || []).length > 0 && <Warn><b>Timesheets not approved by the office yet:</b> {run.unapprovedTimesheets.map(x => `${x.name} (${x.status && x.status.office === 'changed' ? 'hours changed since approved' : x.status && x.status.office === 'sent_back' ? 'sent back for a correction' : 'waiting for approval'})`).join(', ')}. Approve them on the Timesheets tab. Their clocked hours are still paid if you approve payroll; you will be asked why. <span className="text-stone-600">The employee's own confirmation in My GFC is optional and never holds this.</span></Warn>}
         {run.timesheetOverride && <p className="text-[12.5px] text-stone-500 mb-2">Approved with timesheets not approved ({run.timesheetOverride.people.join(', ')}): {run.timesheetOverride.reason}</p>}
         {(run.stateRatesMissing || []).length > 0 && <Warn>Set GFC's unemployment rate for {run.stateRatesMissing.map(stName).join(', ')} under Settings before approving.</Warn>}
         <div className="grid sm:grid-cols-4 gap-3 mb-4">
@@ -180,12 +214,20 @@ const RunDetail = ({ id, onBack, reload }) => {
             <tbody>{run.workers.map(w => {
               const reg = w.earnings.find(e => e.code === 'regular'), ot = w.earnings.find(e => e.code === 'overtime');
               return (
-                <tr key={w.userId} className="border-t border-stone-100">
-                  <td className="py-1.5"><b>{w.name}</b>{w.missing.length > 0 && <div className="text-red-700 text-[12px]">Missing: {w.missing.join(', ')}</div>}</td>
+                <React.Fragment key={w.userId}>
+                <tr className="border-t border-stone-100">
+                  <td className="py-1.5"><b>{w.name}</b>
+                    {w.manualTaxes && <span className="chip bg-amber-50 text-amber-800 ml-1">TAXES ENTERED BY HAND</span>}
+                    {run.status === 'draft' && SUPER && <button className="underline text-primary text-[12px] ml-2" onClick={() => setTaxFor(taxFor === w.userId ? null : w.userId)}>{w.manualTaxes ? 'Edit Taxes' : 'Enter Taxes'}</button>}
+                    {w.manualTaxes && <div className="text-stone-500 text-[12px]">{w.manualTaxes.reason} ({w.manualTaxes.by})</div>}
+                    {w.missing.length > 0 && <div className="text-red-700 text-[12px]">Missing: {w.missing.join(', ')}</div>}
+                    {(w.paperworkOwed || []).length > 0 && <div className="text-amber-800 text-[12px]">Still owed, not holding pay: {w.paperworkOwed.join(', ')}</div>}</td>
                   <td>{reg ? hrs(reg.minutes) : '—'}</td><td>{ot ? hrs(ot.minutes) : ''}</td>
                   {w.pay ? <><td className="text-right">{usd(w.pay.grossCents)}</td><td className="text-right">{usd(w.pay.taxes.federal)}</td><td className="text-right">{usd(w.pay.taxes.socialSecurity)}</td><td className="text-right">{usd(w.pay.taxes.medicare)}</td><td className="text-right">{usd((w.pay.taxes.georgia || 0) + (w.pay.taxes.state || 0))} <span className="text-stone-400">{w.pay.workState || w.workState || 'GA'}</span></td><td className="text-right"><b>{usd(w.pay.netCents)}</b></td></>
-                    : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and their state form are on file.</td>}
+                    : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and their state form are on file{SUPER && run.status === 'draft' ? ', or you enter their taxes' : ''}.</td>}
                 </tr>
+                {taxFor === w.userId && <ManualTaxes run={run} w={w} onSaved={() => { load(); reload(); }} onClose={() => setTaxFor(null)} />}
+                </React.Fragment>
               );
             })}</tbody>
           </table>

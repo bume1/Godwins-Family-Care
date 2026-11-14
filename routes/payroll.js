@@ -729,7 +729,7 @@ module.exports = function createPayrollRoutes(deps) {
   // "staff" (the single schedule it was cut from).
   const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
   const sameRun = (r, period) => r && r.period && r.period.start === period.start && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
-  const draftFor = async (period, settings, adjustments, channels) => {
+  const draftFor = async (period, settings, adjustments, channels, manualTaxes) => {
     const runs = await rows(RUNS);
     const tbl = await activeTables(Number(period.payDate.slice(0, 4)));
     if (!tbl) return { error: `No approved ${period.payDate.slice(0, 4)} tax tables. Approve the federal and Georgia tables under Taxes first.`, code: 'PAYROLL_NO_TABLES' };
@@ -739,9 +739,10 @@ module.exports = function createPayrollRoutes(deps) {
     const run = engine.buildRun({
       period, settings, people, gathered, tables: tbl,
       ytdByUser: engine.ytdFrom(runs, { year: period.payDate.slice(0, 4), beforePayDate: period.payDate }),
-      adjustments, channels
+      adjustments, channels, manualTaxes
     });
     run.channels = channels || { default: 'direct_deposit', byUser: {} };
+    run.manualTaxes = manualTaxes || {};
     run.skippedItems = gathered.skipped;
     run.tableIds = tbl.ids;
     // Whose hours are not approved yet (owner, 2026-11-13). A warning, never a
@@ -925,7 +926,7 @@ module.exports = function createPayrollRoutes(deps) {
       const runs = await rows(RUNS);
       const existing = runs.find(r => sameRun(r, period) && r.status !== 'void');
       if (existing && existing.status !== 'draft') return res.status(409).json({ error: 'That period is already approved.', code: 'RUN_ALREADY_APPROVED', runId: existing.id });
-      const d = await draftFor(period, settings, existing ? existing.adjustments : [], existing ? existing.channels : null);
+      const d = await draftFor(period, settings, existing ? existing.adjustments : [], existing ? existing.channels : null, existing ? existing.manualTaxes : null);
       if (d.error) return res.status(409).json(d);
       const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: req.user.name };
       const next = existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run];
@@ -938,7 +939,51 @@ module.exports = function createPayrollRoutes(deps) {
   router.get('/api/payroll/admin/runs/:id', authenticateToken, requirePayrollPreparer, async (req, res) => {
     const run = (await rows(RUNS)).find(r => r.id === req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found.' });
+    // A draft's timesheet warning is read now, not when it was built, so a
+    // timesheet approved since then no longer shows (owner, 2026-11-14).
+    if (run.status === 'draft' && run.period) {
+      try {
+        const gathered = await gatherFor(run.period, (await rows(RUNS)).filter(r => r.status !== 'draft'));
+        run.unapprovedTimesheets = await unapprovedFor(run.period, run.workers, gathered);
+      } catch (e) { /* keep the stored list */ }
+    }
     res.json({ run });
+  });
+
+  // Taxes entered by hand for one person on a draft (owner, 2026-11-14): the
+  // Super Admin's alone, with a reason, kept on the run and its activity log.
+  router.put('/api/payroll/admin/runs/:id/manual-taxes/:userId', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      if (runs[i].status !== 'draft') return res.status(409).json({ error: 'This payroll is approved. A correction goes on the next run.', code: 'RUN_LOCKED' });
+      const uid = String(req.params.userId);
+      if (!(runs[i].workers || []).some(w => String(w.userId) === uid)) return res.status(404).json({ error: 'That person is not on this payroll.' });
+      const b = req.body || {};
+      const manualTaxes = { ...(runs[i].manualTaxes || {}) };
+      if (b.clear === true) delete manualTaxes[uid];
+      else {
+        const amt = {};
+        for (const k of ['federal', 'socialSecurity', 'medicare', 'stateTax']) {
+          const c = toCents(b[k] === undefined || b[k] === '' ? '0' : b[k]);
+          if (c === null || c < 0) return res.status(400).json({ error: 'Enter each tax as dollars, 0 or more.', code: 'MANUAL_TAX_AMOUNT' });
+          amt[k] = c;
+        }
+        const reason = str(b.reason, 300);
+        if (!reason) return res.status(400).json({ error: 'Say why these taxes are entered by hand.', code: 'MANUAL_TAX_REASON' });
+        manualTaxes[uid] = { ...amt, reason, by: req.user.name || req.user.email, at: nowIso() };
+      }
+      const settings = await readSettings();
+      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], runs[i].channels, manualTaxes);
+      if (d.error) return res.status(409).json(d);
+      const w = d.run.workers.find(x => String(x.userId) === uid);
+      if (w && w.pay && w.pay.netCents < 0) return res.status(400).json({ error: 'Those taxes are more than their pay.', code: 'MANUAL_TAX_TOO_HIGH' });
+      runs[i] = { ...runs[i], ...d.run, status: 'draft', rebuiltAt: nowIso() };
+      await db.set(RUNS, runs);
+      await logActivity(req.user.id, req.user.name, b.clear === true ? 'payroll_manual_taxes_cleared' : 'payroll_manual_taxes_set', 'payroll_run', runs[i].id, { userId: uid, reason: b.clear === true ? null : manualTaxes[uid].reason });
+      res.json({ run: runs[i] });
+    } catch (e) { console.error('Manual taxes error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   // The run's register (owner, 2026-11-09: "ensure all exports match the
@@ -993,7 +1038,7 @@ module.exports = function createPayrollRoutes(deps) {
       }
       const channels = { default: b.default, byUser };
       const settings = await readSettings();
-      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], channels);
+      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], channels, runs[i].manualTaxes);
       if (d.error) return res.status(409).json(d);
       runs[i] = { ...runs[i], ...d.run, status: 'draft', rebuiltAt: nowIso() };
       await db.set(RUNS, runs);
@@ -1014,7 +1059,8 @@ module.exports = function createPayrollRoutes(deps) {
     const note = str(b.note, 300);
     if (!note) return res.status(400).json({ error: 'Say what it is for.', code: 'ADJ_NOTE' });
     const adjustments = [...(runs[i].adjustments || []), { id: uuidv4(), userId: String(b.userId), type: b.type, amountCents: cents, note, by: req.user.name, at: nowIso() }];
-    const d = await draftFor(runs[i].period, await readSettings(), adjustments);
+    // The run's own choices (how it is sent, taxes entered by hand) carry over.
+    const d = await draftFor(runs[i].period, await readSettings(), adjustments, runs[i].channels, runs[i].manualTaxes);
     if (d.error) return res.status(409).json(d);
     runs[i] = { ...runs[i], ...d.run, adjustments, rebuiltAt: nowIso() };
     await db.set(RUNS, runs);
@@ -1031,7 +1077,7 @@ module.exports = function createPayrollRoutes(deps) {
       if (i === -1) return res.status(404).json({ error: 'Run not found.' });
       if (runs[i].status !== 'draft') return res.status(409).json({ error: 'Already approved.', code: 'RUN_LOCKED' });
       const settings = await readSettings();
-      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], runs[i].channels);
+      const d = await draftFor(runs[i].period, settings, runs[i].adjustments || [], runs[i].channels, runs[i].manualTaxes);
       if (d.error) return res.status(409).json(d);
       if (d.run.blocked.length) return res.status(409).json({ error: `${d.run.blocked.length} ${d.run.blocked.length === 1 ? 'person is' : 'people are'} missing paperwork. Nobody can be paid until it is on file.`, code: 'RUN_BLOCKED', blocked: d.run.blocked });
       if (!d.run.workers.length) return res.status(409).json({ error: 'Nobody has pay in this period.', code: 'RUN_EMPTY' });
@@ -1594,7 +1640,7 @@ module.exports = function createPayrollRoutes(deps) {
         const runs = await rows(RUNS);
         const existing = runs.find(r => sameRun(r, period));
         if (existing && existing.status !== 'draft') { out.push({ schedule, summary: 'already approved', period }); continue; }
-        const d = await draftFor(period, settings, existing ? existing.adjustments || [] : []);
+        const d = await draftFor(period, settings, existing ? existing.adjustments || [] : [], existing ? existing.channels : null, existing ? existing.manualTaxes : null);
         if (d.error) { await tellOwner('payroll_period_close', `${label} payroll could not be drafted`, d.error, `close:${schedule}:${period.start}`); out.push({ schedule, summary: d.code, period }); continue; }
         // Nobody on this schedule had pay: no empty run to review.
         if (!existing && !d.run.workers.length) { out.push({ schedule, summary: 'nobody to pay', period }); continue; }
