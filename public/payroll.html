@@ -179,11 +179,48 @@ const ManualTaxes = ({ run, w, onSaved, onClose }) => {
   );
 };
 
+// How a Gusto pay date was actually sent (owner, 2026-11-14): some Gusto
+// "check" pay dates went by Zelle or Cash App while moving off Gusto. For
+// Gusto history only; amounts never change, and the stub says what Gusto
+// recorded and that the office corrected it. Nobody is emailed.
+const METHOD_LABEL = { check: 'Paper check', direct_deposit: 'Direct deposit', zelle: 'Zelle', cashapp: 'Cash App', p2p: 'Cash App', wise: 'Wise' };
+const PaymentCorrection = ({ run, w, onSaved, onClose }) => {
+  const cur = w.paymentCorrection;
+  const others = (run.correctionOptions || {})[w.userId] || [];
+  const [f, setF] = useState({ method: cur ? cur.method : 'zelle', receipt: cur ? cur.receipt || '' : '', sentOn: cur ? cur.sentOn || run.period.payDate : run.period.payDate, reason: '' });
+  const [also, setAlso] = useState([]);
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const save = () => { setBusy(true); setErr(''); post(`/api/payroll/admin/runs/${enc(run.id)}/payment-correction`, { userId: w.userId, ...f, alsoRunIds: also }).then(() => { onSaved(); onClose(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  return (
+    <tr className="bg-stone-50"><td colSpan="9" className="p-3">
+      <Err e={err} />
+      <div className="text-[12.5px] text-stone-600 mb-2">Gusto recorded {w.name}'s pay on {day(run.period.payDate)} as <b>{METHOD_LABEL[w.payMethod] || 'unknown'}</b>. Record how it was actually sent. The amount does not change. Their pay stub is filed again saying Gusto's record was corrected; nobody is emailed.</div>
+      <div className="flex flex-wrap gap-2 items-end">
+        <label>Actually sent by<select className="inp !w-44" value={f.method} onChange={e => setF({ ...f, method: e.target.value })}>{Object.entries(run.correctionMethods || {}).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <label>Receipt # (if you have it)<input className="inp !w-44" value={f.receipt} onChange={e => setF({ ...f, receipt: e.target.value })} /></label>
+        <label>Date sent<input type="date" className="inp !w-44" value={f.sentOn} onChange={e => setF({ ...f, sentOn: e.target.value })} /></label>
+        <label className="flex-1 min-w-[240px]">Why<input className="inp" maxLength={300} value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="Gusto check run; paid by Zelle while direct deposit was set up" /></label>
+      </div>
+      {others.length > 0 && (
+        <div className="mt-2 text-[12.5px]"><div className="text-stone-600 mb-1">Same for {w.name}'s other Gusto paydays (receipts can be added to each later):</div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">{others.map(o => (
+            <label key={o.runId} className="flex gap-1.5 items-center"><input type="checkbox" checked={also.includes(o.runId)} onChange={e => setAlso(e.target.checked ? [...also, o.runId] : also.filter(x => x !== o.runId))} />
+              {day(o.payDate)} · Gusto: {METHOD_LABEL[o.recordedAs] || '—'}{o.correctedTo ? ` · now ${METHOD_LABEL[o.correctedTo]}` : ''}</label>))}</div></div>
+      )}
+      <div className="flex gap-2 mt-2">
+        <button className="btn !py-1" disabled={busy || !f.reason.trim()} onClick={save}>Save Correction</button>
+        <button className="btn ghost !py-1" onClick={onClose}>Cancel</button>
+      </div>
+    </td></tr>
+  );
+};
+
 const RunDetail = ({ id, onBack, reload }) => {
   const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
   const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
   const [adj, setAdj] = useState({ userId: '', type: 'bonus', amount: '', note: '' });
   const [taxFor, setTaxFor] = useState(null);
+  const [fixFor, setFixFor] = useState(null);
   const load = useCallback(() => call(`/api/payroll/admin/runs/${enc(id)}`).then(r => {
     setRun(r.run);
     if (r.run.status !== 'draft') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
@@ -222,6 +259,8 @@ const RunDetail = ({ id, onBack, reload }) => {
                     {w.manualTaxes && <span className="chip bg-amber-50 text-amber-800 ml-1">TAXES ENTERED BY HAND</span>}
                     {run.status === 'draft' && SUPER && <button className="underline text-primary text-[12px] ml-2" onClick={() => setTaxFor(taxFor === w.userId ? null : w.userId)}>{w.manualTaxes ? 'Edit Taxes' : 'Enter Taxes'}</button>}
                     {w.manualTaxes && <div className="text-stone-500 text-[12px]">{w.manualTaxes.reason} ({w.manualTaxes.by})</div>}
+                    {run.source === 'gusto' && w.paymentCorrection && <div className="text-primary text-[12px]">Corrected: {w.paymentCorrection.label}{w.paymentCorrection.receipt ? ` · Receipt ${w.paymentCorrection.receipt}` : ''} (Gusto said {(METHOD_LABEL[w.paymentCorrection.recordedAs] || 'unknown').toLowerCase()}) · {w.paymentCorrection.reason} ({w.paymentCorrection.by})</div>}
+                    {run.source === 'gusto' && SUPER && <button className="underline text-primary text-[12px] ml-2" onClick={() => setFixFor(fixFor === w.userId ? null : w.userId)}>Correct How It Was Paid</button>}
                     {w.manualTaxes && w.manualTaxes.grossChanged && <div className="text-amber-800 text-[12px]"><b>Gross changed</b> from {usd(w.manualTaxes.grossCents)} since these taxes were entered. Check them under Edit Taxes.</div>}
                     {(run.adjustments || []).filter(a => String(a.userId) === String(w.userId)).map(a => (
                       <div key={a.id} className="text-[12px] text-primary">+ {ADJ_LABEL[a.type] || a.type} {usd(a.amountCents)}{a.note ? ` · ${a.note}` : ''}
@@ -233,6 +272,7 @@ const RunDetail = ({ id, onBack, reload }) => {
                     : <td colSpan="6" className="text-stone-500">Not figured until the W-4 and their state form are on file{SUPER && run.status === 'draft' ? ', or you enter their taxes' : ''}.</td>}
                 </tr>
                 {taxFor === w.userId && <ManualTaxes run={run} w={w} onSaved={() => { load(); reload(); }} onClose={() => setTaxFor(null)} />}
+                {fixFor === w.userId && <PaymentCorrection run={run} w={w} onSaved={() => { load(); reload(); }} onClose={() => setFixFor(null)} />}
                 </React.Fragment>
               );
             })}</tbody>
