@@ -558,7 +558,10 @@ module.exports = function createStaffPortalRoutes(deps) {
       // The filed copy first; a stub from an app payroll is drawn again from
       // its run when that copy is missing or cannot be read.
       let buf = null;
-      if (x.driveFileId) { try { buf = await drive.downloadFileBuffer(x.driveFileId); } catch (e) { buf = null; } }
+      // A stub filed before stubs carried the payment receipt (no `final`)
+      // is drawn from its run, which now holds the receipt.
+      if (!x.final && x.runId && regeneratePayStub) { try { buf = await regeneratePayStub(x); } catch (e) { buf = null; } }
+      if (!buf && x.driveFileId) { try { buf = await drive.downloadFileBuffer(x.driveFileId); } catch (e) { buf = null; } }
       if (!buf && x.runId && regeneratePayStub) buf = await regeneratePayStub(x);
       if (!buf) throw new Error('unreadable');
       await logActivity(req.user.id, req.user.name, 'paystub_read', 'staff_paystubs', x.id, {});

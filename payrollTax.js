@@ -31,6 +31,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   gaWithholdingFrequency: 'monthly',
   gaSutaRatePct: null,           // GFC's assigned rate, from the GA DOL notice
   p2pAccount: '$GodwinsFamilyCare', // GFC's Cash App, for a payroll sent P2P (owner, 2026-11-13)
+  // The Drive folder pay stubs are filed in (owner, 2026-11-14: the finance
+  // folder, never the person's role documents). Null: 07 Finance → Payroll.
+  payStubFolderId: null,
   // Contractors living outside the U.S. (owner, 2026-11-13): off until the
   // owner turns it on, and which ways they may be paid.
   overseas: { enabled: false, payMethods: ['wise'] },
@@ -126,6 +129,12 @@ function normalizeSettings(b, current) {
     const t = String(b.p2pAccount || '').trim().replace(/^\$/, '');
     if (!/^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t)) return { error: 'GFC\'s Cash App is a $Cashtag, for example $GodwinsFamilyCare.', code: 'P2P_ACCOUNT' };
     s.p2pAccount = `$${t}`;
+  }
+  if (b.payStubFolder !== undefined) {
+    const raw = String(b.payStubFolder || '').trim();
+    const m = raw.match(/\/folders\/([A-Za-z0-9_-]{10,})/) || raw.match(/^([A-Za-z0-9_-]{10,})$/);
+    if (raw && !m) return { error: 'Paste the Drive folder link, for example https://drive.google.com/drive/folders/…', code: 'PAY_STUB_FOLDER' };
+    s.payStubFolderId = raw ? m[1] : null;
   }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);

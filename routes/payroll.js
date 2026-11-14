@@ -1253,7 +1253,9 @@ module.exports = function createPayrollRoutes(deps) {
         await db.set('time_logs', logs);
       }
       await logActivity(req.user.id, req.user.name, 'payroll_run_approved', 'payroll_run', approved.id, { period: approved.period.start, grossCents: approved.totals.grossCents, netCents: approved.totals.netCents });
-      const stubs = await writeStubs(approved, settings);
+      // Pay stubs go out as each payment is marked paid, with its receipt
+      // (owner, 2026-11-14), not at approval.
+      const stubs = { written: 0, waitingOnPayment: approved.workers.filter(w => w.pay).length };
       if (deps.onRunApproved) await deps.onRunApproved(approved).catch(e => console.error('QuickBooks payroll sync (non-fatal):', e.message));
       res.json({ run: approved, stubs });
     } catch (e) { console.error('Payroll approve error:', e); res.status(500).json({ error: 'Server error' }); }
@@ -1267,14 +1269,24 @@ module.exports = function createPayrollRoutes(deps) {
   // a later one, so a stub drawn again later reads as it did on payday.
   const longDay = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' });
   const ytdAsOf = (allRuns, run) => engine.ytdFrom((allRuns || []).filter(r => r && r.period && r.period.payDate <= run.period.payDate), { year: run.period.payDate.slice(0, 4) });
-  const stubPdf = (run, w, ytd, settings, p) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
-    ssnLast4: p.ssn ? p.ssn.last4 : null,
-    // How this run sent it: P2P is the Super Admin's choice per run and wins
-    // over the bank on file (audit, 2026-11-14: the stub used to name the bank).
-    accountLast4: w.imported || w.channel === 'p2p' ? null : p.payMethod ? p.payMethod.accountLast4 : null,
-    payMethod: w.imported ? w.payMethod : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null,
-    p2pAccount: w.channel === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
-    workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
+  // What a stub says about the person and the payment, taken when it is
+  // issued and kept on the stub row, so a stub reads as it did on payday even
+  // after they change their address, SSN or bank (owner, 2026-11-14). How it
+  // was paid comes from the payment as marked (P2P is the Super Admin's
+  // choice per run); the receipt is that payment's confirmation number.
+  const stubSnapshot = (run, w, settings, p) => {
+    const paid = (run.payments || {})[w.userId] || null;
+    const method = w.imported ? w.payMethod : paid && paid.method ? paid.method : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null;
+    return {
+      ssnLast4: p.ssn ? p.ssn.last4 : null,
+      payMethod: method,
+      accountLast4: w.imported || method !== 'direct_deposit' ? null : paid && paid.accountLast4 ? paid.accountLast4 : p.payMethod ? p.payMethod.accountLast4 : null,
+      p2pAccount: method === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
+      workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null,
+      payment: paid ? { confirmation: paid.confirmation, at: paid.at } : null
+    };
+  };
+  const stubPdf = (run, w, ytd, settings, snap) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null, ...snap });
   // A stub drawn from its run when the Drive copy is missing or cannot be
   // read (audit, 2026-11-14): the employee is never told a stub is ready that
   // they cannot open. Null when the stub did not come from an app run.
@@ -1284,7 +1296,11 @@ module.exports = function createPayrollRoutes(deps) {
     const run = allRuns.find(r => r && r.id === row.runId && r.status !== 'draft' && r.status !== 'void');
     const w = run && (run.workers || []).find(x => String(x.userId) === String(row.userId) && x.pay);
     if (!w) return null;
-    return stubPdf(run, w, ytdAsOf(allRuns, run), await readSettings(), (await readProfiles())[w.userId] || {});
+    const settings = await readSettings();
+    // The snapshot kept when the stub was issued; the payment is read from the
+    // run, where it is final once marked.
+    const snap = row.snap ? { ...row.snap, payment: stubSnapshot(run, w, settings, {}).payment } : stubSnapshot(run, w, settings, (await readProfiles())[w.userId] || {});
+    return stubPdf(run, w, ytdAsOf(allRuns, run), settings, snap);
   };
   const writeStubs = async (run, settings, opts = {}) => {
     const users = await getUsers();
@@ -1292,18 +1308,23 @@ module.exports = function createPayrollRoutes(deps) {
     const ytd = ytdAsOf(await rows(RUNS), run);   // includes this run
     const stubs = await rows(PAYSTUBS);
     const report = { written: 0, pdfFailed: 0 };
-    for (const w of run.workers.filter(x => x.pay)) {
+    const only = opts.only ? new Set(opts.only.map(String)) : null;
+    for (const w of run.workers.filter(x => x.pay && (!only || only.has(String(x.userId))))) {
       const user = users.find(u => String(u.id) === w.userId);
       const p = all[w.userId] || {};
+      const snap = stubSnapshot(run, w, settings, p);
       let driveFileId = null;
       try {
-        const buf = await stubPdf(run, w, ytd, settings, p);
-        const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
+        const buf = await stubPdf(run, w, ytd, settings, snap);
+        // The finance folder, never the person's role documents (owner, 2026-11-14).
+        const stored = await drive.uploadPayStubFile(settings.payStubFolderId || null, run.period.payDate, `Pay stub ${run.period.payDate} - ${(user && user.name) || w.name}.pdf`, buf);
         driveFileId = stored.fileId || stored.id || null;
       } catch (e) { report.pdfFailed++; console.error('Pay stub PDF error (non-fatal):', e.message); }
       const hours = Math.round(((w.earnings.find(e => e.code === 'regular') || {}).minutes || 0) / 60 * 100) / 100;
       const row = { id: uuidv4(), userId: w.userId, payDate: run.period.payDate, periodStart: run.period.start, periodEnd: run.period.end,
-        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso() };
+        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso(),
+        // `final`: the filed copy is the stub as issued, receipt and all.
+        snap: { ...snap, payment: null }, final: true };
       const at = stubs.findIndex(x => String(x.userId) === row.userId && x.payDate === row.payDate && x.reference === row.reference);
       if (at === -1) stubs.push(row); else { row.id = stubs[at].id; stubs[at] = row; }
       report.written++;
@@ -1312,7 +1333,7 @@ module.exports = function createPayrollRoutes(deps) {
         const base = getAppBaseUrl ? await getAppBaseUrl() : '';
         await queueNotification('paystub_ready', user.id, user.email, user.name, {
           subject: 'Your pay stub is ready',
-          body: `Your pay stub for payday ${longDay(run.period.payDate)} is ready. Sign in to GFC to view or download it.`,
+          body: `Your pay for payday ${longDay(run.period.payDate)} has been sent, and your pay stub is ready. Sign in to GFC to view or download it.`,
           ctaUrl: `${base}${links.payFor(user)}`, ctaLabel: 'View Pay Stub'
         }, { relatedEntityId: `${run.id}:${w.userId}`, relatedEntityType: 'paystub' });
       }
@@ -1416,7 +1437,9 @@ module.exports = function createPayrollRoutes(deps) {
     if (!w) return res.status(404).json({ error: 'Nobody by that id is paid in this run.' });
     const conf = str((req.body || {}).confirmation, 80);
     if (!conf) return res.status(400).json({ error: 'Paste the confirmation number: the PNC or Cash App transaction number, or the check number.', code: 'PAYMENT_CONFIRMATION' });
-    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name } };
+    const prof = (await readProfiles())[w.userId] || {};
+    const method = w.channel === 'p2p' ? 'p2p' : prof.payMethod ? prof.payMethod.method : (w.payMethod || null);
+    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name, method, accountLast4: method === 'direct_deposit' && prof.payMethod ? prof.payMethod.accountLast4 || null : null } };
     // Paid only when every worker has a confirmation.
     const everyone = runs[i].workers.filter(x => x.pay).every(x => runs[i].payments[x.userId]);
     if (everyone && runs[i].status !== 'paid') { runs[i].status = 'paid'; runs[i].paidAt = nowIso(); }
@@ -1424,7 +1447,25 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'payroll_payment_confirmed', 'payroll_run', runs[i].id, { userId: w.userId, runPaid: runs[i].status === 'paid' });
     if (deps.onWorkerPaid) await deps.onWorkerPaid(runs[i], w).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
     if (everyone && deps.onRunPaid) await deps.onRunPaid(runs[i]).catch(() => {});
-    res.json({ run: { id: runs[i].id, status: runs[i].status, payments: runs[i].payments } });
+    // Their stub goes out now, with the receipt (owner, 2026-11-14).
+    const stub = await writeStubs(runs[i], await readSettings(), { only: [w.userId] });
+    res.json({ run: { id: runs[i].id, status: runs[i].status, payments: runs[i].payments }, stub });
+  });
+
+  // Issue a run's stubs again for everyone marked paid (owner, 2026-11-14):
+  // for runs paid before stubs carried the receipt or lived in the finance
+  // folder. Nobody is emailed again.
+  router.post('/api/payroll/admin/runs/:id/stubs', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const run = (await rows(RUNS)).find(r => r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+      const paid = Object.keys(run.payments || {});
+      if (!paid.length) return res.status(409).json({ error: 'Nobody on this payroll is marked paid yet. Stubs go out as each payment is marked.', code: 'STUBS_NONE_PAID' });
+      const report = await writeStubs(run, await readSettings(), { only: paid, notify: false });
+      await logActivity(req.user.id, req.user.name, 'payroll_stubs_reissued', 'payroll_run', run.id, { people: report.written });
+      res.json({ ...report });
+    } catch (e) { console.error('Reissue stubs error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   // ---- contractor invoices, the owner's side (step 8) -------------------------------

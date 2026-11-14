@@ -31,10 +31,11 @@ const text = (buf) => {
 function world() {
   const store = new Map();
   const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); } };
-  const filed = {}; const emails = [];
+  const filed = {}; const emails = []; const folders = [];
   const drive = {
-    // Sam's Drive copy fails, as Drive sometimes does.
-    uploadStaffDocumentFile: async (role, person, name, buf) => { if (person === 'Sam Aide') throw new Error('Drive down'); filed[`drv-${person}`] = buf; return { fileId: `drv-${person}` }; },
+    uploadStaffDocumentFile: async () => { throw new Error('a pay stub is never filed in a role documents folder'); },
+    // The finance folder (owner, 2026-11-14). Sam's filing fails, as Drive sometimes does.
+    uploadPayStubFile: async (base, payDate, name, buf) => { folders.push({ base, payDate, name }); if (/Sam Aide/.test(name)) throw new Error('Drive down'); const id = `drv-${name}`; filed[id] = buf; return { fileId: id }; },
     downloadFileBuffer: async (id) => { if (!filed[id]) throw new Error('File not found'); return filed[id]; }
   };
   let me = users[0];
@@ -62,10 +63,10 @@ function world() {
       return { status: r.status, buf, body: (() => { try { return JSON.parse(buf.toString()); } catch (e) { return {}; } })() };
     } finally { srv.close(); }
   };
-  return { store, emails, call, payroll };
+  return { store, emails, call, payroll, folders };
 }
 
-test('approving payroll: each person gets a stub row, a link-only email, and a branded PDF they can open', async () => {
+test('a stub goes out when its payment is marked paid, with the receipt, filed in the finance folder, and opens branded', async () => {
   const w = world();
   let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
   const runId = r.body.run.id;
@@ -74,13 +75,22 @@ test('approving payroll: each person gets a stub row, a link-only email, and a b
   assert.equal(r.status, 200);
   r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'test' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.deepEqual(r.body.stubs, { written: 2, pdfFailed: 1 });
+  assert.equal(r.body.stubs.written, 0, 'approval issues no stub');
+  assert.equal(w.emails.length, 0, 'and emails nobody');
+  assert.equal((await w.call('cg1', 'GET', '/api/my/paystubs')).body.paystubs.length, 0, 'nothing to see before the money is sent');
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'PNC-778812' });
+  assert.equal(r.body.stub.written, 1);
+  assert.equal((await w.call('cg2', 'GET', '/api/my/paystubs')).body.paystubs.length, 0, 'Sam is not paid yet');
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg2`, { confirmation: 'CASH-4F7Q2' });
+  assert.equal(r.body.stub.pdfFailed, 1);
+  assert.deepEqual(w.folders.map(f => [f.base, f.payDate]), [[null, '2026-11-13'], [null, '2026-11-13']], 'filed in the finance folder by payday');
+  assert.match(w.folders[0].name, /^Pay stub 2026-11-13 - Pat Care\.pdf$/);
 
-  // The notice: one per person, no amount, links to their own pay page.
+  // The notice: one per person as their pay is sent, no amount, links to their own pay page.
   assert.equal(w.emails.length, 2);
   for (const [type, , email, , data] of w.emails) {
     assert.equal(type, 'paystub_ready');
-    assert.match(data.body, /payday November 13, 2026 is ready/);
+    assert.match(data.body, /payday November 13, 2026 has been sent, and your pay stub is ready/);
     assert.doesNotMatch(JSON.stringify(data), /\$|\d+\.\d\d/, 'the email never carries an amount');
     assert.equal(data.ctaUrl, 'https://app.example/caregiver#hours', `${email} is sent to their pay page`);
   }
@@ -95,7 +105,7 @@ test('approving payroll: each person gets a stub row, a link-only email, and a b
   const t1 = text(r.buf);
   assert.match(t1, /PAY STUB/); assert.match(t1, /Godwins Family Care LLC/); assert.match(t1, /EIN 12-3456789/);
   assert.match(t1, /Pat Care/); assert.match(t1, /Pay date 11\/13\/2026/);
-  assert.match(t1, /Direct deposit to account ending 4321/);
+  assert.match(t1, /Direct deposit to account ending 4321 · Receipt PNC-778812 · sent /);
   assert.doesNotMatch(t1, /Sam Aide/);
 
   // Sam: Drive failed, so the stub is drawn from the run, and it says Cash App.
@@ -107,7 +117,7 @@ test('approving payroll: each person gets a stub row, a link-only email, and a b
   assert.equal(r.status, 200);
   const t2 = text(r.buf);
   assert.match(t2, /Sam Aide/);
-  assert.match(t2, /P2P by Cash App from \$GodwinsFamilyCare/, 'the stub says how this run paid them');
+  assert.match(t2, /P2P by Cash App from \$GodwinsFamilyCare · Receipt CASH-4F7Q2/, 'how this run paid them, and the receipt');
   assert.doesNotMatch(t2, /account ending 4321/);
 
   // Nobody opens someone else's stub.
@@ -115,18 +125,23 @@ test('approving payroll: each person gets a stub row, a link-only email, and a b
   assert.equal(r.status, 404);
 });
 
-test('a stub drawn again later keeps its own year to date, not a later run\'s', async () => {
+test('a stub reads as issued: its own year to date, and the bank and SSN as they were that payday', async () => {
   const w = world();
   let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
   await w.call('own', 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`, { timesheetReason: 'test' });
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${r.body.run.id}/payments/cg1`, { confirmation: 'PNC-1' });
   const row = w.store.get('staff_paystubs').find(x => x.userId === 'cg1');
   const before = text(await w.payroll.stubPdfForRow(row));
-  // A later week is paid.
+  // A later week is paid, and they change bank and SSN afterwards.
   w.store.set('time_logs', [...w.store.get('time_logs'), log('d', 'cg1', '2026-11-10', 480)]);
   r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-09', schedule: 'caregivers' });
   await w.call('own', 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`, { timesheetReason: 'test' });
+  const prof = w.store.get('payroll_profiles');
+  prof.cg1 = { ...prof.cg1, payMethod: { ...prof.cg1.payMethod, accountLast4: '9999' }, ssn: { ...prof.cg1.ssn, last4: '2222' } };
+  w.store.set('payroll_profiles', prof);
   const after = text(await w.payroll.stubPdfForRow(row));
-  assert.equal(after, before, 'the Nov 13 stub reads the same after a later payday');
+  assert.equal(after, before, 'the Nov 13 stub reads the same after a later payday and new details');
+  assert.match(after, /4321/); assert.doesNotMatch(after, /9999/);
   assert.equal(await w.payroll.stubPdfForRow({ userId: 'cg1' }), null, 'a stub not from an app run is not drawn');
 });
 
@@ -163,6 +178,7 @@ test('a bonus is its own line in the register CSV and on the stub, and can be re
   assert.equal(Number(cells[head.indexOf('Gross')]), 338, 'gross is regular pay plus the bonus');
   // Approved: the stub lists the bonus with its note.
   r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'test' });
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'PNC-9' });
   const stub = w.store.get('staff_paystubs').find(x => x.userId === 'cg1');
   const t = text(await w.payroll.stubPdfForRow(stub));
   assert.match(t, /Bonus · Emergency Tuesday hours\s+\$50\.00/);
@@ -210,4 +226,36 @@ test('the runs list shows P2P and how many payments are marked paid; Paid once a
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
   assert.match(page, /r\.p2p === r\.people \? 'P2P'/);
   assert.match(page, /marked paid\. Open it and mark each payment on the Payment Sheet/);
+});
+
+// A run already paid before stubs carried the receipt (Tasha's, 2026-11-14):
+// its stub opens with the receipt at once, and Redo Pay Stubs files it again
+// in the finance folder without emailing anyone. The folder is a setting.
+test('an earlier stub shows its receipt, Redo Pay Stubs files it again quietly, and the finance folder is set by link', async () => {
+  const w = world();
+  let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const runId = r.body.run.id;
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'test' });
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/stubs`);
+  assert.equal(r.body.code, 'STUBS_NONE_PAID', 'nothing to issue before anyone is paid');
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'CASH-77' });
+  // Make it look like a stub issued the old way: at approval, no receipt.
+  const rows = w.store.get('staff_paystubs');
+  rows[0] = { ...rows[0], final: undefined, snap: undefined, driveFileId: 'old' };
+  w.store.set('staff_paystubs', rows);
+  r = await w.call('cg1', 'GET', `/api/my/paystubs/${rows[0].id}/file`);
+  assert.equal(r.status, 200);
+  assert.match(text(r.buf), /Receipt CASH-77/, 'the earlier stub opens with its receipt');
+  // Settings: a folder link is kept as its id; anything else is refused.
+  r = await w.call('own', 'PUT', '/api/payroll/admin/settings', { payStubFolder: 'not a folder' });
+  assert.equal(r.body.code, 'PAY_STUB_FOLDER');
+  r = await w.call('own', 'PUT', '/api/payroll/admin/settings', { payStubFolder: 'https://drive.google.com/drive/folders/1J5uvQyKt6FWVcbTESTabc?usp=sharing' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const emailsBefore = w.emails.length;
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/stubs`);
+  assert.equal(r.status, 200); assert.equal(r.body.written, 1);
+  assert.equal(w.emails.length, emailsBefore, 'nobody is emailed again');
+  assert.equal(w.folders[w.folders.length - 1].base, '1J5uvQyKt6FWVcbTESTabc', 'filed in the folder set');
+  assert.equal(w.store.get('staff_paystubs').length, 1, 'the same stub, replaced, not a second one');
+  assert.equal(w.store.get('staff_paystubs')[0].final, true);
 });
