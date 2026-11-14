@@ -1803,6 +1803,11 @@
         if (srIsCaregiver(user)) srFetch(token, `/api/caregiver/admin/welcome-packets/${encodeURIComponent(user.id)}`).then(setWp).catch(e => { setWp(null); setWpErr(e.message); });
       }, [token, user.id]);
       React.useEffect(() => { setOb(null); setWp(null); load(); }, [load]);
+      // A document reviewed or filed further down the record changes this list.
+      React.useEffect(() => {
+        window.addEventListener('gfc-staff-docs-changed', load);
+        return () => window.removeEventListener('gfc-staff-docs-changed', load);
+      }, [load]);
       const setItem = async (kind, status) => {
         setBusy(kind); setWpErr('');
         try {
@@ -1954,8 +1959,8 @@
         else if (d && d.error) setMsg({ ok: false, text: `Could not load this caregiver's documents: ${d.error}` });
         if (k && Array.isArray(k.kinds)) {
           setKinds(k.kinds);
-          // The catalog decides the default, so no kind is named in this page.
-          setKind(cur => cur || (k.kinds.find(x => x.payroll) || k.kinds[0] || {}).kind || '');
+          // No default type (owner, 2026-11-13): a file left on the first type
+          // lands on the wrong checklist item.
         }
       }, [token, caregiverId]);
 
@@ -1983,6 +1988,7 @@
             setFile(null);
             if (fileRef.current) fileRef.current.value = '';
             await load();
+            window.dispatchEvent(new Event('gfc-staff-docs-changed'));
           }
         } catch (e) {
           setMsg({ ok: false, text: e.message || 'That did not upload.' });
@@ -2030,6 +2036,7 @@
           });
           setMsg({ ok: true, text: decision === 'accepted' ? 'Accepted.' : 'Sent back with your reason.' });
           await load();
+          window.dispatchEvent(new Event('gfc-staff-docs-changed'));
         } catch (e) { setMsg({ ok: false, text: e.message }); }
       };
 
@@ -2037,7 +2044,7 @@
         if (!window.confirm(`Remove ${d.kindLabel} "${d.fileName}"? This deletes the stored file.`)) return;
         const res = await api.deleteCaregiverDoc(token, d.id);
         if (res && res.error) setMsg({ ok: false, text: res.error });
-        else { setMsg({ ok: true, text: 'Removed.' }); await load(); }
+        else { setMsg({ ok: true, text: 'Removed.' }); await load(); window.dispatchEvent(new Event('gfc-staff-docs-changed')); }
       };
 
       if (!caregiverId) {
@@ -2063,6 +2070,7 @@
               <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
               <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
                 value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="">Choose a type</option>
                 {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
               </select>
             </div>

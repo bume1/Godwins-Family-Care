@@ -576,7 +576,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
           <div className="mg-tag">{tag}</div>
           <nav>
             {sections.map(s => (
-              <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
+              <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}{s.count > 0 && <span className="mg-pill mg-wait" style={{ marginLeft: 'auto' }}>{s.count}</span>}</button>
             ))}
             <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           </nav>
@@ -601,11 +601,25 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
         </main>
         <nav className="mg-tabs">
           {phoneTabs.map(s => (
-            <button key={s.id} className={(s.match ? s.match.includes(view) : view === s.id) ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.short || s.label}</button>
+            <button key={s.id} className={(s.match ? s.match.includes(view) : view === s.id) ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.short || s.label}{s.count > 0 ? ` (${s.count})` : ''}</button>
           ))}
         </nav>
       </div>
     </div>
+  );
+}
+
+// ---- Documents waiting on you (owner, 2026-11-13) ------------------------------
+// One banner on Home, straight to My Documents, like the announcement banner.
+function DocsWaitingBanner({ docs, onOpen }) {
+  if (!docs || !docs.length) return null;
+  const one = docs[0];
+  return (
+    <button onClick={onOpen} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', margin: '0 0 14px', padding: '12px 14px', borderRadius: 14, border: 'none', background: '#033D50', color: '#fff', fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
+      <i className="ti ti-signature" style={{ fontSize: 20, color: '#F5CD85' }} />
+      <span style={{ flex: 1 }}>{docs.length === 1 ? `Document to ${one.action === 'sign' ? 'sign' : 'acknowledge'}: ${one.title}` : `${docs.length} documents waiting on you`}</span>
+      <i className="ti ti-chevron-right" />
+    </button>
   );
 }
 
@@ -750,9 +764,13 @@ function useStaffData() {
   const [folders, setFolders] = useState(null);
   const [hours, setHours] = useState(null);
   const [news, setNews] = useState(null);
+  const [sends, setSends] = useState(null);
   const [err, setErr] = useState('');
   const loadFolders = useCallback(() => call('/api/my/folders').then(d => setFolders(d.folders)).catch(e => setErr(e.message)), []);
   const loadNews = useCallback(() => call('/api/my/announcements').then(d => setNews(d.announcements)).catch(e => setErr(e.message)), []);
+  // Documents the office sent to sign or acknowledge (owner, 2026-11-13): read
+  // once here so Home and the menu can say something is waiting.
+  const loadSends = useCallback(() => call('/api/my/document-sends').then(d => setSends(d.waiting || [])).catch(() => setSends([])), []);
   useEffect(() => {
     if (!getToken()) { window.location.href = '/login'; return; }
     call('/api/my/profile').then(p => {
@@ -763,16 +781,17 @@ function useStaffData() {
       call('/api/my/paystubs').then(d => setStubs(d.paystubs)).catch(e => setErr(e.message));
       loadFolders();
       loadNews();
+      loadSends();
       if (p.isCaregiver) {
         const from = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
         call(`/api/scheduling/time-logs?from=${from}`).then(setHours).catch(() => setHours({ timeLogs: [], totalHours: 0 }));
       }
     }).catch(e => setFatal(e.code === 'STAFF_PORTAL_STAFF_ONLY' ? 'My GFC is for GFC staff.' : e.message));
-  }, [loadFolders, loadNews]);
+  }, [loadFolders, loadNews, loadSends]);
   const reloadProfile = useCallback(() => call('/api/my/profile').then(setProfile).catch(() => {}), []);
   // A document signed here files a copy; the list below shows it at once.
-  const reloadDocs = useCallback(() => call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)), []);
-  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, news, loadNews, err, setErr, loadFolders, reloadProfile, reloadDocs };
+  const reloadDocs = useCallback(() => { loadSends(); return call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)); }, [loadSends]);
+  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, news, loadNews, waitingDocs: sends || [], err, setErr, loadFolders, reloadProfile, reloadDocs };
 }
 
 // The tiles on Home that lead to the staff sections.
@@ -857,6 +876,6 @@ function StaffView({ view, data }) {
   return null;
 }
 
-window.MyGFC = { Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor, AnnouncementList,
+window.MyGFC = { DocsWaitingBanner, Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor, AnnouncementList,
   OnboardingSummary, LiaisonClients, call, getToken, openFile };
 })();

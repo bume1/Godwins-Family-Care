@@ -254,7 +254,8 @@ function packetEvidence(item, packetRows) {
       kind, item: r ? r.item : null, title: r ? r.title : kind,
       required: r ? !!r.required : true,
       status: r ? r.status : 'missing',
-      hers: r ? PACKET_HERS.includes(r.source) : true
+      hers: r ? PACKET_HERS.includes(r.source) : true,
+      office: !!(r && r.source === 'office')
     };
   });
 }

@@ -87,7 +87,9 @@ function outstandingForClearance(checklist) {
       status: r.status,
       // 'you' and 'us' rather than a role name: this sentence is read by both
       // a caregiver on a phone and an administrator on the scheduling board.
-      waitingOn: r.source === 'office' ? 'us' : 'you'
+      // A file she sent that is waiting on review is waiting on the office
+      // (owner, 2026-11-13), not on her.
+      waitingOn: (r.source === 'office' || r.status === 'in_review') ? 'us' : 'you'
     }));
 }
 

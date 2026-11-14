@@ -3084,7 +3084,9 @@ app.use(onboardingRouter);
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
   detectFileType: (buf) => detectFileType(buf),
   // Wrapped: the enrollment helpers are declared further down this file.
-  enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
+  enrollmentSummary: (client) => liaisonEnrollmentView(client),
+  // Read lazily: `notify` is built further down this file.
+  notify: () => notify, getAppBaseUrl }));
 // Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
 // contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
 // approved runs write into the same staff_paystubs store the Apps Script
@@ -32641,6 +32643,13 @@ app.listen(PORT, () => {
       await migrateAccountTypes();
     } catch (err) {
       console.error('Account-type migration failed (non-fatal):', err.message);
+    }
+    try {
+      // Office approvals made in onboarding reach the welcome packet (2026-11-13).
+      const r = await require('./onboarding/packetSync').repairOnce(db, { findItem: require('./onboarding/track').findItem, now: new Date().toISOString() });
+      if (!r.skipped) console.log(`[onboarding] packet sync: ${r.rekinded} file(s) refiled, ${r.accepted} accepted, ${r.officeDone} office item(s) done, ${r.unsure} file(s) left for the office to type.`);
+    } catch (err) {
+      console.error('Onboarding packet sync repair failed (non-fatal):', err.message);
     }
     try {
       await migrateFamilyLinks();
