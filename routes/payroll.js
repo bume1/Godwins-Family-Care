@@ -544,7 +544,15 @@ module.exports = function createPayrollRoutes(deps) {
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
-        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
+        // How it was sent and how many payments are marked paid, so the list
+        // reads true at a glance (owner, 2026-11-14: an approved run sent by
+        // Cash App showed only "approved").
+        runs: runs.map(r => {
+          const toPay = (r.workers || []).filter(w => w.pay);
+          const p2p = toPay.filter(w => w.channel === 'p2p').length;
+          return { id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null,
+            people: toPay.length, markedPaid: toPay.filter(w => (r.payments || {})[w.userId]).length, p2p };
+        })
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         // Both schedules, each with the period running today and the pay
@@ -1049,6 +1057,8 @@ module.exports = function createPayrollRoutes(deps) {
       if (d.error) return res.status(409).json(d);
       const w = d.run.workers.find(x => String(x.userId) === uid);
       if (w && w.pay && w.pay.netCents < 0) return res.status(400).json({ error: 'Those taxes are more than their pay.', code: 'MANUAL_TAX_TOO_HIGH' });
+      // Remember the gross these taxes were entered against.
+      if (manualTaxes[uid] && w && w.pay) { manualTaxes[uid].grossCents = w.pay.grossCents; w.manualTaxes.grossCents = w.pay.grossCents; w.manualTaxes.grossChanged = false; }
       runs[i] = { ...runs[i], ...d.run, status: 'draft', rebuiltAt: nowIso() };
       await db.set(RUNS, runs);
       await logActivity(req.user.id, req.user.name, b.clear === true ? 'payroll_manual_taxes_cleared' : 'payroll_manual_taxes_set', 'payroll_run', runs[i].id, { userId: uid, reason: b.clear === true ? null : manualTaxes[uid].reason });
@@ -1066,23 +1076,31 @@ module.exports = function createPayrollRoutes(deps) {
     const d = (c) => (Number(c || 0) / 100).toFixed(2);
     const h = (m) => (Number(m || 0) / 60).toFixed(2);
     const q = (v) => { const t = String(v === null || v === undefined ? '' : v); return /^[=+\-@]/.test(t) ? `"'${t.replace(/"/g, '""')}"` : `"${t.replace(/"/g, '""')}"`; };
-    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Missing Paperwork'];
+    // Each kind of pay in its own column, and every line added by hand named
+    // with its note (owner, 2026-11-14: a bonus must show as a line, not only
+    // as a bigger gross).
+    const amt = (w, codes) => (w.earnings || []).filter(e => codes.includes(e.code)).reduce((a, e) => a + (e.amountCents || 0), 0);
+    const kinds = [['Regular Pay', ['regular']], ['Overtime Pay', ['overtime']], ['Salary', ['salary']], ['Visit and Exam Pay', ['per_visit', 'per_exam']], ['Bonus', ['bonus']], ['Correction', ['correction']]];
+    const added = (w) => (run.adjustments || []).filter(a => String(a.userId) === String(w.userId))
+      .map(a => `${engine.ADJUSTMENT_TYPES[a.type] || a.type} ${a.amountCents < 0 ? '-' : ''}$${d(Math.abs(a.amountCents))}: ${a.note || ''}`).join('; ');
+    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', ...kinds.map(k => k[0]), 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Added Lines', 'Taxes Entered By Hand', 'Missing Paperwork'];
     const lines = [head.map(q).join(',')];
     for (const w of run.workers || []) {
       const reg = (w.earnings || []).find(e => e.code === 'regular'), ot = (w.earnings || []).find(e => e.code === 'overtime');
       const p = w.pay;
       const pay = (run.payments || {})[w.userId];
       lines.push([q(w.name), q((p && p.workState) || w.workState || 'GA'), h(reg && reg.minutes), h(ot && ot.minutes),
+        ...kinds.map(k => d(amt(w, k[1]))),
         p ? d(p.grossCents) : '', p ? d(p.taxes.federal) : '', p ? d(p.taxes.socialSecurity) : '', p ? d(p.taxes.medicare) : '',
         p ? d((p.taxes.georgia || 0) + (p.taxes.state || 0)) : '', p ? d(p.netCents) : '', p ? d(p.reimbursementsCents) : '',
         p ? d(p.employer.socialSecurity) : '', p ? d(p.employer.medicare) : '', p ? d(p.employer.futa) : '',
         p ? d((p.employer.gaSuta || 0) + (p.employer.stateSuta || 0)) : '',
-        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q((w.missing || []).join('; '))].join(','));
+        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q(added(w)), q(w.manualTaxes ? `Yes: ${w.manualTaxes.reason || ''}` : ''), q((w.missing || []).join('; '))].join(','));
     }
     const t = run.totals || {};
-    lines.push([q('TOTAL'), q(''), '', '', d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
+    lines.push([q('TOTAL'), q(''), '', '', ...kinds.map(k => d((run.workers || []).reduce((a, w) => a + amt(w, k[1]), 0))), d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
       d((t.georgiaCents || 0) + (t.stateWithholdingCents || 0)), d(t.netCents), d(t.reimbursementsCents),
-      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q('')].join(','));
+      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q(''), q(''), q('')].join(','));
     await logActivity(req.user.id, req.user.name, 'payroll_register_exported', 'payroll_run', run.id, { period: run.period && run.period.start });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', contentDisposition('attachment', `payroll_register_${(run.period && run.period.payDate) || run.id}.csv`));
@@ -1136,6 +1154,26 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(RUNS, runs);
     await logActivity(req.user.id, req.user.name, 'payroll_adjustment_added', 'payroll_run', runs[i].id, { type: b.type, amountCents: cents });
     res.json({ run: runs[i] });
+  });
+
+  // Remove a line added to a draft (owner, 2026-11-14: a bonus entered by
+  // mistake must come off before approval).
+  router.delete('/api/payroll/admin/runs/:id/adjustments/:adjId', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      if (runs[i].status !== 'draft') return res.status(409).json({ error: 'An approved run is locked. Add the correction to the next run.', code: 'RUN_LOCKED' });
+      const gone = (runs[i].adjustments || []).find(a => a.id === req.params.adjId);
+      if (!gone) return res.status(404).json({ error: 'That line is not on this payroll.' });
+      const adjustments = runs[i].adjustments.filter(a => a.id !== gone.id);
+      const d = await draftFor(runs[i].period, await readSettings(), adjustments, runs[i].channels, runs[i].manualTaxes);
+      if (d.error) return res.status(409).json(d);
+      runs[i] = { ...runs[i], ...d.run, adjustments, rebuiltAt: nowIso() };
+      await db.set(RUNS, runs);
+      await logActivity(req.user.id, req.user.name, 'payroll_adjustment_removed', 'payroll_run', runs[i].id, { type: gone.type, amountCents: gone.amountCents, userId: gone.userId });
+      res.json({ run: runs[i] });
+    } catch (e) { console.error('Remove adjustment error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   // Approve: only the owner, never with anyone missing paperwork. The run is
@@ -1334,7 +1372,7 @@ module.exports = function createPayrollRoutes(deps) {
     const w = runs[i].workers.find(x => x.userId === String(req.params.userId) && x.pay);
     if (!w) return res.status(404).json({ error: 'Nobody by that id is paid in this run.' });
     const conf = str((req.body || {}).confirmation, 80);
-    if (!conf) return res.status(400).json({ error: 'Paste the PNC confirmation number (or the check number).', code: 'PAYMENT_CONFIRMATION' });
+    if (!conf) return res.status(400).json({ error: 'Paste the confirmation number: the PNC or Cash App transaction number, or the check number.', code: 'PAYMENT_CONFIRMATION' });
     runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name } };
     // Paid only when every worker has a confirmation.
     const everyone = runs[i].workers.filter(x => x.pay).every(x => runs[i].payments[x.userId]);

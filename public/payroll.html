@@ -96,6 +96,7 @@ const call = async (path, opts = {}) => {
 };
 const post = (p, b) => call(p, { method: 'POST', body: JSON.stringify(b || {}) });
 const del = (p) => call(p, { method: 'DELETE' });
+const ADJ_LABEL = { bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction' };
 const put = (p, b) => call(p, { method: 'PUT', body: JSON.stringify(b || {}) });
 const enc = encodeURIComponent;
 const usd = (c) => (c === null || c === undefined ? '—' : `$${(Number(c) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`);
@@ -221,6 +222,10 @@ const RunDetail = ({ id, onBack, reload }) => {
                     {w.manualTaxes && <span className="chip bg-amber-50 text-amber-800 ml-1">TAXES ENTERED BY HAND</span>}
                     {run.status === 'draft' && SUPER && <button className="underline text-primary text-[12px] ml-2" onClick={() => setTaxFor(taxFor === w.userId ? null : w.userId)}>{w.manualTaxes ? 'Edit Taxes' : 'Enter Taxes'}</button>}
                     {w.manualTaxes && <div className="text-stone-500 text-[12px]">{w.manualTaxes.reason} ({w.manualTaxes.by})</div>}
+                    {w.manualTaxes && w.manualTaxes.grossChanged && <div className="text-amber-800 text-[12px]"><b>Gross changed</b> from {usd(w.manualTaxes.grossCents)} since these taxes were entered. Check them under Edit Taxes.</div>}
+                    {(run.adjustments || []).filter(a => String(a.userId) === String(w.userId)).map(a => (
+                      <div key={a.id} className="text-[12px] text-primary">+ {ADJ_LABEL[a.type] || a.type} {usd(a.amountCents)}{a.note ? ` · ${a.note}` : ''}
+                        {run.status === 'draft' && <button className="underline text-red-700 ml-2" disabled={busy} onClick={() => window.confirm(`Remove this ${(ADJ_LABEL[a.type] || a.type).toLowerCase()} line?`) && act(() => del(`/api/payroll/admin/runs/${enc(id)}/adjustments/${enc(a.id)}`), 'Removed.')}>Remove</button>}</div>))}
                     {w.missing.length > 0 && <div className="text-red-700 text-[12px]">Missing: {w.missing.join(', ')}</div>}
                     {(w.paperworkOwed || []).length > 0 && <div className="text-amber-800 text-[12px]">Still owed, not holding pay: {w.paperworkOwed.join(', ')}</div>}</td>
                   <td>{reg ? hrs(reg.minutes) : '—'}</td><td>{ot ? hrs(ot.minutes) : ''}</td>
@@ -546,7 +551,10 @@ const Runs = ({ data, reload }) => {
       {data.runs.map(r => (
         <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
           <span><b className="text-primary">{day(r.period.start)} to {day(r.period.end)}</b><div className="text-[12.5px] text-stone-500">{r.schedule ? `${schedLabel(r.schedule)} · ` : ''}Pay date {day(r.period.payDate)}{r.blocked && r.blocked.length ? ` · ${r.blocked.length} missing paperwork` : ''}</div></span>
-          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>{r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}</span>
+          <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>
+            {r.p2p > 0 && <span className="chip ml-1">{r.p2p === r.people ? 'P2P' : `P2P · ${r.p2p} of ${r.people}`}</span>}
+            {r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}
+            {r.status === 'approved' && r.people > 0 && <div className="text-[12px] text-amber-800">{r.markedPaid} of {r.people} marked paid. Open it and mark each payment on the Payment Sheet.</div>}</span>
         </button>
       ))}
     </Card>

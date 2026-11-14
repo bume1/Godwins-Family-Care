@@ -135,3 +135,79 @@ test('My GFC reads a payday still ahead as Payday, not Paid', () => {
   assert.match(src, /p\.payDate > todayYmd\(\) \? 'Payday' : 'Paid'/);
   assert.match(src, /timeZone: 'America\/New_York'/);
 });
+
+// Lines added by hand (owner, 2026-11-14): a bonus shows as its own line on
+// the draft, in the register CSV and on the stub, not only as a bigger gross.
+test('a bonus is its own line in the register CSV and on the stub, and can be removed from a draft', async () => {
+  const w = world();
+  let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const runId = r.body.run.id;
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '50', note: 'Emergency Tuesday hours' });
+  assert.equal(r.status, 200);
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '10', note: 'Entered twice by mistake' });
+  const extra = r.body.run.adjustments.find(a => a.amountCents === 1000);
+  r = await w.call('own', 'DELETE', `/api/payroll/admin/runs/${runId}/adjustments/${extra.id}`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.run.adjustments.map(a => a.amountCents), [5000], 'the mistaken line is gone');
+  const pat = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.ok(pat.earnings.some(e => e.code === 'bonus' && e.amountCents === 5000));
+  // Register CSV: a Bonus column and the line named with its note.
+  r = await w.call('own', 'GET', `/api/payroll/admin/runs/${runId}/register.csv`);
+  const csv = r.buf.toString().trim().split('\r\n');
+  const head = csv[0].split('","').map(x => x.replace(/"/g, ''));
+  const row = csv.find(l => l.startsWith('"Pat Care"'));
+  const cells = row.match(/("([^"]|"")*"|[^,]*)(,|$)/g).map(c => c.replace(/,$/, '').replace(/^"|"$/g, ''));
+  assert.equal(cells[head.indexOf('Bonus')], '50.00');
+  assert.equal(cells[head.indexOf('Regular Pay')], '288.00', '16 hours at $18');
+  assert.match(cells[head.indexOf('Added Lines')], /Bonus \$50\.00: Emergency Tuesday hours/);
+  assert.equal(Number(cells[head.indexOf('Gross')]), 338, 'gross is regular pay plus the bonus');
+  // Approved: the stub lists the bonus with its note.
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'test' });
+  const stub = w.store.get('staff_paystubs').find(x => x.userId === 'cg1');
+  const t = text(await w.payroll.stubPdfForRow(stub));
+  assert.match(t, /Bonus · Emergency Tuesday hours\s+\$50\.00/);
+  // An approved run's lines cannot be removed.
+  r = await w.call('own', 'DELETE', `/api/payroll/admin/runs/${runId}/adjustments/${pat.earnings ? r.body.run.adjustments[0].id : ''}`);
+  assert.equal(r.body.code, 'RUN_LOCKED');
+});
+
+test('taxes entered by hand warn when a later line changes gross', async () => {
+  const w = world();
+  let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const runId = r.body.run.id;
+  r = await w.call('own', 'PUT', `/api/payroll/admin/runs/${runId}/manual-taxes/cg1`, { federal: '0', socialSecurity: '17.86', medicare: '4.18', stateTax: '0', reason: 'W-4 pending' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  let pat = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.equal(pat.manualTaxes.grossChanged, false);
+  assert.equal(pat.manualTaxes.grossCents, 28800);
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '50', note: 'Holiday' });
+  pat = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.equal(pat.manualTaxes.grossChanged, true, 'gross moved after the taxes were entered');
+  assert.equal(pat.pay.taxes.socialSecurity, 1786, 'hand-entered taxes are not changed by the app');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.match(page, /manualTaxes\.grossChanged && <div/);
+});
+
+// The runs list says how a run was sent and how far it is paid (owner,
+// 2026-11-14: a run sent by Cash App read only "approved").
+test('the runs list shows P2P and how many payments are marked paid; Paid once all are', async () => {
+  const w = world();
+  let r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const runId = r.body.run.id;
+  await w.call('own', 'PUT', `/api/payroll/admin/runs/${runId}/channel`, { default: 'p2p' });
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'test' });
+  const row = async () => (await w.call('own', 'GET', '/api/payroll/admin/overview')).body.runs.find(x => x.id === runId);
+  let x = await row();
+  assert.equal(x.status, 'approved'); assert.equal(x.p2p, 2); assert.equal(x.people, 2); assert.equal(x.markedPaid, 0);
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, {});
+  assert.match(r.body.error, /Cash App/, 'the prompt names Cash App');
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'CA-1' });
+  x = await row();
+  assert.equal(x.status, 'approved'); assert.equal(x.markedPaid, 1);
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${runId}/payments/cg2`, { confirmation: 'CA-2' });
+  x = await row();
+  assert.equal(x.status, 'paid'); assert.equal(x.markedPaid, 2);
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.match(page, /r\.p2p === r\.people \? 'P2P'/);
+  assert.match(page, /marked paid\. Open it and mark each payment on the Payment Sheet/);
+});
