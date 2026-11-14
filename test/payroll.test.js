@@ -103,7 +103,7 @@ test('a form is a signature: typed name and agreement, or nothing saves', () => 
 
 test('who is missing what: a run refuses anyone without W-4, G-4, SSN, I-9 or pay method', () => {
   const p = pp.defaultProfile({ id: 'u', role: 'user' });
-  assert.deepEqual(pp.missingForPay(p).slice(0, 5), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9']);
+  assert.deepEqual(pp.missingForPay(p).slice(0, 6), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9 Section 1 (theirs)', 'I-9 Section 2 (the office)'], 'both halves of the I-9 are named');
   const ready = { ...p, payMethod: { method: 'check' }, ssn: { last4: '6789' }, w4: {}, g4: {}, i9: { section1: {}, section2: {} }, hourlyRateCents: 3000 };
   assert.deepEqual(pp.missingForPay(ready), []);
   assert.deepEqual(pp.missingForPay({ ...ready, i9: { section1: {} } }), ['I-9 Section 2 (the office)']);
@@ -514,7 +514,7 @@ test('the owner sets each schedule\'s first Monday on Settings, and a non-Monday
 test('an I-9 on file from before counts as complete; the copy must be filed first', () => {
   const pp = require('../payrollProfiles');
   const base = { ...pp.defaultProfile({ id: 'x', role: 'user' }), w4: {}, g4: {}, ssn: { last4: '1' }, payMethod: { method: 'check' } };
-  assert.ok(pp.missingForPay(base).includes('I-9'));
+  assert.ok(pp.missingForPay(base).includes('I-9 Section 1 (theirs)'));
   assert.equal(pp.normalizeI9OnFile({ firstDay: '2025-03-03' }, { at: 'now', by: 'A' }).code, 'I9_COPY_NOT_FILED');
   assert.equal(pp.normalizeI9OnFile({ copyFiled: true }, { at: 'now', by: 'A' }).code, 'I9_FIRST_DAY');
   const n = pp.normalizeI9OnFile({ firstDay: '2025-03-03', copyFiled: true, source: 'gusto' }, { at: 'now', by: 'A' });

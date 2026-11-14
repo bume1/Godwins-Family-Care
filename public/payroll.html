@@ -491,8 +491,12 @@ const Paperwork = ({ p, openPdf }) => {
     items.push(['W-4', !!pr.w4, pr.w4 && 'w4']);
     if ((pr.workState || 'GA') === 'GA') items.push(['G-4', !!pr.g4, pr.g4 && 'g4']);
     else if (pr.stateCert) items.push([`${stName(pr.stateCert.state)} certificate`, true, 'state']);
-    items.push(['I-9', !!((i9.section1 && i9.section2) || i9.onFile), i9.section1 && 'i9',
-      i9.onFile ? `on file from ${i9.onFile.source === 'paper' ? 'paper' : 'Gusto'}` : i9.section1 && !i9.section2 ? 'Section 2 is yours, below' : !i9.section1 ? 'waiting on their Section 1' : null]);
+    // Both halves of the I-9, each shown (owner, 2026-11-14).
+    if (i9.onFile) items.push(['I-9', true, null, `on file from ${i9.onFile.source === 'paper' ? 'paper' : 'Gusto'}`]);
+    else {
+      items.push(['I-9 Section 1', !!i9.section1, i9.section1 && 'i9', i9.section1 ? 'theirs' : 'theirs, not signed yet']);
+      items.push(['I-9 Section 2', !!i9.section2, i9.section2 && 'i9', i9.section2 ? 'yours' : i9.section1 ? 'yours, below' : 'yours, after their Section 1']);
+    }
   }
   if (con) items.push(pr.taxResidence === 'foreign' ? ['W-8BEN', !!pr.w8ben, pr.w8ben && 'w8ben'] : ['W-9', !!pr.w9, pr.w9 && 'w9']);
   return (

@@ -8,9 +8,9 @@ const pp = require('../payrollProfiles');
 test('a contractor owes a W-9, an employee the employee forms, a hybrid both', () => {
   const c = pp.missingForPerson({ workerType: '1099', payType: 'hourly' });
   assert.ok(c.includes('W-9'));
-  for (const f of ['W-4', 'G-4', 'I-9', 'SSN']) assert.ok(!c.includes(f), f);
+  for (const f of ['W-4', 'G-4', 'I-9 Section 1 (theirs)', 'I-9 Section 2 (the office)', 'SSN']) assert.ok(!c.includes(f), f);
   const e = pp.missingForPerson({ workerType: 'W2', payType: 'hourly', isCaregiver: true });
-  for (const f of ['W-4', 'G-4', 'I-9', 'SSN']) assert.ok(e.includes(f), f);
+  for (const f of ['W-4', 'G-4', 'I-9 Section 1 (theirs)', 'I-9 Section 2 (the office)', 'SSN']) assert.ok(e.includes(f), f);
   assert.ok(!e.includes('W-9'));
   const h = pp.missingForPerson({ workerType: 'HYBRID', payType: 'hourly', isCaregiver: true });
   assert.ok(h.includes('W-4') && h.includes('W-9'));

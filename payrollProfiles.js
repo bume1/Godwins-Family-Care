@@ -356,7 +356,12 @@ function missingForPay(p, { asContractor = false, p2p = false } = {}) {
   if (!p.ssn) out.push('SSN');
   if (!p.w4) out.push('W-4');
   if (!p.g4 && (p.workState || 'GA') === 'GA') out.push('G-4');
-  if (!i9Complete(p)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
+  // The I-9's two halves are named apart (owner, 2026-11-14), so a missing
+  // Section 1 is never hidden behind "I-9".
+  if (!i9Complete(p)) {
+    if (!(p.i9 && p.i9.section1)) out.push('I-9 Section 1 (theirs)');
+    out.push('I-9 Section 2 (the office)');
+  }
   if (p.payType === 'hourly' && !p.isCaregiver && !(p.hourlyRateCents > 0)) out.push('Hourly rate');
   if (p.payType === 'salary' && !(p.salaryAnnualCents > 0)) out.push('Salary');
   if (p.payType === 'per_visit' && !(p.perVisitRateCents > 0)) out.push('Per-visit rate');
