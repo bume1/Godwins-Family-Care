@@ -27,7 +27,19 @@ const { useState, useEffect } = React;
 .mp-item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--edge);border-radius:12px;background:#fff}
 .mp-item b{font-size:14.5px} .mp-item small{display:block;color:var(--mut);font-size:12.5px}
 .mp-line{display:grid;grid-template-columns:120px 1fr 90px 70px 90px 30px;gap:6px;align-items:center;margin-bottom:6px}
-@media(max-width:700px){.mp-line{grid-template-columns:1fr 1fr}}`;
+@media(max-width:700px){.mp-line{grid-template-columns:1fr 1fr}}
+.mp-ws{position:fixed;inset:0;z-index:100000;background:#f4f1ea;display:flex;flex-direction:column}
+.mp-ws-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--edge);background:#fff}
+.mp-ws-head .mg-btn{white-space:nowrap} .mp-ws-head b{font-size:16px} .mp-ws-head small{display:block;color:var(--mut);font-size:12.5px}
+.mp-ws-body{flex:1;display:grid;grid-template-columns:minmax(0,3fr) minmax(320px,2fr);min-height:0}
+.mp-ws-pdf{overflow:auto;padding:16px;background:#e7e3db}
+.mp-ws-page{position:relative;margin:0 auto 14px;max-width:820px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.18)}
+.mp-ws-page img{display:block;width:100%;height:auto}
+.mp-ws-hl{position:absolute;border:2px solid #c8961e;background:rgba(200,150,30,.2);border-radius:3px;pointer-events:none}
+.mp-ws-fields{overflow:auto;padding:16px 20px 28px;background:#fff;border-left:1px solid var(--edge)}
+.mp-ws-msg{color:var(--mut);text-align:center;padding:40px 10px}
+.mp-ws-toggle{display:none}
+@media(max-width:899px){.mp-ws-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.mp-ws-pdf{max-height:45vh}.mp-ws-pdf.mp-hide{display:none}.mp-ws-fields{border-left:0;border-top:1px solid var(--edge)}.mp-ws-toggle{display:inline-flex}}`;
   document.head.appendChild(el);
 })();
 
@@ -46,9 +58,9 @@ const today = () => new Date().toISOString().slice(0, 10);
 function Sign({ statement, form, set }) {
   return (
     <div>
-      <label className="mp-check"><input type="checkbox" checked={!!form.agree} onChange={e => set({ ...form, agree: e.target.checked })} /><span>{statement}</span></label>
+      <label className="mp-check"><input name="agree" type="checkbox" checked={!!form.agree} onChange={e => set({ ...form, agree: e.target.checked })} /><span>{statement}</span></label>
       <label>Type your full name to sign</label>
-      <input type="text" value={form.signedName || ''} onChange={e => set({ ...form, signedName: e.target.value })} />
+      <input name="signedName" type="text" value={form.signedName || ''} onChange={e => set({ ...form, signedName: e.target.value })} />
     </div>
   );
 }
@@ -61,17 +73,17 @@ function FormBody({ which, data, form, set }) {
   if (which === 'w4') return (
     <div>
       <label>Step 1(c): filing status</label>
-      <select value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
+      <select name="filingStatus" value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
         <option value="">Choose…</option>{Object.entries(o.w4Filing).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
-      <label className="mp-check"><input type="checkbox" checked={!!form.multipleJobs} onChange={e => set({ ...form, multipleJobs: e.target.checked })} /><span>Step 2(c): I have two jobs at once, or I'm married filing jointly and my spouse also works, and the two jobs pay about the same.</span></label>
+      <label className="mp-check"><input name="multipleJobs" type="checkbox" checked={!!form.multipleJobs} onChange={e => set({ ...form, multipleJobs: e.target.checked })} /><span>Step 2(c): I have two jobs at once, or I'm married filing jointly and my spouse also works, and the two jobs pay about the same.</span></label>
       <div className="mp-grid">
-        <div><label>Step 3: dependents amount ($ a year)</label><input type="number" min="0" value={form.dependentsAmount || ''} onChange={e => set({ ...form, dependentsAmount: e.target.value })} /></div>
-        <div><label>Step 4(a): other income ($ a year)</label><input type="number" min="0" value={form.otherIncome || ''} onChange={e => set({ ...form, otherIncome: e.target.value })} /></div>
-        <div><label>Step 4(b): deductions ($ a year)</label><input type="number" min="0" value={form.deductions || ''} onChange={e => set({ ...form, deductions: e.target.value })} /></div>
-        <div><label>Step 4(c): extra withholding ($ each paycheck)</label><input type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
+        <div><label>Step 3: dependents amount ($ a year)</label><input name="dependentsAmount" type="number" min="0" value={form.dependentsAmount || ''} onChange={e => set({ ...form, dependentsAmount: e.target.value })} /></div>
+        <div><label>Step 4(a): other income ($ a year)</label><input name="otherIncome" type="number" min="0" value={form.otherIncome || ''} onChange={e => set({ ...form, otherIncome: e.target.value })} /></div>
+        <div><label>Step 4(b): deductions ($ a year)</label><input name="deductions" type="number" min="0" value={form.deductions || ''} onChange={e => set({ ...form, deductions: e.target.value })} /></div>
+        <div><label>Step 4(c): extra withholding ($ each paycheck)</label><input name="extraWithholding" type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
       </div>
-      <label className="mp-check"><input type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt: I had no federal income tax liability last year and expect none this year.</span></label>
+      <label className="mp-check"><input name="exempt" type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt: I had no federal income tax liability last year and expect none this year.</span></label>
       <p className="mg-note">The IRS worksheets for Steps 2 to 4 are on the official form at irs.gov/FormW4. Enter the totals here.</p>
       <Sign statement={PERJURY} form={form} set={set} />
     </div>
@@ -79,15 +91,15 @@ function FormBody({ which, data, form, set }) {
   if (which === 'g4') return (
     <div>
       <label>Line 3: marital status</label>
-      <select value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
+      <select name="filingStatus" value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
         <option value="">Choose…</option>{Object.entries(o.g4Filing).map(([k, v]) => <option key={k} value={k}>{k}. {v}</option>)}
       </select>
       <div className="mp-grid">
-        <div><label>Line 4: dependent allowances</label><input type="number" min="0" value={form.dependentAllowances || ''} onChange={e => set({ ...form, dependentAllowances: e.target.value })} /></div>
-        <div><label>Line 5: additional allowances</label><input type="number" min="0" value={form.additionalAllowances || ''} onChange={e => set({ ...form, additionalAllowances: e.target.value })} /></div>
-        <div><label>Line 6: extra withholding ($ each paycheck)</label><input type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
+        <div><label>Line 4: dependent allowances</label><input name="dependentAllowances" type="number" min="0" value={form.dependentAllowances || ''} onChange={e => set({ ...form, dependentAllowances: e.target.value })} /></div>
+        <div><label>Line 5: additional allowances</label><input name="additionalAllowances" type="number" min="0" value={form.additionalAllowances || ''} onChange={e => set({ ...form, additionalAllowances: e.target.value })} /></div>
+        <div><label>Line 6: extra withholding ($ each paycheck)</label><input name="extraWithholding" type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
       </div>
-      <label className="mp-check"><input type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt from Georgia withholding (line 8).</span></label>
+      <label className="mp-check"><input name="exempt" type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt from Georgia withholding (line 8).</span></label>
       <Sign statement={PERJURY} form={form} set={set} />
     </div>
   );
@@ -95,37 +107,37 @@ function FormBody({ which, data, form, set }) {
     <div>
       <p className="mg-note">For {data.workStateName}, where you work.</p>
       <label>Filing status</label>
-      <select value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
+      <select name="filingStatus" value={form.filingStatus || ''} onChange={e => set({ ...form, filingStatus: e.target.value })}>
         <option value="">Choose…</option><option value="single">Single</option><option value="married">Married</option>
       </select>
       <div className="mp-grid">
-        <div><label>Allowances</label><input type="number" min="0" value={form.allowances || ''} onChange={e => set({ ...form, allowances: e.target.value })} /></div>
-        <div><label>Extra withholding ($ each paycheck)</label><input type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
+        <div><label>Allowances</label><input name="allowances" type="number" min="0" value={form.allowances || ''} onChange={e => set({ ...form, allowances: e.target.value })} /></div>
+        <div><label>Extra withholding ($ each paycheck)</label><input name="extraWithholding" type="number" min="0" value={form.extraWithholding || ''} onChange={e => set({ ...form, extraWithholding: e.target.value })} /></div>
       </div>
-      <label className="mp-check"><input type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt from {data.workStateName} withholding.</span></label>
+      <label className="mp-check"><input name="exempt" type="checkbox" checked={!!form.exempt} onChange={e => set({ ...form, exempt: e.target.checked })} /><span>Exempt from {data.workStateName} withholding.</span></label>
       <Sign statement={PERJURY} form={form} set={set} />
     </div>
   );
   if (which === 'i9') return (
     <div>
       <label>Section 1: I attest that I am</label>
-      <select value={form.status || ''} onChange={e => set({ ...form, status: e.target.value })}>
+      <select name="status" value={form.status || ''} onChange={e => set({ ...form, status: e.target.value })}>
         <option value="">Choose…</option>{Object.entries(o.i9Status).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
       <div className="mp-grid">
-        <div><label>Date of birth</label><input type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
-        <div><label>Other last names used (if any)</label><input type="text" value={form.otherLastNames || ''} onChange={e => set({ ...form, otherLastNames: e.target.value })} /></div>
-        <div><label>Phone (optional)</label><input type="tel" value={form.phone || ''} onChange={e => set({ ...form, phone: e.target.value })} /></div>
+        <div><label>Date of birth</label><input name="dob" type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
+        <div><label>Other last names used (if any)</label><input name="otherLastNames" type="text" value={form.otherLastNames || ''} onChange={e => set({ ...form, otherLastNames: e.target.value })} /></div>
+        <div><label>Phone (optional)</label><input name="phone" type="tel" value={form.phone || ''} onChange={e => set({ ...form, phone: e.target.value })} /></div>
       </div>
-      {form.status === 'lpr' && <div><label>A-Number or USCIS number</label><input type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} placeholder="7 to 9 digits" /></div>}
+      {form.status === 'lpr' && <div><label>A-Number or USCIS number</label><input name="alienNumber" type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} placeholder="7 to 9 digits" /></div>}
       {form.status === 'authorized' && (
         <div>
-          <div><label>Work authorization expires (if it does)</label><input type="date" value={form.workAuthExpires || ''} onChange={e => set({ ...form, workAuthExpires: e.target.value })} /></div>
+          <div><label>Work authorization expires (if it does)</label><input name="workAuthExpires" type="date" value={form.workAuthExpires || ''} onChange={e => set({ ...form, workAuthExpires: e.target.value })} /></div>
           <p className="mg-note">Give one of these three.</p>
           <div className="mp-grid">
-            <div><label>A-Number or USCIS number</label><input type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} /></div>
-            <div><label>Form I-94 admission number</label><input type="text" autoComplete="off" value={form.i94Number || ''} onChange={e => set({ ...form, i94Number: e.target.value })} /></div>
-            <div><label>Foreign passport number and country</label><input type="text" autoComplete="off" value={form.passport || ''} onChange={e => set({ ...form, passport: e.target.value })} /></div>
+            <div><label>A-Number or USCIS number</label><input name="alienNumber" type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} /></div>
+            <div><label>Form I-94 admission number</label><input name="i94Number" type="text" autoComplete="off" value={form.i94Number || ''} onChange={e => set({ ...form, i94Number: e.target.value })} /></div>
+            <div><label>Foreign passport number and country</label><input name="passport" type="text" autoComplete="off" value={form.passport || ''} onChange={e => set({ ...form, passport: e.target.value })} /></div>
           </div>
         </div>
       )}
@@ -134,53 +146,53 @@ function FormBody({ which, data, form, set }) {
     </div>
   );
   if (which === 'ssn') return (
-    <div><label>Social Security number</label><input type="password" autoComplete="off" value={form.ssn || ''} onChange={e => set({ ...form, ssn: e.target.value })} placeholder="9 digits" />
+    <div><label>Social Security number</label><input name="ssn" type="password" autoComplete="off" value={form.ssn || ''} onChange={e => set({ ...form, ssn: e.target.value })} placeholder="9 digits" />
       <p className="mg-note">Stored encrypted. Only the last four show after you save.</p></div>
   );
   if (which === 'w9') return (
     <div>
-      <label>Name on your tax return</label><input type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} />
-      <label>Business name (if different)</label><input type="text" value={form.businessName || ''} onChange={e => set({ ...form, businessName: e.target.value })} />
+      <label>Name on your tax return</label><input name="name" type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} />
+      <label>Business name (if different)</label><input name="businessName" type="text" value={form.businessName || ''} onChange={e => set({ ...form, businessName: e.target.value })} />
       <label>Tax classification</label>
-      <select value={form.taxClass || ''} onChange={e => set({ ...form, taxClass: e.target.value })}><option value="">Choose…</option>{Object.entries(o.w9Class).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+      <select name="taxClass" value={form.taxClass || ''} onChange={e => set({ ...form, taxClass: e.target.value })}><option value="">Choose…</option>{Object.entries(o.w9Class).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
       <div className="mp-grid">
-        <div><label>Taxpayer ID type</label><select value={form.tinType || 'ssn'} onChange={e => set({ ...form, tinType: e.target.value })}><option value="ssn">SSN</option><option value="ein">EIN</option></select></div>
-        <div><label>Taxpayer ID</label><input type="password" autoComplete="off" value={form.tin || ''} onChange={e => set({ ...form, tin: e.target.value })} /></div>
+        <div><label>Taxpayer ID type</label><select name="tinType" value={form.tinType || 'ssn'} onChange={e => set({ ...form, tinType: e.target.value })}><option value="ssn">SSN</option><option value="ein">EIN</option></select></div>
+        <div><label>Taxpayer ID</label><input name="tin" type="password" autoComplete="off" value={form.tin || ''} onChange={e => set({ ...form, tin: e.target.value })} /></div>
       </div>
-      <label>Address</label><input type="text" value={form.address || ''} onChange={e => set({ ...form, address: e.target.value })} />
+      <label>Address</label><input name="address" type="text" value={form.address || ''} onChange={e => set({ ...form, address: e.target.value })} />
       <Sign statement="Under penalties of perjury, I certify that the number shown is my correct taxpayer identification number and that I am a U.S. person." form={form} set={set} />
     </div>
   );
   if (which === 'pay') return (
     <div>
       <label>How you are paid</label>
-      <select value={form.method || ''} onChange={e => set({ ...form, method: e.target.value })}>
+      <select name="method" value={form.method || ''} onChange={e => set({ ...form, method: e.target.value })}>
         <option value="">Choose…</option>
         {!abroad && <><option value="direct_deposit">Direct deposit</option><option value="check">Paper check</option></>}
         {data.contractor && (abroad ? Object.entries((data.overseas && data.overseas.payMethods) || { wise: 'Wise' }) : [['wise', 'Wise (outside the US)']]).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
       {form.method === 'direct_deposit' && (
         <div>
-          <label>Bank name</label><input type="text" value={form.bankName || ''} onChange={e => set({ ...form, bankName: e.target.value })} />
+          <label>Bank name</label><input name="bankName" type="text" value={form.bankName || ''} onChange={e => set({ ...form, bankName: e.target.value })} />
           <div className="mp-grid">
-            <div><label>Routing number</label><input type="password" autoComplete="off" value={form.routing || ''} onChange={e => set({ ...form, routing: e.target.value })} /></div>
-            <div><label>Account number</label><input type="password" autoComplete="off" value={form.account || ''} onChange={e => set({ ...form, account: e.target.value })} /></div>
+            <div><label>Routing number</label><input name="routing" type="password" autoComplete="off" value={form.routing || ''} onChange={e => set({ ...form, routing: e.target.value })} /></div>
+            <div><label>Account number</label><input name="account" type="password" autoComplete="off" value={form.account || ''} onChange={e => set({ ...form, account: e.target.value })} /></div>
           </div>
           <label>Account type</label>
-          <select value={form.accountType || ''} onChange={e => set({ ...form, accountType: e.target.value })}><option value="">Choose…</option><option value="checking">Checking</option><option value="savings">Savings</option></select>
+          <select name="accountType" value={form.accountType || ''} onChange={e => set({ ...form, accountType: e.target.value })}><option value="">Choose…</option><option value="checking">Checking</option><option value="savings">Savings</option></select>
           <p className="mg-note">I authorize Godwins Family Care to deposit my pay into this account. Stored encrypted; only the last four show after you save.</p>
         </div>
       )}
-      {form.method === 'wise' && <div><label>Wise email</label><input type="email" value={form.wiseEmail || ''} onChange={e => set({ ...form, wiseEmail: e.target.value })} /></div>}
+      {form.method === 'wise' && <div><label>Wise email</label><input name="wiseEmail" type="email" value={form.wiseEmail || ''} onChange={e => set({ ...form, wiseEmail: e.target.value })} /></div>}
       {form.method === 'intl_wire' && (
         <div>
           <div className="mp-grid">
-            <div><label>Bank name</label><input type="text" value={form.bankName || ''} onChange={e => set({ ...form, bankName: e.target.value })} /></div>
-            <div><label>Bank country</label><input type="text" value={form.bankCountry || ''} onChange={e => set({ ...form, bankCountry: e.target.value })} /></div>
-            <div><label>SWIFT / BIC</label><input type="text" value={form.swift || ''} onChange={e => set({ ...form, swift: e.target.value })} /></div>
-            <div><label>IBAN or account number</label><input type="password" autoComplete="off" value={form.iban || ''} onChange={e => set({ ...form, iban: e.target.value })} /></div>
+            <div><label>Bank name</label><input name="bankName" type="text" value={form.bankName || ''} onChange={e => set({ ...form, bankName: e.target.value })} /></div>
+            <div><label>Bank country</label><input name="bankCountry" type="text" value={form.bankCountry || ''} onChange={e => set({ ...form, bankCountry: e.target.value })} /></div>
+            <div><label>SWIFT / BIC</label><input name="swift" type="text" value={form.swift || ''} onChange={e => set({ ...form, swift: e.target.value })} /></div>
+            <div><label>IBAN or account number</label><input name="iban" type="password" autoComplete="off" value={form.iban || ''} onChange={e => set({ ...form, iban: e.target.value })} /></div>
           </div>
-          <label>Account holder name (if not yours)</label><input type="text" value={form.beneficiaryName || ''} onChange={e => set({ ...form, beneficiaryName: e.target.value })} />
+          <label>Account holder name (if not yours)</label><input name="beneficiaryName" type="text" value={form.beneficiaryName || ''} onChange={e => set({ ...form, beneficiaryName: e.target.value })} />
           <p className="mg-note">Stored encrypted; only the last four show after you save. Your bank may charge a fee to receive a wire.</p>
         </div>
       )}
@@ -196,33 +208,33 @@ function FormBody({ which, data, form, set }) {
     <div>
       <p className="mg-note" style={{ marginTop: 0 }}>IRS Form W-8BEN. Signing fills in the official form for you.</p>
       <div className="mp-grid">
-        <div><label>Your full name</label><input type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} /></div>
-        <div><label>Country of citizenship</label><input type="text" value={form.citizenship || ''} onChange={e => set({ ...form, citizenship: e.target.value })} /></div>
-        <div><label>Date of birth</label><input type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
+        <div><label>Your full name</label><input name="name" type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} /></div>
+        <div><label>Country of citizenship</label><input name="citizenship" type="text" value={form.citizenship || ''} onChange={e => set({ ...form, citizenship: e.target.value })} /></div>
+        <div><label>Date of birth</label><input name="dob" type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
       </div>
-      <label>Permanent home address (street)</label><input type="text" value={form.permLine || ''} onChange={e => set({ ...form, permLine: e.target.value })} />
+      <label>Permanent home address (street)</label><input name="permLine" type="text" value={form.permLine || ''} onChange={e => set({ ...form, permLine: e.target.value })} />
       <div className="mp-grid">
-        <div><label>City, region and postal code</label><input type="text" value={form.permCity || ''} onChange={e => set({ ...form, permCity: e.target.value })} /></div>
-        <div><label>Country</label><input type="text" value={form.permCountry || ''} onChange={e => set({ ...form, permCountry: e.target.value })} /></div>
+        <div><label>City, region and postal code</label><input name="permCity" type="text" value={form.permCity || ''} onChange={e => set({ ...form, permCity: e.target.value })} /></div>
+        <div><label>Country</label><input name="permCountry" type="text" value={form.permCountry || ''} onChange={e => set({ ...form, permCountry: e.target.value })} /></div>
       </div>
-      <label>Mailing address, if different (street)</label><input type="text" value={form.mailLine || ''} onChange={e => set({ ...form, mailLine: e.target.value })} />
+      <label>Mailing address, if different (street)</label><input name="mailLine" type="text" value={form.mailLine || ''} onChange={e => set({ ...form, mailLine: e.target.value })} />
       {form.mailLine && <div className="mp-grid">
-        <div><label>City, region and postal code</label><input type="text" value={form.mailCity || ''} onChange={e => set({ ...form, mailCity: e.target.value })} /></div>
-        <div><label>Country</label><input type="text" value={form.mailCountry || ''} onChange={e => set({ ...form, mailCountry: e.target.value })} /></div>
+        <div><label>City, region and postal code</label><input name="mailCity" type="text" value={form.mailCity || ''} onChange={e => set({ ...form, mailCity: e.target.value })} /></div>
+        <div><label>Country</label><input name="mailCountry" type="text" value={form.mailCountry || ''} onChange={e => set({ ...form, mailCountry: e.target.value })} /></div>
       </div>}
       <div className="mp-grid">
-        <div><label>Tax ID number from your country</label><input type="password" autoComplete="off" value={form.foreignTin || ''} onChange={e => set({ ...form, foreignTin: e.target.value })} /></div>
-        <div><label>U.S. SSN or ITIN (only if you have one)</label><input type="password" autoComplete="off" value={form.usTin || ''} onChange={e => set({ ...form, usTin: e.target.value })} /></div>
+        <div><label>Tax ID number from your country</label><input name="foreignTin" type="password" autoComplete="off" value={form.foreignTin || ''} onChange={e => set({ ...form, foreignTin: e.target.value })} /></div>
+        <div><label>U.S. SSN or ITIN (only if you have one)</label><input name="usTin" type="password" autoComplete="off" value={form.usTin || ''} onChange={e => set({ ...form, usTin: e.target.value })} /></div>
       </div>
-      <label className="mp-check"><input type="checkbox" checked={!!form.ftinNotRequired} onChange={e => set({ ...form, ftinNotRequired: e.target.checked })} /><span>My country does not issue or require a tax ID number.</span></label>
+      <label className="mp-check"><input name="ftinNotRequired" type="checkbox" checked={!!form.ftinNotRequired} onChange={e => set({ ...form, ftinNotRequired: e.target.checked })} /><span>My country does not issue or require a tax ID number.</span></label>
       <details style={{ margin: '8px 0' }}><summary>Claiming a tax treaty benefit (most people skip this)</summary>
         <div className="mp-grid">
-          <div><label>Treaty country</label><input type="text" value={form.treatyCountry || ''} onChange={e => set({ ...form, treatyCountry: e.target.value })} /></div>
-          <div><label>Article</label><input type="text" value={form.treatyArticle || ''} onChange={e => set({ ...form, treatyArticle: e.target.value })} /></div>
-          <div><label>Rate (%)</label><input type="text" value={form.treatyRate || ''} onChange={e => set({ ...form, treatyRate: e.target.value })} /></div>
-          <div><label>Type of income</label><input type="text" value={form.treatyIncomeType || ''} onChange={e => set({ ...form, treatyIncomeType: e.target.value })} /></div>
+          <div><label>Treaty country</label><input name="treatyCountry" type="text" value={form.treatyCountry || ''} onChange={e => set({ ...form, treatyCountry: e.target.value })} /></div>
+          <div><label>Article</label><input name="treatyArticle" type="text" value={form.treatyArticle || ''} onChange={e => set({ ...form, treatyArticle: e.target.value })} /></div>
+          <div><label>Rate (%)</label><input name="treatyRate" type="text" value={form.treatyRate || ''} onChange={e => set({ ...form, treatyRate: e.target.value })} /></div>
+          <div><label>Type of income</label><input name="treatyIncomeType" type="text" value={form.treatyIncomeType || ''} onChange={e => set({ ...form, treatyIncomeType: e.target.value })} /></div>
         </div>
-        <label>Conditions of the article you meet</label><input type="text" value={form.treatyConditions || ''} onChange={e => set({ ...form, treatyConditions: e.target.value })} />
+        <label>Conditions of the article you meet</label><input name="treatyConditions" type="text" value={form.treatyConditions || ''} onChange={e => set({ ...form, treatyConditions: e.target.value })} />
       </details>
       <Sign statement="Under penalties of perjury, I declare that I have examined the information on this form and to the best of my knowledge and belief it is true, correct, and complete, and I certify everything in Part III of Form W-8BEN." form={form} set={set} />
     </div>
@@ -231,17 +243,17 @@ function FormBody({ which, data, form, set }) {
     <div>
       <p className="mg-note">Exactly as on your Social Security card. This prints on your W-2 or 1099.</p>
       <div className="mp-grid">
-        <div><label>First name</label><input type="text" value={form.firstName || ''} onChange={e => set({ ...form, firstName: e.target.value })} /></div>
-        <div><label>Middle name or initial</label><input type="text" value={form.middle || ''} onChange={e => set({ ...form, middle: e.target.value })} /></div>
-        <div><label>Last name</label><input type="text" value={form.lastName || ''} onChange={e => set({ ...form, lastName: e.target.value })} /></div>
-        <div><label>Suffix</label><input type="text" value={form.suffix || ''} onChange={e => set({ ...form, suffix: e.target.value })} /></div>
+        <div><label>First name</label><input name="firstName" type="text" value={form.firstName || ''} onChange={e => set({ ...form, firstName: e.target.value })} /></div>
+        <div><label>Middle name or initial</label><input name="middle" type="text" value={form.middle || ''} onChange={e => set({ ...form, middle: e.target.value })} /></div>
+        <div><label>Last name</label><input name="lastName" type="text" value={form.lastName || ''} onChange={e => set({ ...form, lastName: e.target.value })} /></div>
+        <div><label>Suffix</label><input name="suffix" type="text" value={form.suffix || ''} onChange={e => set({ ...form, suffix: e.target.value })} /></div>
       </div>
-      <label>Street address</label><input type="text" value={form.line1 || ''} onChange={e => set({ ...form, line1: e.target.value })} />
-      <label>Apartment or unit</label><input type="text" value={form.line2 || ''} onChange={e => set({ ...form, line2: e.target.value })} />
+      <label>Street address</label><input name="line1" type="text" value={form.line1 || ''} onChange={e => set({ ...form, line1: e.target.value })} />
+      <label>Apartment or unit</label><input name="line2" type="text" value={form.line2 || ''} onChange={e => set({ ...form, line2: e.target.value })} />
       <div className="mp-grid">
-        <div><label>City</label><input type="text" value={form.city || ''} onChange={e => set({ ...form, city: e.target.value })} /></div>
-        <div><label>State</label><input type="text" maxLength={2} value={form.state || ''} onChange={e => set({ ...form, state: e.target.value.toUpperCase() })} /></div>
-        <div><label>ZIP</label><input type="text" inputMode="numeric" value={form.zip || ''} onChange={e => set({ ...form, zip: e.target.value })} /></div>
+        <div><label>City</label><input name="city" type="text" value={form.city || ''} onChange={e => set({ ...form, city: e.target.value })} /></div>
+        <div><label>State</label><input name="state" type="text" maxLength={2} value={form.state || ''} onChange={e => set({ ...form, state: e.target.value.toUpperCase() })} /></div>
+        <div><label>ZIP</label><input name="zip" type="text" inputMode="numeric" value={form.zip || ''} onChange={e => set({ ...form, zip: e.target.value })} /></div>
       </div>
     </div>
   );
@@ -250,7 +262,7 @@ function FormBody({ which, data, form, set }) {
   if (which === 'edelivery') return (
     <div>
       <ul className="mg-note" style={{ paddingLeft: 18, margin: '0 0 10px' }}>{((data.options && data.options.eDelivery && data.options.eDelivery.disclosure) || []).map((t, i) => <li key={i}>{t}</li>)}</ul>
-      <label className="mp-check"><input type="checkbox" checked={!!form.consented} onChange={e => set({ ...form, consented: e.target.checked, disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version })} /><span>I have read the above and agree to get my W-2 or 1099 electronically in My GFC.</span></label>
+      <label className="mp-check"><input name="consented" type="checkbox" checked={!!form.consented} onChange={e => set({ ...form, consented: e.target.checked, disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version })} /><span>I have read the above and agree to get my W-2 or 1099 electronically in My GFC.</span></label>
     </div>
   );
   return null;
@@ -268,6 +280,119 @@ const downloadForm = async (key, setErr) => {
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   } catch (e) { setErr(e.message); }
 };
+
+// The official form beside its questions (owner, 2026-11-14: "people still
+// need to see the full picture of what they are filling out"). The form on
+// the left is the real government form, filled with the answers so far by the
+// server and marked PREVIEW; it redraws half a second after each change, and
+// the box being filled is outlined. Nothing is saved until Sign and Save.
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+const loadPdfJs = () => (window.pdfjsLib ? Promise.resolve(window.pdfjsLib) : (window.__gfcPdfjs = window.__gfcPdfjs || new Promise((ok, bad) => {
+  const el = document.createElement('script');
+  el.src = `${PDFJS}pdf.min.js`;
+  el.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS}pdf.worker.min.js`; ok(window.pdfjsLib); };
+  el.onerror = () => { window.__gfcPdfjs = null; bad(new Error('The form viewer could not load.')); };
+  document.head.appendChild(el);
+})));
+const pagesFromPdf = async (buf) => {
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: buf }).promise;
+  const out = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const pg = await doc.getPage(i);
+    const vp = pg.getViewport({ scale: 1.6 });
+    const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+    await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    out.push(c.toDataURL('image/png'));
+  }
+  doc.destroy();
+  return out;
+};
+const FORM_TITLE = { w4: 'Form W-4', g4: 'Georgia Form G-4', statecert: 'State withholding certificate', i9: 'Form I-9, Section 1', w9: 'Form W-9', w8ben: 'Form W-8BEN' };
+function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) {
+  const route = ROUTE[which];
+  const [pages, setPages] = useState(null);
+  const [boxes, setBoxes] = useState(null);
+  const [active, setActive] = useState(null);
+  const [problem, setProblem] = useState('');
+  const [fallback, setFallback] = useState(null);
+  const [showForm, setShowForm] = useState(true);
+  const abort = React.useRef(null);
+  const prev = React.useRef(form);
+  const hl = React.useRef(null);
+  useEffect(() => {
+    const was = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    call(`/api/my/pay-setup/preview/${route}/fields`).then(setBoxes).catch(() => setBoxes({ pages: [], fields: {} }));
+    return () => { document.body.style.overflow = was; if (abort.current) abort.current.abort(); if (fallback) URL.revokeObjectURL(fallback); };
+  }, []);
+  // The answer that just changed is the box to outline.
+  useEffect(() => {
+    const changed = Object.keys(form).find(k => form[k] !== prev.current[k]);
+    if (changed) setActive(changed);
+    prev.current = form;
+  }, [form]);
+  const body = JSON.stringify(form);
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      if (abort.current) abort.current.abort();
+      const ctl = new AbortController(); abort.current = ctl;
+      try {
+        const res = await fetch(`/api/my/pay-setup/preview/${route}`, { method: 'POST', signal: ctl.signal, headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' }, body });
+        if (!res.ok) { let m = 'The form could not be drawn.'; try { m = (await res.json()).error || m; } catch (e) { /* not json */ } setProblem(m); return; }
+        const buf = await res.arrayBuffer();
+        if (ctl.signal.aborted) return;
+        setProblem('');
+        try { const imgs = await pagesFromPdf(buf); if (!ctl.signal.aborted) setPages(imgs); }
+        catch (e) { setFallback(URL.createObjectURL(new Blob([buf], { type: 'application/pdf' }))); }
+      } catch (e) { if (e.name !== 'AbortError') setProblem('The form could not be drawn. Your answers are still here.'); }
+    }, pages ? 500 : 0);
+    return () => clearTimeout(t);
+  }, [body]);
+  // Bring the outlined box into view.
+  useEffect(() => { if (hl.current && hl.current.scrollIntoView) hl.current.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [active, pages]);
+  const marks = (boxes && active && boxes.fields[active]) || [];
+  const firstMark = marks[0];
+  // Drawn on the page body, so no container around Pay Setup can sit it
+  // under the app's header or bottom menu.
+  return ReactDOM.createPortal(
+    <div className="mp-ws mygfc mp-form" role="dialog" aria-modal="true" aria-label={FORM_TITLE[which]}>
+      <div className="mp-ws-head">
+        <div><b>{FORM_TITLE[which]}</b><small>The official form fills in as you answer. It is a preview until you sign.</small></div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="mg-btn mg-ghost mg-sm mp-ws-toggle" onClick={() => setShowForm(!showForm)}>{showForm ? 'Hide Form' : 'Show Form'}</button>
+          <button className="mg-btn mg-ghost mg-sm" onClick={onCancel}>Close</button>
+        </div>
+      </div>
+      <div className="mp-ws-body">
+        <div className={`mp-ws-pdf${showForm ? '' : ' mp-hide'}`}>
+          {problem && <p className="mp-ws-msg">{problem}</p>}
+          {!problem && fallback && <iframe title="Form preview" src={fallback} style={{ width: '100%', height: '100%', minHeight: 600, border: 0 }} />}
+          {!problem && !fallback && !pages && <p className="mp-ws-msg">Drawing the form…</p>}
+          {!problem && !fallback && pages && pages.map((src, i) => {
+            const size = boxes && boxes.pages[i];
+            return (
+              <div className="mp-ws-page" key={i}>
+                <img src={src} alt={`${FORM_TITLE[which]}, page ${i + 1}`} />
+                {size && marks.filter(m => m.page === i).map((m, j) => (
+                  <div key={j} ref={m === firstMark ? hl : null} className="mp-ws-hl" style={{ left: `${(m.x - 2) / size.width * 100}%`, top: `${(size.height - m.y - m.h - 2) / size.height * 100}%`, width: `${(m.w + 4) / size.width * 100}%`, height: `${(m.h + 4) / size.height * 100}%` }} />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+        <div className="mp-ws-fields mp-form" onFocusCapture={e => { if (e.target && e.target.name) setActive(e.target.name); }}>
+          <FormBody which={which} data={data} form={form} set={set} />
+          {err && <div className="mg-err">{err}</div>}
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <button className="mg-btn" disabled={busy} onClick={onSave}>Sign and Save</button>
+            <button className="mg-btn mg-ghost" onClick={onCancel}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
 
 function PaySetup() {
   const [data, setData] = useState(null);
@@ -311,7 +436,7 @@ function PaySetup() {
           {/* The form opens right under the item clicked (owner report,
               2026-11-13): drawn below the whole list it landed off-screen,
               and Start looked like it did nothing. */}
-          {open === c.key && (
+          {open === c.key && !FORM_PDF[c.key] && (
             <div className="mg-card mp-open" ref={openRef} style={{ boxShadow: 'none', margin: '4px 0 10px' }}>
               <FormBody which={open} data={data} form={form} set={setForm} />
               {err && <div className="mg-err">{err}</div>}
@@ -324,6 +449,7 @@ function PaySetup() {
           </React.Fragment>
         ))}
       </div>
+      {open && FORM_PDF[open] && <FormWorkspace which={open} data={data} form={form} set={setForm} onSave={save} busy={busy} err={err} onCancel={() => { setOpen(null); setForm({}); setErr(''); }} />}
     </div>
   );
 }

@@ -120,7 +120,9 @@ module.exports = function createPayrollRoutes(deps) {
   const overseasOf = (settings) => ({ enabled: false, payMethods: ['wise'], ...((settings && settings.overseas) || {}) });
   const openJson = (box) => { try { return box && box.enc ? JSON.parse(pc.open(box.enc, env)) : null; } catch (e) { return null; } };
   const openPlain = (box) => { try { return box && box.enc ? pc.open(box.enc, env) : null; } catch (e) { return null; } };
-  const govPdf = async (user, p, key) => {
+  // `extra` carries the preview's options (owner, 2026-11-14): no signature,
+  // a PREVIEW mark, and secret numbers as their last four only.
+  const govPdf = async (user, p, key, extra = {}) => {
     const settings = await readSettings();
     const person = { address: p.taxAddress || null, email: user.email || null, phone: user.phone || null };
     // The employer block is the Year End one when set (Settings → Year End), so
@@ -130,12 +132,14 @@ module.exports = function createPayrollRoutes(deps) {
     const employer = { name: yeE.employerName || ORG.name, address: ya && ya.line1 ? [ya.line1, ya.line2, ya.city, `${ya.state || ''} ${ya.zip || ''}`.trim()].filter(Boolean).join(', ') : ORG.address,
       ein: settings.employerEin || null, gaWithholdingNumber: yeE.gaWithholdingId || null };
     const firstDay = (p.i9 && ((p.i9.section2 && p.i9.section2.firstDay) || (p.i9.onFile && p.i9.onFile.firstDay))) || null;
-    if (key === 'w4' && p.w4) return gov.fillW4({ person, ssn: openPlain(p.ssn), w4: p.w4, employer, firstDay });
-    if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn: openPlain(p.ssn), g4: p.g4, employer });
-    if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn: openPlain(p.ssn), i9: p.i9, employer, immigration: openJson(p.i9Ids), docNumbers: openJson(p.i9DocNumbers) });
-    if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: openPlain(p.tin) });
-    if (key === 'w8ben' && p.w8ben) return gov.fillW8BEN({ w8: p.w8ben, tins: openJson(p.w8benTins) });
-    if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer });
+    const pv = !!extra.preview;
+    const ssn = pv ? null : openPlain(p.ssn);
+    if (key === 'w4' && p.w4) return gov.fillW4({ person, ssn, w4: p.w4, employer, firstDay, ...extra });
+    if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn, g4: p.g4, employer, ...extra });
+    if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn, i9: p.i9, employer, immigration: pv ? extra.immigration : openJson(p.i9Ids), docNumbers: pv ? null : openJson(p.i9DocNumbers), ...extra });
+    if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: pv ? null : openPlain(p.tin), ...extra });
+    if (key === 'w8ben' && p.w8ben) return gov.fillW8BEN({ w8: p.w8ben, tins: pv ? null : openJson(p.w8benTins), ...extra });
+    if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer, ...extra });
     return null;
   };
   // File the signed copy on their Staff Record folder in Drive, and note it on
@@ -313,6 +317,45 @@ module.exports = function createPayrollRoutes(deps) {
     }
   });
 
+
+  // A live preview of the official form while they fill it in (owner,
+  // 2026-11-14): the answers so far on the real form, marked PREVIEW, with
+  // no signature and secret numbers as their last four. It writes nothing:
+  // no profile change, no Drive copy, no activity row, and the answers are
+  // never logged. Like signing, it needs the legal name and address first,
+  // because the form is filled from them.
+  const PREVIEW_FORMS = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' };
+  router.post('/api/my/pay-setup/preview/:form', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const key = PREVIEW_FORMS[req.params.form];
+      if (!key) return res.status(404).json({ error: 'Unknown form.' });
+      const p = await profileFor(req.user);
+      if (['w4', 'g4', 'state', 'i9'].includes(key) && !p.taxAddress) return res.status(409).json({ error: 'Save your legal name and mailing address first. The form is filled in from them.', code: 'FORM_NEEDS_ADDRESS' });
+      const v = pp.previewValue(req.params.form, req.body || {}, { at: nowIso() });
+      const draft = { ...p };
+      const extra = { preview: true, ssnLast4: (p.ssn && p.ssn.last4) || null };
+      if (key === 'w4') draft.w4 = v.value;
+      if (key === 'g4') draft.g4 = v.value;
+      if (key === 'state') draft.stateCert = { ...v.value, state: p.workState || 'GA' };
+      if (key === 'i9') { draft.i9 = { ...(p.i9 || {}), section1: v.value }; extra.immigration = v.ids; }
+      if (key === 'w9') { draft.w9 = v.value; extra.tinLast4 = v.tinLast4; }
+      if (key === 'w8ben') { draft.w8ben = v.value; extra.usTinLast4 = v.usTinLast4; extra.foreignTinLast4 = v.foreignTinLast4; }
+      const buf = await govPdf(req.user, draft, key, extra);
+      if (!buf) return res.status(404).json({ error: 'That form has no preview.' });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(buf);
+    } catch (e) { console.error('Form preview error:', e.message); res.status(500).json({ error: 'Server error' }); }
+  });
+  // Where each answer sits on the blank form, for outlining the box being
+  // filled. Template geometry only.
+  router.get('/api/my/pay-setup/preview/:form/fields', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const key = PREVIEW_FORMS[req.params.form];
+      if (!key) return res.status(404).json({ error: 'Unknown form.' });
+      res.json(key === 'state' ? { pages: [{ width: 612, height: 792 }], fields: {} } : await gov.fieldBoxes(key));
+    } catch (e) { console.error('Form fields error:', e.message); res.status(500).json({ error: 'Server error' }); }
+  });
 
   // The signed official form, filled. Their own, or anyone's for the Super
   // Admin. It carries their full SSN, so every download is logged.

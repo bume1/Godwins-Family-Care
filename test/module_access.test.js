@@ -140,9 +140,12 @@ test('a payroll preparer sees no Super Admin button on the page', () => {
 test('Pay Setup opens each form under the item clicked, in view', () => {
   const src = read('public/my-pay.js');
   const list = src.indexOf('{p.checklist.map((c, i) => (');
-  const card = src.indexOf('{open === c.key && (');
+  // A tax form opens the form workspace over the page (owner, 2026-11-14);
+  // everything else still opens right under its item.
+  const card = src.indexOf('{open === c.key && !FORM_PDF[c.key] && (');
   const listEnd = src.indexOf('))}', card);
   assert.ok(list > 0 && card > list && listEnd > card, 'the form renders inside the checklist, beside its item');
   assert.ok(!/\n      \{open && \(\n        <div className="mg-card"/.test(src), 'not after the whole list');
   assert.match(src, /openRef\.current\.scrollIntoView\(/, 'and it is brought into view');
+  assert.match(src, /\{open && FORM_PDF\[open\] && <FormWorkspace /, 'a tax form opens the workspace, so nothing is drawn off-screen');
 });
