@@ -170,3 +170,21 @@ test('a form cannot be signed before its name, address and SSN; a correction re-
     assert.ok(filed.filter(n => /^Form I-9/.test(n)).length >= 2, 'and the I-9');
   } finally { srv.close(); }
 });
+
+// I-9 Section 2 carries the Additional Information note (a late Section 2
+// says why) and the DHS alternative-procedure box (owner, 2026-11-14).
+test('I-9 Section 2: the note and the remote-review box reach the form', async () => {
+  const n = pp.normalizeI9Section2({ firstDay: '2026-10-01', documents: [{ list: 'A', title: 'U.S. Passport', issuer: 'U.S. Dept of State', number: 'P123' }], additionalInfo: 'Completed late: documents examined 11/14/2026.', altProcedure: true }, { at: '2026-11-14T15:00:00Z', by: 'Owner' });
+  assert.equal(n.value.additionalInfo, 'Completed late: documents examined 11/14/2026.');
+  assert.equal(n.value.altProcedure, true);
+  assert.equal(pp.normalizeI9Section2({ firstDay: '2026-10-01', documents: [{ list: 'A', title: 'Passport' }] }, { at: 'x', by: 'y' }).value.altProcedure, false);
+  const buf = await g.fillI9({ person, ssn: null, i9: { section1: { status: 'citizen', dob: '1990-04-12', ...sig }, section2: n.value }, employer, docNumbers: n.numbers });
+  const { PDFDocument } = require('pdf-lib');
+  assert.equal((await PDFDocument.load(buf)).getForm().getTextField('Additional Information').getText(), 'Completed late: documents examined 11/14/2026.');
+  assert.match(textOf(buf), /X\s+Check here if you used an alternative procedure/);
+  // The People card links to the signed forms rather than restating them.
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.match(page, /const Paperwork = \(\{ p, openPdf \}\)/);
+  assert.ok(!/What they submitted/.test(page), 'no second copy of their documents');
+  assert.match(page, /altProcedure: !!i9\.altProcedure/);
+});

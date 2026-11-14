@@ -160,7 +160,11 @@ function normalizeI9Section2(b, { at, by }) {
   const hasA = docs.some(d => d.list === 'A'), hasBC = docs.some(d => d.list === 'B') && docs.some(d => d.list === 'C');
   if (!hasA && !hasBC) return { error: 'Record one List A document, or one List B and one List C document.', code: 'I9_DOCUMENTS' };
   if (!isYmd(b.firstDay)) return { error: 'Give the employee\'s first day of work.', code: 'I9_FIRST_DAY' };
-  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by, reviewerTitle: str(b.reviewerTitle, 60) || null, numbersOnFile: numbers.some(Boolean) }, numbers };
+  // Additional Information prints on the form (for a late Section 2, why).
+  // The alternative procedure box is for an E-Verify employer examining
+  // documents remotely under the DHS procedure.
+  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by, reviewerTitle: str(b.reviewerTitle, 60) || null, numbersOnFile: numbers.some(Boolean),
+    additionalInfo: str(b.additionalInfo, 300) || null, altProcedure: b.altProcedure === true }, numbers };
 }
 // An I-9 already on file (owner, 2026-11-13). Someone hired before GFC moved
 // payroll into the app has a completed Form I-9 from Gusto or on paper. That

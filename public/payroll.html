@@ -472,6 +472,42 @@ const Runs = ({ data, reload }) => {
   );
 };
 
+// ---- Payroll paperwork, at a glance (owner, 2026-11-14) -------------------------
+// One line per payroll item: done or to do, and Open for the filled official
+// form, which is the document itself (the I-9 shows both sections). Nothing is
+// restated here: everything else they submitted lives in their Documents and
+// Onboarding. How they are paid is payroll data, so it is one line too.
+const payLine = (m) => !m ? null : m.method === 'direct_deposit' ? `Direct deposit, ${m.bankName || 'bank'} ••••${m.accountLast4 || ''}`
+  : m.method === 'check' ? 'Paper check' : m.method === 'wise' ? `Wise${m.wiseEmail ? `, ${m.wiseEmail}` : ''}`
+  : m.method === 'intl_wire' ? `International wire, ${m.bankName || ''} ••••${m.accountLast4 || ''}` : m.method;
+const Paperwork = ({ p, openPdf }) => {
+  const pr = p.profile;
+  const emp = pr.workerType !== '1099', con = pr.workerType === '1099' || pr.workerType === 'HYBRID';
+  const i9 = pr.i9 || {};
+  const items = [['Name and address', !!pr.taxAddress]];
+  if (emp) items.push(['SSN', !!pr.ssnLast4, null, pr.ssnLast4 ? `••${pr.ssnLast4}` : null]);
+  items.push(['Paid by', !!pr.payMethod, null, payLine(pr.payMethod)]);
+  if (emp) {
+    items.push(['W-4', !!pr.w4, pr.w4 && 'w4']);
+    if ((pr.workState || 'GA') === 'GA') items.push(['G-4', !!pr.g4, pr.g4 && 'g4']);
+    else if (pr.stateCert) items.push([`${stName(pr.stateCert.state)} certificate`, true, 'state']);
+    items.push(['I-9', !!((i9.section1 && i9.section2) || i9.onFile), i9.section1 && 'i9',
+      i9.onFile ? `on file from ${i9.onFile.source === 'paper' ? 'paper' : 'Gusto'}` : i9.section1 && !i9.section2 ? 'Section 2 is yours, below' : !i9.section1 ? 'waiting on their Section 1' : null]);
+  }
+  if (con) items.push(pr.taxResidence === 'foreign' ? ['W-8BEN', !!pr.w8ben, pr.w8ben && 'w8ben'] : ['W-9', !!pr.w9, pr.w9 && 'w9']);
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] items-center">
+      {items.map(([label, done, pdf, note]) => (
+        <span key={label} className="inline-flex gap-1 items-center">
+          <span className={done ? 'text-emerald-700' : 'text-red-700'}>{done ? '✓' : '○'}</span>
+          <b className="text-primary">{label}</b>{note ? <span className="text-stone-500">{note}</span> : null}
+          {SUPER && pdf && <button className="underline text-primary" onClick={() => openPdf(pdf, label)}>Open</button>}
+        </span>
+      ))}
+    </div>
+  );
+};
+
 // ---- People --------------------------------------------------------------------
 const Person = ({ p, data, reload }) => {
   const pr = p.profile;
@@ -481,14 +517,10 @@ const Person = ({ p, data, reload }) => {
   const i9Done = !!(pr.i9 && ((pr.i9.section1 && pr.i9.section2) || pr.i9.onFile));
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
-  // The signed official forms, filled from what they entered (owner,
-  // 2026-11-13). They carry the full SSN, so only the Super Admin downloads.
-  const signedForms = [['w4', 'W-4', pr.w4], ['g4', 'G-4', pr.g4], ['state', 'State certificate', pr.stateCert], ['i9', 'I-9', pr.i9 && pr.i9.section1], ['w9', 'W-9', pr.w9]].filter(x => x[2]);
   return (
     <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
       <Err e={err} /><Ok m={msg} />
-      {SUPER && signedForms.length > 0 && <div className="flex flex-wrap gap-2 items-center text-[12.5px]"><span className="text-stone-500">Signed forms:</span>
-        {signedForms.map(([k, l]) => <button key={k} className="btn ghost !py-0.5 !px-2" onClick={() => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }}>{l} PDF</button>)}</div>}
+      <Paperwork p={p} openPdf={(k, l) => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }} />
       <div className="grid sm:grid-cols-3 gap-2">
         {p.employmentTypeOnUser
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
@@ -524,6 +556,7 @@ const Person = ({ p, data, reload }) => {
           <button className="btn ghost mt-2" disabled={!onFile.firstDay || !onFile.copyFiled} onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-on-file`, onFile).then(() => { setMsg('I-9 recorded as on file.'); reload(); }).catch(e => setErr(e.message))}>Record I-9 On File</button>
         </div>
       )}
+      {!(pr.i9 && (pr.i9.section1 || pr.i9.onFile)) && pr.workerType !== '1099' && <p className="text-[12.5px] text-stone-500">I-9 Section 2 opens here once they sign Section 1 in My GFC → Hours & Pay → Pay Setup. Section 1 is theirs to fill in; you complete Section 2.</p>}
       {pr.i9 && pr.i9.section1 && !pr.i9.section2 && !pr.i9.onFile && (
         <div className="border-t border-stone-100 pt-3">
           <div className="lblu mb-1">I-9 Section 2: documents you examined</div>
@@ -539,7 +572,10 @@ const Person = ({ p, data, reload }) => {
           <button className="btn ghost !py-1 mr-2" onClick={() => setI9({ ...i9, docs: [...i9.docs, { list: 'C', title: '', expires: '' }] })}>Add Document</button>
           <label className="inline-block">First day of work <input type="date" className="inp !w-44" value={i9.firstDay} onChange={e => setI9({ ...i9, firstDay: e.target.value })} /></label>
           <label className="inline-block ml-2">Your title <input className="inp !w-40" value={i9.reviewerTitle || ''} onChange={e => setI9({ ...i9, reviewerTitle: e.target.value })} placeholder="Owner" /></label>
-          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs, reviewerTitle: i9.reviewerTitle }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
+          <label className="block mt-2">Additional information (prints on the I-9; for a late Section 2, say why)<input className="inp" maxLength={300} value={i9.additionalInfo || ''} onChange={e => setI9({ ...i9, additionalInfo: e.target.value })} placeholder="Section 2 completed late: documents examined on this date." /></label>
+          <label className="flex gap-2 items-center mt-1 text-[13px]"><input type="checkbox" checked={!!i9.altProcedure} onChange={e => setI9({ ...i9, altProcedure: e.target.checked })} />I examined the documents by the DHS alternative (remote) procedure. Only if GFC uses E-Verify.</label>
+          <p className="text-[12px] text-stone-500 mt-1">Look at their original documents, not photos or uploads. Date it today; never backdate.</p>
+          <button className="btn mt-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs, reviewerTitle: i9.reviewerTitle, additionalInfo: i9.additionalInfo, altProcedure: !!i9.altProcedure }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
         </div>
       )}
     </div>
@@ -550,7 +586,7 @@ const People = ({ data, reload }) => {
   return (
     <Card title="People">
       {!data.secretsStorable && <Warn>Secure storage is not switched on: set PAYROLL_ENCRYPTION_KEY on the server. Until then nobody can save an SSN or bank account.</Warn>}
-      <p className="text-stone-500 mb-3">Each person fills in their own paperwork in My GFC, under Hours & Pay. You set how they are paid and complete I-9 Section 2.</p>
+      <p className="text-stone-500 mb-3">Each person fills in their own paperwork in My GFC → Hours & Pay → Pay Setup: name and address, SSN, how they are paid, W-4, G-4, and I-9 Section 1 (a contractor: W-9, or W-8BEN abroad). Open a name to see which are done and open each signed form. You set their pay here and complete I-9 Section 2. Their other documents are on their Staff Record.</p>
       {data.people.map(p => (
         <div key={p.userId} className="border-b border-stone-100 py-2">
           <button className="w-full text-left flex flex-wrap justify-between gap-2" onClick={() => setOpen(open === p.userId ? null : p.userId)}>
