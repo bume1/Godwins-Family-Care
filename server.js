@@ -3086,7 +3086,10 @@ app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4
   // Wrapped: the enrollment helpers are declared further down this file.
   enrollmentSummary: (client) => liaisonEnrollmentView(client),
   // Read lazily: `notify` is built further down this file.
-  notify: () => notify, getAppBaseUrl }));
+  notify: () => notify, getAppBaseUrl,
+  // Wrapped: the payroll router is built further down this file. Draws a pay
+  // stub from its run when the Drive copy cannot be read.
+  regeneratePayStub: (row) => payrollRouter.stubPdfForRow(row) }));
 // Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
 // contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
 // approved runs write into the same staff_paystubs store the Apps Script
@@ -3096,7 +3099,7 @@ app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4
 // and every call is best effort: a QuickBooks failure never undoes the event.
 const qbo = quickbooks.createQbo({ db, uuid: uuidv4, logActivity, getUsers: () => getUsers(),
   getRuns: async () => (await db.get('payroll_runs')) || [] });
-app.use(payrollRoutes({
+const payrollRouter = payrollRoutes({
   db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
@@ -3114,7 +3117,8 @@ app.use(payrollRoutes({
   onContractorPaid: (inv) => qbo.contractorPaid(inv),
   onTaxPaid: (pay) => qbo.taxPaid(pay),
   qboRetry: () => qbo.retry()
-}));
+});
+app.use(payrollRouter);
 // QuickBooks connection, the owner's (Super Admin).
 app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
   try { res.json(await qbo.status()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
