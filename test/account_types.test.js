@@ -175,7 +175,7 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
     else if (r.includes("/api/payroll/admin/contractor-invoices/:id/:action'")) assert.match(r, /authenticateToken, requireInvoiceAction\b/, r);
     else assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
   }
-  assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
+  assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*(?:const allRuns = await rows\(RUNS\);\s*)?return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
   // What a preparer must never reach: approving, paying, bank numbers,
   // settings, people's pay setup, tax tables, contractor approvals, the Gusto
   // import and year-end release (owner, 2026-11-13: "prepare only").

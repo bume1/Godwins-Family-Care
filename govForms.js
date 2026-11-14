@@ -312,6 +312,8 @@ async function fillI9({ person, ssn, i9, employer, immigration, docNumbers }) {
       setText(f, names[0], d.title); setText(f, names[1], d.issuer); setText(f, names[2], d.number); setText(f, names[3], d.expires ? mdy(d.expires) : 'N/A');
     }
     setText(f, 'FirstDayEmployed mmddyyyy', mdy(s2.firstDay));
+    setText(f, 'Additional Information', s2.additionalInfo);
+    check(f, 'CB_Alt', s2.altProcedure);
     setText(f, 'Last Name First Name and Title of Employer or Authorized Representative', [s2.reviewedBy, s2.reviewerTitle].filter(Boolean).join(', '));
     setText(f, 'Signature of Employer or AR', s2.reviewedBy ? `/s/ ${s2.reviewedBy}` : '');
     setText(f, 'S2 Todays Date mmddyyyy', mdy(s2.reviewedAt));

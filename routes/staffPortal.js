@@ -333,7 +333,18 @@ module.exports = function createStaffPortalRoutes(deps) {
   // every policy, packet and attestation they signed. ONE function, read by
   // the person's own My GFC and by the office's view of their staff record
   // (owner, 2026-11-09), so the two can never show different files.
-  const documentsFor = async (person) => {
+  // The official tax forms they signed in Pay Setup (owner, 2026-11-14). Each
+  // opens as the filled government form, built from what they entered. On the
+  // Staff Record they are listed for the Super Admin only: they carry the SSN.
+  const TAX_FORM_TITLES = { w4: 'Form W-4 (federal withholding)', g4: 'Georgia Form G-4', state: 'State withholding certificate', i9: 'Form I-9', w9: 'Form W-9', w8ben: 'Form W-8BEN' };
+  const taxFormsFor = async (me) => {
+    const p = (((await db.get('payroll_profiles')) || {})[me]) || null;
+    if (!p) return [];
+    const at = { w4: p.w4, g4: p.g4, state: p.stateCert, i9: p.i9 && p.i9.section1, w9: p.w9, w8ben: p.w8ben };
+    return Object.entries(at).filter(([, v]) => v && v.signedAt)
+      .map(([k, v]) => ({ id: `taxform:${k}`, title: TAX_FORM_TITLES[k], signedAt: v.signedAt, pdf: 'taxform', form: k }));
+  };
+  const documentsFor = async (person, { taxForms = true } = {}) => {
     const me = String(person.id);
     const files = ((await db.get('caregiver_documents')) || [])
       .filter(r => String(r.caregiver_id) === me && !r.deleted_at)
@@ -365,6 +376,7 @@ module.exports = function createStaffPortalRoutes(deps) {
         signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: attestations.versionLabel(a.version), signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
       }
     }
+    if (taxForms) signed.push(...await taxFormsFor(me));
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
     return { documents: files, signed };
   };
@@ -381,7 +393,7 @@ module.exports = function createStaffPortalRoutes(deps) {
     const person = (await getUsers()).find(u => String(u.id) === String(req.params.userId) && audienceOf(u));
     if (!person) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
     await logActivity(req.user.id, req.user.name || req.user.email, 'staff_record_documents_read', 'user', person.id, {});
-    return res.json(await documentsFor(person));
+    return res.json(await documentsFor(person, { taxForms: req.user.role === 'admin' }));
   });
   router.get('/api/my/documents/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const row = ((await db.get('caregiver_documents')) || []).find(r => r.id === req.params.id);

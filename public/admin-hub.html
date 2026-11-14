@@ -1780,6 +1780,8 @@
                     onClick={() => openPdf(`/api/caregiver/welcome-packet/signed.pdf?caregiverId=${encodeURIComponent(user.id)}`, 'welcome-packet.pdf')}>Open</button>}
                   {x.pdf === 'attestation' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
                     onClick={() => openPdf(`/api/caregiver/welcome-packet/attestations/${encodeURIComponent(x.kind)}.pdf?caregiverId=${encodeURIComponent(user.id)}`, `${x.kind}.pdf`)}>Open</button>}
+                  {x.pdf === 'taxform' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onClick={() => openPdf(`/api/payroll/admin/people/${encodeURIComponent(user.id)}/forms/${encodeURIComponent(x.form)}.pdf`, `${x.title}.pdf`)}>Open</button>}
                   {(x.links || []).slice(0, 1).map(href => <a key={href} href={href} target="_blank" rel="noopener noreferrer" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">View policy</a>)}
                 </div>
               ))}

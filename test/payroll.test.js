@@ -103,7 +103,7 @@ test('a form is a signature: typed name and agreement, or nothing saves', () => 
 
 test('who is missing what: a run refuses anyone without W-4, G-4, SSN, I-9 or pay method', () => {
   const p = pp.defaultProfile({ id: 'u', role: 'user' });
-  assert.deepEqual(pp.missingForPay(p).slice(0, 5), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9']);
+  assert.deepEqual(pp.missingForPay(p).slice(0, 6), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9 Section 1 (theirs)', 'I-9 Section 2 (the office)'], 'both halves of the I-9 are named');
   const ready = { ...p, payMethod: { method: 'check' }, ssn: { last4: '6789' }, w4: {}, g4: {}, i9: { section1: {}, section2: {} }, hourlyRateCents: 3000 };
   assert.deepEqual(pp.missingForPay(ready), []);
   assert.deepEqual(pp.missingForPay({ ...ready, i9: { section1: {} } }), ['I-9 Section 2 (the office)']);
@@ -456,7 +456,7 @@ test('period close drafts each schedule on its own and skips one with nobody to 
 
 test('Pay Setup lists pay and tax paperwork only, grouped, and hiring paperwork is not repeated there', async () => {
   const rows = pp.checklist({ ...pp.defaultProfile(cgUser) });
-  assert.deepEqual(rows.map(r => r.key), ['w4', 'g4', 'i9', 'ssn', 'pay', 'taxaddress', 'edelivery']);
+  assert.deepEqual(rows.map(r => r.key), ['taxaddress', 'ssn', 'w4', 'g4', 'i9', 'pay', 'edelivery'], 'name, address and SSN first: every form is filled from them');
   assert.ok(rows.every(r => r.group === 'tax' || r.group === 'paid'));
   assert.ok(!rows.some(r => /offer|handbook/i.test(r.key + r.label)), 'the offer letter and handbook belong to onboarding');
   const { app } = harness('cg1');
@@ -514,7 +514,7 @@ test('the owner sets each schedule\'s first Monday on Settings, and a non-Monday
 test('an I-9 on file from before counts as complete; the copy must be filed first', () => {
   const pp = require('../payrollProfiles');
   const base = { ...pp.defaultProfile({ id: 'x', role: 'user' }), w4: {}, g4: {}, ssn: { last4: '1' }, payMethod: { method: 'check' } };
-  assert.ok(pp.missingForPay(base).includes('I-9'));
+  assert.ok(pp.missingForPay(base).includes('I-9 Section 1 (theirs)'));
   assert.equal(pp.normalizeI9OnFile({ firstDay: '2025-03-03' }, { at: 'now', by: 'A' }).code, 'I9_COPY_NOT_FILED');
   assert.equal(pp.normalizeI9OnFile({ copyFiled: true }, { at: 'now', by: 'A' }).code, 'I9_FIRST_DAY');
   const n = pp.normalizeI9OnFile({ firstDay: '2025-03-03', copyFiled: true, source: 'gusto' }, { at: 'now', by: 'A' });
@@ -642,4 +642,108 @@ test('timesheets: each line carries its times and pending change; managers see t
   assert.match(page, /if \(mode === 'direct'\) await put\(`\/api\/scheduling\/time-logs\/\$\{enc\(l\.timeLogId\)\}`/);
   assert.match(page, /await post\(`\/api\/scheduling\/time-logs\/\$\{enc\(l\.timeLogId\)\}\/adjustment-requests`/);
   assert.match(read('public/my-pay.js'), /\/api\/my\/time-logs\/\$\{encodeURIComponent\(l\.timeLogId\)\}\/adjustment-requests/);
+});
+
+// Taxes entered by hand (owner, 2026-11-14): pay someone whose W-4 is not in
+// yet, P2P, with the office's withholding and a reason. Other missing
+// paperwork is listed as still owed, not holding pay. The timesheet warning
+// is read live, and adding a line keeps the run's P2P choice.
+test('taxes entered by hand: paid without a W-4, owed paperwork listed, banner live, P2P kept', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: { ...pp.defaultProfile(cgUser) } });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store), me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  let w = r.body.run.workers[0];
+  assert.equal(w.pay, undefined, 'not figured without a W-4');
+  assert.ok(w.missing.includes('W-4') && w.missing.includes('SSN'));
+  assert.equal((await req(me.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10', reason: 'x' })).status, 403, 'the Super Admin only');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10' })).body.code, 'MANUAL_TAX_REASON');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '9999', reason: 'x' })).body.code, 'MANUAL_TAX_TOO_HIGH');
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '12.50', socialSecurity: '14.51', medicare: '3.39', stateTax: '6.00', reason: 'W-4 not in yet' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  w = r.body.run.workers[0];
+  assert.deepEqual([w.pay.taxes.federal, w.pay.taxes.socialSecurity, w.pay.taxes.medicare, w.pay.taxes.georgia], [1250, 1451, 339, 600]);
+  assert.equal(w.pay.netCents, w.pay.grossCents - 1250 - 1451 - 339 - 600);
+  assert.ok(w.pay.employer.socialSecurity > 0, 'employer taxes still figured');
+  assert.deepEqual(w.missing, [], 'nothing holds pay');
+  assert.ok(w.paperworkOwed.includes('SSN') && w.paperworkOwed.some(m => /I-9/.test(m)), 'still owed, listed');
+  assert.ok(!w.paperworkOwed.includes('W-4'), 'the W-4 is what the hand entry stands in for');
+  assert.equal(w.manualTaxes.reason, 'W-4 not in yet');
+  // Adding a line keeps P2P and the hand-entered taxes.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '20', note: 'Holiday' });
+  assert.equal(r.body.run.workers[0].channel, 'p2p'); assert.ok(r.body.run.workers[0].manualTaxes);
+  // The timesheet banner reads live: approve it, and the draft stops listing it.
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 1);
+  await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 0);
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.workers[0].pay.taxes.federal, 1250, 'the approved run keeps the office\'s withholding');
+  // Clearing is refused once approved.
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { clear: true })).body.code, 'RUN_LOCKED');
+});
+
+// Pay periods (owner, 2026-11-14): pick a real pay period or set a custom one,
+// and a timesheet approved for a week is what that week's payroll pays. The
+// screen says whether payroll exists; a payday is not a payment.
+test('pay periods: approved hours flow into that period\'s payroll, the screen says it is not paid yet, and custom periods work', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', periodEnd: '2026-11-08', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.run, null, 'approving a timesheet is not a payroll, and nothing reads as paid');
+  assert.equal(r.body.timesheets.find(t => t.userId === 'cg1').paid, false);
+  // The period list: real Monday-to-Sunday weeks, with the payday.
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  const cg = r.body.schedules.find(x => x.key === 'caregivers');
+  const nov2 = cg.periods.find(p => p.start === '2026-11-02');
+  assert.ok(nov2, 'the week of Nov 2 is offered');
+  assert.equal(nov2.end, '2026-11-08'); assert.equal(nov2.payDate, '2026-11-13'); assert.equal(nov2.status, null);
+  assert.ok(cg.periods.every(p => p.custom || tax.periodFor(p.start, store.get('payroll_settings'), 'caregivers').start === p.start), 'every standard period starts on the schedule');
+  // Drafting that week pays the approved hours, with no unapproved warning.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.equal(w.earnings.reduce((a, e) => a + (e.minutes || 0), 0), 780, 'the 13 approved hours are on the payroll');
+  assert.deepEqual(r.body.run.unapprovedTimesheets, []);
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-11-02').status, 'draft');
+  // A custom period: checked, then listed with its run.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-28' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_PAYDAY');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-01', end: '2026-11-05', payDate: '2026-11-06' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_LENGTH');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-31' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.period.custom, true); assert.equal(r.body.run.period.frequency, 'weekly');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-20&end=2026-10-29');
+  assert.equal(r.status, 200); assert.equal(r.body.period.custom, true); assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-21&end=2026-10-29');
+  assert.equal(r.status, 404, 'a made-up period is refused');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.ok(r.body.schedules.find(x => x.key === 'caregivers').periods.some(p => p.custom && p.start === '2026-10-20'));
+  // The screen never reads a payday as a payment.
+  const page = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.doesNotMatch(page, /A date in the pay period/);
+  assert.doesNotMatch(page, /· paid \{day\(/);
+  assert.match(page, /no payroll yet/);
+  // A week paid in Gusto before the app reads as paid there.
+  store.set('payroll_runs', [...store.get('payroll_runs'), { id: 'gusto:2026-10-23:2026-10-12:2026-10-18', status: 'paid', source: 'gusto', period: { start: '2026-10-12', end: '2026-10-18', payDate: '2026-10-23' }, workers: [] }]);
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-10-12').status, 'gusto');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-12&end=2026-10-18');
+  assert.equal(r.body.run.status, 'gusto');
 });

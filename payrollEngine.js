@@ -184,7 +184,16 @@ function runTotals(workers) {
 // override. `channels` = { default, byUser }.
 const PAY_CHANNELS = Object.freeze({ direct_deposit: 'Direct deposit', p2p: 'P2P (Cash App)' });
 const channelOf = (channels, uid) => { const c = channels || {}; const v = (c.byUser || {})[uid] || c.default; return PAY_CHANNELS[v] ? v : 'direct_deposit'; };
-function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments, channels }) {
+// Taxes entered by hand (owner, 2026-11-14), for the rare period the office
+// must pay before the forms are in, or adjust what was withheld. The Super
+// Admin enters the employee's withholding with a reason; employer taxes are
+// still figured. A missing W-4 or withholding certificate then does not hold
+// pay, and other missing paperwork is listed as still owed rather than
+// blocking: hours worked are paid on payday. How they are paid and a pay rate
+// are still needed, since without them nothing can be paid at all.
+const BLOCKS_EVEN_BY_HAND = (m) => /^How they are paid|^Pay rate|^Works in|also withholds for/.test(m);
+const FORM_ITEMS = (m) => m === 'W-4' || m === 'G-4' || /withholding certificate$/.test(m);
+function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments, channels, manualTaxes }) {
   // The run's own schedule decides the divisor (52 weekly, 26 biweekly).
   const frequency = (period && period.frequency) || settings.frequency;
   const perYear = tax.FREQUENCIES[frequency].perYear;
@@ -218,7 +227,23 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
       payMethod: channel === 'p2p' ? 'p2p' : profile && profile.payMethod ? profile.payMethod.method : null, channel,
       refs: items.map(i => i.ref), earnings: lines, missing, workState: ws
     };
-    if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
+    const byHand = (manualTaxes || {})[uid];
+    if (byHand && stTable) {
+      // The figured paycheck (with the default forms where theirs are not in)
+      // supplies gross and employer taxes; the employee's withholding is the
+      // office's.
+      const base = tax.paycheck({
+        earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: (profile && profile.w4) || { filingStatus: 'single' }, g4: (profile && profile.g4) || { filingStatus: 'A' },
+        tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: (profile && profile.stateCert) || { filingStatus: 'single', allowances: 0 }
+      });
+      const taxes = { federal: byHand.federal, socialSecurity: byHand.socialSecurity, medicare: byHand.medicare, georgia: ws === 'GA' ? byHand.stateTax : 0 };
+      if (ws !== 'GA') taxes.state = byHand.stateTax;
+      const taxCents = Object.values(taxes).reduce((a, v) => a + v, 0);
+      w.pay = { ...base, taxes, taxCents, netCents: base.grossCents - taxCents + base.reimbursementsCents };
+      w.manualTaxes = { reason: byHand.reason, by: byHand.by, at: byHand.at };
+      w.paperworkOwed = missing.filter(m => !BLOCKS_EVEN_BY_HAND(m) && !FORM_ITEMS(m));
+      w.missing = missing.filter(BLOCKS_EVEN_BY_HAND);
+    } else if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
       w.pay = tax.paycheck({
         earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: profile.w4, g4: profile.g4,
         tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: profile.stateCert
