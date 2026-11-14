@@ -117,7 +117,9 @@ module.exports = function createSchedulingRoutes(deps) {
   //                    scheduling one.
   // A manager who tries one is refused by the route, not merely by a hidden
   // button, and every one of those lines is build-enforced.
-  const isScheduleManager = (u) => !!u && (u.role === ROLES.ADMIN || !!u.isManager);
+  // Whoever holds Staff Scheduling in the Modules grid (owner, 2026-11-13):
+  // the office by default, plus a grant, minus a removal.
+  const isScheduleManager = (u) => !!u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'caregiverScheduling'));
 
   const requireScheduleManager = (req, res, next) => {
     if (isScheduleManager(req.user)) return next();
@@ -146,7 +148,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // handing the permission to LMSWs, who are the caseManager role. An LMSW is
   // deliberately left out: the owner did not ask for it, and case management
   // is clinical work, not the scheduling office.
-  const isAvailabilityRecorder = (u) => accountTypes.isHomeCareOffice(u);
+  const isAvailabilityRecorder = (u) => accountTypes.hasModule(u, 'caregiverScheduling');
 
   // MIDDLEWARE, not a check inside the handler, and that is deliberate. The
   // route sweep in test/scheduling.test.js proves every /api/scheduling route
@@ -2967,89 +2969,97 @@ module.exports = function createSchedulingRoutes(deps) {
     decisionNote: r.decision_note, history: r.history || []
   });
 
-  // POST /api/scheduling/time-logs/:id/adjustment-requests — raise one.
-  router.post('/api/scheduling/time-logs/:id/adjustment-requests', authenticateToken, requireScheduleManager, async (req, res) => {
-    try {
-      const body = req.body || {};
-      const reason = String(body.reason || '').trim();
-      if (!reason) {
-        return res.status(400).json({ error: 'Say why this time needs changing.', code: 'ADJUSTMENT_REASON_REQUIRED' });
-      }
-      const logs = await readRows('time_logs');
-      const log = logs.find(l => l && l.id === req.params.id);
-      if (!log) return res.status(404).json({ error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' });
-
-      const reqIn = body.clockInAt !== undefined ? isoOrNull(body.clockInAt) : log.clock_in_at;
-      const reqOut = body.clockOutAt !== undefined ? isoOrNull(body.clockOutAt) : log.clock_out_at;
-      if (body.clockInAt !== undefined && !reqIn) {
-        return res.status(400).json({ error: 'That clock-in time is not a valid timestamp.', code: 'CLOCK_IN_INVALID' });
-      }
-      if (body.clockOutAt !== undefined && body.clockOutAt !== null && !reqOut) {
-        return res.status(400).json({ error: 'That clock-out time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' });
-      }
-      if (reqIn && reqOut && new Date(reqOut).getTime() < new Date(reqIn).getTime()) {
-        return res.status(400).json({ error: 'The clock-out is before the clock-in.', code: 'CLOCK_OUT_BEFORE_IN' });
-      }
-      if (reqIn === log.clock_in_at && reqOut === log.clock_out_at) {
-        return res.status(400).json({ error: 'Those are the times already on the log.', code: 'ADJUSTMENT_NO_CHANGE' });
-      }
-
-      const rows = await readRows('time_log_adjustment_requests');
-      const open = rows.find(r => r && r.time_log_id === log.id && r.status === 'pending');
-      if (open) {
-        return res.status(409).json({
-          error: `${open.requested_by_name} already asked for this time to be changed on ${time.fmtDateTime(open.requested_at)}. It is waiting on the Super Admin.`,
-          code: 'ADJUSTMENT_ALREADY_PENDING', request: publicAdjustment(open)
-        });
-      }
-
-      const at = nowIso();
-      const role = accountTypes.accountTypeOf(req.user);
-      const row = {
-        id: uuidv4(),
-        time_log_id: log.id,
-        shift_id: log.shift_id || null,
-        caregiver_id: log.caregiver_id,
-        caregiver_name: log.caregiver_name || null,
-        client_name: log.client_name || null,
-        requested_by_id: req.user.id,
-        requested_by_name: req.user.name || req.user.email,
-        requested_by_role: role,
-        requested_at: at,
-        current_clock_in: log.clock_in_at,
-        current_clock_out: log.clock_out_at,
-        requested_clock_in: reqIn,
-        requested_clock_out: reqOut,
-        reason: reason.slice(0, 1000),
-        status: 'pending',
-        decided_by_id: null, decided_by_name: null, decided_at: null, decision_note: null,
-        // Append-only status trail.
-        history: [{ status: 'pending', at, byId: req.user.id, byName: req.user.name || req.user.email }]
-      };
-      rows.push(row);
-      await db.set('time_log_adjustment_requests', rows);
-
-      await logActivity(req.user.id, row.requested_by_name, 'time_log_adjustment_requested', 'time_log', log.id, {
-        requestId: row.id, role, caregiverId: log.caregiver_id,
-        current: { clockInAt: row.current_clock_in, clockOutAt: row.current_clock_out },
-        requested: { clockInAt: reqIn, clockOutAt: reqOut }
-      });
-
-      for (const admin of (await getUsers()).filter(u => u.role === ROLES.ADMIN && u.email && u.accountStatus !== 'inactive')) {
-        await queueNotification('time_adjustment_requested', admin.id, admin.email, admin.name,
-          {
-            subject: 'A time adjustment is waiting for your approval',
-            body: `${row.requested_by_name} asked to change ${row.caregiver_name || 'a caregiver'}'s clocked time for ${time.fmtDateTime(row.current_clock_in)}. Their reason: "${row.reason}". Nothing changes until you approve it.`,
-            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
-          },
-          { relatedEntityId: `${row.id}:requested`, relatedEntityType: 'time_log', createdBy: req.user.id });
-      }
-
-      res.json({ request: publicAdjustment(row), message: 'Sent to the Super Admin. The time does not change until they approve it.' });
-    } catch (error) {
-      console.error('Adjustment request error:', error);
-      res.status(500).json({ error: 'Server error' });
+  // Raise a request to change a time log's times. One function for a manager
+  // or care coordinator (any log) and an employee (their own hours, from their
+  // timesheet: owner, 2026-11-13). It refuses or returns the stored request.
+  const raiseAdjustment = async ({ timeLogId, body, actor, ownOnly }) => {
+    body = body || {};
+    const reason = String(body.reason || '').trim();
+    if (!reason) return { status: 400, error: 'Say why this time needs changing.', code: 'ADJUSTMENT_REASON_REQUIRED' };
+    const logs = await readRows('time_logs');
+    const log = logs.find(l => l && l.id === timeLogId);
+    if (!log || (ownOnly && String(log.caregiver_id) !== String(actor.id))) return { status: 404, error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' };
+    if (log.payroll_run_id) {
+      return { status: 409, error: 'These hours were paid in an approved payroll run and are locked. A correction goes on the next payroll as an adjustment.', code: 'TIME_LOG_PAYROLL_LOCKED' };
     }
+    const reqIn = body.clockInAt !== undefined ? isoOrNull(body.clockInAt) : log.clock_in_at;
+    const reqOut = body.clockOutAt !== undefined ? isoOrNull(body.clockOutAt) : log.clock_out_at;
+    if (body.clockInAt !== undefined && !reqIn) return { status: 400, error: 'That clock-in time is not a valid timestamp.', code: 'CLOCK_IN_INVALID' };
+    if (body.clockOutAt !== undefined && body.clockOutAt !== null && !reqOut) return { status: 400, error: 'That clock-out time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' };
+    if (reqIn && reqOut && new Date(reqOut).getTime() < new Date(reqIn).getTime()) return { status: 400, error: 'The clock-out is before the clock-in.', code: 'CLOCK_OUT_BEFORE_IN' };
+    if (reqIn === log.clock_in_at && reqOut === log.clock_out_at) return { status: 400, error: 'Those are the times already on the log.', code: 'ADJUSTMENT_NO_CHANGE' };
+
+    const rows = await readRows('time_log_adjustment_requests');
+    const open = rows.find(r => r && r.time_log_id === log.id && r.status === 'pending');
+    if (open) {
+      return {
+        status: 409, error: `${open.requested_by_name} already asked for this time to be changed on ${time.fmtDateTime(open.requested_at)}. It is waiting on the Super Admin.`,
+        code: 'ADJUSTMENT_ALREADY_PENDING', request: publicAdjustment(open)
+      };
+    }
+
+    const at = nowIso();
+    const role = ownOnly ? 'self' : accountTypes.accountTypeOf(actor);
+    const row = {
+      id: uuidv4(),
+      time_log_id: log.id,
+      shift_id: log.shift_id || null,
+      caregiver_id: log.caregiver_id,
+      caregiver_name: log.caregiver_name || null,
+      client_name: log.client_name || null,
+      requested_by_id: actor.id,
+      requested_by_name: actor.name || actor.email,
+      requested_by_role: role,
+      requested_at: at,
+      current_clock_in: log.clock_in_at,
+      current_clock_out: log.clock_out_at,
+      requested_clock_in: reqIn,
+      requested_clock_out: reqOut,
+      reason: reason.slice(0, 1000),
+      status: 'pending',
+      decided_by_id: null, decided_by_name: null, decided_at: null, decision_note: null,
+      // Append-only status trail.
+      history: [{ status: 'pending', at, byId: actor.id, byName: actor.name || actor.email }]
+    };
+    rows.push(row);
+    await db.set('time_log_adjustment_requests', rows);
+
+    await logActivity(actor.id, row.requested_by_name, 'time_log_adjustment_requested', 'time_log', log.id, {
+      requestId: row.id, role, caregiverId: log.caregiver_id,
+      current: { clockInAt: row.current_clock_in, clockOutAt: row.current_clock_out },
+      requested: { clockInAt: reqIn, clockOutAt: reqOut }
+    });
+
+    // The reason stays in the app: it can name a client.
+    const who = ownOnly ? `${row.requested_by_name} asked to change their own clocked time` : `${row.requested_by_name} asked to change ${row.caregiver_name || 'a caregiver'}'s clocked time`;
+    for (const admin of (await getUsers()).filter(u => u.role === ROLES.ADMIN && u.email && u.accountStatus !== 'inactive')) {
+      await queueNotification('time_adjustment_requested', admin.id, admin.email, admin.name,
+        {
+          subject: 'A time adjustment is waiting for your approval',
+          body: `${who} for ${time.fmtDateTime(row.current_clock_in)}. Nothing changes until you approve it. Open Payroll, then Timesheets, or Staff Scheduling to decide.`,
+          ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
+        },
+        { relatedEntityId: `${row.id}:requested`, relatedEntityType: 'time_log', createdBy: actor.id });
+    }
+    return { row };
+  };
+  const sendRaised = (res, out) => (out.error
+    ? res.status(out.status).json({ error: out.error, code: out.code, ...(out.request ? { request: out.request } : {}) })
+    : res.json({ request: publicAdjustment(out.row), message: 'Sent to the Super Admin. The time does not change until they approve it.' }));
+
+  // POST /api/scheduling/time-logs/:id/adjustment-requests — a manager or
+  // care coordinator raises one.
+  router.post('/api/scheduling/time-logs/:id/adjustment-requests', authenticateToken, requireScheduleManager, async (req, res) => {
+    try { sendRaised(res, await raiseAdjustment({ timeLogId: req.params.id, body: req.body, actor: req.user })); }
+    catch (error) { console.error('Adjustment request error:', error); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // POST /api/my/time-logs/:id/adjustment-requests — an employee asks for
+  // their OWN hours to be changed, from their timesheet (owner, 2026-11-13).
+  // Someone else's log reads as not found.
+  router.post('/api/my/time-logs/:id/adjustment-requests', authenticateToken, async (req, res) => {
+    try { sendRaised(res, await raiseAdjustment({ timeLogId: req.params.id, body: req.body, actor: req.user, ownOnly: true })); }
+    catch (error) { console.error('Own adjustment request error:', error); res.status(500).json({ error: 'Server error' }); }
   });
 
   // GET /api/scheduling/adjustment-requests — the queue. Managers and
@@ -3418,7 +3428,10 @@ module.exports = function createSchedulingRoutes(deps) {
   };
 
   // GET /api/scheduling/payroll.csv — the FILE, Super Admin only.
-  router.get('/api/scheduling/payroll.csv', authenticateToken, requireAdmin, async (req, res) => {
+  // The hours file is payroll's: the Super Admin, or a payroll preparer
+  // (the Payroll module granted in the Modules grid, owner 2026-11-13).
+  const requireHoursExport = (req, res, next) => (req.user && (req.user.role === ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll')) ? next() : requireAdmin(req, res, next));
+  router.get('/api/scheduling/payroll.csv', authenticateToken, requireHoursExport, async (req, res) => {
     try {
       const from = String(req.query.from || '');
       const to = String(req.query.to || '');

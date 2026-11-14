@@ -93,8 +93,10 @@ module.exports = function createCaregiverRoutes(deps) {
   // and those must not answer a different question than the guard does. Two
   // routes restated it inline and so would NOT have picked this up; they call
   // it now, which is what that sentence was asking for.
+  // The office part follows Home Care Oversight in the Modules grid (owner,
+  // 2026-11-13); clinicians and case managers review visit logs by licence.
   const isReviewStaff = (u) =>
-    !!u && (u.role === ROLES.ADMIN || !!u.isManager || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
+    !!u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'caregiverManagement') || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
 
   const requireReviewStaff = (req, res, next) => {
     if (isReviewStaff(req.user)) return next();
@@ -110,7 +112,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // manager and a care coordinator run caregiver management — documents,
   // competencies, the Feed. Read by ACCOUNT TYPE (accountTypes.js), never by
   // `role`, because a coordinator is stored as `role: 'user'`.
-  const isCaregiverOffice = (u) => accountTypes.isHomeCareOffice(u);
+  // Home Care Oversight in the Modules grid (owner, 2026-11-13): the office
+  // by default, plus a grant, minus a removal.
+  const isCaregiverOffice = (u) => accountTypes.hasModule(u, 'caregiverManagement');
   // An employee of any kind: an account type that is not a client or family.
   const isStaffAccount = (u) => {
     const t = accountTypes.accountTypeOf(u);
@@ -1051,7 +1055,18 @@ module.exports = function createCaregiverRoutes(deps) {
   });
 
   // GET /api/caregiver/incidents — review staff. ?status=open|closed.
-  router.get('/api/caregiver/incidents', authenticateToken, requireReviewStaff, async (req, res) => {
+  // The Incident Log follows its own row in the Modules grid (owner,
+  // 2026-11-13). Clinicians and case managers still read it by licence.
+  const requireIncidentReader = (req, res, next) => {
+    const u = req.user;
+    if (u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'incidents') || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER)) return next();
+    return res.status(403).json({ error: 'The Incident Log is for the office and clinical staff.', code: 'INCIDENT_READER_ONLY' });
+  };
+  const requireIncidentOffice = (req, res, next) => {
+    if (req.user && (req.user.role === ROLES.ADMIN || accountTypes.hasModule(req.user, 'incidents'))) return next();
+    return res.status(403).json({ error: 'The office closes incidents.', code: 'INCIDENT_OFFICE_ONLY' });
+  };
+  router.get('/api/caregiver/incidents', authenticateToken, requireIncidentReader, async (req, res) => {
     try {
       let rows = await readRows('incident_reports');
       const want = String(req.query.status || '');
@@ -1069,7 +1084,7 @@ module.exports = function createCaregiverRoutes(deps) {
 
   // POST /api/caregiver/incidents/:id/close — the caregiver office closes an
   // incident with a follow-up note, and records a state report if one was made.
-  router.post('/api/caregiver/incidents/:id/close', authenticateToken, requireCaregiverOffice, async (req, res) => {
+  router.post('/api/caregiver/incidents/:id/close', authenticateToken, requireIncidentOffice, async (req, res) => {
     try {
       const { note, stateReport } = req.body || {};
       const text = String(note || '').trim();

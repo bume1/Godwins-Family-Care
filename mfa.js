@@ -113,6 +113,11 @@ const mfaRequiredFor = (user, requiredRoles) => {
   if (!user) return false;
   if ((requiredRoles || []).includes(user.role)) return true;
   if (user.hasClinicalAccess || canClinicalRead(user)) return true;
+  // A module the Super Admin GRANTED in the Modules grid (owner, 2026-11-13)
+  // is office-level access, so it brings two-step sign-in with it even for an
+  // account type that has none (a caregiver given Billing or Payroll).
+  const ma = user.moduleAccess;
+  if (ma && Array.isArray(ma.granted) && ma.granted.length) return true;
   return MANAGER_LEVEL_FLAGS.some(flag => !!user[flag]);
 };
 const isEnrolled = (user) => !!(user && user.mfa && user.mfa.enrolledAt && user.mfa.secret);

@@ -114,6 +114,36 @@ let STATE_NAMES = {};
 const stName = (c) => STATE_NAMES[c] || c;
 const statesGaFirst = () => ['GA', ...Object.keys(STATE_NAMES).filter(c => c !== 'GA').sort((a, b) => stName(a).localeCompare(stName(b)))];
 const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700' };
+// How this payroll is sent (owner, 2026-11-13): the Super Admin's choice on the
+// draft, Direct deposit or P2P from GFC's Cash App, with a per-person
+// override. Employees never choose it. The stubs say which.
+const ChannelPicker = ({ run, onSaved }) => {
+  const ch = run.channels || { default: 'direct_deposit', byUser: {} };
+  const [def, setDef] = useState(ch.default || 'direct_deposit');
+  const [by, setBy] = useState({ ...(ch.byUser || {}) });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const dirty = def !== (ch.default || 'direct_deposit') || JSON.stringify(by) !== JSON.stringify(ch.byUser || {});
+  const save = () => { setBusy(true); setErr(''); setMsg(''); call(`/api/payroll/admin/runs/${enc(run.id)}/channel`, { method: 'PUT', body: JSON.stringify({ default: def, byUser: by }) }).then(() => { setMsg('Saved.'); onSaved(); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+  const opt = (v) => (v === 'p2p' ? 'P2P (Cash App)' : 'Direct deposit');
+  return (
+    <div className="border border-stone-200 rounded-xl p-3 mb-3">
+      <Err e={err} /><Ok m={msg} />
+      <div className="flex flex-wrap gap-2 items-end">
+        <label>How this payroll is sent<select className="inp !w-56" value={def} onChange={e => { setDef(e.target.value); setBy({}); }}><option value="direct_deposit">Direct deposit</option><option value="p2p">P2P (Cash App)</option></select></label>
+        <button className="btn ghost" disabled={busy || !dirty} onClick={save}>Save</button>
+      </div>
+      <div className="mt-2 grid sm:grid-cols-2 gap-x-4">
+        {run.workers.map(w => {
+          const v = by[w.userId] || def;
+          return <label key={w.userId} className="flex justify-between items-center gap-2 text-[13px] py-0.5"><span>{w.name}</span>
+            <select className="inp !w-48 !py-1" value={v} onChange={e => { const n = { ...by }; if (e.target.value === def) delete n[w.userId]; else n[w.userId] = e.target.value; setBy(n); }}><option value="direct_deposit">{opt('direct_deposit')}</option><option value="p2p">{opt('p2p')}</option></select></label>;
+        })}
+      </div>
+      <p className="text-[12px] text-stone-500 mt-2">P2P is sent from GFC's Cash App (set under Settings). Anyone sent P2P does not need bank details on file. Their pay stub says how they were paid.</p>
+    </div>
+  );
+};
+
 const RunDetail = ({ id, onBack, reload }) => {
   const [run, setRun] = useState(null); const [sheet, setSheet] = useState(null);
   const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
@@ -134,6 +164,10 @@ const RunDetail = ({ id, onBack, reload }) => {
         <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
         {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
+        {run.status === 'draft' && SUPER && <ChannelPicker run={run} onSaved={() => { load(); reload(); }} />}
+        {run.status !== 'draft' && run.channels && <p className="text-[12.5px] text-stone-500 mb-2">Sent by {run.channels.default === 'p2p' ? 'P2P (Cash App)' : 'direct deposit'}{Object.keys(run.channels.byUser || {}).length ? `, ${Object.keys(run.channels.byUser).length} person(s) the other way` : ''}.</p>}
+        {run.status === 'draft' && (run.unapprovedTimesheets || []).length > 0 && <Warn><b>Timesheets not approved yet:</b> {run.unapprovedTimesheets.map(x => x.name).join(', ')}. Approve them on the Timesheets tab. Their clocked hours are still paid if you approve payroll; you will be asked why.</Warn>}
+        {run.timesheetOverride && <p className="text-[12.5px] text-stone-500 mb-2">Approved with timesheets not approved ({run.timesheetOverride.people.join(', ')}): {run.timesheetOverride.reason}</p>}
         {(run.stateRatesMissing || []).length > 0 && <Warn>Set GFC's unemployment rate for {run.stateRatesMissing.map(stName).join(', ')} under Settings before approving.</Warn>}
         <div className="grid sm:grid-cols-4 gap-3 mb-4">
           {[['Gross pay', t.grossCents], ['Net pay', t.netCents], ['Taxes withheld', t.federalCents + t.socialSecurityCents + t.medicareCents + t.georgiaCents + (t.stateWithholdingCents || 0)], ['Cash needed', t.cashNeededCents]].map(([k, v]) => (
@@ -170,22 +204,31 @@ const RunDetail = ({ id, onBack, reload }) => {
             </div>
             <div className="flex gap-2">
               <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
-              <button className="btn gold" disabled={busy} onClick={() => window.confirm('Approve this payroll? Its hours lock and pay stubs go out.') && act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`), 'Approved. Pay stubs are out.')}>Approve Payroll</button>
+              {SUPER ? <button className="btn gold" disabled={busy} onClick={() => {
+                const pending = run.unapprovedTimesheets || [];
+                let timesheetReason;
+                if (pending.length) {
+                  timesheetReason = window.prompt(`${pending.length} timesheet(s) are not approved: ${pending.map(x => x.name).join(', ')}. Their clocked hours will be paid. Why go ahead now?`);
+                  if (!timesheetReason || !timesheetReason.trim()) return;
+                }
+                if (window.confirm('Approve this payroll? Its hours lock and pay stubs go out.')) act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`, pending.length ? { timesheetReason } : undefined), 'Approved. Pay stubs are out.');
+              }}>Approve Payroll</button>
+                : <span className="text-[12.5px] text-stone-500 self-center">Ready? Tell the Super Admin to approve it.</span>}
             </div>
           </div>
         )}
       </Card>
       {sheet && (
-        <Card title="Payment Sheet (PNC)" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
-          <p className="mb-3 text-stone-500">Send each payment in the PNC app, then paste its confirmation number here. The run is paid when everyone has one.</p>
-          {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} />)}
+        <Card title="Payment Sheet" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
+          <p className="mb-3 text-stone-500">Send each payment in the PNC app, or from GFC's Cash App for anyone marked P2P, then paste its confirmation or Cash App payment ID here. The run is paid when everyone has one.</p>
+          {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} p2pAccount={sheet.p2pAccount} />)}
         </Card>
       )}
     </div>
   );
 };
 const Copy = ({ text }) => <button className="btn ghost !py-0.5 !px-2 !text-[11px]" onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(text))}>Copy</button>;
-const PaymentRow = ({ runId, s, onDone }) => {
+const PaymentRow = ({ runId, s, onDone, p2pAccount }) => {
   const [conf, setConf] = useState(''); const [full, setFull] = useState({}); const [err, setErr] = useState('');
   const reveal = (field) => post(`/api/payroll/admin/people/${enc(s.userId)}/reveal`, { field }).then(r => setFull(f => ({ ...f, [field]: r.value }))).catch(e => setErr(e.message));
   return (
@@ -194,13 +237,13 @@ const PaymentRow = ({ runId, s, onDone }) => {
         <b className="text-primary">{s.name}</b> · <b>{s.net}</b> <Copy text={(s.netCents / 100).toFixed(2)} />
         <div className="text-[12.5px] text-stone-500">
           {s.method === 'direct_deposit' ? <>
-            {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : <button className="underline" onClick={() => reveal('routing')}>show</button>}
-            {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : <button className="underline" onClick={() => reveal('account')}>show</button>}
-          </> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
+            {s.bankName} {s.accountType} · routing {full.routing || `••••${s.routingLast4}`} {full.routing ? <Copy text={full.routing} /> : SUPER && <button className="underline" onClick={() => reveal('routing')}>show</button>}
+            {' '}· account {full.account || `••••${s.accountLast4}`} {full.account ? <Copy text={full.account} /> : SUPER && <button className="underline" onClick={() => reveal('account')}>show</button>}
+          </> : s.method === 'p2p' ? <>P2P · send from GFC's Cash App ({p2pAccount || '$GodwinsFamilyCare'}){s.phone ? <> · their phone {s.phone} <Copy text={s.phone} /></> : ''}</> : s.method === 'check' ? 'Paper check' : s.method === 'wise' ? 'Wise' : 'No pay method'}
         </div>
         {err && <div className="text-red-700 text-[12px]">{err}</div>}
       </div>
-      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : (
+      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : !SUPER ? <span className="text-[12.5px] text-stone-500">Not paid yet</span> : (
         <div className="flex gap-2"><input className="inp !w-44" placeholder="Confirmation #" value={conf} onChange={e => setConf(e.target.value)} />
           <button className="btn" disabled={!conf.trim()} onClick={() => post(`/api/payroll/admin/runs/${enc(runId)}/payments/${enc(s.userId)}`, { confirmation: conf }).then(onDone).catch(e => setErr(e.message))}>Mark Paid</button></div>
       )}
@@ -265,6 +308,138 @@ const HoursExport = () => {
   );
 };
 
+// ---- Timesheets (owner, 2026-11-13) -------------------------------------------
+// Everyone's hours for one period, before payroll: what they said, and the
+// Super Admin's Approve or Send Back (with what to correct). A preparer reads.
+const OFFICE_CHIP = { approved: ['APPROVED', 'bg-emerald-50 text-emerald-700'], changed: ['CHANGED SINCE APPROVED', 'bg-amber-50 text-amber-800'], sent_back: ['SENT BACK', 'bg-red-50 text-red-700'], waiting: ['WAITING', 'bg-stone-100 text-stone-600'] };
+const EMP_TEXT = { confirmed: 'Confirmed by them', flagged: 'Flagged by them', changed: 'Hours changed since they confirmed', not_yet: 'Not confirmed by them' };
+const hm = (m) => `${Math.floor((m || 0) / 60)}h ${String((m || 0) % 60).padStart(2, '0')}m`;
+
+// ---- One clocked line, and changing it (owner, 2026-11-13) -------------------
+// Times are Georgia's. The Super Admin's change applies at once (with a reason
+// kept on the log). A manager's or care coordinator's goes to the Super Admin
+// as a time adjustment request, the same queue Staff Scheduling shows.
+const T = window.GFC_TIME;
+const clock = (iso) => (iso ? T.fmtTime(iso) : '');
+const partsOf = (iso) => { const p = iso ? T.zonedParts(iso) : null; return p ? { date: p.isoDate, time: `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}` } : { date: '', time: '' }; };
+// The clock-out is on the same day, or the next one when it is earlier than the clock-in.
+const toTimes = (date, tin, tout) => { const a = T.instantFromZoned(date, tin); let b = T.instantFromZoned(date, tout); if (a && b && b <= a) b = T.instantFromZoned(T.addDays(date, 1), tout); return { clockInAt: a, clockOutAt: b }; };
+const HoursLine = ({ l, mode, onDone }) => {
+  const [edit, setEdit] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const start = partsOf(l.clockIn);
+  const [f, setF] = useState({ date: start.date, tin: start.time, tout: partsOf(l.clockOut).time, reason: '' });
+  const save = async () => {
+    const t = toTimes(f.date, f.tin, f.tout);
+    if (!t.clockInAt || !t.clockOutAt) { setErr('Give the date and both times.'); return; }
+    setBusy(true); setErr('');
+    try {
+      if (mode === 'direct') await put(`/api/scheduling/time-logs/${enc(l.timeLogId)}`, { ...t, reason: f.reason });
+      else await post(`/api/scheduling/time-logs/${enc(l.timeLogId)}/adjustment-requests`, { ...t, reason: f.reason });
+      setEdit(false); await onDone(mode === 'direct' ? 'Hours changed.' : 'Sent to the Super Admin to approve.');
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const decide = async (decision) => {
+    const note = decision === 'declined' ? (window.prompt('Why not? They will see this.') || '') : '';
+    if (decision === 'declined' && !note.trim()) return;
+    setBusy(true); setErr('');
+    try { await post(`/api/scheduling/adjustment-requests/${enc(l.pendingChange.id)}/decide`, { decision, note }); await onDone(decision === 'approved' ? 'Change approved; the hours are updated.' : 'Change declined.'); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div className="pl-3 py-1 border-t border-stone-100 text-[12.5px] text-stone-600">
+      <div className="flex flex-wrap justify-between gap-2 items-center">
+        <span>{day(l.date)} · {l.source}{l.clockIn ? ` · ${clock(l.clockIn)} to ${clock(l.clockOut)}` : ''}{l.client ? ` · ${l.client}` : ''}{l.edited ? <span className="chip bg-stone-100 text-stone-600 ml-1">EDITED{l.editedBy ? ` BY ${String(l.editedBy).toUpperCase()}` : ''}</span> : null}</span>
+        <span className="flex gap-2 items-center"><b>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</b>
+          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}</span>
+      </div>
+      {l.edited && l.editReason && <div className="text-stone-500">Changed: {l.editReason}</div>}
+      {!l.editable && l.timeLogId && <div className="text-stone-500">Paid and locked. A correction goes on the next payroll.</div>}
+      {!l.timeLogId && mode && <div className="text-stone-500">Visit times come from the clinician's note and are corrected there.</div>}
+      {l.pendingChange && (
+        <div className="rounded-lg bg-amber-50 text-amber-900 p-2 mt-1">
+          {l.pendingChange.self ? 'They asked' : `${l.pendingChange.by} asked`} to change this to {clock(l.pendingChange.clockIn)} to {clock(l.pendingChange.clockOut)}: "{l.pendingChange.reason}"
+          {SUPER && <span className="ml-2 inline-flex gap-1"><button className="btn !py-0.5 !px-2" disabled={busy} onClick={() => decide('approved')}>Approve Change</button><button className="btn ghost !py-0.5 !px-2" disabled={busy} onClick={() => decide('declined')}>Decline</button></span>}
+          {!SUPER && <span className="ml-1">Waiting on the Super Admin.</span>}
+        </div>
+      )}
+      {edit && (
+        <div className="flex flex-wrap gap-2 items-end mt-1">
+          <label>Date<input type="date" className="inp !w-40" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></label>
+          <label>Clock in<input type="time" className="inp !w-32" value={f.tin} onChange={e => setF({ ...f, tin: e.target.value })} /></label>
+          <label>Clock out<input type="time" className="inp !w-32" value={f.tout} onChange={e => setF({ ...f, tout: e.target.value })} /></label>
+          <label className="flex-1 min-w-[200px]">Why<input className="inp" value={f.reason} maxLength={1000} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="Forgot to clock out at 5:00" /></label>
+          <button className="btn" disabled={busy || !f.reason.trim()} onClick={save}>{mode === 'direct' ? 'Save' : 'Send for Approval'}</button>
+          <button className="btn ghost" onClick={() => setEdit(false)}>Cancel</button>
+        </div>
+      )}
+      {err && <div className="text-red-700 mt-1">{err}</div>}
+    </div>
+  );
+};
+const Timesheets = ({ data }) => {
+  const scheds = data.schedules || [];
+  const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'caregivers');
+  const [date, setDate] = useState('');
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const [open, setOpen] = useState(null); const [busy, setBusy] = useState(false);
+  const load = (sch = schedule, dt = date) => call(`/api/payroll/admin/timesheets?schedule=${enc(sch)}${dt ? `&date=${enc(dt)}` : ''}`).then(x => { setD(x); if (!dt) setDate(x.period.start); }).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const decide = async (t, decision) => {
+    let note = '';
+    if (decision === 'send_back') { note = window.prompt(`What should ${t.name} correct?`) || ''; if (!note.trim()) return; }
+    setBusy(true); setErr(''); setMsg('');
+    try { await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision, note }); setMsg(decision === 'approve' ? `${t.name}: approved.` : `${t.name}: sent back.`); await load(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const waiting = d ? d.timesheets.filter(t => !t.paid && !t.status.approved && t.status.office !== 'sent_back' && t.status.employee !== 'flagged') : [];
+  const approveAll = async () => {
+    if (!window.confirm(`Approve ${waiting.length} timesheet(s) nobody flagged or sent back?`)) return;
+    setBusy(true); setErr('');
+    try { for (const t of waiting) await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision: 'approve' }); setMsg(`${waiting.length} approved.`); await load(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <Card title="Timesheets">
+      <Err e={err} /><Ok m={msg} />
+      <p className="text-stone-500 mb-3">Everyone's hours for the pay period, the same hours they see in My GFC. Check them, fix them, then approve each person before you draft payroll, or send them back with what to correct.</p>
+      <div className="flex flex-wrap gap-2 items-end mb-4">
+        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); setDate(''); load(e.target.value, ''); }}>{scheds.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}</select></div>
+        <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} /></div>
+        <button className="btn ghost" onClick={() => load()}>Show</button>
+        {d && SUPER !== null && !TIMESHEETS_ONLY && <button className="btn ghost" onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${d.period.start}&to=${d.period.end}`, `payroll-hours-${d.period.start}-to-${d.period.end}.csv`, setErr); }}>Export Hours CSV</button>}
+        {d && d.canDecide && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
+      </div>
+      {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· paid {day(d.period.payDate)}{d.ended ? '' : ' · this period is still going'}</span></p>}
+      {d && d.timesheets.length === 0 && <p className="text-stone-500">Nobody has hours in this period yet.</p>}
+      {d && d.timesheets.map(t => {
+        const [lbl, cls] = t.paid ? ['PAID', 'bg-emerald-50 text-emerald-700'] : (OFFICE_CHIP[t.status.office] || OFFICE_CHIP.waiting);
+        return (
+          <div key={t.userId} className="py-2 border-b border-stone-100">
+            <div className="flex flex-wrap justify-between gap-2 items-center">
+              <button className="text-left" onClick={() => setOpen(open === t.userId ? null : t.userId)}>
+                <b className="text-primary">{t.name}</b> <span className="text-stone-500 text-[12.5px]">· {hm(t.paid && t.paidMinutes !== null ? t.paidMinutes : t.totals.minutes)}{t.totals.visits ? ` · ${t.totals.visits} visits` : ''}{t.totals.exams ? ` · ${t.totals.exams} exams` : ''} · {EMP_TEXT[t.status.employee]}</span>
+              </button>
+              <span className="flex gap-2 items-center"><span className={`chip ${cls}`}>{lbl}</span>
+                {d.canDecide && !t.paid && !t.status.approved && <button className="btn !py-1" disabled={busy} onClick={() => decide(t, 'approve')}>Approve</button>}
+                {d.canDecide && !t.paid && <button className="btn ghost !py-1" disabled={busy} onClick={() => decide(t, 'send_back')}>Send Back</button>}</span>
+            </div>
+            {t.employee && t.employee.status === 'flagged' && <div className="text-[12.5px] text-red-700 mt-1">They say: {t.employee.note}</div>}
+            {t.office && t.office.status === 'sent_back' && <div className="text-[12.5px] text-stone-500 mt-1">You sent it back: {t.office.note}</div>}
+            {t.openClockIns.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Still clocked in from {t.openClockIns.map(o => o.date).join(', ')}: not in payroll until clocked out.</div>}
+            {t.cannotPay.length > 0 && <div className="text-[12.5px] text-amber-800 mt-1">Payroll cannot pay: {t.cannotPay.join(' ')}</div>}
+            {(open === t.userId || t.lines.some(l => l.pendingChange)) && t.lines.filter(l => open === t.userId || l.pendingChange).map(l => <HoursLine key={l.ref} l={l} mode={t.paid ? null : d.editHours} onDone={async (m) => { setMsg(`${t.name}: ${m}`); await load(); }} />)}
+          </div>
+        );
+      })}
+      <p className="text-[12.5px] text-stone-500 mt-3">Open a name to see each shift and edit it. {d && d.editHours === 'request' ? 'Your edits go to the Super Admin to approve.' : 'Edits by managers, care coordinators and employees wait for your approval here.'} An approval no longer counts if the hours change afterwards. Unapproved hours are still paid on payday; approving payroll asks why.</p>
+    </Card>
+  );
+};
+
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
   const scheds = data.schedules || [];
@@ -275,7 +450,7 @@ const Runs = ({ data, reload }) => {
   const schedLabel = (k) => { const x = scheds.find(y => y.key === k); return x ? `${x.label} · ${x.frequency === 'weekly' ? 'weekly' : 'every two weeks'}` : ''; };
   return (
     <>
-    <GustoImport reload={reload} />
+    {SUPER && <GustoImport reload={reload} />}
     <HoursExport />
     <Card title="Payroll Runs">
       <Err e={err} />
@@ -302,11 +477,18 @@ const Person = ({ p, data, reload }) => {
   const pr = p.profile;
   const [f, setF] = useState({ paySchedule: pr.paySchedulePinned ? pr.paySchedule : '', workState: pr.workState || 'GA', workerType: pr.workerType, payType: pr.payType, hourlyRate: pr.hourlyRateCents ? pr.hourlyRateCents / 100 : '', salaryAnnual: pr.salaryAnnualCents ? pr.salaryAnnualCents / 100 : '', perVisitRate: pr.perVisitRateCents ? pr.perVisitRateCents / 100 : '', perExamRate: pr.perExamRateCents ? pr.perExamRateCents / 100 : '', wageAccount: pr.wageAccount, hireDate: pr.hireDate || '', status: pr.status });
   const [i9, setI9] = useState({ firstDay: '', docs: [{ list: 'A', title: '', expires: '' }] });
+  const [onFile, setOnFile] = useState({ source: 'gusto', firstDay: '', completedOn: '', copyFiled: false, note: '' });
+  const i9Done = !!(pr.i9 && ((pr.i9.section1 && pr.i9.section2) || pr.i9.onFile));
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
+  // The signed official forms, filled from what they entered (owner,
+  // 2026-11-13). They carry the full SSN, so only the Super Admin downloads.
+  const signedForms = [['w4', 'W-4', pr.w4], ['g4', 'G-4', pr.g4], ['state', 'State certificate', pr.stateCert], ['i9', 'I-9', pr.i9 && pr.i9.section1], ['w9', 'W-9', pr.w9]].filter(x => x[2]);
   return (
     <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
       <Err e={err} /><Ok m={msg} />
+      {SUPER && signedForms.length > 0 && <div className="flex flex-wrap gap-2 items-center text-[12.5px]"><span className="text-stone-500">Signed forms:</span>
+        {signedForms.map(([k, l]) => <button key={k} className="btn ghost !py-0.5 !px-2" onClick={() => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }}>{l} PDF</button>)}</div>}
       <div className="grid sm:grid-cols-3 gap-2">
         {p.employmentTypeOnUser
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
@@ -328,19 +510,36 @@ const Person = ({ p, data, reload }) => {
       </div>
       <div><button className="btn" onClick={save}>Save Pay Setup</button>
         {!pr.newHireReportedAt && pr.workerType !== '1099' && <button className="btn ghost ml-2" onClick={() => post(`/api/payroll/admin/people/${enc(p.userId)}/new-hire-reported`).then(() => { setMsg('Recorded.'); reload(); }).catch(e => setErr(e.message))}>Mark {stName(pr.workState || 'GA')} New Hire Reported</button>}</div>
-      {pr.i9 && pr.i9.section1 && !pr.i9.section2 && (
+      {pr.i9 && pr.i9.onFile && <p className="text-[12.5px] text-stone-500 border-t border-stone-100 pt-3">I-9 on file from {pr.i9.onFile.source === 'paper' ? 'a paper form' : 'Gusto'}: first day of work {day(pr.i9.onFile.firstDay)}, recorded by {pr.i9.onFile.recordedBy}.</p>}
+      {!i9Done && (
+        <div className="border-t border-stone-100 pt-3">
+          <div className="lblu mb-1">I-9 already on file</div>
+          <p className="text-[12.5px] text-stone-500 mb-2">For someone hired before payroll moved into the app. Their completed I-9 stays valid, so they do not fill it in again. Download it from Gusto (their profile → Documents), file it on their Staff Record as Work authorization documents, then record it here.</p>
+          <div className="flex flex-wrap gap-2 items-end">
+            <label>From<select className="inp !w-36" value={onFile.source} onChange={e => setOnFile({ ...onFile, source: e.target.value })}><option value="gusto">Gusto</option><option value="paper">Paper form</option></select></label>
+            <label>First day of work (on the I-9)<input type="date" className="inp !w-44" value={onFile.firstDay} onChange={e => setOnFile({ ...onFile, firstDay: e.target.value })} /></label>
+            <label>Section 2 completed on (optional)<input type="date" className="inp !w-44" value={onFile.completedOn} onChange={e => setOnFile({ ...onFile, completedOn: e.target.value })} /></label>
+          </div>
+          <label className="flex gap-2 items-center mt-2 text-[13px]"><input type="checkbox" checked={onFile.copyFiled} onChange={e => setOnFile({ ...onFile, copyFiled: e.target.checked })} />Their signed I-9 is filed on their Staff Record.</label>
+          <button className="btn ghost mt-2" disabled={!onFile.firstDay || !onFile.copyFiled} onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-on-file`, onFile).then(() => { setMsg('I-9 recorded as on file.'); reload(); }).catch(e => setErr(e.message))}>Record I-9 On File</button>
+        </div>
+      )}
+      {pr.i9 && pr.i9.section1 && !pr.i9.section2 && !pr.i9.onFile && (
         <div className="border-t border-stone-100 pt-3">
           <div className="lblu mb-1">I-9 Section 2: documents you examined</div>
           {i9.docs.map((d, k) => (
             <div key={k} className="flex flex-wrap gap-2 mb-2">
               <select className="inp !w-24" value={d.list} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, list: e.target.value } : x)) })}><option>A</option><option>B</option><option>C</option></select>
               <input className="inp !w-64" placeholder="Document title (e.g. U.S. Passport)" value={d.title} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, title: e.target.value } : x)) })} />
+              <input className="inp !w-44" placeholder="Issuing authority" value={d.issuer || ''} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, issuer: e.target.value } : x)) })} />
+              <input className="inp !w-40" autoComplete="off" placeholder="Document number" value={d.number || ''} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, number: e.target.value } : x)) })} />
               <input type="date" className="inp !w-44" value={d.expires} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, expires: e.target.value } : x)) })} />
             </div>
           ))}
           <button className="btn ghost !py-1 mr-2" onClick={() => setI9({ ...i9, docs: [...i9.docs, { list: 'C', title: '', expires: '' }] })}>Add Document</button>
           <label className="inline-block">First day of work <input type="date" className="inp !w-44" value={i9.firstDay} onChange={e => setI9({ ...i9, firstDay: e.target.value })} /></label>
-          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
+          <label className="inline-block ml-2">Your title <input className="inp !w-40" value={i9.reviewerTitle || ''} onChange={e => setI9({ ...i9, reviewerTitle: e.target.value })} placeholder="Owner" /></label>
+          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs, reviewerTitle: i9.reviewerTitle }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
         </div>
       )}
     </div>
@@ -359,7 +558,7 @@ const People = ({ data, reload }) => {
             {p.missing.length ? <span className="chip bg-red-50 text-red-700">Missing {p.missing.length}</span> : <span className="chip bg-emerald-50 text-emerald-700">Ready to pay</span>}
           </button>
           {p.missing.length > 0 && <div className="text-[12.5px] text-stone-500">{p.missing.join(' · ')}</div>}
-          {open === p.userId && <Person p={p} data={data} reload={reload} />}
+          {SUPER && open === p.userId && <Person p={p} data={data} reload={reload} />}
         </div>
       ))}
     </Card>
@@ -381,25 +580,35 @@ const ExaminerPayouts = ({ reload }) => {
     </div>
   );
 };
+// Contractor invoices (owner, 2026-11-13): managers, care coordinators and the
+// Super Admin approve or send back; only the Super Admin pays. An invoice may
+// be an uploaded PDF or spreadsheet with its total instead of lines.
+const PAY_TO = (t) => !t ? '' : t.method === 'intl_wire' ? `International wire · ${t.bankName || ''}${t.bankCountry ? `, ${t.bankCountry}` : ''} · SWIFT ${t.swift || ''} · account ••••${t.accountLast4 || ''}`
+  : t.method === 'wise' ? `Wise${t.wiseEmail ? ` · ${t.wiseEmail}` : ''}` : t.method === 'direct_deposit' ? `Direct deposit · ${t.bankName || 'Bank'} ••••${t.accountLast4 || ''}` : t.method === 'check' ? 'Paper check' : 'No pay method yet';
 const Contractors = ({ data, reload }) => {
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState(''); const [d, setD] = useState(null);
+  const load = () => call('/api/payroll/admin/contractor-invoices').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
   const act = (inv, action) => {
-    const body = action === 'reject' ? { note: window.prompt('What should they fix?') || '' } : action === 'pay' ? { confirmation: window.prompt('PNC or Wise confirmation number') || '' } : {};
+    const body = action === 'reject' ? { note: window.prompt('What should they fix?') || '' } : action === 'pay' ? { confirmation: window.prompt('PNC, Wise or wire confirmation number') || '' } : {};
     if ((action === 'reject' && !body.note) || (action === 'pay' && !body.confirmation)) return;
-    post(`/api/payroll/admin/contractor-invoices/${enc(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message));
+    post(`/api/payroll/admin/contractor-invoices/${enc(inv.id)}/${action}`, body).then(() => { load(); if (reload) reload(); }).catch(e => setErr(e.message));
   };
+  const list = d ? d.invoices : [];
   return (
     <Card title="Contractor Invoices">
       <Err e={err} />
-      <ExaminerPayouts reload={reload} />
-      {data.contractorInvoices.length === 0 && <p className="text-stone-500">Nothing waiting.</p>}
-      {data.contractorInvoices.map(i => (
+      {SUPER && !TIMESHEETS_ONLY && <ExaminerPayouts reload={reload} />}
+      {d && list.length === 0 && <p className="text-stone-500">Nothing waiting.</p>}
+      {list.map(i => (
         <div key={i.id} className="py-2 border-b border-stone-100">
-          <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}</span><b>{usd(i.totalCents)}</b></div>
-          {i.lines.map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
+          <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}{i.status === 'approved' ? <span className="chip bg-emerald-50 text-emerald-700 ml-2">APPROVED</span> : null}</span><b>{usd(i.totalCents)}</b></div>
+          {(i.lines || []).map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
+          {i.attachment && <button className="text-[12.5px] underline text-primary" onClick={() => { setErr(''); download(`/api/payroll/contractor-invoices/${enc(i.id)}/file`, i.attachment.name, setErr); }}>Open their invoice: {i.attachment.name}</button>}
+          {i.payTo && <div className="text-[12.5px] text-stone-500">{i.payTo.abroad ? 'Lives outside the U.S. (W-8BEN, no 1099) · ' : ''}{PAY_TO(i.payTo)}</div>}
           <div className="flex gap-2 mt-2">
-            {i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
-            {i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
+            {d.canReview && i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
+            {d.canPay && i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
           </div>
         </div>
       ))}
@@ -539,7 +748,7 @@ const YearEnd = () => {
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
             {ye.gustoGrossCents > 0 && !rel && <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-[13px] text-stone-700 mb-3">These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. GFC files {yr}'s W-2s from the app (owner, 2026-11-09), so those wages belong here. Before releasing, make sure Gusto is not also set to file {yr} W-2s, or the wages are reported twice.</div>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
-            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
+            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.{(ye.foreignContractors || []).length ? ` Contractors outside the U.S. with a W-8BEN get no 1099: ${ye.foreignContractors.map(x => `${x.name} (${usd(x.totalCents)})`).join(', ')}.` : ''}</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>
             {w2.length === 0 && <p className="text-stone-500 mb-2">No wages paid in {yr}.</p>}
             {w2.map(x => formRow(x, 'w2', 'W-2', x.boxes.box1))}
@@ -675,7 +884,7 @@ const Settings = ({ data, reload }) => {
   const s = data.settings;
   const [sch, setSch] = useState(Object.fromEntries((data.schedules || []).map(x => [x.key, { frequency: x.frequency, payDateOffsetDays: x.payDateOffsetDays, anchor: x.anchor }])));
   const setS = (k, field, v) => setSch({ ...sch, [k]: { ...sch[k], [field]: v } });
-  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '' });
+  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare', overseas: { enabled: !!(s.overseas && s.overseas.enabled), payMethods: (s.overseas && s.overseas.payMethods) || ['wise'] } });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   return (
     <Card title="Payroll Settings">
@@ -697,6 +906,13 @@ const Settings = ({ data, reload }) => {
         <label>Georgia unemployment rate (%)<input className="inp" value={f.gaSutaRatePct} onChange={e => setF({ ...f, gaSutaRatePct: e.target.value })} placeholder="from the GA DOL notice, e.g. 2.70" /></label>
         <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
+        <label>GFC's Cash App, for P2P payroll<input className="inp" value={f.p2pAccount} onChange={e => setF({ ...f, p2pAccount: e.target.value })} placeholder="$GodwinsFamilyCare" /></label>
+        <div className="sm:col-span-2 border border-stone-200 rounded-xl p-3">
+          <b className="text-primary">Contractors outside the U.S.</b>
+          <label className="flex gap-2 items-center mt-1"><input type="checkbox" checked={!!f.overseas.enabled} onChange={e => setF({ ...f, overseas: { ...f.overseas, enabled: e.target.checked } })} />Pay contractors who live outside the U.S. They give a W-8BEN instead of a W-9 and get no 1099.</label>
+          <div className="flex gap-4 mt-1 text-[13px]"><span className="text-stone-500">Ways to pay them:</span>
+            {[['wise', 'Wise'], ['intl_wire', 'International wire']].map(([k, l]) => <label key={k} className="flex gap-1 items-center"><input type="checkbox" checked={f.overseas.payMethods.includes(k)} onChange={e => setF({ ...f, overseas: { ...f.overseas, payMethods: e.target.checked ? [...f.overseas.payMethods, k] : f.overseas.payMethods.filter(x => x !== k) } })} />{l}</label>)}</div>
+        </div>
       </div>
       <OtherStates data={data} reload={reload} />
       <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, schedules: Object.fromEntries(Object.entries(sch).map(([k, v]) => { const was = (data.schedules || []).find(x => x.key === k) || {}; return [k, { frequency: v.frequency, payDateOffsetDays: Number(v.payDateOffsetDays), ...(v.anchor && v.anchor !== was.anchor ? { anchor: v.anchor } : {}) }]; })), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
@@ -705,11 +921,19 @@ const Settings = ({ data, reload }) => {
   );
 };
 
-const TABS = [['runs', 'Runs'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+const TABS = [['runs', 'Runs'], ['timesheets', 'Timesheets'], ['people', 'People'], ['contractors', 'Contractors'], ['taxes', 'Taxes'], ['yearend', 'Year End'], ['tables', 'Tax Tables'], ['qbo', 'QuickBooks'], ['settings', 'Settings']];
+// A payroll PREPARER (the Payroll module granted in the Modules grid, owner
+// 2026-11-13) drafts and reviews runs and records tax payments. These tabs and
+// the Super Admin's buttons are not drawn for them; the server refuses them
+// whatever this page shows. Set once the overview says who is looking.
+const PREPARER_TABS = ['runs', 'timesheets', 'people', 'contractors', 'taxes'];
+let SUPER = true;
+// A manager or care coordinator without the Payroll module sees Timesheets only.
+let TIMESHEETS_ONLY = false;
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
-  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; setData(d); }).catch(e => {
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; TIMESHEETS_ONLY = !!d.timesheetsOnly; if (TIMESHEETS_ONLY && !['timesheets', 'contractors'].includes(tab)) setTab('timesheets'); else if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
     if (e.status === 401) { window.location.replace('/login'); return; }
     setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
   }), []);
@@ -722,12 +946,15 @@ const App = () => {
           <span className="font-serif text-[24px] font-semibold">Payroll</span>
           <span className="flex items-center gap-4 text-[13.5px] font-semibold"><a className="text-[#F5CD85]" href="/billing">Billing</a><a className="text-[#F5CD85]" href="/my">My GFC</a><a className="text-[#F5CD85]" href="/login">Portal Hub</a></span>
         </div>
-        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => (TIMESHEETS_ONLY ? ['timesheets', 'contractors'].includes(k) : SUPER || PREPARER_TABS.includes(k))).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
       </div>
       <div className="max-w-[1300px] mx-auto px-4 lg:px-8 py-5">
         <Err e={err} />
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
+        {data && !SUPER && !TIMESHEETS_ONLY && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
+        {data && TIMESHEETS_ONLY && <Warn>Check each person's hours here, then approve them or send them back. A change to someone's times goes to the Super Admin, the same request as Request Correction on Staff Scheduling. Contractor invoices are yours to approve or send back too; paying stays with the Super Admin.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
+        {data && tab === 'timesheets' && <Timesheets data={data} />}
         {data && tab === 'people' && <People data={data} reload={load} />}
         {data && tab === 'contractors' && <Contractors data={data} reload={load} />}
         {data && tab === 'taxes' && <Taxes />}

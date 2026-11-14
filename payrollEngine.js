@@ -179,7 +179,12 @@ function runTotals(workers) {
   return totals;
 }
 
-function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
+// HOW EACH PERSON IS SENT PAY (owner, 2026-11-13): the office chooses per run,
+// Direct deposit or P2P (Cash App from GFC's account), with a per-person
+// override. `channels` = { default, byUser }.
+const PAY_CHANNELS = Object.freeze({ direct_deposit: 'Direct deposit', p2p: 'P2P (Cash App)' });
+const channelOf = (channels, uid) => { const c = channels || {}; const v = (c.byUser || {})[uid] || c.default; return PAY_CHANNELS[v] ? v : 'direct_deposit'; };
+function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments, channels }) {
   // The run's own schedule decides the divisor (52 weekly, 26 biweekly).
   const frequency = (period && period.frequency) || settings.frequency;
   const perYear = tax.FREQUENCIES[frequency].perYear;
@@ -193,7 +198,8 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const { lines, missingRate } = earningsFor(profile, items, perYear);
     for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
     const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
-    const missing = profiles.missingForPay(profile);
+    const channel = channelOf(channels, uid);
+    const missing = profiles.missingForPay(profile, { p2p: channel === 'p2p' });
     // Georgia first; another state is paid only once its table is approved,
     // and never taxed as Georgian.
     const ws = (profile && profile.workState) || 'GA';
@@ -209,7 +215,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const w = {
       userId: uid, name: user.name || user.email || uid,
       workerType: profile ? profile.workerType : 'W2', wageAccount: profile ? profile.wageAccount : 'clinical',
-      payMethod: profile && profile.payMethod ? profile.payMethod.method : null,
+      payMethod: channel === 'p2p' ? 'p2p' : profile && profile.payMethod ? profile.payMethod.method : null, channel,
       refs: items.map(i => i.ref), earnings: lines, missing, workState: ws
     };
     if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
@@ -257,4 +263,4 @@ function paidRefsFrom(runs) {
   return s;
 }
 
-module.exports = { RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, runTotals, buildRun, ytdFrom, paidRefsFrom };
+module.exports = { PAY_CHANNELS, channelOf, RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, runTotals, buildRun, ytdFrom, paidRefsFrom };

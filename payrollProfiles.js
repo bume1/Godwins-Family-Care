@@ -19,7 +19,14 @@ const { STATE_NAMES } = require('./payrollTaxTables');
 
 const WORKER_TYPES = Object.freeze({ W2: 'W2', C1099: '1099', HYBRID: 'HYBRID' });
 const PAY_TYPES = Object.freeze(['hourly', 'salary', 'per_visit']);
-const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise']);
+const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise', 'intl_wire']);
+// For a contractor living outside the U.S. (owner, 2026-11-13). Which of these
+// are offered is a payroll setting (Settings → Overseas contractors).
+const OVERSEAS_PAY_METHODS = Object.freeze({ wise: 'Wise', intl_wire: 'International wire' });
+// A $Cashtag: a letter, then letters, numbers or underscores (Cash App rules).
+// Used for GFC's own P2P sending account (Payroll → Settings), never chosen
+// by an employee: how a payroll is sent is the office's choice per run.
+const normalizeCashtag = (v) => { const t = String(v || '').trim().replace(/^\$/, ''); return /^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t) ? `$${t}` : null; };
 const WAGE_ACCOUNTS = Object.freeze(['home_care', 'clinical']);
 const W4_FILING = Object.freeze({ single: 'Single or Married filing separately', mfj: 'Married filing jointly', hoh: 'Head of household' });
 // Georgia Form G-4 (rev. 06/03/26), line 3.
@@ -115,25 +122,65 @@ function normalizeStateCert(b, ctx, state) {
   if (sig.error) return sig;
   return { value: { state, filingStatus: b.filingStatus, allowances, extraWithholdingCents: extra, exempt: b.exempt === true, ...sig.value } };
 }
+// Section 1 has everything the official form asks the employee (owner,
+// 2026-11-13: the app fills the real I-9). The A-Number, Form I-94 number and
+// foreign passport are returned apart as `ids`: the route seals them, and they
+// never come back to a browser.
+const ALIEN_NO = /^A?\d{7,9}$/i;
 function normalizeI9Section1(b, ctx) {
   b = b || {};
   if (!I9_STATUS[b.status]) return { error: 'Choose your citizenship or immigration status.', code: 'I9_STATUS' };
+  if (!isYmd(b.dob) || b.dob > (ctx.at || '').slice(0, 10)) return { error: 'Give your date of birth.', code: 'I9_DOB' };
   if (b.status === 'authorized' && b.workAuthExpires && !isYmd(b.workAuthExpires)) return { error: 'Work authorization expiration must be a date.', code: 'I9_EXPIRES' };
+  const alien = str(b.alienNumber, 12).replace(/[\s-]/g, '').toUpperCase();
+  const i94 = str(b.i94Number, 11).replace(/\s/g, '');
+  const passport = str(b.passport, 80);
+  if (alien && !ALIEN_NO.test(alien)) return { error: 'An A-Number or USCIS number is 7 to 9 digits.', code: 'I9_ALIEN_NUMBER' };
+  if (i94 && !/^[A-Z0-9]{11}$/i.test(i94)) return { error: 'A Form I-94 admission number is 11 characters.', code: 'I9_I94' };
+  if (b.status === 'lpr' && !alien) return { error: 'Give your A-Number or USCIS number.', code: 'I9_ALIEN_NUMBER' };
+  if (b.status === 'authorized' && !alien && !i94 && !passport) return { error: 'Give one of: A-Number or USCIS number, Form I-94 number, or foreign passport number and country.', code: 'I9_AUTH_NUMBER' };
   const sig = signature(b, ctx);
   if (sig.error) return sig;
-  return { value: { status: b.status, workAuthExpires: b.status === 'authorized' ? (b.workAuthExpires || null) : null, ...sig.value } };
+  const ids = b.status === 'lpr' ? { alienNumber: alien.replace(/^A/, '') } : b.status === 'authorized' ? { alienNumber: alien.replace(/^A/, '') || null, i94Number: i94 || null, passport: passport || null } : null;
+  return {
+    value: { status: b.status, workAuthExpires: b.status === 'authorized' ? (b.workAuthExpires || null) : null, dob: b.dob, otherLastNames: str(b.otherLastNames, 80) || null, phone: str(b.phone, 20) || null, idsOnFile: !!ids, ...sig.value },
+    ids
+  };
 }
 // Section 2 is the employer's: which documents were examined. Document
 // numbers are not stored, only what they were and when they expire.
 function normalizeI9Section2(b, { at, by }) {
   b = b || {};
-  const docs = (Array.isArray(b.documents) ? b.documents : []).map(d => ({ list: str(d && d.list, 1).toUpperCase(), title: str(d && d.title, 120), expires: d && isYmd(d.expires) ? d.expires : null }))
+  // The document number is kept for the official form, sealed by the route
+  // (returned apart as `numbers`, in the same order as the documents).
+  const raw = (Array.isArray(b.documents) ? b.documents : []).map(d => ({ list: str(d && d.list, 1).toUpperCase(), title: str(d && d.title, 120), issuer: str(d && d.issuer, 120) || null, expires: d && isYmd(d.expires) ? d.expires : null, number: str(d && d.number, 40) }))
     .filter(d => d.title && ['A', 'B', 'C'].includes(d.list));
+  const numbers = raw.map(d => d.number || null);
+  const docs = raw.map(({ number, ...d }) => d);
   const hasA = docs.some(d => d.list === 'A'), hasBC = docs.some(d => d.list === 'B') && docs.some(d => d.list === 'C');
   if (!hasA && !hasBC) return { error: 'Record one List A document, or one List B and one List C document.', code: 'I9_DOCUMENTS' };
   if (!isYmd(b.firstDay)) return { error: 'Give the employee\'s first day of work.', code: 'I9_FIRST_DAY' };
-  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by } };
+  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by, reviewerTitle: str(b.reviewerTitle, 60) || null, numbersOnFile: numbers.some(Boolean) }, numbers };
 }
+// An I-9 already on file (owner, 2026-11-13). Someone hired before GFC moved
+// payroll into the app has a completed Form I-9 from Gusto or on paper. That
+// form stays valid: changing payroll provider does not call for a new one.
+// The office records that it is on file, and where, instead of asking the
+// employee to fill Section 1 again. Required: their first day of work as the
+// form shows it, and confirmation the signed copy is filed on their Staff
+// Record, so the form itself can always be produced on request.
+const I9_ON_FILE_SOURCES = Object.freeze({ gusto: 'Gusto', paper: 'Paper form' });
+function normalizeI9OnFile(b, { at, by }) {
+  b = b || {};
+  if (!isYmd(b.firstDay)) return { error: 'Give the first day of work shown on their I-9.', code: 'I9_FIRST_DAY' };
+  if (b.completedOn !== undefined && b.completedOn !== null && b.completedOn !== '' && !isYmd(b.completedOn)) return { error: 'The date Section 2 was completed is not a date.', code: 'I9_COMPLETED_ON' };
+  if (b.copyFiled !== true) return { error: 'File their signed I-9 on their Staff Record (Documents → Work authorization documents) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
+  const source = I9_ON_FILE_SOURCES[b.source] ? b.source : 'gusto';
+  return { value: { source, firstDay: b.firstDay, completedOn: isYmd(b.completedOn) ? b.completedOn : null, note: str(b.note, 300) || null, recordedAt: at, recordedBy: by } };
+}
+// The I-9 is complete when both sections were done in the app, or a completed
+// form is on file from before.
+const i9Complete = (p) => !!(p && p.i9 && ((p.i9.section1 && p.i9.section2) || p.i9.onFile));
 function normalizeW9(b, ctx) {
   b = b || {};
   const name = str(b.name, 160);
@@ -147,11 +194,52 @@ function normalizeW9(b, ctx) {
   return { value: { name, businessName: str(b.businessName, 160), taxClass: b.taxClass, tinType, address: str(b.address, 300), ...sig.value }, tin: String(b.tin).replace(/\D/g, '') };
 }
 
+// Form W-8BEN (owner, 2026-11-13): a contractor who is not a U.S. person and
+// lives outside the U.S. gives this instead of a W-9. Part I identifies them;
+// Part II (a tax treaty claim) is optional and rarely needed for work done
+// outside the U.S. The U.S. and foreign tax ID numbers are returned apart, for
+// the route to seal.
+const isUS = (c) => /^(us|usa|u\.s\.a?\.?|united states( of america)?)$/i.test(String(c || '').trim());
+function normalizeW8BEN(b, ctx) {
+  b = b || {};
+  const name = str(b.name, 160);
+  if (!name) return { error: 'Give your name as on your passport or national ID.', code: 'W8_NAME' };
+  const citizenship = str(b.citizenship, 60);
+  if (!citizenship || isUS(citizenship)) return { error: 'Give your country of citizenship. A U.S. citizen gives a W-9 instead.', code: 'W8_CITIZENSHIP' };
+  const perm = { line: str(b.permLine, 120), city: str(b.permCity, 120), country: str(b.permCountry, 60) };
+  if (!perm.line || !perm.city || !perm.country) return { error: 'Give your permanent home address, city and country.', code: 'W8_ADDRESS' };
+  if (isUS(perm.country)) return { error: 'A W-8BEN is for someone living outside the U.S. Give a W-9 instead.', code: 'W8_US_ADDRESS' };
+  const mail = { line: str(b.mailLine, 120), city: str(b.mailCity, 120), country: str(b.mailCountry, 60) };
+  if (!isYmd(b.dob)) return { error: 'Give your date of birth.', code: 'W8_DOB' };
+  const foreignTin = str(b.foreignTin, 40);
+  const ftinNotRequired = b.ftinNotRequired === true;
+  if (!foreignTin && !ftinNotRequired) return { error: 'Give your tax ID number from your country, or tick that your country does not require one.', code: 'W8_FTIN' };
+  const usTin = String(b.usTin || '').replace(/\D/g, '');
+  if (usTin && usTin.length !== 9) return { error: 'A U.S. taxpayer ID (SSN or ITIN) has 9 digits. Leave it blank if you have none.', code: 'W8_US_TIN' };
+  const treaty = b.treatyCountry ? { country: str(b.treatyCountry, 60), article: str(b.treatyArticle, 30), rate: str(b.treatyRate, 10), incomeType: str(b.treatyIncomeType, 80), conditions: str(b.treatyConditions, 300) } : null;
+  const sig = signature(b, ctx);
+  if (sig.error) return sig;
+  return {
+    value: { name, citizenship, permanentAddress: perm, mailingAddress: mail.line ? mail : null, dob: b.dob, ftinNotRequired, foreignTinOnFile: !!foreignTin, usTinOnFile: !!usTin, treaty, ...sig.value },
+    foreignTin: foreignTin || null, usTin: usTin || null
+  };
+}
+
 // The bank account, or a paper check, or Wise for a contractor abroad.
 function normalizePayMethod(b) {
   b = b || {};
   const method = b.method;
   if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, paper check or Wise.', code: 'PAY_METHOD' };
+  // An international wire: the bank's SWIFT/BIC and the IBAN or account
+  // number. The account is returned apart for the route to seal.
+  if (method === 'intl_wire') {
+    const swift = str(b.swift, 11).replace(/\s/g, '').toUpperCase();
+    const account = str(b.iban, 40).replace(/\s/g, '').toUpperCase();
+    if (!/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(swift)) return { error: 'A SWIFT/BIC code is 8 or 11 letters and numbers.', code: 'WIRE_SWIFT' };
+    if (!/^[A-Z0-9]{6,34}$/.test(account)) return { error: 'Give the IBAN or account number.', code: 'WIRE_ACCOUNT' };
+    if (!str(b.bankName, 120) || !str(b.bankCountry, 60)) return { error: 'Give the bank name and country.', code: 'WIRE_BANK' };
+    return { value: { method, bankName: str(b.bankName, 120), bankCountry: str(b.bankCountry, 60), swift, beneficiaryName: str(b.beneficiaryName, 120) || null }, account };
+  }
   if (method !== 'direct_deposit') return { value: { method, wiseEmail: method === 'wise' ? str(b.wiseEmail, 200) : null } };
   const r = checkRouting(b.routing), a = checkAccount(b.account);
   if (r) return { error: r, code: 'BANK_ROUTING' };
@@ -249,18 +337,22 @@ const isContractor = (p) => p && (p.workerType === WORKER_TYPES.C1099 || p.worke
 // What still stops this person being paid. A run refuses anyone with an item
 // here (spec: a run cannot be approved if any worker is missing a W-4, G-4 or
 // bank details, unless paid by check).
-function missingForPay(p, { asContractor = false } = {}) {
+function missingForPay(p, { asContractor = false, p2p = false } = {}) {
   const out = [];
   if (!p) return ['Payroll record'];
-  if (!p.payMethod) out.push('How they are paid (bank details, check or Wise)');
+  // Paid P2P on this run (the office's choice, owner 2026-11-13): GFC sends it
+  // from its own Cash App, so their bank details are not needed for it.
+  if (!p.payMethod && !p2p) out.push('How they are paid (bank details, check or Wise)');
   if (asContractor) {
-    if (!p.w9 && !(p.payMethod && p.payMethod.method === 'wise' && p.w8ben)) out.push('W-9');
+    // Living outside the U.S. (owner, 2026-11-13): a W-8BEN instead of a W-9.
+    if (p.taxResidence === 'foreign') { if (!p.w8ben) out.push('W-8BEN'); }
+    else if (!p.w9) out.push('W-9');
     return out;
   }
   if (!p.ssn) out.push('SSN');
   if (!p.w4) out.push('W-4');
   if (!p.g4 && (p.workState || 'GA') === 'GA') out.push('G-4');
-  if (!(p.i9 && p.i9.section1 && p.i9.section2)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
+  if (!i9Complete(p)) out.push(p.i9 && p.i9.section1 ? 'I-9 Section 2 (the office)' : 'I-9');
   if (p.payType === 'hourly' && !p.isCaregiver && !(p.hourlyRateCents > 0)) out.push('Hourly rate');
   if (p.payType === 'salary' && !(p.salaryAnnualCents > 0)) out.push('Salary');
   if (p.payType === 'per_visit' && !(p.perVisitRateCents > 0)) out.push('Per-visit rate');
@@ -291,15 +383,18 @@ function checklist(p, opts = {}) {
     // where that state taxes wages (Texas does not).
     if ((p.workState || 'GA') === 'GA') rows.push({ key: 'g4', label: 'Form G-4 (Georgia withholding)', done: !!p.g4 });
     else if (opts.stateIncomeTax) rows.push({ key: 'statecert', label: `${STATE_NAMES[p.workState] || p.workState} withholding certificate`, done: !!(p.stateCert && p.stateCert.state === p.workState) });
-    rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && p.i9.section1), note: p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
+    rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && (p.i9.section1 || p.i9.onFile)), locked: !!(p.i9 && p.i9.onFile && !p.i9.section1),
+      note: p.i9 && p.i9.onFile && !p.i9.section1 ? 'Already on file from your earlier hire paperwork. Nothing to do.' : p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
     rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   }
-  if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
+  if (con && opts.overseasAllowed) rows.push({ key: 'residence', label: 'Where you live for tax', done: !!p.taxResidence, note: p.taxResidence === 'foreign' ? 'Outside the U.S.: you give a W-8BEN, and no 1099 is issued.' : p.taxResidence === 'us' ? 'In the U.S.: you give a W-9.' : null });
+  if (con && p.taxResidence === 'foreign') rows.push({ key: 'w8ben', label: 'Form W-8BEN (living outside the U.S.)', done: !!p.w8ben });
+  else if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
   // Printed on the W-2 or 1099 (and the copy filed with the IRS and SSA).
   rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your W-2 or 1099)', done: !!p.taxAddress });
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
-  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
+  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
   return rows.map(r => ({ ...r, group: GROUP[r.key] }));
 }
 
@@ -307,7 +402,7 @@ function checklist(p, opts = {}) {
 // is on file. `full` is for the owner's audited reveal only.
 function publicProfile(p, opts = {}) {
   if (!p) return null;
-  const { ssn, tin, payMethod, history, ...rest } = p;
+  const { ssn, tin, payMethod, history, i9Ids, i9DocNumbers, w8benTins, ...rest } = p;
   return {
     ...rest,
     paySchedule: scheduleFor(p), paySchedulePinned: PAY_SCHEDULE_KEYS.includes(p.paySchedule),
@@ -315,7 +410,8 @@ function publicProfile(p, opts = {}) {
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
     payMethod: payMethod ? {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
-      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null
+      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null,
+      swift: payMethod.swift || null, bankCountry: payMethod.bankCountry || null
     } : null,
     checklist: checklist(p, opts)
   };
@@ -323,7 +419,7 @@ function publicProfile(p, opts = {}) {
 
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
-  checkSsn, checkEin, checkRouting, checkAccount, signature,
-  normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeW9, normalizePayMethod, normalizePaySetup,
+  checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
+  normalizeW4, normalizeG4, normalizeW8BEN, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

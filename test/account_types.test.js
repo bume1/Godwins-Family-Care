@@ -96,7 +96,7 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
     ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
     ['clients', ['clients']],
     ['clinical', ['clinical', 'ime']],
-    ['billing', ['billing']],
+    ['billing', ['billing', 'payroll']],
     ['adminCompliance', ['admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']]
   ]);
   assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
@@ -125,9 +125,9 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'clients', 'clinical', 'ime', 'billing', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
+    'clients', 'clinical', 'ime', 'billing', 'payroll', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
-    for (const blocked of ['admin', 'service', 'clientPortalAdmin']) assert.ok(!ids(u).includes(blocked), blocked);
+    for (const blocked of ['admin', 'service', 'clientPortalAdmin', 'payroll']) assert.ok(!ids(u).includes(blocked), blocked);
   }
 });
 
@@ -146,6 +146,47 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
   const tile = (id) => at.hubTilesFor(at.fieldsFor('manager')).find(t => t.id === id);
   assert.equal(tile('clients').path, '/clients');
   assert.equal(tile('billing').path, '/billing');
+});
+
+// Payroll had no tile anywhere on the hub (owner report, 2026-11-13). It is the
+// Super Admin's alone, matching its requireAdmin routes.
+test('the Super Admin has a Payroll tile under Billing; nobody else does', () => {
+  const pay = at.hubTilesFor(at.fieldsFor('admin')).find(t => t.id === 'payroll');
+  assert.ok(pay, 'admin sees Payroll');
+  assert.equal(pay.path, '/payroll');
+  for (const t of ['manager', 'coordinator', 'provider', 'rn', 'lcsw', 'lmsw', 'liaison', 'caregiver', 'client', 'family']) {
+    assert.ok(!ids({ ...at.fieldsFor(t), licenseLevel: t === 'caregiver' ? 'cna' : undefined }).includes('payroll'), t);
+  }
+  const routes = fs.readFileSync(path.join(root, 'routes', 'payroll.js'), 'utf8');
+  const regs = routes.match(/router\.(get|post|put|delete)\('\/api\/payroll\/admin[^\n]*/g) || [];
+  assert.ok(regs.length > 10, 'the admin routes were found');
+  // Every admin route is the Super Admin's or a preparer's (a Payroll grant);
+  // none is open to anyone else.
+  // The one exception: managers and care coordinators view and edit HOURS
+  // (owner, 2026-11-13), so the overview and Timesheets admit them, and the
+  // overview tells them it is timesheets only.
+  const timesheetViewer = ["/api/payroll/admin/overview'", "/api/payroll/admin/timesheets'", "/api/payroll/admin/contractor-invoices'"];
+  // Managers and care coordinators also approve or send back timesheets
+  // (owner, 2026-11-14). Approving the payroll run stays the Super Admin's.
+  for (const r of regs) {
+    if (timesheetViewer.some(t => r.includes(t))) assert.match(r, /authenticateToken, requireTimesheetViewer\b/, r);
+    else if (r.includes("/api/payroll/admin/timesheets/decide'")) assert.match(r, /authenticateToken, requireTimesheetDecider\b/, r);
+    // Contractor invoices: reviewers approve or send back; paying is the Super Admin's.
+    else if (r.includes("/api/payroll/admin/contractor-invoices/:id/:action'")) assert.match(r, /authenticateToken, requireInvoiceAction\b/, r);
+    else assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  }
+  assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
+  // What a preparer must never reach: approving, paying, bank numbers,
+  // settings, people's pay setup, tax tables, contractor approvals, the Gusto
+  // import and year-end release (owner, 2026-11-13: "prepare only").
+  const superOnly = ['/runs/:id/approve', '/people/:userId/reveal', '/settings', "/people/:userId'", '/people/:userId/i9-section2',
+    '/tax-tables/:id/approve', "/tax-tables'", '/runs/:id/payments/:userId', '/import/gusto', '/year-end/:year/release'];
+  for (const tail of superOnly) {
+    const line = regs.find(r => r.includes(`/api/payroll/admin${tail.replace(/'$/, '')}'`) || (tail.endsWith("'") && r.includes(`/api/payroll/admin${tail}`)));
+    assert.ok(line, tail);
+    assert.match(line, /authenticateToken, requireAdmin\b/, tail);
+  }
+  assert.match(routes, /const requireInvoiceAction = \(req, res, next\) => \{\s*if \(req\.params\.action === 'pay'\) return requireAdmin\(req, res, next\);/, 'paying a contractor stays the Super Admin\'s');
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
@@ -168,7 +209,7 @@ test('every enrollment workflow write is open to a manager and a coordinator, an
   // canManageEnrollment is the one predicate requireEnrollmentManager calls; run it.
   assert.match(serverSrc, /const requireEnrollmentManager = \(req, res, next\) => \{\s*if \(canManageEnrollment\(req\.user\)\) return next\(\);/);
   const i = serverSrc.indexOf('const canManageEnrollment = ');
-  const pred = new Function('config', `${serverSrc.slice(i, serverSrc.indexOf(';', i) + 1)} return canManageEnrollment;`)(require('../config'));
+  const pred = new Function('config', 'accountTypes', `${serverSrc.slice(i, serverSrc.indexOf(';', i) + 1)} return canManageEnrollment;`)(require('../config'), at);
   const can = (u) => pred(u);
   assert.equal(can({ role: 'admin' }), true);
   assert.equal(can(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), true);
@@ -183,7 +224,9 @@ test('a manager and a coordinator can correct the enrollment submission too', ()
 
 test('the enrollment page offers the workflow buttons to managers and coordinators', () => {
   const page = fs.readFileSync(path.join(root, 'public', 'admin-enrollment.html'), 'utf8');
-  assert.match(page, /const canManageRole = \(user\) => !!user && \(user\.role === 'admin' \|\| user\.isManager === true\);/);
+  // Since the Modules grid (owner, 2026-11-13) it reads the Clients module, falling back to the manager flag.
+  assert.match(page, /const canManageRole = \(user\) => !!user && \(user\.role === 'admin' \|\| hasClients\(user\)\);/);
+  assert.match(page, /const hasClients = \(user\) => !!user && \(Array\.isArray\(user\.modules\) \? user\.modules\.includes\('clients'\) : user\.isManager === true\);/);
   assert.match(page, /const canEdit = canManageRole\(user\);/);
   assert.ok(!/isAdmin=\{isAdminRole\(user\)\}/.test(page), 'documents and family invites follow the same rule');
 });

@@ -101,7 +101,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // ---- who ----------------------------------------------------------------
   // The office is an admin or a manager: a provider must never verify her own
   // licence or sign her own service line open.
-  const isOffice = (u) => !!u && (u.role === 'admin' || u.isManager === true);
+  // Whoever holds Staff Onboarding in the Modules grid (owner, 2026-11-13).
+  const isOffice = (u) => !!u && (u.role === 'admin' || accountTypes.hasModule(u, 'onboarding'));
   const requireOffice = (req, res, next) => (isOffice(req.user) ? next()
     : res.status(403).json({ error: 'This is the office\'s onboarding view.', code: 'ONBOARDING_OFFICE_ONLY' }));
   const requireStaff = (req, res, next) => (req.user && (req.user.hasClinicalAccess || isOffice(req.user) || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(req.user))) ? next()

@@ -531,7 +531,7 @@ test('every /api/caregiver route authenticates and carries a role guard', () => 
     const [, method, routePath, middleware] = m;
     assert.ok(middleware.includes('authenticateToken'),
       `${method.toUpperCase()} ${routePath} must authenticate`);
-    const guarded = /requireCaregiver|requireReviewStaff|requireAdmin/.test(middleware);
+    const guarded = /requireCaregiver|requireReviewStaff|requireAdmin|requireIncident(Reader|Office)/.test(middleware);
     const inlineGuarded = INLINE_GUARDED.includes(routePath) && method === 'get';
     assert.ok(guarded || inlineGuarded,
       `${method.toUpperCase()} ${routePath} must carry a role guard, not rely on the UI`);

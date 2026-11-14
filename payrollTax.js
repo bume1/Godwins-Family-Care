@@ -30,6 +30,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   federalDepositSchedule: 'monthly',
   gaWithholdingFrequency: 'monthly',
   gaSutaRatePct: null,           // GFC's assigned rate, from the GA DOL notice
+  p2pAccount: '$GodwinsFamilyCare', // GFC's Cash App, for a payroll sent P2P (owner, 2026-11-13)
+  // Contractors living outside the U.S. (owner, 2026-11-13): off until the
+  // owner turns it on, and which ways they may be paid.
+  overseas: { enabled: false, payMethods: ['wise'] },
   reminderLeadBusinessDays: 5
 });
 
@@ -111,6 +115,17 @@ function normalizeSettings(b, current) {
     s.schedules = next;
     // The top-level fields mirror "staff", which older readers still use.
     s.frequency = next.staff.frequency; s.anchor = next.staff.anchor; s.payDateOffsetDays = next.staff.payDateOffsetDays;
+  }
+  if (b.overseas !== undefined) {
+    const o = b.overseas || {};
+    const methods = (Array.isArray(o.payMethods) ? o.payMethods : []).filter(m => ['wise', 'intl_wire'].includes(m));
+    if (o.enabled === true && !methods.length) return { error: 'Choose at least one way to pay contractors abroad.', code: 'OVERSEAS_METHODS' };
+    s.overseas = { enabled: o.enabled === true, payMethods: methods.length ? [...new Set(methods)] : ['wise'] };
+  }
+  if (b.p2pAccount !== undefined) {
+    const t = String(b.p2pAccount || '').trim().replace(/^\$/, '');
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t)) return { error: 'GFC\'s Cash App is a $Cashtag, for example $GodwinsFamilyCare.', code: 'P2P_ACCOUNT' };
+    s.p2pAccount = `$${t}`;
   }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);

@@ -2739,7 +2739,7 @@ async function generatePhcInvoicePDF(inv) {
 // Current and year-to-date for every line. Last four of the SSN and the
 // deposit account only. Drawn from the approved run's frozen numbers; nothing
 // is recalculated here.
-async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, workState, paidThrough }) {
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, p2pAccount, workState, paidThrough }) {
   return new Promise((resolve, reject) => {
     try {
       const ORG = consentText.ORG;
@@ -2787,14 +2787,16 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       };
       const hrs = (m) => (m ? (m / 60).toFixed(2) : '');
       table('EARNINGS', worker.earnings.map(e => ({
-        label: e.label + (e.note ? ` · ${e.note}` : ''),
+        label: e.label + (e.minutes && e.rateCents ? ` @ ${usd(e.rateCents)}/hr` : '') + (e.note ? ` · ${e.note}` : ''),
         cells: [e.minutes ? hrs(e.minutes) : e.count ? String(e.count) : '', usd(e.amountCents), usd((y.earnings || {})[e.code] || 0)]
       })).concat(p.reimbursementsCents ? [{ label: 'Reimbursements (not taxed)', cells: ['', usd(p.reimbursementsCents), usd(y.reimbursementsCents)] }] : []),
       [['HOURS / QTY', 330, 70], ['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const stCode = (worker.pay && worker.pay.workState) || workState || 'GA';
       const tl = [['Federal income tax', 'federal'], ['Social Security', 'socialSecurity'], ['Medicare', 'medicare'],
         stCode === 'GA' ? ['Georgia income tax', 'georgia'] : [`${payrollStateName(stCode)} income tax`, 'state']];
-      table('TAXES WITHHELD', tl.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
+      // A state with no income tax (Texas) and nothing withheld shows no line for it.
+      const tlShown = tl.filter(([, k]) => k !== 'state' || (p.taxes || {}).state || (y.taxes || {}).state);
+      table('TAXES WITHHELD', tlShown.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
       table('TOTALS', [
         { label: 'Gross pay', cells: [usd(p.grossCents), usd(y.grossCents)] },
@@ -2804,7 +2806,7 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
       y0 += 10;
-      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : 'Payment method not set';
+      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : payMethod === 'p2p' ? `P2P by Cash App from ${p2pAccount || '$GodwinsFamilyCare'}` : 'Payment method not set';
       doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}`, L, y0);
       doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
       doc.page.margins.bottom = 0;   // the footer sits below the margin

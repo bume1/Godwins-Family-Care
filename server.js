@@ -2534,7 +2534,10 @@ const authenticateToken = async (req, res, next) => {
         // from. Read from the FRESH user record, never the token, so a role an
         // admin narrowed this morning takes effect on the next request rather
         // than when the nurse next signs in — the same rule POA status follows.
-        clinicalRole: clinicalRoles.resolveClinicalRole(freshUser)
+        clinicalRole: clinicalRoles.resolveClinicalRole(freshUser),
+        // The Modules grid (owner, 2026-11-13): grants and removals, read fresh
+        // so a change applies on the next request. accountTypes.hasModule reads it.
+        moduleAccess: accountTypes.moduleAccessOf(freshUser)
       };
       // ...and the legacy boolean is DERIVED from that role, so a stale stored
       // flag cannot widen someone the enum has narrowed.
@@ -2726,7 +2729,7 @@ function buildServiceReportFromTicket(ticket, assignedToId, assignedToName, serv
 // patient's facility. Coordinators carry the manager flag (accountTypes.js),
 // so one predicate covers both.
 const canManageEnrollment = (u) => !!u && u.accountStatus !== 'inactive' &&
-  (u.role === config.ROLES.ADMIN || u.isManager === true);
+  (u.role === config.ROLES.ADMIN || accountTypes.hasModule(u, 'clients'));
 const requireEnrollmentManager = (req, res, next) => {
   if (canManageEnrollment(req.user)) return next();
   return res.status(403).json({ error: 'An admin, a manager or a care coordinator makes this change.', code: 'ENROLLMENT_MANAGER_ONLY' });
@@ -2737,6 +2740,19 @@ const requireAdmin = (req, res, next) => {
     return res.status(403).json({ error: 'Super Admin access required' });
   }
   next();
+};
+// The Audit Log (owner, 2026-11-13): the Super Admin, or anyone granted the
+// Audit module in the Modules grid. It only reads.
+const requireAuditReader = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'audit'))) return next();
+  return res.status(403).json({ error: 'The Audit Log is the Super Admin\'s.', code: 'AUDIT_READER_ONLY' });
+};
+// Payroll (owner, 2026-11-13): someone granted the Payroll module PREPARES
+// payroll. Approving a run, full bank numbers, settings and anything that
+// changes who is paid what stay requireAdmin in routes/payroll.js.
+const requirePayrollPreparer = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll'))) return next();
+  return res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' });
 };
 
 // Alias for clarity - Super Admin only routes
@@ -3082,6 +3098,7 @@ app.use(payrollRoutes({
   db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
+  requirePayrollPreparer: (req, res, next) => requirePayrollPreparer(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
   localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate,
   resolvePayRate: (cg, clientId, shift) => caregiverRepo.resolvePayRate(cg, clientId, shift),
@@ -3944,6 +3961,9 @@ const loginProfileFor = (user) => {
     landing: accountTypes.landingFor(user),
     hubTiles: accountTypes.hubTilesFor(user),
     hubAreas: accountTypes.hubAreasFor(user),
+    // The modules this account opens (accountTypes.modulesFor): the Admin Hub
+    // and the Clients page read it to decide what to draw.
+    modules: accountTypes.modulesFor(user),
     assignedProjects: user.assignedProjects || [],
     assignedClients: user.assignedClients || [],
     // GFC role fields — the login page's directDestination() routes on
@@ -3971,7 +3991,7 @@ app.get('/api/staff/hub', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const me = users.find(u => String(u.id) === String(req.user.id)) || req.user;
-    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me) });
+    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me), modules: accountTypes.modulesFor(me) });
   } catch (err) {
     console.error('Staff hub read failed:', err.message);
     return res.status(500).json({ error: 'The Portal Hub could not be loaded.', code: 'STAFF_HUB_UNAVAILABLE' });
@@ -4189,7 +4209,8 @@ const fmtVeteranTime = (iso) => new Date(iso).toLocaleString('en-US', { timeZone
 const fmtVeteranDob = (ymd) => { const [y, m, d] = String(ymd || '').split('-'); return y ? `${m}/${d}/${y}` : ''; };
 const isVeteranProvider = (u) => !!u && patientRead.canClinicalWrite(u);
 const requireVeteranStaff = (req, res, next) => {
-  if (vetRoster.isOffice(req.user) || isVeteranProvider(req.user)) return next();
+  // The IME module (owner, 2026-11-13): granted or taken away in the grid.
+  if (accountTypes.hasModule(req.user, 'ime')) return next();
   return res.status(403).json({ error: 'Only the office and providers manage veterans.', code: 'VETERAN_STAFF_ONLY' });
 };
 const requireVeteranOffice = (req, res, next) => {
@@ -4846,7 +4867,7 @@ app.get('/api/admin/activity-log', authenticateToken, requireAdmin, async (req, 
 // ============== USER MANAGEMENT (Super Admin, Manager, and Client Portal Admin) ==============
 app.get('/api/users', authenticateToken, async (req, res) => {
   // Allow super admins, managers, and client portal admins to view users
-  if (req.user.role !== config.ROLES.ADMIN && !req.user.isManager) {
+  if (req.user.role !== config.ROLES.ADMIN && !accountTypes.hasModule(req.user, 'users')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -4953,7 +4974,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 // Session 5.4 — read the durable audit log (admin). Session 12 builds the UI;
 // this is the verification surface for go-live acceptance: every PHI access
 // must be here. Filters: since, until (ISO), userId, patientId, limit.
-app.get('/api/admin/audit-log', authenticateToken, requireAdmin, async (req, res) => {
+app.get('/api/admin/audit-log', authenticateToken, requireAuditReader, async (req, res) => {
   try {
     const { since, until, userId, patientId } = req.query;
     const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || '200', 10) || 200));
@@ -4983,6 +5004,48 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
     await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
     res.json({ ok: true, revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ---- The Modules grid on Edit User (owner, 2026-11-13) ---------------------
+// One row per module. A module the person's account type includes comes
+// ticked ("comes with their role") and a Super Admin can untick it; one it
+// does not include comes unticked and can be granted. Locked rows (My GFC,
+// Messages, the Admin Hub and the two lab-era screens) cannot change. The
+// Super Admin alone reads or changes the grid: whoever could change it could
+// give themselves anything, so it is never grantable, and the Admin Hub that
+// holds it is locked.
+app.get('/api/users/:userId/modules', authenticateToken, requireAdmin, async (req, res) => {
+  const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId));
+  if (!u) return res.status(404).json({ error: 'User not found' });
+  res.json({ grid: accountTypes.moduleGridFor(u), editable: accountTypes.accountTypeOf(u) !== accountTypes.TYPES.ADMIN && accountTypes.moduleGridFor(u).length > 0 });
+});
+app.put('/api/users/:userId/modules', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(x => String(x.id) === String(req.params.userId));
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const target = users[idx];
+    const type = accountTypes.accountTypeOf(target);
+    if (type === accountTypes.TYPES.ADMIN) return res.status(409).json({ error: 'A Super Admin has every module.', code: 'MODULES_ADMIN_LOCKED' });
+    if (!accountTypes.moduleGridFor(target).length) return res.status(409).json({ error: 'Modules are for team accounts, not clients or family.', code: 'MODULES_NOT_TEAM' });
+    const modules = (req.body || {}).modules;
+    if (!Array.isArray(modules)) return res.status(400).json({ error: 'modules must be a list of module ids.', code: 'MODULES_INVALID' });
+    const unknown = modules.filter(id => !accountTypes.MODULE_IDS.includes(String(id)));
+    if (unknown.length) return res.status(400).json({ error: `Unknown module: ${unknown.join(', ')}`, code: 'MODULES_UNKNOWN' });
+    const before = accountTypes.moduleAccessOf(target);
+    const next = accountTypes.moduleAccessFromChecks(target, modules);
+    if (next.granted.length || next.removed.length) target.moduleAccess = next;
+    else delete target.moduleAccess;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'user_modules_changed', 'user', target.id, {
+      accountType: type, before, after: next
+    });
+    res.json({ grid: accountTypes.moduleGridFor(target), moduleAccess: next });
+  } catch (err) {
+    console.error('Module grid save failed:', err.message);
+    res.status(500).json({ error: 'The modules could not be saved.', code: 'MODULES_SAVE_FAILED' });
+  }
 });
 
 app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res) => {
@@ -21225,8 +21288,15 @@ const notify = createNotifier({
   familyRole: config.ROLES.FAMILY
 });
 const requireEnrollmentStaff = (req, res, next) => {
+  // Whoever holds the Clients module (the office by default, plus a grant),
+  // and clinicians and case managers, who read enrollment from the chart. A
+  // manager or coordinator the Clients module was taken from is refused: their
+  // role is 'user' too, so the role list alone would let them back in.
   const role = req.user.role;
-  if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager) {
+  const type = accountTypes.accountTypeOf(req.user);
+  const clinician = accountTypes.CLINICIAN_TYPES.includes(type) || role === config.ROLES.CASE_MANAGER;
+  if (role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'clients') ||
+      (clinician && ENROLLMENT_STAFF_ROLES.includes(role))) {
     return next();
   }
   return res.status(403).json({ error: 'Staff access required for the enrollment view.', code: 'ENROLLMENT_STAFF_ONLY' });

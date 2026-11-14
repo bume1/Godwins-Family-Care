@@ -159,3 +159,25 @@ test('Additional Medicare is part of box 6 (Medicare withheld), and a section ca
   assert.equal(w.pay.taxes.medicare, 4350 + 900);
   assert.equal(w.pay.netCents, w.pay.grossCents - w.pay.taxCents);
 });
+
+// Every earning Gusto lists is its own stub line with its hours and rate
+// (owner, 2026-11-13: "every single paystub as is in Gusto"). Wages Gusto
+// recorded as history, without hours, say so.
+test('Gusto earnings: Regular and Overtime keep their hours and rates; historical wages are named', () => {
+  const g = require('../payrollGustoImport');
+  const head = 'Last Name,First Name,Department,Work Address,Regular (Hours),Regular (Amount),Regular (Rate),Overtime (Hours),Overtime (Amount),Overtime (Rate),Gross Earnings,Federal Income Tax (Employee),Social Security (Employee),Medicare (Employee),GA State Tax (Employee),Net Pay,Employee Type,Payment';
+  const csv = ['"Payroll journal"', '', 'Employee Earnings', 'Regular (Weekly (Caregiver))', 'Pay period, 10/05/2026 - 10/11/2026', 'Pay day, 10/16/2026', head,
+    'Rivers,Ann,PHC,"1 Main St, Atlanta, GA 30339",40.00,800.00,20.00,2.00,60.00,30.00,860.00,10.00,53.32,12.47,20.00,764.21,Paid by the hour,Direct Deposit', 'Payroll Totals,,,,,,,,,,,,,,,,,', '',
+    'Non-Gusto', 'Pay period, 09/14/2026 - 09/20/2026', 'Pay day, 09/25/2026', head,
+    'Rivers,Ann,PHC,"1 Main St, Atlanta, GA 30339",0.00,300.00,0,,,,300.00,0,18.60,4.35,0,277.05,Paid by the hour,Historical'].join('\n');
+  const p = g.parseJournal(csv); assert.ok(!p.error, JSON.stringify(p));
+  const b = g.buildImport({ entries: g.netEntries(p.lines), users: [{ id: 'u1', name: 'Ann Rivers' }], profiles: {}, refsFor: () => [], at: 'x', by: 'y' });
+  assert.deepEqual(b.warnings, []);
+  const oct = b.runs.find(r => r.period.payDate === '2026-10-16').workers[0].earnings;
+  assert.deepEqual(oct.map(e => [e.code, e.label, e.minutes, e.rateCents, e.amountCents]), [['regular', 'Hours worked', 2400, 2000, 80000], ['overtime', 'Overtime', 120, 3000, 6000]]);
+  const sep = b.runs.find(r => r.period.payDate === '2026-09-25').workers[0].earnings;
+  assert.deepEqual(sep.map(e => [e.label, e.minutes, e.amountCents]), [['Wages (recorded in Gusto without hours)', 0, 30000]]);
+  // Lines that do not add up to gross: one line carries the gross, and it is named.
+  const w = []; const one = g.earningsFor({ gross: 1000, hours: 1, payment: 'Check', payDate: 'd', earnings: [{ label: 'Regular', amountCents: 900, hours: 1, rateCents: 900 }] }, 'Ann', w);
+  assert.equal(one.length, 1); assert.equal(one[0].amountCents, 1000); assert.equal(w.length, 1);
+});
