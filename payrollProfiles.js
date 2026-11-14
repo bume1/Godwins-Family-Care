@@ -229,6 +229,42 @@ function normalizeW8BEN(b, ctx) {
   };
 }
 
+// The answers so far, for the live preview of the official form (owner,
+// 2026-11-14: "people still need to see the full picture of what they are
+// filling out"). Lenient where saving is strict: a half-filled form still
+// draws, a value that would be refused is left blank, and there is never a
+// signature. It builds the same shape the strict normalizers save, so the
+// form is filled by the same code either way (a test holds the two together).
+// Secret numbers come back apart, last four only, for the preview to mask.
+const last4 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 4 ? d.slice(-4) : ''; };
+function previewValue(form, b, { at } = {}) {
+  b = b || {};
+  const cents = (v) => { const m = money(v); return m === null ? 0 : m; };
+  const count = (v) => { const n = Number(v); return Number.isInteger(n) && n >= 0 && n < 100 ? n : 0; };
+  const day = (v) => (isYmd(v) && (!at || v <= String(at).slice(0, 10)) ? v : null);
+  if (form === 'w4') return { value: { filingStatus: W4_FILING[b.filingStatus] ? b.filingStatus : null, multipleJobs: b.multipleJobs === true,
+    dependentsCents: cents(b.dependentsAmount), otherIncomeCents: cents(b.otherIncome), deductionsCents: cents(b.deductions), extraWithholdingCents: cents(b.extraWithholding), exempt: b.exempt === true } };
+  if (form === 'g4') return { value: { filingStatus: G4_FILING[b.filingStatus] ? b.filingStatus : null, dependentAllowances: count(b.dependentAllowances), additionalAllowances: count(b.additionalAllowances),
+    extraWithholdingCents: cents(b.extraWithholding), exempt: b.exempt === true } };
+  if (form === 'state-cert') return { value: { filingStatus: ['single', 'married'].includes(b.filingStatus) ? b.filingStatus : null, allowances: count(b.allowances), extraWithholdingCents: cents(b.extraWithholding), exempt: b.exempt === true } };
+  if (form === 'i9') {
+    const status = I9_STATUS[b.status] ? b.status : null;
+    const alien = str(b.alienNumber, 12).replace(/[\s-]/g, '').toUpperCase().replace(/^A/, '');
+    const masked = (v) => (v ? `${'X'.repeat(Math.max(0, String(v).length - 4))}${String(v).slice(-4)}` : null);
+    return { value: { status, workAuthExpires: status === 'authorized' && isYmd(b.workAuthExpires) ? b.workAuthExpires : null, dob: day(b.dob), otherLastNames: str(b.otherLastNames, 80) || null, phone: str(b.phone, 20) || null },
+      ids: status === 'lpr' ? { alienNumber: masked(alien) } : status === 'authorized' ? { alienNumber: masked(alien), i94Number: masked(str(b.i94Number, 11).replace(/\s/g, '')), passport: str(b.passport, 80) || null } : null };
+  }
+  if (form === 'w9') return { value: { name: str(b.name, 160), businessName: str(b.businessName, 160), taxClass: W9_CLASS[b.taxClass] ? b.taxClass : null, tinType: b.tinType === 'ein' ? 'ein' : 'ssn', address: str(b.address, 300) }, tinLast4: last4(b.tin) };
+  if (form === 'w8ben') {
+    const mail = { line: str(b.mailLine, 120), city: str(b.mailCity, 120), country: str(b.mailCountry, 60) };
+    return { value: { name: str(b.name, 160), citizenship: str(b.citizenship, 60), permanentAddress: { line: str(b.permLine, 120), city: str(b.permCity, 120), country: str(b.permCountry, 60) },
+      mailingAddress: mail.line ? mail : null, dob: isYmd(b.dob) ? b.dob : null, ftinNotRequired: b.ftinNotRequired === true,
+      treaty: b.treatyCountry ? { country: str(b.treatyCountry, 60), article: str(b.treatyArticle, 30), rate: str(b.treatyRate, 10), incomeType: str(b.treatyIncomeType, 80), conditions: str(b.treatyConditions, 300) } : null },
+      foreignTinLast4: last4(b.foreignTin), usTinLast4: last4(b.usTin) };
+  }
+  return null;
+}
+
 // The bank account, or a paper check, or Wise for a contractor abroad.
 function normalizePayMethod(b) {
   b = b || {};
@@ -431,6 +467,6 @@ function publicProfile(p, opts = {}) {
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
-  normalizeW4, normalizeG4, normalizeW8BEN, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeW8BEN, previewValue, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

@@ -36,6 +36,9 @@ const TAX_TABLES = 'payroll_tax_tables';
 const RUNS = 'payroll_runs';
 const CONTRACTOR_INVOICES = 'contractor_invoices';
 const TIMESHEETS = 'payroll_timesheets';
+// A draft deleted by the Super Admin (owner, 2026-11-14): who, when and which
+// period, so the morning automation does not draft that period again.
+const DELETED_DRAFTS = 'payroll_deleted_drafts';
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
 const YEAR_END = 'payroll_year_end';          // one row per released tax year
@@ -117,7 +120,9 @@ module.exports = function createPayrollRoutes(deps) {
   const overseasOf = (settings) => ({ enabled: false, payMethods: ['wise'], ...((settings && settings.overseas) || {}) });
   const openJson = (box) => { try { return box && box.enc ? JSON.parse(pc.open(box.enc, env)) : null; } catch (e) { return null; } };
   const openPlain = (box) => { try { return box && box.enc ? pc.open(box.enc, env) : null; } catch (e) { return null; } };
-  const govPdf = async (user, p, key) => {
+  // `extra` carries the preview's options (owner, 2026-11-14): no signature,
+  // a PREVIEW mark, and secret numbers as their last four only.
+  const govPdf = async (user, p, key, extra = {}) => {
     const settings = await readSettings();
     const person = { address: p.taxAddress || null, email: user.email || null, phone: user.phone || null };
     // The employer block is the Year End one when set (Settings → Year End), so
@@ -127,12 +132,14 @@ module.exports = function createPayrollRoutes(deps) {
     const employer = { name: yeE.employerName || ORG.name, address: ya && ya.line1 ? [ya.line1, ya.line2, ya.city, `${ya.state || ''} ${ya.zip || ''}`.trim()].filter(Boolean).join(', ') : ORG.address,
       ein: settings.employerEin || null, gaWithholdingNumber: yeE.gaWithholdingId || null };
     const firstDay = (p.i9 && ((p.i9.section2 && p.i9.section2.firstDay) || (p.i9.onFile && p.i9.onFile.firstDay))) || null;
-    if (key === 'w4' && p.w4) return gov.fillW4({ person, ssn: openPlain(p.ssn), w4: p.w4, employer, firstDay });
-    if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn: openPlain(p.ssn), g4: p.g4, employer });
-    if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn: openPlain(p.ssn), i9: p.i9, employer, immigration: openJson(p.i9Ids), docNumbers: openJson(p.i9DocNumbers) });
-    if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: openPlain(p.tin) });
-    if (key === 'w8ben' && p.w8ben) return gov.fillW8BEN({ w8: p.w8ben, tins: openJson(p.w8benTins) });
-    if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer });
+    const pv = !!extra.preview;
+    const ssn = pv ? null : openPlain(p.ssn);
+    if (key === 'w4' && p.w4) return gov.fillW4({ person, ssn, w4: p.w4, employer, firstDay, ...extra });
+    if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn, g4: p.g4, employer, ...extra });
+    if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn, i9: p.i9, employer, immigration: pv ? extra.immigration : openJson(p.i9Ids), docNumbers: pv ? null : openJson(p.i9DocNumbers), ...extra });
+    if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: pv ? null : openPlain(p.tin), ...extra });
+    if (key === 'w8ben' && p.w8ben) return gov.fillW8BEN({ w8: p.w8ben, tins: pv ? null : openJson(p.w8benTins), ...extra });
+    if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer, ...extra });
     return null;
   };
   // File the signed copy on their Staff Record folder in Drive, and note it on
@@ -310,6 +317,45 @@ module.exports = function createPayrollRoutes(deps) {
     }
   });
 
+
+  // A live preview of the official form while they fill it in (owner,
+  // 2026-11-14): the answers so far on the real form, marked PREVIEW, with
+  // no signature and secret numbers as their last four. It writes nothing:
+  // no profile change, no Drive copy, no activity row, and the answers are
+  // never logged. Like signing, it needs the legal name and address first,
+  // because the form is filled from them.
+  const PREVIEW_FORMS = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' };
+  router.post('/api/my/pay-setup/preview/:form', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const key = PREVIEW_FORMS[req.params.form];
+      if (!key) return res.status(404).json({ error: 'Unknown form.' });
+      const p = await profileFor(req.user);
+      if (['w4', 'g4', 'state', 'i9'].includes(key) && !p.taxAddress) return res.status(409).json({ error: 'Save your legal name and mailing address first. The form is filled in from them.', code: 'FORM_NEEDS_ADDRESS' });
+      const v = pp.previewValue(req.params.form, req.body || {}, { at: nowIso() });
+      const draft = { ...p };
+      const extra = { preview: true, ssnLast4: (p.ssn && p.ssn.last4) || null };
+      if (key === 'w4') draft.w4 = v.value;
+      if (key === 'g4') draft.g4 = v.value;
+      if (key === 'state') draft.stateCert = { ...v.value, state: p.workState || 'GA' };
+      if (key === 'i9') { draft.i9 = { ...(p.i9 || {}), section1: v.value }; extra.immigration = v.ids; }
+      if (key === 'w9') { draft.w9 = v.value; extra.tinLast4 = v.tinLast4; }
+      if (key === 'w8ben') { draft.w8ben = v.value; extra.usTinLast4 = v.usTinLast4; extra.foreignTinLast4 = v.foreignTinLast4; }
+      const buf = await govPdf(req.user, draft, key, extra);
+      if (!buf) return res.status(404).json({ error: 'That form has no preview.' });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(buf);
+    } catch (e) { console.error('Form preview error:', e.message); res.status(500).json({ error: 'Server error' }); }
+  });
+  // Where each answer sits on the blank form, for outlining the box being
+  // filled. Template geometry only.
+  router.get('/api/my/pay-setup/preview/:form/fields', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      const key = PREVIEW_FORMS[req.params.form];
+      if (!key) return res.status(404).json({ error: 'Unknown form.' });
+      res.json(key === 'state' ? { pages: [{ width: 612, height: 792 }], fields: {} } : await gov.fieldBoxes(key));
+    } catch (e) { console.error('Form fields error:', e.message); res.status(500).json({ error: 'Server error' }); }
+  });
 
   // The signed official form, filled. Their own, or anyone's for the Super
   // Admin. It carries their full SSN, so every download is logged.
@@ -541,7 +587,15 @@ module.exports = function createPayrollRoutes(deps) {
           // Set in User Management: the page shows it and does not edit it.
           employmentTypeOnUser: profile.isCaregiver || ['W2', '1099', 'HYBRID'].includes(user.employmentType)
         })).sort((a, b) => a.name.localeCompare(b.name)),
-        runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
+        // How it was sent and how many payments are marked paid, so the list
+        // reads true at a glance (owner, 2026-11-14: an approved run sent by
+        // Cash App showed only "approved").
+        runs: runs.map(r => {
+          const toPay = (r.workers || []).filter(w => w.pay);
+          const p2p = toPay.filter(w => w.channel === 'p2p').length;
+          return { id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null,
+            people: toPay.length, markedPaid: toPay.filter(w => (r.payments || {})[w.userId]).length, p2p };
+        })
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
         // Both schedules, each with the period running today and the pay
@@ -731,6 +785,7 @@ module.exports = function createPayrollRoutes(deps) {
   // A run saved before the two schedules existed has none, and is read as
   // "staff" (the single schedule it was cut from).
   const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
+  const wasDeleted = (x, period) => x && period && x.start === period.start && x.end === period.end && x.schedule === (period.schedule || 'staff');
   const sameRun = (r, period) => r && r.period && r.period.start === period.start && (!period.end || !r.period.end || r.period.end === period.end) && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
   // The pay periods to pick from (owner, 2026-11-14): the schedule's standard
   // periods around today, and any custom period a run was drafted for, each
@@ -975,9 +1030,31 @@ module.exports = function createPayrollRoutes(deps) {
       const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: req.user.name };
       const next = existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run];
       await db.set(RUNS, next);
+      // Drafting a deleted period by hand brings it back for the automation too.
+      const gone = await rows(DELETED_DRAFTS);
+      if (gone.some(x => wasDeleted(x, period))) await db.set(DELETED_DRAFTS, gone.filter(x => !wasDeleted(x, period)));
       await logActivity(req.user.id, req.user.name, 'payroll_run_drafted', 'payroll_run', run.id, { period: period.start, workers: run.workers.length, grossCents: run.totals.grossCents });
       res.json({ run });
     } catch (e) { console.error('Payroll draft error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // Delete a draft (owner, 2026-11-14). A draft has paid nothing, locked no
+  // hours and sent no stubs, so it is removed outright. An approved run is
+  // never deleted; a mistake there goes on the next run. The Super Admin's
+  // alone, since a draft can carry their channel choice and hand-entered taxes.
+  router.delete('/api/payroll/admin/runs/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const run = runs.find(r => r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.status !== 'draft') return res.status(409).json({ error: 'Only a draft can be deleted. An approved payroll is corrected on the next run.', code: 'RUN_LOCKED' });
+      await db.set(RUNS, runs.filter(r => r.id !== run.id));
+      const gone = (await rows(DELETED_DRAFTS)).filter(x => !wasDeleted(x, run.period));
+      gone.push({ schedule: runSchedule(run), start: run.period.start, end: run.period.end, custom: !!run.period.custom, runId: run.id, deletedAt: nowIso(), deletedBy: req.user.name || req.user.email });
+      await db.set(DELETED_DRAFTS, gone);
+      await logActivity(req.user.id, req.user.name, 'payroll_run_draft_deleted', 'payroll_run', run.id, { period: run.period.start, end: run.period.end, schedule: runSchedule(run), workers: (run.workers || []).length });
+      res.json({ deleted: true });
+    } catch (e) { console.error('Payroll draft delete error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   router.get('/api/payroll/admin/runs/:id', authenticateToken, requirePayrollPreparer, async (req, res) => {
@@ -1023,6 +1100,8 @@ module.exports = function createPayrollRoutes(deps) {
       if (d.error) return res.status(409).json(d);
       const w = d.run.workers.find(x => String(x.userId) === uid);
       if (w && w.pay && w.pay.netCents < 0) return res.status(400).json({ error: 'Those taxes are more than their pay.', code: 'MANUAL_TAX_TOO_HIGH' });
+      // Remember the gross these taxes were entered against.
+      if (manualTaxes[uid] && w && w.pay) { manualTaxes[uid].grossCents = w.pay.grossCents; w.manualTaxes.grossCents = w.pay.grossCents; w.manualTaxes.grossChanged = false; }
       runs[i] = { ...runs[i], ...d.run, status: 'draft', rebuiltAt: nowIso() };
       await db.set(RUNS, runs);
       await logActivity(req.user.id, req.user.name, b.clear === true ? 'payroll_manual_taxes_cleared' : 'payroll_manual_taxes_set', 'payroll_run', runs[i].id, { userId: uid, reason: b.clear === true ? null : manualTaxes[uid].reason });
@@ -1040,23 +1119,31 @@ module.exports = function createPayrollRoutes(deps) {
     const d = (c) => (Number(c || 0) / 100).toFixed(2);
     const h = (m) => (Number(m || 0) / 60).toFixed(2);
     const q = (v) => { const t = String(v === null || v === undefined ? '' : v); return /^[=+\-@]/.test(t) ? `"'${t.replace(/"/g, '""')}"` : `"${t.replace(/"/g, '""')}"`; };
-    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Missing Paperwork'];
+    // Each kind of pay in its own column, and every line added by hand named
+    // with its note (owner, 2026-11-14: a bonus must show as a line, not only
+    // as a bigger gross).
+    const amt = (w, codes) => (w.earnings || []).filter(e => codes.includes(e.code)).reduce((a, e) => a + (e.amountCents || 0), 0);
+    const kinds = [['Regular Pay', ['regular']], ['Overtime Pay', ['overtime']], ['Salary', ['salary']], ['Visit and Exam Pay', ['per_visit', 'per_exam']], ['Bonus', ['bonus']], ['Correction', ['correction']]];
+    const added = (w) => (run.adjustments || []).filter(a => String(a.userId) === String(w.userId))
+      .map(a => `${engine.ADJUSTMENT_TYPES[a.type] || a.type} ${a.amountCents < 0 ? '-' : ''}$${d(Math.abs(a.amountCents))}: ${a.note || ''}`).join('; ');
+    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', ...kinds.map(k => k[0]), 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Added Lines', 'Taxes Entered By Hand', 'Missing Paperwork'];
     const lines = [head.map(q).join(',')];
     for (const w of run.workers || []) {
       const reg = (w.earnings || []).find(e => e.code === 'regular'), ot = (w.earnings || []).find(e => e.code === 'overtime');
       const p = w.pay;
       const pay = (run.payments || {})[w.userId];
       lines.push([q(w.name), q((p && p.workState) || w.workState || 'GA'), h(reg && reg.minutes), h(ot && ot.minutes),
+        ...kinds.map(k => d(amt(w, k[1]))),
         p ? d(p.grossCents) : '', p ? d(p.taxes.federal) : '', p ? d(p.taxes.socialSecurity) : '', p ? d(p.taxes.medicare) : '',
         p ? d((p.taxes.georgia || 0) + (p.taxes.state || 0)) : '', p ? d(p.netCents) : '', p ? d(p.reimbursementsCents) : '',
         p ? d(p.employer.socialSecurity) : '', p ? d(p.employer.medicare) : '', p ? d(p.employer.futa) : '',
         p ? d((p.employer.gaSuta || 0) + (p.employer.stateSuta || 0)) : '',
-        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q((w.missing || []).join('; '))].join(','));
+        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q(added(w)), q(w.manualTaxes ? `Yes: ${w.manualTaxes.reason || ''}` : ''), q((w.missing || []).join('; '))].join(','));
     }
     const t = run.totals || {};
-    lines.push([q('TOTAL'), q(''), '', '', d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
+    lines.push([q('TOTAL'), q(''), '', '', ...kinds.map(k => d((run.workers || []).reduce((a, w) => a + amt(w, k[1]), 0))), d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
       d((t.georgiaCents || 0) + (t.stateWithholdingCents || 0)), d(t.netCents), d(t.reimbursementsCents),
-      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q('')].join(','));
+      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q(''), q(''), q('')].join(','));
     await logActivity(req.user.id, req.user.name, 'payroll_register_exported', 'payroll_run', run.id, { period: run.period && run.period.start });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', contentDisposition('attachment', `payroll_register_${(run.period && run.period.payDate) || run.id}.csv`));
@@ -1112,6 +1199,26 @@ module.exports = function createPayrollRoutes(deps) {
     res.json({ run: runs[i] });
   });
 
+  // Remove a line added to a draft (owner, 2026-11-14: a bonus entered by
+  // mistake must come off before approval).
+  router.delete('/api/payroll/admin/runs/:id/adjustments/:adjId', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      if (runs[i].status !== 'draft') return res.status(409).json({ error: 'An approved run is locked. Add the correction to the next run.', code: 'RUN_LOCKED' });
+      const gone = (runs[i].adjustments || []).find(a => a.id === req.params.adjId);
+      if (!gone) return res.status(404).json({ error: 'That line is not on this payroll.' });
+      const adjustments = runs[i].adjustments.filter(a => a.id !== gone.id);
+      const d = await draftFor(runs[i].period, await readSettings(), adjustments, runs[i].channels, runs[i].manualTaxes);
+      if (d.error) return res.status(409).json(d);
+      runs[i] = { ...runs[i], ...d.run, adjustments, rebuiltAt: nowIso() };
+      await db.set(RUNS, runs);
+      await logActivity(req.user.id, req.user.name, 'payroll_adjustment_removed', 'payroll_run', runs[i].id, { type: gone.type, amountCents: gone.amountCents, userId: gone.userId });
+      res.json({ run: runs[i] });
+    } catch (e) { console.error('Remove adjustment error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
   // Approve: only the owner, never with anyone missing paperwork. The run is
   // rebuilt from the hours one last time, frozen, and its hours lock.
   router.post('/api/payroll/admin/runs/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
@@ -1146,7 +1253,9 @@ module.exports = function createPayrollRoutes(deps) {
         await db.set('time_logs', logs);
       }
       await logActivity(req.user.id, req.user.name, 'payroll_run_approved', 'payroll_run', approved.id, { period: approved.period.start, grossCents: approved.totals.grossCents, netCents: approved.totals.netCents });
-      const stubs = await writeStubs(approved, settings);
+      // Pay stubs go out as each payment is marked paid, with its receipt
+      // (owner, 2026-11-14), not at approval.
+      const stubs = { written: 0, waitingOnPayment: approved.workers.filter(w => w.pay).length };
       if (deps.onRunApproved) await deps.onRunApproved(approved).catch(e => console.error('QuickBooks payroll sync (non-fatal):', e.message));
       res.json({ run: approved, stubs });
     } catch (e) { console.error('Payroll approve error:', e); res.status(500).json({ error: 'Server error' }); }
@@ -1160,14 +1269,24 @@ module.exports = function createPayrollRoutes(deps) {
   // a later one, so a stub drawn again later reads as it did on payday.
   const longDay = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' });
   const ytdAsOf = (allRuns, run) => engine.ytdFrom((allRuns || []).filter(r => r && r.period && r.period.payDate <= run.period.payDate), { year: run.period.payDate.slice(0, 4) });
-  const stubPdf = (run, w, ytd, settings, p) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
-    ssnLast4: p.ssn ? p.ssn.last4 : null,
-    // How this run sent it: P2P is the Super Admin's choice per run and wins
-    // over the bank on file (audit, 2026-11-14: the stub used to name the bank).
-    accountLast4: w.imported || w.channel === 'p2p' ? null : p.payMethod ? p.payMethod.accountLast4 : null,
-    payMethod: w.imported ? w.payMethod : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null,
-    p2pAccount: w.channel === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
-    workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
+  // What a stub says about the person and the payment, taken when it is
+  // issued and kept on the stub row, so a stub reads as it did on payday even
+  // after they change their address, SSN or bank (owner, 2026-11-14). How it
+  // was paid comes from the payment as marked (P2P is the Super Admin's
+  // choice per run); the receipt is that payment's confirmation number.
+  const stubSnapshot = (run, w, settings, p) => {
+    const paid = (run.payments || {})[w.userId] || null;
+    const method = w.imported ? w.payMethod : paid && paid.method ? paid.method : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null;
+    return {
+      ssnLast4: p.ssn ? p.ssn.last4 : null,
+      payMethod: method,
+      accountLast4: w.imported || method !== 'direct_deposit' ? null : paid && paid.accountLast4 ? paid.accountLast4 : p.payMethod ? p.payMethod.accountLast4 : null,
+      p2pAccount: method === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
+      workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null,
+      payment: paid ? { confirmation: paid.confirmation, at: paid.at } : null
+    };
+  };
+  const stubPdf = (run, w, ytd, settings, snap) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null, ...snap });
   // A stub drawn from its run when the Drive copy is missing or cannot be
   // read (audit, 2026-11-14): the employee is never told a stub is ready that
   // they cannot open. Null when the stub did not come from an app run.
@@ -1177,7 +1296,11 @@ module.exports = function createPayrollRoutes(deps) {
     const run = allRuns.find(r => r && r.id === row.runId && r.status !== 'draft' && r.status !== 'void');
     const w = run && (run.workers || []).find(x => String(x.userId) === String(row.userId) && x.pay);
     if (!w) return null;
-    return stubPdf(run, w, ytdAsOf(allRuns, run), await readSettings(), (await readProfiles())[w.userId] || {});
+    const settings = await readSettings();
+    // The snapshot kept when the stub was issued; the payment is read from the
+    // run, where it is final once marked.
+    const snap = row.snap ? { ...row.snap, payment: stubSnapshot(run, w, settings, {}).payment } : stubSnapshot(run, w, settings, (await readProfiles())[w.userId] || {});
+    return stubPdf(run, w, ytdAsOf(allRuns, run), settings, snap);
   };
   const writeStubs = async (run, settings, opts = {}) => {
     const users = await getUsers();
@@ -1185,18 +1308,23 @@ module.exports = function createPayrollRoutes(deps) {
     const ytd = ytdAsOf(await rows(RUNS), run);   // includes this run
     const stubs = await rows(PAYSTUBS);
     const report = { written: 0, pdfFailed: 0 };
-    for (const w of run.workers.filter(x => x.pay)) {
+    const only = opts.only ? new Set(opts.only.map(String)) : null;
+    for (const w of run.workers.filter(x => x.pay && (!only || only.has(String(x.userId))))) {
       const user = users.find(u => String(u.id) === w.userId);
       const p = all[w.userId] || {};
+      const snap = stubSnapshot(run, w, settings, p);
       let driveFileId = null;
       try {
-        const buf = await stubPdf(run, w, ytd, settings, p);
-        const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
+        const buf = await stubPdf(run, w, ytd, settings, snap);
+        // The finance folder, never the person's role documents (owner, 2026-11-14).
+        const stored = await drive.uploadPayStubFile(settings.payStubFolderId || null, run.period.payDate, `Pay stub ${run.period.payDate} - ${(user && user.name) || w.name}.pdf`, buf);
         driveFileId = stored.fileId || stored.id || null;
       } catch (e) { report.pdfFailed++; console.error('Pay stub PDF error (non-fatal):', e.message); }
       const hours = Math.round(((w.earnings.find(e => e.code === 'regular') || {}).minutes || 0) / 60 * 100) / 100;
       const row = { id: uuidv4(), userId: w.userId, payDate: run.period.payDate, periodStart: run.period.start, periodEnd: run.period.end,
-        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso() };
+        gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso(),
+        // `final`: the filed copy is the stub as issued, receipt and all.
+        snap: { ...snap, payment: null }, final: true };
       const at = stubs.findIndex(x => String(x.userId) === row.userId && x.payDate === row.payDate && x.reference === row.reference);
       if (at === -1) stubs.push(row); else { row.id = stubs[at].id; stubs[at] = row; }
       report.written++;
@@ -1205,7 +1333,7 @@ module.exports = function createPayrollRoutes(deps) {
         const base = getAppBaseUrl ? await getAppBaseUrl() : '';
         await queueNotification('paystub_ready', user.id, user.email, user.name, {
           subject: 'Your pay stub is ready',
-          body: `Your pay stub for payday ${longDay(run.period.payDate)} is ready. Sign in to GFC to view or download it.`,
+          body: `Your pay for payday ${longDay(run.period.payDate)} has been sent, and your pay stub is ready. Sign in to GFC to view or download it.`,
           ctaUrl: `${base}${links.payFor(user)}`, ctaLabel: 'View Pay Stub'
         }, { relatedEntityId: `${run.id}:${w.userId}`, relatedEntityType: 'paystub' });
       }
@@ -1308,8 +1436,10 @@ module.exports = function createPayrollRoutes(deps) {
     const w = runs[i].workers.find(x => x.userId === String(req.params.userId) && x.pay);
     if (!w) return res.status(404).json({ error: 'Nobody by that id is paid in this run.' });
     const conf = str((req.body || {}).confirmation, 80);
-    if (!conf) return res.status(400).json({ error: 'Paste the PNC confirmation number (or the check number).', code: 'PAYMENT_CONFIRMATION' });
-    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name } };
+    if (!conf) return res.status(400).json({ error: 'Paste the confirmation number: the PNC or Cash App transaction number, or the check number.', code: 'PAYMENT_CONFIRMATION' });
+    const prof = (await readProfiles())[w.userId] || {};
+    const method = w.channel === 'p2p' ? 'p2p' : prof.payMethod ? prof.payMethod.method : (w.payMethod || null);
+    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name, method, accountLast4: method === 'direct_deposit' && prof.payMethod ? prof.payMethod.accountLast4 || null : null } };
     // Paid only when every worker has a confirmation.
     const everyone = runs[i].workers.filter(x => x.pay).every(x => runs[i].payments[x.userId]);
     if (everyone && runs[i].status !== 'paid') { runs[i].status = 'paid'; runs[i].paidAt = nowIso(); }
@@ -1317,7 +1447,25 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'payroll_payment_confirmed', 'payroll_run', runs[i].id, { userId: w.userId, runPaid: runs[i].status === 'paid' });
     if (deps.onWorkerPaid) await deps.onWorkerPaid(runs[i], w).catch(e => console.error('QuickBooks payment sync (non-fatal):', e.message));
     if (everyone && deps.onRunPaid) await deps.onRunPaid(runs[i]).catch(() => {});
-    res.json({ run: { id: runs[i].id, status: runs[i].status, payments: runs[i].payments } });
+    // Their stub goes out now, with the receipt (owner, 2026-11-14).
+    const stub = await writeStubs(runs[i], await readSettings(), { only: [w.userId] });
+    res.json({ run: { id: runs[i].id, status: runs[i].status, payments: runs[i].payments }, stub });
+  });
+
+  // Issue a run's stubs again for everyone marked paid (owner, 2026-11-14):
+  // for runs paid before stubs carried the receipt or lived in the finance
+  // folder. Nobody is emailed again.
+  router.post('/api/payroll/admin/runs/:id/stubs', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const run = (await rows(RUNS)).find(r => r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+      const paid = Object.keys(run.payments || {});
+      if (!paid.length) return res.status(409).json({ error: 'Nobody on this payroll is marked paid yet. Stubs go out as each payment is marked.', code: 'STUBS_NONE_PAID' });
+      const report = await writeStubs(run, await readSettings(), { only: paid, notify: false });
+      await logActivity(req.user.id, req.user.name, 'payroll_stubs_reissued', 'payroll_run', run.id, { people: report.written });
+      res.json({ ...report });
+    } catch (e) { console.error('Reissue stubs error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   // ---- contractor invoices, the owner's side (step 8) -------------------------------
@@ -1702,6 +1850,7 @@ module.exports = function createPayrollRoutes(deps) {
         const runs = await rows(RUNS);
         const existing = runs.find(r => sameRun(r, period));
         if (existing && existing.status !== 'draft') { out.push({ schedule, summary: 'already approved', period }); continue; }
+        if (!existing && (await rows(DELETED_DRAFTS)).some(x => wasDeleted(x, period))) { out.push({ schedule, summary: 'draft deleted by the Super Admin', period }); continue; }
         const d = await draftFor(period, settings, existing ? existing.adjustments || [] : [], existing ? existing.channels : null, existing ? existing.manualTaxes : null);
         if (d.error) { await tellOwner('payroll_period_close', `${label} payroll could not be drafted`, d.error, `close:${schedule}:${period.start}`); out.push({ schedule, summary: d.code, period }); continue; }
         // Nobody on this schedule had pay: no empty run to review.

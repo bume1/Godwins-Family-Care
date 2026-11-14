@@ -259,7 +259,7 @@ function harness(user, store = new Map(), extraUsers = []) {
     requireAdmin: (req, res, next) => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'no' })),
     uuidv4: (() => { let n = 0; return () => `id${++n}`; })(), accountTypeOf: (u) => (u.role === 'admin' ? 'admin' : 'caregiver'), localDate: ld,
     resolvePayRate: (u) => ({ rate: u && u.payRate, source: 'base' }), queueNotification: async () => {}, hashIp: () => 'h',
-    pdf: require('../pdf-generator'), drive: { uploadStaffDocumentFile: async () => ({ fileId: 'drv1' }) }, roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app'
+    pdf: require('../pdf-generator'), drive: { uploadStaffDocumentFile: async () => ({ fileId: 'drv1' }), uploadPayStubFile: async () => ({ fileId: 'drv1' }) }, roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app'
   });
   const app = express(); app.use(express.json()); app.use(routes);
   return { app, store, acts };
@@ -296,7 +296,7 @@ test('only the owner reveals a number, and every reveal is logged without the va
   assert.ok(!JSON.stringify(acts).includes('123456789'));
 });
 
-test('a draft needs approved tables; approval refuses missing paperwork, then locks hours and writes the stub into My GFC\'s store', async () => {
+test('a draft needs approved tables; approval refuses missing paperwork, then locks hours; each stub is written into My GFC\'s store when its payment is marked paid', async () => {
   const store = new Map();
   const { app } = harness('own', store);
   store.set('time_logs', [log('a', '2026-11-02', 480), { ...log('z', '2026-11-03', 240), caregiver_id: 'cg2' }]);
@@ -320,8 +320,7 @@ test('a draft needs approved tables; approval refuses missing paperwork, then lo
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.run.timesheetOverride.reason, 'Paying as clocked; reviewed by phone.');
   assert.equal(store.get('time_logs')[0].payroll_run_id, runId, 'the paid hours lock');
-  const stub = store.get('staff_paystubs')[0];
-  assert.deepEqual([stub.userId, stub.reference, stub.driveFileId, stub.source], ['cg1', `run:${runId}`, 'drv1', 'app']);
+  assert.equal((store.get('staff_paystubs') || []).length, 0, 'approval issues no stub: it waits for the payment and its receipt');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '50', note: 'x' });
   assert.equal(r.body.code, 'RUN_LOCKED');
   // Paid only when every worker has a confirmation.
@@ -329,6 +328,9 @@ test('a draft needs approved tables; approval refuses missing paperwork, then lo
   assert.equal(r.body.code, 'PAYMENT_CONFIRMATION');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'PNC-1' });
   assert.equal(r.body.run.status, 'approved', 'one of two confirmed is not paid');
+  const stub = store.get('staff_paystubs')[0];
+  assert.deepEqual([stub.userId, stub.reference, stub.driveFileId, stub.source, stub.final], ['cg1', `run:${runId}`, 'drv1', 'app', true], 'marking paid issues that person\'s stub');
+  assert.equal(store.get('staff_paystubs').length, 1, 'only the person marked paid');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/payments/cg2`, { confirmation: 'PNC-2' });
   assert.equal(r.body.run.status, 'paid');
 });
@@ -746,4 +748,44 @@ test('pay periods: approved hours flow into that period\'s payroll, the screen s
   assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-10-12').status, 'gusto');
   r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-12&end=2026-10-18');
   assert.equal(r.body.run.status, 'gusto');
+});
+
+// Deleting a draft (owner, 2026-11-14): the Super Admin's alone, drafts only,
+// and the morning automation does not draft that period again until someone
+// drafts it by hand.
+test('a draft can be deleted by the Super Admin; an approved run cannot; the automation does not bring it back', async () => {
+  const store = new Map();
+  const settings = { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } };
+  // The last ended caregiver week, whatever today is: the period the morning
+  // automation drafts.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const last = tax.periodFor(tax.addDays(tax.periodFor(today, settings, 'caregivers').start, -1), settings, 'caregivers');
+  store.set('time_logs', [log('a', last.start, 480)]);
+  store.set('payroll_settings', settings);
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(me.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 403, 'only the Super Admin deletes a draft');
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(store.get('payroll_runs').length, 0, 'the draft is gone');
+  assert.ok(own.acts.some(a => a[2] === 'payroll_run_draft_deleted'));
+  // The morning automation skips the deleted period.
+  r = await req(own.app, 'POST', '/api/payroll/automation/period-close', {}, { 'X-GFC-Payroll-Key': 'k'.repeat(40) });
+  assert.equal(r.status, 200);
+  assert.match(r.body.summary, /caregivers: draft deleted/);
+  assert.equal(store.get('payroll_runs').length, 0, 'not drafted again');
+  // Drafting it by hand brings it back, for the automation too.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  assert.equal(r.status, 200);
+  assert.equal((store.get('payroll_deleted_drafts') || []).length, 0);
+  // An approved run is never deleted.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${r.body.run.id}`);
+  assert.equal(r.body.code, 'RUN_LOCKED');
+  assert.equal(store.get('payroll_runs').length, 1);
 });

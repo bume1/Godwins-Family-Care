@@ -107,6 +107,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'payroll_runs', phi: false, owner: 'payroll 11/2026', note: 'draft, approved (frozen), paid; liabilities and payment confirmations' },
   { key: 'contractor_invoices', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_timesheets', phi: false, owner: 'payroll timesheets 11/2026' },
+  { key: 'payroll_deleted_drafts', phi: false, owner: 'payroll 11/2026', note: 'deleted draft runs: who, when, which period; the morning automation skips them' },
   { key: 'payroll_tax_payments', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_filing_confirmations', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_year_end', phi: false, owner: 'payroll 11/2026', note: 'year-end W-2 / 1099-NEC figures once released' },

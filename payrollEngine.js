@@ -240,7 +240,10 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
       if (ws !== 'GA') taxes.state = byHand.stateTax;
       const taxCents = Object.values(taxes).reduce((a, v) => a + v, 0);
       w.pay = { ...base, taxes, taxCents, netCents: base.grossCents - taxCents + base.reimbursementsCents };
-      w.manualTaxes = { reason: byHand.reason, by: byHand.by, at: byHand.at };
+      // Gross when the taxes were entered: a line added or removed since then
+      // changes gross but not hand-entered taxes, so the screen warns.
+      const enteredOn = Number.isFinite(byHand.grossCents) ? byHand.grossCents : null;
+      w.manualTaxes = { reason: byHand.reason, by: byHand.by, at: byHand.at, grossCents: enteredOn, grossChanged: enteredOn !== null && enteredOn !== base.grossCents };
       w.paperworkOwed = missing.filter(m => !BLOCKS_EVEN_BY_HAND(m) && !FORM_ITEMS(m));
       w.missing = missing.filter(BLOCKS_EVEN_BY_HAND);
     } else if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {

@@ -23,7 +23,7 @@
 // ============================================================================
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
 
 const DIR = path.join(__dirname, 'govforms');
 const FORMS = Object.freeze({
@@ -148,8 +148,21 @@ async function finish(doc, { lock = false } = {}) {
   return Buffer.from(await doc.save());
 }
 
+// A live preview while the person fills the form in (owner, 2026-11-14): a
+// light mark on every page so it is never taken for the signed form, no
+// signature, and the SSN as its last four only.
+async function markPreview(doc) {
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  for (const pg of doc.getPages()) {
+    const { width, height } = pg.getSize();
+    pg.drawText('PREVIEW \u00B7 NOT SIGNED', { x: width * 0.16, y: height * 0.3, size: 46, font, color: rgb(0.75, 0.2, 0.2), opacity: 0.16, rotate: degrees(35) });
+  }  // And in words at the top, where a reader (or a screen reader) finds it.
+  await footer(doc, ['PREVIEW, NOT SIGNED: your answers so far. Nothing is saved or sent until you sign.'], { top: true });
+}
+const maskedSsn = (last4, dashed = true) => (/^\d{4}$/.test(String(last4 || '')) ? (dashed ? `XXX-XX-${last4}` : `XXXXX${last4}`) : '');
+
 // ---- Form W-4 -----------------------------------------------------------------
-async function fillW4({ person, ssn, w4, employer, firstDay }) {
+async function fillW4({ person, ssn, w4, employer, firstDay, preview, ssnLast4 }) {
   const doc = await load('w4'); const f = doc.getForm();
   const P = 'topmostSubform[0].Page1[0].';
   const a = person.address || {};
@@ -157,7 +170,7 @@ async function fillW4({ person, ssn, w4, employer, firstDay }) {
   setText(f, `${P}Step1a[0].f1_02[0]`, [a.lastName, a.suffix].filter(Boolean).join(' '));
   setText(f, `${P}Step1a[0].f1_03[0]`, streetLine(a));
   setText(f, `${P}Step1a[0].f1_04[0]`, cityLine(a));
-  setText(f, `${P}f1_05[0]`, ssnFmt(ssn));
+  setText(f, `${P}f1_05[0]`, preview ? maskedSsn(ssnLast4) : ssnFmt(ssn));
   check(f, `${P}c1_1[0]`, w4.filingStatus === 'single');
   check(f, `${P}c1_1[1]`, w4.filingStatus === 'mfj');
   check(f, `${P}c1_1[2]`, w4.filingStatus === 'hoh');
@@ -171,15 +184,15 @@ async function fillW4({ person, ssn, w4, employer, firstDay }) {
   setText(f, `${P}f1_12[0]`, [employer.name, employer.address].filter(Boolean).join(', '));
   setText(f, `${P}f1_13[0]`, mdy(firstDay));
   setText(f, `${P}f1_14[0]`, einFmt(employer.ein));
-  await signHere(doc, { x: 106, y: 95, dateX: 465, sig: w4 });
-  await footer(doc, [esigLine(w4, 'Pay Setup, Form W-4')]);
+  if (preview) await markPreview(doc);
+  else { await signHere(doc, { ...SIGN_AT.w4, sig: w4 }); await footer(doc, [esigLine(w4, 'Pay Setup, Form W-4')]); }
   return finish(doc);
 }
 
 // ---- Form W-9 -----------------------------------------------------------------
 const W9_BOX = { individual: 0, c_corp: 1, s_corp: 2, partnership: 3, llc_single: 0, llc_c: 5, llc_s: 5, llc_p: 5 };
 const W9_LLC = { llc_c: 'C', llc_s: 'S', llc_p: 'P' };
-async function fillW9({ w9, tin }) {
+async function fillW9({ w9, tin, preview, tinLast4 }) {
   const doc = await load('w9'); const f = doc.getForm();
   const P = 'topmostSubform[0].Page1[0].';
   setText(f, `${P}f1_01[0]`, w9.name);
@@ -191,16 +204,16 @@ async function fillW9({ w9, tin }) {
   const cut = addr.indexOf(',');
   setText(f, `${P}Address_ReadOrder[0].f1_07[0]`, cut > 0 ? addr.slice(0, cut).trim() : addr);
   setText(f, `${P}Address_ReadOrder[0].f1_08[0]`, cut > 0 ? addr.slice(cut + 1).trim() : '');
-  const d = String(tin || '');
+  const d = preview ? (/^\d{4}$/.test(String(tinLast4 || '')) ? `XXXXX${tinLast4}` : '') : String(tin || '');
   if (w9.tinType === 'ein' && d.length === 9) { setText(f, `${P}f1_14[0]`, d.slice(0, 2)); setText(f, `${P}f1_15[0]`, d.slice(2)); }
   else if (d.length === 9) { setText(f, `${P}f1_11[0]`, d.slice(0, 3)); setText(f, `${P}f1_12[0]`, d.slice(3, 5)); setText(f, `${P}f1_13[0]`, d.slice(5)); }
-  await signHere(doc, { x: 125, y: 200, dateX: 405, sig: w9 });
-  await footer(doc, [esigLine(w9, 'Pay Setup, Form W-9')]);
+  if (preview) await markPreview(doc);
+  else { await signHere(doc, { ...SIGN_AT.w9, sig: w9 }); await footer(doc, [esigLine(w9, 'Pay Setup, Form W-9')]); }
   return finish(doc);
 }
 
 // ---- Form W-8BEN (a contractor living outside the U.S.) ---------------------------
-async function fillW8BEN({ w8, tins }) {
+async function fillW8BEN({ w8, tins, preview, usTinLast4, foreignTinLast4 }) {
   const doc = await load('w8ben'); const f = doc.getForm();
   const P = 'topmostSubform[0].Page1[0].';
   const t = tins || {};
@@ -213,9 +226,9 @@ async function fillW8BEN({ w8, tins }) {
   setText(f, `${P}f_6[0]`, mail.line);
   setText(f, `${P}f_7[0]`, mail.city);
   setText(f, `${P}f_8[0]`, mail.country);
-  setText(f, `${P}f_9[0]`, t.usTin ? ssnFmt(t.usTin) : '');
-  setText(f, `${P}f_10[0]`, t.foreignTin);
-  check(f, `${P}c1_01[0]`, w8.ftinNotRequired && !t.foreignTin);
+  setText(f, `${P}f_9[0]`, preview ? maskedSsn(usTinLast4) : t.usTin ? ssnFmt(t.usTin) : '');
+  setText(f, `${P}f_10[0]`, preview ? (foreignTinLast4 ? `XXXX${foreignTinLast4}` : '') : t.foreignTin);
+  check(f, `${P}c1_01[0]`, w8.ftinNotRequired && !(preview ? foreignTinLast4 : t.foreignTin));
   setText(f, `${P}f_12[0]`, mdy(w8.dob).replace(/\//g, '-'));
   if (w8.treaty) {
     setText(f, `${P}f_13[0]`, w8.treaty.country);
@@ -224,37 +237,40 @@ async function fillW8BEN({ w8, tins }) {
     setText(f, `${P}f_16[0]`, w8.treaty.incomeType);
     setText(f, `${P}f_17[0]`, w8.treaty.conditions);
   }
-  setText(f, `${P}Date[0]`, mdy(w8.signedAt));
-  setText(f, `${P}f_21[0]`, w8.signedName);
-  await signHere(doc, { x: 112, y: 77, sig: w8 });
-  await footer(doc, [esigLine(w8, 'Pay Setup, Form W-8BEN')], { top: true });
+  if (preview) await markPreview(doc);
+  else {
+    setText(f, `${P}Date[0]`, mdy(w8.signedAt));
+    setText(f, `${P}f_21[0]`, w8.signedName);
+    await signHere(doc, { ...SIGN_AT.w8ben, sig: w8 });
+    await footer(doc, [esigLine(w8, 'Pay Setup, Form W-8BEN')], { top: true });
+  }
   return finish(doc);
 }
 
 // ---- Georgia Form G-4 -----------------------------------------------------------
-async function fillG4({ person, ssn, g4, employer }) {
+async function fillG4({ person, ssn, g4, employer, preview, ssnLast4 }) {
   const doc = await load('g4'); const f = doc.getForm();
   const a = person.address || {};
   setText(f, '1a YOUR FULL NAME', [a.firstName, a.middle, a.lastName, a.suffix].filter(Boolean).join(' '));
-  setText(f, '1b YOUR SOCIAL SECURITY NUMBER', ssnFmt(ssn));
+  setText(f, '1b YOUR SOCIAL SECURITY NUMBER', preview ? maskedSsn(ssnLast4) : ssnFmt(ssn));
   setText(f, '2a HOME ADDRESS Number Street or Rural Route', streetLine(a));
   setText(f, '2b CITY STATE AND ZIP CODE', cityLine(a));
   if (g4.exempt) {
     // Line 8a. Lines 4 to 7 stay empty when claiming exempt (the form says so).
     check(f, 'Check Box5', true);
   } else {
-    setText(f, 'LETTER USED Marital Status A B C or D', g4.filingStatus);
+    setText(f, 'LETTER USED Marital Status A B C or D', g4.filingStatus || '');
     setText(f, 'Dependent Allowances', String(g4.dependentAllowances || 0));
     setText(f, 'Georgia Adjustment Allowance', String(g4.additionalAllowances || 0));
     setText(f, 'TOTAL ALLOWANCES: Total of Lines 4 and  5', String((g4.dependentAllowances || 0) + (g4.additionalAllowances || 0)));
   }
   setText(f, 'ADDITIONAL WITHHOLDING', dollars(g4.extraWithholdingCents));
-  setText(f, 'Date', mdy(g4.signedAt));
+  if (!preview) setText(f, 'Date', mdy(g4.signedAt));
   setText(f, "Employer's name and address", [employer.name, employer.address].filter(Boolean).join(', '));
   setText(f, 'EMPLOYERS FEIN', einFmt(employer.ein));
   setText(f, 'EMPLOYERS WH', employer.gaWithholdingNumber);
-  await signHere(doc, { x: 135, y: 123, sig: g4 });
-  await footer(doc, [esigLine(g4, 'Pay Setup, Form G-4')]);
+  if (preview) await markPreview(doc);
+  else { await signHere(doc, { ...SIGN_AT.g4, sig: g4 }); await footer(doc, [esigLine(g4, 'Pay Setup, Form G-4')]); }
   // The form's own Print and Clear buttons do nothing on a signed copy.
   for (const n of ['PRINT', 'CLEAR']) { try { f.removeField(f.getButton(n)); } catch (e) { /* absent */ } }
   return finish(doc);
@@ -269,7 +285,7 @@ const LIST_A = [
 ];
 const LIST_B = ['List B Document 1 Title', 'List B Issuing Authority 1', 'List B Document Number 1', 'List B Expiration Date 1'];
 const LIST_C = ['List C Document Title 1', 'List C Issuing Authority 1', 'List C Document Number 1', 'List C Expiration Date 1'];
-async function fillI9({ person, ssn, i9, employer, immigration, docNumbers }) {
+async function fillI9({ person, ssn, i9, employer, immigration, docNumbers, preview, ssnLast4 }) {
   const doc = await load('i9'); const f = doc.getForm();
   const a = person.address || {};
   const s1 = (i9 && i9.section1) || {};
@@ -283,7 +299,7 @@ async function fillI9({ person, ssn, i9, employer, immigration, docNumbers }) {
   select(f, 'State', a.state);
   setText(f, 'ZIP Code', a.zip);
   setText(f, 'Date of Birth mmddyyyy', mdy(s1.dob));
-  setText(f, 'US Social Security Number', ssn && /^\d{9}$/.test(ssn) ? ssn : '');
+  setText(f, 'US Social Security Number', preview ? maskedSsn(ssnLast4, false) : ssn && /^\d{9}$/.test(ssn) ? ssn : '');
   setText(f, 'Employees E-mail Address', person.email);
   setText(f, 'Telephone Number', s1.phone || person.phone);
   check(f, I9_BOX[s1.status], !!I9_BOX[s1.status]);
@@ -320,13 +336,14 @@ async function fillI9({ person, ssn, i9, employer, immigration, docNumbers }) {
     setText(f, 'Employers Business or Org Name', employer.name);
     setText(f, 'Employers Business or Org Address', employer.address);
   }
-  await footer(doc, [esigLine(s1, 'Pay Setup, Form I-9 Section 1'),
+  if (preview) await markPreview(doc);
+  else await footer(doc, [esigLine(s1, 'Pay Setup, Form I-9 Section 1'),
     s2 ? `Section 2 completed electronically by ${s2.reviewedBy} on ${stamp(s2.reviewedAt)}, who examined the documents listed.` : null], { top: true });
   return finish(doc, { lock: true });
 }
 
 // ---- A state certificate with no official template yet ---------------------------
-async function fillStateCert({ person, stateCert, stateName, employer }) {
+async function fillStateCert({ person, stateCert, stateName, employer, preview }) {
   const doc = await PDFDocument.create();
   const page = doc.addPage([612, 792]);
   const font = await doc.embedFont(StandardFonts.Helvetica), bold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -338,15 +355,83 @@ async function fillStateCert({ person, stateCert, stateName, employer }) {
   y -= 6;
   line(`Employee: ${[a.firstName, a.middle, a.lastName].filter(Boolean).join(' ')}`);
   line(`Address: ${streetLine(a)}, ${cityLine(a)}`);
-  line(`Filing status: ${stateCert.filingStatus === 'married' ? 'Married' : 'Single'}`);
+  line(`Filing status: ${stateCert.filingStatus === 'married' ? 'Married' : stateCert.filingStatus === 'single' ? 'Single' : ''}`);
   line(`Allowances: ${stateCert.allowances || 0}`);
   line(`Additional withholding per pay period: $${dollars(stateCert.extraWithholdingCents) || '0'}`);
   line(`Exempt: ${stateCert.exempt ? 'Yes' : 'No'}`);
   y -= 10;
   line('Under penalties of perjury, I declare that the information above is correct.', font, 10);
+  if (preview) { line('Signature:                         Date:'); await markPreview(doc); return Buffer.from(await doc.save()); }
   line(`Signature: /s/ ${stateCert.signedName}     Date: ${mdy(stateCert.signedAt)}`);
   await footer(doc, [esigLine(stateCert, `Pay Setup, ${stateName} certificate`)]);
   return Buffer.from(await doc.save());
+}
+
+// Where each answer lands on the official form, by the key the app's own field
+// uses (owner, 2026-11-14): the preview outlines the box being filled in.
+// Every name here is one the fill above writes, and a test holds the two
+// together. A signature has no form field: it is drawn at SIGN_AT.
+const SIGN_AT = Object.freeze({
+  w4: { x: 106, y: 95, dateX: 465 }, w9: { x: 125, y: 200, dateX: 405 }, w8ben: { x: 112, y: 77 }, g4: { x: 135, y: 123 }
+});
+const W4P = 'topmostSubform[0].Page1[0].', W9P = 'topmostSubform[0].Page1[0].', W8P = 'topmostSubform[0].Page1[0].';
+const FIELD_MAP = Object.freeze({
+  w4: {
+    filingStatus: [`${W4P}c1_1[0]`, `${W4P}c1_1[1]`, `${W4P}c1_1[2]`], multipleJobs: [`${W4P}c1_2[0]`],
+    dependentsAmount: [`${W4P}f1_08[0]`], otherIncome: [`${W4P}f1_09[0]`], deductions: [`${W4P}f1_10[0]`], extraWithholding: [`${W4P}f1_11[0]`],
+    exempt: [`${W4P}c1_3[0]`]
+  },
+  g4: {
+    filingStatus: ['LETTER USED Marital Status A B C or D'], dependentAllowances: ['Dependent Allowances'], additionalAllowances: ['Georgia Adjustment Allowance'],
+    extraWithholding: ['ADDITIONAL WITHHOLDING'], exempt: ['Check Box5']
+  },
+  i9: {
+    status: ['CB_1', 'CB_2', 'CB_3', 'CB_4'], dob: ['Date of Birth mmddyyyy'], otherLastNames: ['Employee Other Last Names Used (if any)'], phone: ['Telephone Number'],
+    alienNumber: ['3 A lawful permanent resident Enter USCIS or ANumber', 'USCIS ANumber'], workAuthExpires: ['Exp Date mmddyyyy'],
+    i94Number: ['Form I94 Admission Number'], passport: ['Foreign Passport Number and Country of IssuanceRow1'],
+    signedName: ['Signature of Employee'], agree: ['Signature of Employee']
+  },
+  w9: {
+    name: [`${W9P}f1_01[0]`], businessName: [`${W9P}f1_02[0]`],
+    taxClass: [0, 1, 2, 3, 5].map(i => `${W9P}Boxes3a-b_ReadOrder[0].c1_1[${i}]`),
+    tin: [`${W9P}f1_11[0]`, `${W9P}f1_12[0]`, `${W9P}f1_13[0]`, `${W9P}f1_14[0]`, `${W9P}f1_15[0]`], tinType: [`${W9P}f1_11[0]`, `${W9P}f1_14[0]`],
+    address: [`${W9P}Address_ReadOrder[0].f1_07[0]`, `${W9P}Address_ReadOrder[0].f1_08[0]`]
+  },
+  w8ben: {
+    name: [`${W8P}f_1[0]`], citizenship: [`${W8P}f_2[0]`], permLine: [`${W8P}f_3[0]`], permCity: [`${W8P}f_4[0]`], permCountry: [`${W8P}f_5[0]`],
+    mailLine: [`${W8P}f_6[0]`], mailCity: [`${W8P}f_7[0]`], mailCountry: [`${W8P}f_8[0]`], usTin: [`${W8P}f_9[0]`], foreignTin: [`${W8P}f_10[0]`],
+    ftinNotRequired: [`${W8P}c1_01[0]`], dob: [`${W8P}f_12[0]`], treatyCountry: [`${W8P}f_13[0]`], treatyArticle: [`${W8P}f_14[0]`],
+    treatyRate: [`${W8P}f_15[0]`], treatyIncomeType: [`${W8P}f_16[0]`], treatyConditions: [`${W8P}f_17[0]`], signedName: [`${W8P}f_21[0]`]
+  }
+});
+// The signature line, for forms whose signature is drawn rather than a field.
+const SIGN_KEYS = { w4: 'w4', w9: 'w9', g4: 'g4', w8ben: 'w8ben' };
+// The boxes on the blank form for each field: page, x, y, width, height in PDF
+// points from the bottom left, and each page's size. Geometry only, nothing
+// about anyone, so it is worked out once per form.
+const boxCache = new Map();
+async function fieldBoxes(key) {
+  if (boxCache.has(key)) return boxCache.get(key);
+  if (!FORMS[key]) return { pages: [], fields: {} };
+  const doc = await load(key); const form = doc.getForm();
+  const pages = doc.getPages();
+  const out = { pages: pages.map(pg => ({ width: pg.getWidth(), height: pg.getHeight() })), fields: {} };
+  for (const [appKey, names] of Object.entries(FIELD_MAP[key] || {})) {
+    const boxes = [];
+    for (const name of names) {
+      let fld; try { fld = form.getField(name); } catch (e) { continue; }
+      for (const w of fld.acroField.getWidgets()) {
+        const r = w.getRectangle();
+        const pi = pages.findIndex(pg => pg.ref === w.P());
+        boxes.push({ page: pi < 0 ? 0 : pi, x: r.x, y: r.y, w: r.width, h: r.height });
+      }
+    }
+    if (boxes.length) out.fields[appKey] = boxes;
+  }
+  const at = SIGN_KEYS[key] && SIGN_AT[SIGN_KEYS[key]];
+  if (at) { const sig = [{ page: 0, x: at.x - 4, y: at.y - 4, w: 230, h: 18 }]; out.fields.signedName = sig; out.fields.agree = sig; }
+  boxCache.set(key, out);
+  return out;
 }
 
 const formsFor = (p) => {
@@ -361,4 +446,4 @@ const formsFor = (p) => {
 };
 const FILE_NAMES = Object.freeze({ w4: 'Form W-4', w9: 'Form W-9', w8ben: 'Form W-8BEN', g4: 'Georgia Form G-4', i9: 'Form I-9', state: 'State withholding certificate' });
 
-module.exports = { FORMS, STATE_FORMS, FILE_NAMES, fillW4, fillW9, fillW8BEN, fillG4, fillI9, fillStateCert, formsFor, mdy };
+module.exports = { FORMS, STATE_FORMS, FILE_NAMES, FIELD_MAP, SIGN_AT, fieldBoxes, fillW4, fillW9, fillW8BEN, fillG4, fillI9, fillStateCert, formsFor, mdy };
