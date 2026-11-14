@@ -56,6 +56,7 @@ function Sign({ statement, form, set }) {
 const PERJURY = 'Under penalties of perjury, I declare that this certificate, to the best of my knowledge and belief, is true, correct and complete.';
 
 function FormBody({ which, data, form, set }) {
+  const abroad = !!(data.profile && data.profile.taxResidence === 'foreign');
   const o = data.options;
   if (which === 'w4') return (
     <div>
@@ -154,7 +155,9 @@ function FormBody({ which, data, form, set }) {
     <div>
       <label>How you are paid</label>
       <select value={form.method || ''} onChange={e => set({ ...form, method: e.target.value })}>
-        <option value="">Choose…</option><option value="direct_deposit">Direct deposit</option><option value="check">Paper check</option>{data.contractor && <option value="wise">Wise (outside the US)</option>}
+        <option value="">Choose…</option>
+        {!abroad && <><option value="direct_deposit">Direct deposit</option><option value="check">Paper check</option></>}
+        {data.contractor && (abroad ? Object.entries((data.overseas && data.overseas.payMethods) || { wise: 'Wise' }) : [['wise', 'Wise (outside the US)']]).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
       {form.method === 'direct_deposit' && (
         <div>
@@ -169,6 +172,59 @@ function FormBody({ which, data, form, set }) {
         </div>
       )}
       {form.method === 'wise' && <div><label>Wise email</label><input type="email" value={form.wiseEmail || ''} onChange={e => set({ ...form, wiseEmail: e.target.value })} /></div>}
+      {form.method === 'intl_wire' && (
+        <div>
+          <div className="mp-grid">
+            <div><label>Bank name</label><input type="text" value={form.bankName || ''} onChange={e => set({ ...form, bankName: e.target.value })} /></div>
+            <div><label>Bank country</label><input type="text" value={form.bankCountry || ''} onChange={e => set({ ...form, bankCountry: e.target.value })} /></div>
+            <div><label>SWIFT / BIC</label><input type="text" value={form.swift || ''} onChange={e => set({ ...form, swift: e.target.value })} /></div>
+            <div><label>IBAN or account number</label><input type="password" autoComplete="off" value={form.iban || ''} onChange={e => set({ ...form, iban: e.target.value })} /></div>
+          </div>
+          <label>Account holder name (if not yours)</label><input type="text" value={form.beneficiaryName || ''} onChange={e => set({ ...form, beneficiaryName: e.target.value })} />
+          <p className="mg-note">Stored encrypted; only the last four show after you save. Your bank may charge a fee to receive a wire.</p>
+        </div>
+      )}
+    </div>
+  );
+  if (which === 'residence') return (
+    <div>
+      <label className="mp-check"><input type="radio" name="res" checked={form.residence === 'us'} onChange={() => set({ ...form, residence: 'us' })} /><span>I live in the United States, or I am a U.S. citizen or green card holder. I give a W-9 and get a 1099.</span></label>
+      <label className="mp-check"><input type="radio" name="res" checked={form.residence === 'foreign'} onChange={() => set({ ...form, residence: 'foreign' })} /><span>I am not a U.S. person and I live and work outside the United States. I give a W-8BEN and get no 1099.</span></label>
+    </div>
+  );
+  if (which === 'w8ben') return (
+    <div>
+      <p className="mg-note" style={{ marginTop: 0 }}>IRS Form W-8BEN. Signing fills in the official form for you.</p>
+      <div className="mp-grid">
+        <div><label>Your full name</label><input type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} /></div>
+        <div><label>Country of citizenship</label><input type="text" value={form.citizenship || ''} onChange={e => set({ ...form, citizenship: e.target.value })} /></div>
+        <div><label>Date of birth</label><input type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
+      </div>
+      <label>Permanent home address (street)</label><input type="text" value={form.permLine || ''} onChange={e => set({ ...form, permLine: e.target.value })} />
+      <div className="mp-grid">
+        <div><label>City, region and postal code</label><input type="text" value={form.permCity || ''} onChange={e => set({ ...form, permCity: e.target.value })} /></div>
+        <div><label>Country</label><input type="text" value={form.permCountry || ''} onChange={e => set({ ...form, permCountry: e.target.value })} /></div>
+      </div>
+      <label>Mailing address, if different (street)</label><input type="text" value={form.mailLine || ''} onChange={e => set({ ...form, mailLine: e.target.value })} />
+      {form.mailLine && <div className="mp-grid">
+        <div><label>City, region and postal code</label><input type="text" value={form.mailCity || ''} onChange={e => set({ ...form, mailCity: e.target.value })} /></div>
+        <div><label>Country</label><input type="text" value={form.mailCountry || ''} onChange={e => set({ ...form, mailCountry: e.target.value })} /></div>
+      </div>}
+      <div className="mp-grid">
+        <div><label>Tax ID number from your country</label><input type="password" autoComplete="off" value={form.foreignTin || ''} onChange={e => set({ ...form, foreignTin: e.target.value })} /></div>
+        <div><label>U.S. SSN or ITIN (only if you have one)</label><input type="password" autoComplete="off" value={form.usTin || ''} onChange={e => set({ ...form, usTin: e.target.value })} /></div>
+      </div>
+      <label className="mp-check"><input type="checkbox" checked={!!form.ftinNotRequired} onChange={e => set({ ...form, ftinNotRequired: e.target.checked })} /><span>My country does not issue or require a tax ID number.</span></label>
+      <details style={{ margin: '8px 0' }}><summary>Claiming a tax treaty benefit (most people skip this)</summary>
+        <div className="mp-grid">
+          <div><label>Treaty country</label><input type="text" value={form.treatyCountry || ''} onChange={e => set({ ...form, treatyCountry: e.target.value })} /></div>
+          <div><label>Article</label><input type="text" value={form.treatyArticle || ''} onChange={e => set({ ...form, treatyArticle: e.target.value })} /></div>
+          <div><label>Rate (%)</label><input type="text" value={form.treatyRate || ''} onChange={e => set({ ...form, treatyRate: e.target.value })} /></div>
+          <div><label>Type of income</label><input type="text" value={form.treatyIncomeType || ''} onChange={e => set({ ...form, treatyIncomeType: e.target.value })} /></div>
+        </div>
+        <label>Conditions of the article you meet</label><input type="text" value={form.treatyConditions || ''} onChange={e => set({ ...form, treatyConditions: e.target.value })} />
+      </details>
+      <Sign statement="Under penalties of perjury, I declare that I have examined the information on this form and to the best of my knowledge and belief it is true, correct, and complete, and I certify everything in Part III of Form W-8BEN." form={form} set={set} />
     </div>
   );
   if (which === 'taxaddress') return (
@@ -200,9 +256,9 @@ function FormBody({ which, data, form, set }) {
   return null;
 }
 
-const ROUTE = { w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
+const ROUTE = { residence: 'tax-residence', w8ben: 'w8ben', w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
 // The signed official form, filled from your answers (owner, 2026-11-13).
-const FORM_PDF = { w4: 'w4', g4: 'g4', statecert: 'state', i9: 'i9', w9: 'w9' };
+const FORM_PDF = { w4: 'w4', g4: 'g4', statecert: 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' };
 const downloadForm = async (key, setErr) => {
   try {
     const res = await fetch(`/api/my/pay-setup/forms/${FORM_PDF[key]}.pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
@@ -249,7 +305,7 @@ function PaySetup() {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={`mg-pill ${c.done ? 'mg-ok' : c.optional ? 'mg-wait' : 'mg-bad'}`}>{c.done ? 'Done' : 'To do'}</span>
               {c.done && FORM_PDF[c.key] && !(c.key === 'i9' && p.i9 && p.i9.onFile && !p.i9.section1) && <button className="mg-btn mg-ghost mg-sm" onClick={() => { setErr(''); downloadForm(c.key, setErr); }}>Download PDF</button>}
-              {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
+              {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'residence' ? { residence: p.taxResidence || '' } : c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
             </div>
           </div>
           {/* The form opens right under the item clicked (owner report,
@@ -260,7 +316,7 @@ function PaySetup() {
               <FormBody which={open} data={data} form={form} set={setForm} />
               {err && <div className="mg-err">{err}</div>}
               <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-                <button className="mg-btn" disabled={busy} onClick={save}>{['w4', 'g4', 'statecert', 'i9', 'w9'].includes(open) ? 'Sign and Save' : 'Save'}</button>
+                <button className="mg-btn" disabled={busy} onClick={save}>{['w4', 'g4', 'statecert', 'i9', 'w9', 'w8ben'].includes(open) ? 'Sign and Save' : 'Save'}</button>
                 <button className="mg-btn mg-ghost" onClick={() => { setOpen(null); setForm({}); }}>Cancel</button>
               </div>
             </div>
@@ -287,21 +343,41 @@ function ContractorInvoices({ Section }) {
     setBusy(false);
   };
   const setLine = (i, k, v) => setF({ ...f, lines: f.lines.map((l, j) => (j === i ? { ...l, [k]: v } : l)) });
+  // Read the chosen file into base64 for the upload (owner, 2026-11-13).
+  const readInvoiceFile = (file) => {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { setErr('The invoice file is over 10 MB.'); return; }
+    const r = new FileReader();
+    r.onload = () => setF(cur => ({ ...cur, attachment: { name: file.name, dataBase64: String(r.result).split(',')[1] || '' } }));
+    r.onerror = () => setErr('That file could not be read.');
+    r.readAsDataURL(file);
+  };
   const pill = { submitted: ['mg-wait', 'With the office'], approved: ['mg-ok', 'Approved'], paid: ['mg-ok', 'Paid'], rejected: ['mg-bad', 'Sent back'] };
   return (
     <Wrap title="Contractor Invoices" sub="Send an invoice for contract work. The office approves it and pays it with the next payout.">
     <div className="mp-form">
       {err && <div className="mg-err">{err}</div>}
-      <p style={{ marginTop: 0 }}>Paid to you this year: <b>{usd(d.paidThisYearCents)}</b>. This is the total on your 1099-NEC.</p>
-      {!f && <button className="mg-btn" onClick={() => setF({ invoiceNo: '', periodStart: '', periodEnd: '', lines: [{ ...EMPTY_LINE }] })}>New Invoice</button>}
+      <p style={{ marginTop: 0 }}>Paid to you this year: <b>{usd(d.paidThisYearCents)}</b>. {d.abroad ? 'You live outside the U.S. and gave a W-8BEN, so no 1099 is issued.' : 'This is the total on your 1099-NEC.'}</p>
+      {!f && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button className="mg-btn" onClick={() => setF({ invoiceNo: '', periodStart: '', periodEnd: '', lines: [{ ...EMPTY_LINE }] })}>New Invoice</button>
+        <button className="mg-btn mg-ghost" onClick={() => setF({ invoiceNo: '', periodStart: '', periodEnd: '', lines: [], upload: true, total: '' })}>Upload Your Invoice</button>
+      </div>}
       {f && (
         <div className="mg-card" style={{ boxShadow: 'none' }}>
           <div className="mp-grid">
             <div><label>Your invoice number</label><input type="text" value={f.invoiceNo} onChange={e => setF({ ...f, invoiceNo: e.target.value })} /></div>
             <div><label>Period</label><div style={{ display: 'flex', gap: 6 }}><input type="date" value={f.periodStart} onChange={e => setF({ ...f, periodStart: e.target.value })} /><input type="date" value={f.periodEnd} onChange={e => setF({ ...f, periodEnd: e.target.value })} /></div></div>
           </div>
-          <label>Lines</label>
-          {f.lines.map((l, i) => (
+          {f.upload && (
+            <div>
+              <label>Your invoice (PDF, Excel .xlsx or CSV, up to 10 MB)</label>
+              <input type="file" accept=".pdf,.xlsx,.csv,application/pdf,text/csv" onChange={e => readInvoiceFile(e.target.files && e.target.files[0])} />
+              {f.attachment && <small style={{ display: 'block', color: 'var(--mut)' }}>{f.attachment.name}</small>}
+              <label>Invoice total ($)</label><input type="number" min="0" step="0.01" value={f.total} onChange={e => setF({ ...f, total: e.target.value })} />
+            </div>
+          )}
+          {!f.upload && <label>Lines</label>}
+          {!f.upload && f.lines.map((l, i) => (
             <div key={i} className="mp-line">
               <input type="date" value={l.serviceDate} onChange={e => setLine(i, 'serviceDate', e.target.value)} />
               <input type="text" placeholder="What you did" value={l.description} onChange={e => setLine(i, 'description', e.target.value)} />
@@ -311,7 +387,7 @@ function ContractorInvoices({ Section }) {
               <button className="mg-btn mg-ghost mg-sm" onClick={() => setF({ ...f, lines: f.lines.filter((_, j) => j !== i) })}>✕</button>
             </div>
           ))}
-          <button className="mg-btn mg-ghost mg-sm" onClick={() => setF({ ...f, lines: [...f.lines, { ...EMPTY_LINE }] })}>Add Line</button>
+          {!f.upload && <button className="mg-btn mg-ghost mg-sm" onClick={() => setF({ ...f, lines: [...f.lines, { ...EMPTY_LINE }] })}>Add Line</button>}
           <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
             <button className="mg-btn" disabled={busy} onClick={submit}>Submit Invoice</button>
             <button className="mg-btn mg-ghost" onClick={() => setF(null)}>Cancel</button>
@@ -321,7 +397,7 @@ function ContractorInvoices({ Section }) {
       <div className="mp-items" style={{ marginTop: 10 }}>
         {d.invoices.map(x => (
           <div key={x.id} className="mp-item">
-            <div><b>Invoice {x.invoiceNo} · {usd(x.totalCents)}</b><small>{x.periodStart} to {x.periodEnd}{x.reviewNote ? ` · ${x.reviewNote}` : ''}</small></div>
+            <div><b>Invoice {x.invoiceNo} · {usd(x.totalCents)}</b><small>{x.periodStart} to {x.periodEnd}{x.attachment ? ` · ${x.attachment.name}` : ''}{x.status === 'rejected' && x.reviewNote ? ` · To fix: ${x.reviewNote}` : x.reviewNote ? ` · ${x.reviewNote}` : ''}</small></div>
             <span className={`mg-pill ${(pill[x.status] || [])[0] || ''}`}>{(pill[x.status] || [])[1] || x.status}</span>
           </div>
         ))}

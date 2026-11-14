@@ -114,6 +114,7 @@ module.exports = function createPayrollRoutes(deps) {
   // What a signed W-4, G-4, I-9 or W-9 puts on the real government form. The
   // secrets are opened here, on the server, only to draw that form.
   const gov = require('../govForms');
+  const overseasOf = (settings) => ({ enabled: false, payMethods: ['wise'], ...((settings && settings.overseas) || {}) });
   const openJson = (box) => { try { return box && box.enc ? JSON.parse(pc.open(box.enc, env)) : null; } catch (e) { return null; } };
   const openPlain = (box) => { try { return box && box.enc ? pc.open(box.enc, env) : null; } catch (e) { return null; } };
   const govPdf = async (user, p, key) => {
@@ -130,6 +131,7 @@ module.exports = function createPayrollRoutes(deps) {
     if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn: openPlain(p.ssn), g4: p.g4, employer });
     if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn: openPlain(p.ssn), i9: p.i9, employer, immigration: openJson(p.i9Ids), docNumbers: openJson(p.i9DocNumbers) });
     if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: openPlain(p.tin) });
+    if (key === 'w8ben' && p.w8ben) return gov.fillW8BEN({ w8: p.w8ben, tins: openJson(p.w8benTins) });
     if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer });
     return null;
   };
@@ -192,8 +194,10 @@ module.exports = function createPayrollRoutes(deps) {
   router.get('/api/my/pay-setup', authenticateToken, requireStaff, async (req, res) => {
     const p = await profileFor(req.user);
     const stateIncomeTax = await stateTaxesWages(p);
+    const ov = overseasOf(await readSettings());
     res.json({
-      profile: pp.publicProfile(p, { stateIncomeTax }), workState: p.workState || 'GA', workStateName: tables.stateName(p.workState || 'GA'),
+      profile: pp.publicProfile(p, { stateIncomeTax, overseasAllowed: ov.enabled || p.taxResidence === 'foreign' }),
+      overseas: { enabled: ov.enabled, payMethods: Object.fromEntries(ov.payMethods.map(m => [m, pp.OVERSEAS_PAY_METHODS[m]])) }, workState: p.workState || 'GA', workStateName: tables.stateName(p.workState || 'GA'),
       employee: pp.isEmployee(p), contractor: pp.isContractor(p), caregiver: !!p.isCaregiver,
       secretsStorable: pc.configured(env),
       options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, i9Status: pp.I9_STATUS, w9Class: pp.W9_CLASS, workTypes: WORK_TYPES, units: CI_UNITS,
@@ -211,6 +215,19 @@ module.exports = function createPayrollRoutes(deps) {
       const b = req.body || {};
       let change;
       switch (req.params.form) {
+        case 'tax-residence': {
+          if (!pp.isContractor(p)) return res.status(409).json({ error: 'This is for contractors.', code: 'RESIDENCE_NOT_CONTRACTOR' });
+          if (!['us', 'foreign'].includes(b.residence)) return res.status(400).json({ error: 'Choose in the U.S. or outside the U.S.', code: 'RESIDENCE' });
+          if (b.residence === 'foreign' && !overseasOf(await readSettings()).enabled) return res.status(409).json({ error: 'GFC is not set up to pay contractors abroad yet. Ask the office.', code: 'OVERSEAS_OFF' });
+          p.taxResidence = b.residence; change = `Tax residence set: ${b.residence === 'foreign' ? 'outside the U.S.' : 'U.S.'}`; break;
+        }
+        case 'w8ben': {
+          if (p.taxResidence !== 'foreign') return res.status(409).json({ error: 'A W-8BEN is for someone living outside the U.S. Choose that first.', code: 'W8_NOT_FOREIGN' });
+          const n = pp.normalizeW8BEN(b, ctx); if (n.error) return res.status(400).json(n);
+          p.w8ben = n.value;
+          p.w8benTins = (n.foreignTin || n.usTin) ? { enc: pc.seal(JSON.stringify({ foreignTin: n.foreignTin, usTin: n.usTin }), env), at: ctx.at } : null;
+          change = 'W-8BEN signed'; break;
+        }
         case 'w4': { const n = pp.normalizeW4(b, ctx); if (n.error) return res.status(400).json(n); p.w4 = n.value; change = 'W-4 signed'; break; }
         case 'g4': { const n = pp.normalizeG4(b, ctx); if (n.error) return res.status(400).json(n); p.g4 = n.value; change = 'G-4 signed'; break; }
         case 'state-cert': {
@@ -236,6 +253,12 @@ module.exports = function createPayrollRoutes(deps) {
         }
         case 'pay-method': {
           const n = pp.normalizePayMethod(b); if (n.error) return res.status(400).json(n);
+          if (n.value.method === 'intl_wire') {
+            const ov = overseasOf(await readSettings());
+            if (p.taxResidence !== 'foreign' || !ov.enabled || !ov.payMethods.includes('intl_wire')) return res.status(409).json({ error: 'An international wire is for contractors abroad, where the office has turned it on.', code: 'WIRE_NOT_OFFERED' });
+            p.payMethod = { ...n.value, accountEnc: pc.seal(n.account, env), accountLast4: pc.last4(n.account), at: ctx.at };
+            change = 'Pay method set: intl_wire'; break;
+          }
           p.payMethod = n.value.method === 'direct_deposit'
             ? { ...n.value, routingEnc: pc.seal(n.routing, env), routingLast4: pc.last4(n.routing), accountEnc: pc.seal(n.account, env), accountLast4: pc.last4(n.account), at: ctx.at }
             : { ...n.value, at: ctx.at };
@@ -263,9 +286,9 @@ module.exports = function createPayrollRoutes(deps) {
         default: return res.status(404).json({ error: 'Unknown form.' });
       }
       const saved = await saveProfile(req.user.id, p, change, req.user);
-      const signed = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9' }[req.params.form];
+      const signed = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' }[req.params.form];
       if (signed) fileGovForm(req.user, saved, signed, req.user).catch(e => console.error('Form filing (non-fatal):', e.message));
-      res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved) }) });
+      res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved), overseasAllowed: overseasOf(await readSettings()).enabled || saved.taxResidence === 'foreign' }) });
     } catch (e) {
       if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
       console.error('Pay setup error:', e);
@@ -309,25 +332,96 @@ module.exports = function createPayrollRoutes(deps) {
       if (!(qty > 0) || qty > 1000 || rate === null) return { error: `Line ${i + 1}: quantity and rate must be numbers.`, code: 'CI_LINE' };
       lines.push({ serviceDate: l.serviceDate, description: str(l.description, 300), clientId: l.clientId ? String(l.clientId) : null, unit: l.unit, qty, rateCents: rate, amountCents: Math.round(qty * rate) });
     }
-    if (!lines.length) return { error: 'Add at least one line.', code: 'CI_NO_LINES' };
-    return { value: { invoiceNo: number, periodStart: b.periodStart, periodEnd: b.periodEnd, lines, totalCents: lines.reduce((a, l) => a + l.amountCents, 0) } };
+    // An uploaded invoice (PDF or spreadsheet) with its total stands without
+    // lines (owner, 2026-11-13). Lines, when given, must add up to the total.
+    const given = !(b.total === undefined || b.total === '' || b.total === null);
+    const total = given ? toCents(b.total) : null;
+    if (given && !(total > 0)) return { error: 'Give the invoice total in dollars.', code: 'CI_TOTAL' };
+    if (!lines.length) {
+      if (!b.hasAttachment) return { error: 'Add at least one line, or upload your invoice with its total.', code: 'CI_NO_LINES' };
+      if (!(total > 0)) return { error: 'Give the invoice total in dollars.', code: 'CI_TOTAL' };
+      return { value: { invoiceNo: number, periodStart: b.periodStart, periodEnd: b.periodEnd, lines: [], totalCents: total } };
+    }
+    const sum = lines.reduce((a, l) => a + l.amountCents, 0);
+    if (total !== null && total !== sum) return { error: `The lines add up to $${(sum / 100).toFixed(2)}, not the total you gave.`, code: 'CI_TOTAL_MISMATCH' };
+    return { value: { invoiceNo: number, periodStart: b.periodStart, periodEnd: b.periodEnd, lines, totalCents: sum } };
   };
+  // An invoice file: a PDF, an Excel workbook or a CSV, up to 10 MB, sent as
+  // base64. Typed by its bytes, never by the name alone.
+  const INVOICE_MAX = 10 * 1024 * 1024;
+  const invoiceAttachment = (a) => {
+    if (!a || !a.dataBase64) return null;
+    const name = str(a.name, 120).replace(/[\\/]/g, '_') || 'invoice';
+    const buf = Buffer.from(String(a.dataBase64), 'base64');
+    if (!buf.length) return { error: 'That file is empty.', code: 'CI_FILE_EMPTY' };
+    if (buf.length > INVOICE_MAX) return { error: 'The invoice file is over 10 MB.', code: 'CI_FILE_TOO_LARGE' };
+    const m = name.match(/\.([a-z0-9]+)$/i);
+    const ext = m ? m[1].toLowerCase() : '';
+    if (buf.slice(0, 4).toString('latin1') === '%PDF') return { name, buf, type: 'application/pdf' };
+    if (ext === 'xlsx' && buf[0] === 0x50 && buf[1] === 0x4B) return { name, buf, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+    if (ext === 'csv' && !buf.includes(0)) return { name, buf, type: 'text/csv' };
+    return { error: 'Upload a PDF, an Excel file (.xlsx) or a CSV.', code: 'CI_FILE_TYPE' };
+  };
+  // Managers and care coordinators review contractor invoices with the Super
+  // Admin: approve, or send back with what to fix (owner, 2026-11-13). Paying
+  // stays the Super Admin's.
+  const canReviewInvoices = (u) => !!u && (u.role === 'admin' || isHoursEditor(u));
+  router.get('/api/payroll/admin/contractor-invoices', authenticateToken, requireTimesheetViewer, async (req, res) => {
+    const profiles = await readProfiles();
+    const isSuper = !!req.user && req.user.role === 'admin';
+    // How each is paid, for the Super Admin who pays it: never a full number.
+    const payTo = (uid) => { const p = profiles[String(uid)] || {}; const pm = p.payMethod || {};
+      return { method: pm.method || null, bankName: pm.bankName || null, bankCountry: pm.bankCountry || null, swift: pm.swift || null, accountLast4: pm.accountLast4 || null, wiseEmail: pm.wiseEmail || null, abroad: p.taxResidence === 'foreign' }; };
+    const open = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'submitted' || x.status === 'approved')
+      .sort((a, b) => String(a.submittedAt).localeCompare(String(b.submittedAt)))
+      .map(x => ({ ...x, payTo: isSuper ? payTo(x.userId) : null }));
+    res.json({ invoices: open, canReview: canReviewInvoices(req.user), canPay: isSuper });
+  });
+  // The invoice file: its contractor, anyone who reviews invoices, or a preparer.
+  router.get('/api/payroll/contractor-invoices/:id/file', authenticateToken, async (req, res) => {
+    try {
+      const inv = (await rows(CONTRACTOR_INVOICES)).find(x => x.id === req.params.id);
+      const mine = inv && String(inv.userId) === String(req.user.id);
+      if (!inv || !(mine || canReviewInvoices(req.user) || isPreparer(req.user))) return res.status(404).json({ error: 'Invoice not found.' });
+      if (!inv.attachment || !inv.attachment.driveFileId) return res.status(404).json({ error: 'No file on this invoice.', code: 'CI_NO_FILE' });
+      const buf = await drive.downloadFileBuffer(inv.attachment.driveFileId);
+      await logActivity(req.user.id, req.user.name, 'contractor_invoice_file_opened', 'contractor_invoice', inv.id, {});
+      res.setHeader('Content-Type', inv.attachment.type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', contentDisposition('attachment', inv.attachment.name || 'invoice'));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+    } catch (e) { console.error('Invoice file error:', e.message); res.status(502).json({ error: 'That file could not be opened right now.', code: 'CI_FILE_UNAVAILABLE' }); }
+  });
   router.get('/api/my/contractor-invoices', authenticateToken, requireStaff, async (req, res) => {
     const p = await profileFor(req.user);
     const mine = (await rows(CONTRACTOR_INVOICES)).filter(x => String(x.userId) === String(req.user.id)).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
     const year = nowIso().slice(0, 4);
-    res.json({ contractor: pp.isContractor(p), invoices: mine, paidThisYearCents: mine.filter(x => x.status === 'paid' && String(x.paidAt).startsWith(year)).reduce((a, x) => a + x.totalCents, 0) });
+    res.json({ contractor: pp.isContractor(p), abroad: p.taxResidence === 'foreign', invoices: mine, paidThisYearCents: mine.filter(x => x.status === 'paid' && String(x.paidAt).startsWith(year)).reduce((a, x) => a + x.totalCents, 0) });
   });
   router.post('/api/my/contractor-invoices', authenticateToken, requireStaff, async (req, res) => {
     const p = await profileFor(req.user);
     if (!pp.isContractor(p)) return res.status(403).json({ error: 'Invoices are for contractors. Ask the office if you are paid as one.', code: 'CI_NOT_CONTRACTOR' });
     const all = await rows(CONTRACTOR_INVOICES);
     const mine = all.filter(x => String(x.userId) === String(req.user.id) && x.status !== 'rejected');
-    const n = normalizeContractorInvoice(req.body, new Set(mine.map(x => String(x.invoiceNo).toLowerCase())));
+    const att = invoiceAttachment((req.body || {}).attachment);
+    if (att && att.error) return res.status(400).json(att);
+    const n = normalizeContractorInvoice({ ...(req.body || {}), hasAttachment: !!att }, new Set(mine.map(x => String(x.invoiceNo).toLowerCase())));
     if (n.error) return res.status(400).json(n);
+    // The file goes to their Staff Record folder first. If Drive refuses it,
+    // nothing is recorded: an invoice pointing at a missing file is worse.
+    let attachment = null;
+    if (att) {
+      try {
+        const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(req.user)), personFolderName(req.user.name, req.user.id), `Invoice ${n.value.invoiceNo} - ${att.name}`, att.buf, att.type);
+        attachment = { name: att.name, type: att.type, bytes: att.buf.length, driveFileId: (stored && (stored.fileId || stored.id)) || null };
+      } catch (e) {
+        console.error('Invoice upload error:', e.message);
+        return res.status(502).json({ error: 'Your invoice file could not be stored. Try again in a few minutes.', code: 'CI_FILE_NOT_STORED' });
+      }
+    }
     // A line naming an exam or visit date with nothing on the schedule is
     // flagged for the owner, never refused: the contractor knows their work.
-    const inv = { id: uuidv4(), userId: String(req.user.id), name: req.user.name || req.user.email, ...n.value, status: 'submitted', submittedAt: nowIso(), history: [{ at: nowIso(), action: 'submitted' }] };
+    const inv = { id: uuidv4(), userId: String(req.user.id), name: req.user.name || req.user.email, ...n.value, attachment, status: 'submitted', submittedAt: nowIso(), history: [{ at: nowIso(), action: 'submitted' }] };
     all.push(inv);
     await db.set(CONTRACTOR_INVOICES, all);
     await logActivity(req.user.id, req.user.name, 'contractor_invoice_submitted', 'contractor_invoice', inv.id, { totalCents: inv.totalCents });
@@ -1080,7 +1174,9 @@ module.exports = function createPayrollRoutes(deps) {
         bankName: pm.bankName || null, accountType: pm.accountType || null, routingLast4: pm.routingLast4 || null, accountLast4: pm.accountLast4 || null, phone: w.channel === 'p2p' ? (person.phone || null) : null, paid };
     });
     await logActivity(req.user.id, req.user.name, 'payment_sheet_opened', 'payroll_run', run.id, {});
-    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), p2pAccount: (await readSettings()).p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved') });
+    // How each approved contractor invoice is paid: never a full account number.
+    const payTo = (uid) => { const pm = (all[uid] || {}).payMethod || {}; return { method: pm.method || null, bankName: pm.bankName || null, bankCountry: pm.bankCountry || null, swift: pm.swift || null, accountLast4: pm.accountLast4 || null, wiseEmail: pm.wiseEmail || null, abroad: (all[uid] || {}).taxResidence === 'foreign' }; };
+    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), p2pAccount: (await readSettings()).p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved').map(x => ({ ...x, payTo: payTo(x.userId) })) });
   });
   router.post('/api/payroll/admin/runs/:id/payments/:userId', authenticateToken, requireAdmin, async (req, res) => {
     const runs = await rows(RUNS);
@@ -1103,7 +1199,11 @@ module.exports = function createPayrollRoutes(deps) {
   });
 
   // ---- contractor invoices, the owner's side (step 8) -------------------------------
-  router.post('/api/payroll/admin/contractor-invoices/:id/:action', authenticateToken, requireAdmin, async (req, res) => {
+  const requireInvoiceAction = (req, res, next) => {
+    if (req.params.action === 'pay') return requireAdmin(req, res, next);
+    return canReviewInvoices(req.user) ? next() : res.status(403).json({ error: 'Reviewing invoices is for the Super Admin, managers and care coordinators.', code: 'CI_REVIEWER_ONLY' });
+  };
+  router.post('/api/payroll/admin/contractor-invoices/:id/:action', authenticateToken, requireInvoiceAction, async (req, res) => {
     const all = await rows(CONTRACTOR_INVOICES);
     const i = all.findIndex(x => x.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: 'Invoice not found.' });
@@ -1130,6 +1230,13 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(CONTRACTOR_INVOICES, all);
     await logActivity(req.user.id, req.user.name, `contractor_invoice_${act === 'pay' ? 'paid' : act + 'd'}`, 'contractor_invoice', inv.id, { totalCents: inv.totalCents });
     if (act === 'pay' && deps.onContractorPaid) await deps.onContractorPaid(inv).catch(e => console.error('QuickBooks contractor sync (non-fatal):', e.message));
+    // Sent back: the contractor is told where to look. The note stays in the app.
+    if (act === 'reject' && queueNotification) {
+      const who = (await getUsers()).find(u => u && String(u.id) === String(inv.userId));
+      if (who && who.email) await queueNotification('contractor_invoice_sent_back', who.id, who.email, who.name, {
+        subject: 'Your invoice needs a correction', body: `Your invoice ${inv.invoiceNo} was sent back. Open My GFC, then Contractor Invoices, to see what to fix and send it again.`
+      }, { relatedEntityId: `ci-back:${inv.id}` }).catch(e => console.error('Invoice notice (non-fatal):', e.message));
+    }
     res.json({ invoice: inv });
   });
 
@@ -1215,9 +1322,16 @@ module.exports = function createPayrollRoutes(deps) {
     if (!tbl) return { error: 'No approved tables for that year.', code: 'PAYROLL_NO_TABLES', status: 409 };
     const settings = await readSettings();
     const runs = await rows(RUNS);
-    const paid = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'paid').map(x => ({ userId: x.userId, name: x.name, amountCents: x.totalCents, paidAt: x.paidAt }));
-    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal, incomeTaxStates: Object.entries(tbl.states || {}).filter(([, d]) => d.incomeTax).map(([k]) => k) });
     const profiles = await readProfiles();
+    // A contractor living outside the U.S. with a W-8BEN on file gets no 1099
+    // (owner, 2026-11-13): payment for work done abroad by a foreign person is
+    // not U.S.-source income. They are counted apart so nothing is hidden.
+    const abroad = (uid) => { const p = profiles[String(uid)]; return !!(p && p.taxResidence === 'foreign' && p.w8ben); };
+    const allPaid = (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'paid').map(x => ({ userId: x.userId, name: x.name, amountCents: x.totalCents, paidAt: x.paidAt }));
+    const paid = allPaid.filter(x => !abroad(x.userId));
+    const paidAbroad = allPaid.filter(x => abroad(x.userId) && String(x.paidAt || '').startsWith(String(year)));
+    const figures = cal.yearEnd(runs, paid, { year, fed: tbl.federal, incomeTaxStates: Object.entries(tbl.states || {}).filter(([, d]) => d.incomeTax).map(([k]) => k) });
+    figures.foreignContractors = [...new Set(paidAbroad.map(x => x.userId))].map(uid => ({ userId: uid, name: (paidAbroad.find(x => x.userId === uid) || {}).name, totalCents: paidAbroad.filter(x => x.userId === uid).reduce((a, x) => a + x.amountCents, 0) }));
     const users = new Map((await getUsers()).filter(Boolean).map(u => [String(u.id), u]));
     const employer = employerFor(settings);
     const w2 = figures.w2.map(e => {
@@ -1243,6 +1357,7 @@ module.exports = function createPayrollRoutes(deps) {
       // files this year's W-2s, releasing here would report them twice.
       gustoGrossCents: runs.filter(r => r.source === 'gusto' && String(r.period.payDate).startsWith(String(year))).reduce((t, r) => t + ((r.totals && r.totals.grossCents) || 0), 0),
       w2, nec, necBelowThreshold: figures.necBelowThreshold, necThresholdCents: figures.necThresholdCents,
+      foreignContractors: figures.foreignContractors || [],
       g1003: ye.g1003Totals(w2.map(w => ({ boxes: w.boxes }))),
       layouts: { efw2: ye.EFW2_LAYOUT_YEARS.includes(Number(year)), irisNec: ye.IRIS_NEC_LAYOUT_YEARS.includes(Number(year)) },
       released: (await rows(YEAR_END)).find(r => String(r.year) === String(year)) || null

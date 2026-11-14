@@ -580,25 +580,35 @@ const ExaminerPayouts = ({ reload }) => {
     </div>
   );
 };
+// Contractor invoices (owner, 2026-11-13): managers, care coordinators and the
+// Super Admin approve or send back; only the Super Admin pays. An invoice may
+// be an uploaded PDF or spreadsheet with its total instead of lines.
+const PAY_TO = (t) => !t ? '' : t.method === 'intl_wire' ? `International wire · ${t.bankName || ''}${t.bankCountry ? `, ${t.bankCountry}` : ''} · SWIFT ${t.swift || ''} · account ••••${t.accountLast4 || ''}`
+  : t.method === 'wise' ? `Wise${t.wiseEmail ? ` · ${t.wiseEmail}` : ''}` : t.method === 'direct_deposit' ? `Direct deposit · ${t.bankName || 'Bank'} ••••${t.accountLast4 || ''}` : t.method === 'check' ? 'Paper check' : 'No pay method yet';
 const Contractors = ({ data, reload }) => {
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState(''); const [d, setD] = useState(null);
+  const load = () => call('/api/payroll/admin/contractor-invoices').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
   const act = (inv, action) => {
-    const body = action === 'reject' ? { note: window.prompt('What should they fix?') || '' } : action === 'pay' ? { confirmation: window.prompt('PNC or Wise confirmation number') || '' } : {};
+    const body = action === 'reject' ? { note: window.prompt('What should they fix?') || '' } : action === 'pay' ? { confirmation: window.prompt('PNC, Wise or wire confirmation number') || '' } : {};
     if ((action === 'reject' && !body.note) || (action === 'pay' && !body.confirmation)) return;
-    post(`/api/payroll/admin/contractor-invoices/${enc(inv.id)}/${action}`, body).then(reload).catch(e => setErr(e.message));
+    post(`/api/payroll/admin/contractor-invoices/${enc(inv.id)}/${action}`, body).then(() => { load(); if (reload) reload(); }).catch(e => setErr(e.message));
   };
+  const list = d ? d.invoices : [];
   return (
     <Card title="Contractor Invoices">
       <Err e={err} />
-      <ExaminerPayouts reload={reload} />
-      {data.contractorInvoices.length === 0 && <p className="text-stone-500">Nothing waiting.</p>}
-      {data.contractorInvoices.map(i => (
+      {SUPER && !TIMESHEETS_ONLY && <ExaminerPayouts reload={reload} />}
+      {d && list.length === 0 && <p className="text-stone-500">Nothing waiting.</p>}
+      {list.map(i => (
         <div key={i.id} className="py-2 border-b border-stone-100">
-          <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}</span><b>{usd(i.totalCents)}</b></div>
-          {i.lines.map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
+          <div className="flex flex-wrap justify-between gap-2"><span><b className="text-primary">{i.name}</b> · invoice {i.invoiceNo} · {day(i.periodStart)} to {day(i.periodEnd)}{i.status === 'approved' ? <span className="chip bg-emerald-50 text-emerald-700 ml-2">APPROVED</span> : null}</span><b>{usd(i.totalCents)}</b></div>
+          {(i.lines || []).map((l, k) => <div key={k} className="text-[12.5px] text-stone-500">{day(l.serviceDate)} · {l.description} · {l.qty} {l.unit} × {usd(l.rateCents)} = {usd(l.amountCents)}</div>)}
+          {i.attachment && <button className="text-[12.5px] underline text-primary" onClick={() => { setErr(''); download(`/api/payroll/contractor-invoices/${enc(i.id)}/file`, i.attachment.name, setErr); }}>Open their invoice: {i.attachment.name}</button>}
+          {i.payTo && <div className="text-[12.5px] text-stone-500">{i.payTo.abroad ? 'Lives outside the U.S. (W-8BEN, no 1099) · ' : ''}{PAY_TO(i.payTo)}</div>}
           <div className="flex gap-2 mt-2">
-            {SUPER && i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
-            {SUPER && i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
+            {d.canReview && i.status === 'submitted' && <><button className="btn !py-1" onClick={() => act(i, 'approve')}>Approve</button><button className="btn ghost !py-1" onClick={() => act(i, 'reject')}>Send Back</button></>}
+            {d.canPay && i.status === 'approved' && <button className="btn !py-1" onClick={() => act(i, 'pay')}>Mark Paid</button>}
           </div>
         </div>
       ))}
@@ -738,7 +748,7 @@ const YearEnd = () => {
             {ye.employerMissing.length > 0 && <Warn>Before release: {ye.employerMissing.join(', ')}.</Warn>}
             {ye.gustoGrossCents > 0 && !rel && <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-[13px] text-stone-700 mb-3">These figures include {usd(ye.gustoGrossCents)} paid through Gusto in {yr}. GFC files {yr}'s W-2s from the app (owner, 2026-11-09), so those wages belong here. Before releasing, make sure Gusto is not also set to file {yr} W-2s, or the wages are reported twice.</div>}
             {(ye.draftRuns > 0 || ye.unpaidRuns > 0) && <Warn>{ye.draftRuns} draft and {ye.unpaidRuns} unpaid run(s) with a {yr} pay date. Finish them first; their wages belong on these forms.</Warn>}
-            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.</p>
+            <p className="text-stone-500 mb-3">Due to people by January 31; filed with SSA, the IRS and Georgia by the same date (the next business day when it falls on a weekend). 1099-NEC is for contractors paid {usd(ye.necThresholdCents)} or more{ye.necBelowThreshold ? `; ${ye.necBelowThreshold} paid less and get none` : ''}.{(ye.foreignContractors || []).length ? ` Contractors outside the U.S. with a W-8BEN get no 1099: ${ye.foreignContractors.map(x => `${x.name} (${usd(x.totalCents)})`).join(', ')}.` : ''}</p>
             <div className="lblu mb-1">W-2 ({w2.length})</div>
             {w2.length === 0 && <p className="text-stone-500 mb-2">No wages paid in {yr}.</p>}
             {w2.map(x => formRow(x, 'w2', 'W-2', x.boxes.box1))}
@@ -874,7 +884,7 @@ const Settings = ({ data, reload }) => {
   const s = data.settings;
   const [sch, setSch] = useState(Object.fromEntries((data.schedules || []).map(x => [x.key, { frequency: x.frequency, payDateOffsetDays: x.payDateOffsetDays, anchor: x.anchor }])));
   const setS = (k, field, v) => setSch({ ...sch, [k]: { ...sch[k], [field]: v } });
-  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare' });
+  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare', overseas: { enabled: !!(s.overseas && s.overseas.enabled), payMethods: (s.overseas && s.overseas.payMethods) || ['wise'] } });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   return (
     <Card title="Payroll Settings">
@@ -897,6 +907,12 @@ const Settings = ({ data, reload }) => {
         <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
         <label>GFC's Cash App, for P2P payroll<input className="inp" value={f.p2pAccount} onChange={e => setF({ ...f, p2pAccount: e.target.value })} placeholder="$GodwinsFamilyCare" /></label>
+        <div className="sm:col-span-2 border border-stone-200 rounded-xl p-3">
+          <b className="text-primary">Contractors outside the U.S.</b>
+          <label className="flex gap-2 items-center mt-1"><input type="checkbox" checked={!!f.overseas.enabled} onChange={e => setF({ ...f, overseas: { ...f.overseas, enabled: e.target.checked } })} />Pay contractors who live outside the U.S. They give a W-8BEN instead of a W-9 and get no 1099.</label>
+          <div className="flex gap-4 mt-1 text-[13px]"><span className="text-stone-500">Ways to pay them:</span>
+            {[['wise', 'Wise'], ['intl_wire', 'International wire']].map(([k, l]) => <label key={k} className="flex gap-1 items-center"><input type="checkbox" checked={f.overseas.payMethods.includes(k)} onChange={e => setF({ ...f, overseas: { ...f.overseas, payMethods: e.target.checked ? [...f.overseas.payMethods, k] : f.overseas.payMethods.filter(x => x !== k) } })} />{l}</label>)}</div>
+        </div>
       </div>
       <OtherStates data={data} reload={reload} />
       <button className="btn mt-3" onClick={() => put('/api/payroll/admin/settings', { ...f, schedules: Object.fromEntries(Object.entries(sch).map(([k, v]) => { const was = (data.schedules || []).find(x => x.key === k) || {}; return [k, { frequency: v.frequency, payDateOffsetDays: Number(v.payDateOffsetDays), ...(v.anchor && v.anchor !== was.anchor ? { anchor: v.anchor } : {}) }]; })), reminderLeadBusinessDays: Number(f.reminderLeadBusinessDays), gaSutaRatePct: f.gaSutaRatePct === '' ? null : Number(f.gaSutaRatePct) }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message))}>Save Settings</button>
@@ -917,7 +933,7 @@ let TIMESHEETS_ONLY = false;
 const App = () => {
   const [tab, setTab] = useState(() => (TABS.some(([k]) => k === String(window.location.hash).slice(1)) ? String(window.location.hash).slice(1) : 'runs'));
   const [data, setData] = useState(null); const [err, setErr] = useState('');
-  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; TIMESHEETS_ONLY = !!d.timesheetsOnly; if (TIMESHEETS_ONLY) setTab('timesheets'); else if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
+  const load = useCallback(() => call('/api/payroll/admin/overview').then(d => { STATE_NAMES = d.stateNames || {}; SUPER = d.superAdmin !== false; TIMESHEETS_ONLY = !!d.timesheetsOnly; if (TIMESHEETS_ONLY && !['timesheets', 'contractors'].includes(tab)) setTab('timesheets'); else if (!SUPER && !PREPARER_TABS.includes(tab)) setTab('runs'); setData(d); }).catch(e => {
     if (e.status === 401) { window.location.replace('/login'); return; }
     setErr(e.status === 403 ? 'Payroll is the Super Admin\'s.' : e.message);
   }), []);
@@ -930,13 +946,13 @@ const App = () => {
           <span className="font-serif text-[24px] font-semibold">Payroll</span>
           <span className="flex items-center gap-4 text-[13.5px] font-semibold"><a className="text-[#F5CD85]" href="/billing">Billing</a><a className="text-[#F5CD85]" href="/my">My GFC</a><a className="text-[#F5CD85]" href="/login">Portal Hub</a></span>
         </div>
-        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => (TIMESHEETS_ONLY ? k === 'timesheets' : SUPER || PREPARER_TABS.includes(k))).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
+        <div className="max-w-[1300px] mx-auto px-4 lg:px-8 flex gap-1 overflow-x-auto">{TABS.filter(([k]) => (TIMESHEETS_ONLY ? ['timesheets', 'contractors'].includes(k) : SUPER || PREPARER_TABS.includes(k))).map(([k, l]) => <button key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => pick(k)}>{l}</button>)}</div>
       </div>
       <div className="max-w-[1300px] mx-auto px-4 lg:px-8 py-5">
         <Err e={err} />
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && !SUPER && !TIMESHEETS_ONLY && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
-        {data && TIMESHEETS_ONLY && <Warn>Check each person's hours here, then approve them or send them back. A change to someone's times goes to the Super Admin, the same request as Request Correction on Staff Scheduling.</Warn>}
+        {data && TIMESHEETS_ONLY && <Warn>Check each person's hours here, then approve them or send them back. A change to someone's times goes to the Super Admin, the same request as Request Correction on Staff Scheduling. Contractor invoices are yours to approve or send back too; paying stays with the Super Admin.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
         {data && tab === 'timesheets' && <Timesheets data={data} />}
         {data && tab === 'people' && <People data={data} reload={load} />}

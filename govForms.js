@@ -29,6 +29,7 @@ const DIR = path.join(__dirname, 'govforms');
 const FORMS = Object.freeze({
   w4: { file: 'fw4-2026.pdf', title: 'Form W-4 (2026)', agency: 'IRS' },
   w9: { file: 'fw9-2024-03.pdf', title: 'Form W-9 (Rev. March 2024)', agency: 'IRS' },
+  w8ben: { file: 'fw8ben-2021-10.pdf', title: 'Form W-8BEN (Rev. October 2021)', agency: 'IRS' },
   g4: { file: 'g4-2026-06-03.pdf', title: 'Georgia Form G-4 (Rev. 06/03/26)', agency: 'Georgia Department of Revenue' },
   // Flattening the USCIS file leaves broken empty boxes, so its fields are
   // locked read-only instead (checked: a viewer reports no errors either way).
@@ -132,8 +133,18 @@ const esigLine = (sig, what) => (sig && sig.signedName
 async function finish(doc, { lock = false } = {}) {
   await drawMarks(doc);
   const form = doc.getForm();
-  if (lock) { for (const fld of form.getFields()) { try { fld.enableReadOnly(); } catch (e) { /* fine */ } } }
-  else { try { form.flatten(); } catch (e) { /* a form that will not flatten is still filled */ } }
+  // A digital-signature box (the W-8BEN has one) cannot be flattened and is
+  // not used: the typed signature is drawn on the page instead.
+  // It has no drawn appearance, which stops a flatten, so it gets an empty one.
+  for (const fld of form.getFields()) {
+    if (!fld.constructor || fld.constructor.name !== 'PDFSignature') continue;
+    for (const w of fld.acroField.getWidgets()) {
+      try { w.setNormalAppearance(doc.context.register(doc.context.formXObject([], { BBox: [0, 0, 1, 1] }))); } catch (e) { /* fine */ }
+    }
+  }
+  const lockAll = () => { for (const fld of form.getFields()) { try { fld.enableReadOnly(); } catch (e) { /* fine */ } } };
+  if (lock) lockAll();
+  else { try { form.flatten(); } catch (e) { lockAll(); } }
   return Buffer.from(await doc.save());
 }
 
@@ -185,6 +196,38 @@ async function fillW9({ w9, tin }) {
   else if (d.length === 9) { setText(f, `${P}f1_11[0]`, d.slice(0, 3)); setText(f, `${P}f1_12[0]`, d.slice(3, 5)); setText(f, `${P}f1_13[0]`, d.slice(5)); }
   await signHere(doc, { x: 125, y: 200, dateX: 405, sig: w9 });
   await footer(doc, [esigLine(w9, 'Pay Setup, Form W-9')]);
+  return finish(doc);
+}
+
+// ---- Form W-8BEN (a contractor living outside the U.S.) ---------------------------
+async function fillW8BEN({ w8, tins }) {
+  const doc = await load('w8ben'); const f = doc.getForm();
+  const P = 'topmostSubform[0].Page1[0].';
+  const t = tins || {};
+  const perm = w8.permanentAddress || {}, mail = w8.mailingAddress || {};
+  setText(f, `${P}f_1[0]`, w8.name);
+  setText(f, `${P}f_2[0]`, w8.citizenship);
+  setText(f, `${P}f_3[0]`, perm.line);
+  setText(f, `${P}f_4[0]`, perm.city);
+  setText(f, `${P}f_5[0]`, perm.country);
+  setText(f, `${P}f_6[0]`, mail.line);
+  setText(f, `${P}f_7[0]`, mail.city);
+  setText(f, `${P}f_8[0]`, mail.country);
+  setText(f, `${P}f_9[0]`, t.usTin ? ssnFmt(t.usTin) : '');
+  setText(f, `${P}f_10[0]`, t.foreignTin);
+  check(f, `${P}c1_01[0]`, w8.ftinNotRequired && !t.foreignTin);
+  setText(f, `${P}f_12[0]`, mdy(w8.dob).replace(/\//g, '-'));
+  if (w8.treaty) {
+    setText(f, `${P}f_13[0]`, w8.treaty.country);
+    setText(f, `${P}f_14[0]`, w8.treaty.article);
+    setText(f, `${P}f_15[0]`, w8.treaty.rate);
+    setText(f, `${P}f_16[0]`, w8.treaty.incomeType);
+    setText(f, `${P}f_17[0]`, w8.treaty.conditions);
+  }
+  setText(f, `${P}Date[0]`, mdy(w8.signedAt));
+  setText(f, `${P}f_21[0]`, w8.signedName);
+  await signHere(doc, { x: 112, y: 77, sig: w8 });
+  await footer(doc, [esigLine(w8, 'Pay Setup, Form W-8BEN')], { top: true });
   return finish(doc);
 }
 
@@ -311,8 +354,9 @@ const formsFor = (p) => {
   if (p.stateCert) out.push('state');
   if (p.i9 && p.i9.section1) out.push('i9');
   if (p.w9) out.push('w9');
+  if (p.w8ben) out.push('w8ben');
   return out;
 };
-const FILE_NAMES = Object.freeze({ w4: 'Form W-4', w9: 'Form W-9', g4: 'Georgia Form G-4', i9: 'Form I-9', state: 'State withholding certificate' });
+const FILE_NAMES = Object.freeze({ w4: 'Form W-4', w9: 'Form W-9', w8ben: 'Form W-8BEN', g4: 'Georgia Form G-4', i9: 'Form I-9', state: 'State withholding certificate' });
 
-module.exports = { FORMS, STATE_FORMS, FILE_NAMES, fillW4, fillW9, fillG4, fillI9, fillStateCert, formsFor, mdy };
+module.exports = { FORMS, STATE_FORMS, FILE_NAMES, fillW4, fillW9, fillW8BEN, fillG4, fillI9, fillStateCert, formsFor, mdy };

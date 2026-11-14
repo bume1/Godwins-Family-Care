@@ -165,12 +165,14 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   // The one exception: managers and care coordinators view and edit HOURS
   // (owner, 2026-11-13), so the overview and Timesheets admit them, and the
   // overview tells them it is timesheets only.
-  const timesheetViewer = ["/api/payroll/admin/overview'", "/api/payroll/admin/timesheets'"];
+  const timesheetViewer = ["/api/payroll/admin/overview'", "/api/payroll/admin/timesheets'", "/api/payroll/admin/contractor-invoices'"];
   // Managers and care coordinators also approve or send back timesheets
   // (owner, 2026-11-14). Approving the payroll run stays the Super Admin's.
   for (const r of regs) {
     if (timesheetViewer.some(t => r.includes(t))) assert.match(r, /authenticateToken, requireTimesheetViewer\b/, r);
     else if (r.includes("/api/payroll/admin/timesheets/decide'")) assert.match(r, /authenticateToken, requireTimesheetDecider\b/, r);
+    // Contractor invoices: reviewers approve or send back; paying is the Super Admin's.
+    else if (r.includes("/api/payroll/admin/contractor-invoices/:id/:action'")) assert.match(r, /authenticateToken, requireInvoiceAction\b/, r);
     else assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
   }
   assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
@@ -178,12 +180,13 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   // settings, people's pay setup, tax tables, contractor approvals, the Gusto
   // import and year-end release (owner, 2026-11-13: "prepare only").
   const superOnly = ['/runs/:id/approve', '/people/:userId/reveal', '/settings', "/people/:userId'", '/people/:userId/i9-section2',
-    '/tax-tables/:id/approve', "/tax-tables'", '/runs/:id/payments/:userId', '/contractor-invoices/:id/:action', '/import/gusto', '/year-end/:year/release'];
+    '/tax-tables/:id/approve', "/tax-tables'", '/runs/:id/payments/:userId', '/import/gusto', '/year-end/:year/release'];
   for (const tail of superOnly) {
     const line = regs.find(r => r.includes(`/api/payroll/admin${tail.replace(/'$/, '')}'`) || (tail.endsWith("'") && r.includes(`/api/payroll/admin${tail}`)));
     assert.ok(line, tail);
     assert.match(line, /authenticateToken, requireAdmin\b/, tail);
   }
+  assert.match(routes, /const requireInvoiceAction = \(req, res, next\) => \{\s*if \(req\.params\.action === 'pay'\) return requireAdmin\(req, res, next\);/, 'paying a contractor stays the Super Admin\'s');
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)

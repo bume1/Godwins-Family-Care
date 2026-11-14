@@ -19,7 +19,10 @@ const { STATE_NAMES } = require('./payrollTaxTables');
 
 const WORKER_TYPES = Object.freeze({ W2: 'W2', C1099: '1099', HYBRID: 'HYBRID' });
 const PAY_TYPES = Object.freeze(['hourly', 'salary', 'per_visit']);
-const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise']);
+const PAY_METHODS = Object.freeze(['direct_deposit', 'check', 'wise', 'intl_wire']);
+// For a contractor living outside the U.S. (owner, 2026-11-13). Which of these
+// are offered is a payroll setting (Settings → Overseas contractors).
+const OVERSEAS_PAY_METHODS = Object.freeze({ wise: 'Wise', intl_wire: 'International wire' });
 // A $Cashtag: a letter, then letters, numbers or underscores (Cash App rules).
 // Used for GFC's own P2P sending account (Payroll → Settings), never chosen
 // by an employee: how a payroll is sent is the office's choice per run.
@@ -191,11 +194,52 @@ function normalizeW9(b, ctx) {
   return { value: { name, businessName: str(b.businessName, 160), taxClass: b.taxClass, tinType, address: str(b.address, 300), ...sig.value }, tin: String(b.tin).replace(/\D/g, '') };
 }
 
+// Form W-8BEN (owner, 2026-11-13): a contractor who is not a U.S. person and
+// lives outside the U.S. gives this instead of a W-9. Part I identifies them;
+// Part II (a tax treaty claim) is optional and rarely needed for work done
+// outside the U.S. The U.S. and foreign tax ID numbers are returned apart, for
+// the route to seal.
+const isUS = (c) => /^(us|usa|u\.s\.a?\.?|united states( of america)?)$/i.test(String(c || '').trim());
+function normalizeW8BEN(b, ctx) {
+  b = b || {};
+  const name = str(b.name, 160);
+  if (!name) return { error: 'Give your name as on your passport or national ID.', code: 'W8_NAME' };
+  const citizenship = str(b.citizenship, 60);
+  if (!citizenship || isUS(citizenship)) return { error: 'Give your country of citizenship. A U.S. citizen gives a W-9 instead.', code: 'W8_CITIZENSHIP' };
+  const perm = { line: str(b.permLine, 120), city: str(b.permCity, 120), country: str(b.permCountry, 60) };
+  if (!perm.line || !perm.city || !perm.country) return { error: 'Give your permanent home address, city and country.', code: 'W8_ADDRESS' };
+  if (isUS(perm.country)) return { error: 'A W-8BEN is for someone living outside the U.S. Give a W-9 instead.', code: 'W8_US_ADDRESS' };
+  const mail = { line: str(b.mailLine, 120), city: str(b.mailCity, 120), country: str(b.mailCountry, 60) };
+  if (!isYmd(b.dob)) return { error: 'Give your date of birth.', code: 'W8_DOB' };
+  const foreignTin = str(b.foreignTin, 40);
+  const ftinNotRequired = b.ftinNotRequired === true;
+  if (!foreignTin && !ftinNotRequired) return { error: 'Give your tax ID number from your country, or tick that your country does not require one.', code: 'W8_FTIN' };
+  const usTin = String(b.usTin || '').replace(/\D/g, '');
+  if (usTin && usTin.length !== 9) return { error: 'A U.S. taxpayer ID (SSN or ITIN) has 9 digits. Leave it blank if you have none.', code: 'W8_US_TIN' };
+  const treaty = b.treatyCountry ? { country: str(b.treatyCountry, 60), article: str(b.treatyArticle, 30), rate: str(b.treatyRate, 10), incomeType: str(b.treatyIncomeType, 80), conditions: str(b.treatyConditions, 300) } : null;
+  const sig = signature(b, ctx);
+  if (sig.error) return sig;
+  return {
+    value: { name, citizenship, permanentAddress: perm, mailingAddress: mail.line ? mail : null, dob: b.dob, ftinNotRequired, foreignTinOnFile: !!foreignTin, usTinOnFile: !!usTin, treaty, ...sig.value },
+    foreignTin: foreignTin || null, usTin: usTin || null
+  };
+}
+
 // The bank account, or a paper check, or Wise for a contractor abroad.
 function normalizePayMethod(b) {
   b = b || {};
   const method = b.method;
   if (!PAY_METHODS.includes(method)) return { error: 'Choose direct deposit, paper check or Wise.', code: 'PAY_METHOD' };
+  // An international wire: the bank's SWIFT/BIC and the IBAN or account
+  // number. The account is returned apart for the route to seal.
+  if (method === 'intl_wire') {
+    const swift = str(b.swift, 11).replace(/\s/g, '').toUpperCase();
+    const account = str(b.iban, 40).replace(/\s/g, '').toUpperCase();
+    if (!/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(swift)) return { error: 'A SWIFT/BIC code is 8 or 11 letters and numbers.', code: 'WIRE_SWIFT' };
+    if (!/^[A-Z0-9]{6,34}$/.test(account)) return { error: 'Give the IBAN or account number.', code: 'WIRE_ACCOUNT' };
+    if (!str(b.bankName, 120) || !str(b.bankCountry, 60)) return { error: 'Give the bank name and country.', code: 'WIRE_BANK' };
+    return { value: { method, bankName: str(b.bankName, 120), bankCountry: str(b.bankCountry, 60), swift, beneficiaryName: str(b.beneficiaryName, 120) || null }, account };
+  }
   if (method !== 'direct_deposit') return { value: { method, wiseEmail: method === 'wise' ? str(b.wiseEmail, 200) : null } };
   const r = checkRouting(b.routing), a = checkAccount(b.account);
   if (r) return { error: r, code: 'BANK_ROUTING' };
@@ -300,7 +344,9 @@ function missingForPay(p, { asContractor = false, p2p = false } = {}) {
   // from its own Cash App, so their bank details are not needed for it.
   if (!p.payMethod && !p2p) out.push('How they are paid (bank details, check or Wise)');
   if (asContractor) {
-    if (!p.w9 && !(p.payMethod && p.payMethod.method === 'wise' && p.w8ben)) out.push('W-9');
+    // Living outside the U.S. (owner, 2026-11-13): a W-8BEN instead of a W-9.
+    if (p.taxResidence === 'foreign') { if (!p.w8ben) out.push('W-8BEN'); }
+    else if (!p.w9) out.push('W-9');
     return out;
   }
   if (!p.ssn) out.push('SSN');
@@ -341,12 +387,14 @@ function checklist(p, opts = {}) {
       note: p.i9 && p.i9.onFile && !p.i9.section1 ? 'Already on file from your earlier hire paperwork. Nothing to do.' : p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
     rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   }
-  if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
+  if (con && opts.overseasAllowed) rows.push({ key: 'residence', label: 'Where you live for tax', done: !!p.taxResidence, note: p.taxResidence === 'foreign' ? 'Outside the U.S.: you give a W-8BEN, and no 1099 is issued.' : p.taxResidence === 'us' ? 'In the U.S.: you give a W-9.' : null });
+  if (con && p.taxResidence === 'foreign') rows.push({ key: 'w8ben', label: 'Form W-8BEN (living outside the U.S.)', done: !!p.w8ben });
+  else if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
   // Printed on the W-2 or 1099 (and the copy filed with the IRS and SSA).
   rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your W-2 or 1099)', done: !!p.taxAddress });
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
-  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
+  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
   return rows.map(r => ({ ...r, group: GROUP[r.key] }));
 }
 
@@ -354,7 +402,7 @@ function checklist(p, opts = {}) {
 // is on file. `full` is for the owner's audited reveal only.
 function publicProfile(p, opts = {}) {
   if (!p) return null;
-  const { ssn, tin, payMethod, history, i9Ids, i9DocNumbers, ...rest } = p;
+  const { ssn, tin, payMethod, history, i9Ids, i9DocNumbers, w8benTins, ...rest } = p;
   return {
     ...rest,
     paySchedule: scheduleFor(p), paySchedulePinned: PAY_SCHEDULE_KEYS.includes(p.paySchedule),
@@ -362,7 +410,8 @@ function publicProfile(p, opts = {}) {
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
     payMethod: payMethod ? {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
-      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null
+      routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null,
+      swift: payMethod.swift || null, bankCountry: payMethod.bankCountry || null
     } : null,
     checklist: checklist(p, opts)
   };
@@ -371,6 +420,6 @@ function publicProfile(p, opts = {}) {
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
-  normalizeW4, normalizeG4, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeW8BEN, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };
