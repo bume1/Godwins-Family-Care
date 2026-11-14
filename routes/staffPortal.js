@@ -144,7 +144,7 @@ function canSee(folder, u) {
 }
 
 module.exports = function createStaffPortalRoutes(deps) {
-  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType, enrollmentSummary } = deps;
+  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType, enrollmentSummary, regeneratePayStub } = deps;
   const payrollKey = () => deps.payrollIngestKey !== undefined ? deps.payrollIngestKey : process.env.PAYROLL_INGEST_KEY;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
   const router = express.Router();
@@ -548,14 +548,19 @@ module.exports = function createStaffPortalRoutes(deps) {
     const mine = ((await db.get(PAYSTUBS)) || []).filter(x => String(x.userId) === String(req.user.id))
       .sort((a, b) => String(b.payDate).localeCompare(String(a.payDate)))
       .map(x => ({ id: x.id, payDate: x.payDate, periodStart: x.periodStart, periodEnd: x.periodEnd,
-        gross: x.gross, net: x.net, hours: x.hours, hasPdf: !!x.driveFileId }));
+        gross: x.gross, net: x.net, hours: x.hours, hasPdf: !!x.driveFileId || (!!x.runId && !!regeneratePayStub) }));
     return res.json({ paystubs: mine });
   });
   router.get('/api/my/paystubs/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const x = ((await db.get(PAYSTUBS)) || []).find(r => r.id === req.params.id);
-    if (!x || String(x.userId) !== String(req.user.id) || !x.driveFileId) return res.status(404).json({ error: 'No such pay stub.', code: 'PAYSTUB_UNKNOWN' });
+    if (!x || String(x.userId) !== String(req.user.id) || (!x.driveFileId && !x.runId)) return res.status(404).json({ error: 'No such pay stub.', code: 'PAYSTUB_UNKNOWN' });
     try {
-      const buf = await drive.downloadFileBuffer(x.driveFileId);
+      // The filed copy first; a stub from an app payroll is drawn again from
+      // its run when that copy is missing or cannot be read.
+      let buf = null;
+      if (x.driveFileId) { try { buf = await drive.downloadFileBuffer(x.driveFileId); } catch (e) { buf = null; } }
+      if (!buf && x.runId && regeneratePayStub) buf = await regeneratePayStub(x);
+      if (!buf) throw new Error('unreadable');
       await logActivity(req.user.id, req.user.name, 'paystub_read', 'staff_paystubs', x.id, {});
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', contentDisposition('inline', `Pay stub ${x.payDate}.pdf`));

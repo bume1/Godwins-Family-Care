@@ -387,6 +387,8 @@ const usd = (n) => (n == null ? '' : Number(n).toLocaleString('en-US', { style: 
 // A bare pay date read at midday UTC, so it is the same calendar day in Georgia.
 const fmtDay = (ymd) => (ymd ? fmtDate(`${ymd}T12:00:00Z`) : '');
 
+// Today in Georgia, so a stub for a payday still ahead never reads as paid.
+const todayYmd = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 function PayStubs({ stubs, onError }) {
   if (!stubs) return <p className="mg-note">Loading…</p>;
   if (!stubs.length) return <p className="mg-note">No pay stubs yet. Each one shows here after payroll runs.</p>;
@@ -394,7 +396,7 @@ function PayStubs({ stubs, onError }) {
     <div className="mg-row" key={p.id}>
       <i className="ti ti-receipt mg-big" />
       <div className="mg-grow">
-        <b>Paid {fmtDay(p.payDate)} · {usd(p.net)} net</b>
+        <b>{p.payDate > todayYmd() ? 'Payday' : 'Paid'} {fmtDay(p.payDate)} · {usd(p.net)} net</b>
         <small>{fmtDay(p.periodStart)} – {fmtDay(p.periodEnd)} · {usd(p.gross)} gross{p.hours != null ? ` · ${p.hours} hours` : ''}</small>
       </div>
       {p.hasPdf && <button className="mg-btn mg-ghost mg-sm" onClick={() => openFile(`/api/my/paystubs/${p.id}/file`, `Pay stub ${p.payDate}.pdf`).catch(e => onError(e.message))}>Open</button>}

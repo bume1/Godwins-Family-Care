@@ -1156,10 +1156,33 @@ module.exports = function createPayrollRoutes(deps) {
   // staff_paystubs (the store My GFC already lists), and a link-only email.
   // opts.notify false: past pay dates imported from Gusto get stubs without
   // an email per pay date.
+  // Year to date as of a run's pay date: that run and every earlier one, never
+  // a later one, so a stub drawn again later reads as it did on payday.
+  const longDay = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' });
+  const ytdAsOf = (allRuns, run) => engine.ytdFrom((allRuns || []).filter(r => r && r.period && r.period.payDate <= run.period.payDate), { year: run.period.payDate.slice(0, 4) });
+  const stubPdf = (run, w, ytd, settings, p) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
+    ssnLast4: p.ssn ? p.ssn.last4 : null,
+    // How this run sent it: P2P is the Super Admin's choice per run and wins
+    // over the bank on file (audit, 2026-11-14: the stub used to name the bank).
+    accountLast4: w.imported || w.channel === 'p2p' ? null : p.payMethod ? p.payMethod.accountLast4 : null,
+    payMethod: w.imported ? w.payMethod : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null,
+    p2pAccount: w.channel === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
+    workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
+  // A stub drawn from its run when the Drive copy is missing or cannot be
+  // read (audit, 2026-11-14): the employee is never told a stub is ready that
+  // they cannot open. Null when the stub did not come from an app run.
+  router.stubPdfForRow = async (row) => {
+    if (!row || !row.runId) return null;
+    const allRuns = await rows(RUNS);
+    const run = allRuns.find(r => r && r.id === row.runId && r.status !== 'draft' && r.status !== 'void');
+    const w = run && (run.workers || []).find(x => String(x.userId) === String(row.userId) && x.pay);
+    if (!w) return null;
+    return stubPdf(run, w, ytdAsOf(allRuns, run), await readSettings(), (await readProfiles())[w.userId] || {});
+  };
   const writeStubs = async (run, settings, opts = {}) => {
     const users = await getUsers();
     const all = await readProfiles();
-    const ytd = engine.ytdFrom((await rows(RUNS)), { year: run.period.payDate.slice(0, 4) });   // includes this run
+    const ytd = ytdAsOf(await rows(RUNS), run);   // includes this run
     const stubs = await rows(PAYSTUBS);
     const report = { written: 0, pdfFailed: 0 };
     for (const w of run.workers.filter(x => x.pay)) {
@@ -1167,12 +1190,7 @@ module.exports = function createPayrollRoutes(deps) {
       const p = all[w.userId] || {};
       let driveFileId = null;
       try {
-        const buf = await pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null,
-          ssnLast4: p.ssn ? p.ssn.last4 : null,
-          accountLast4: w.imported ? null : p.payMethod ? p.payMethod.accountLast4 : null,
-          payMethod: w.imported ? w.payMethod : p.payMethod ? p.payMethod.method : null,
-          p2pAccount: w.channel === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
-          workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null });
+        const buf = await stubPdf(run, w, ytd, settings, p);
         const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `Pay stub ${run.period.payDate}.pdf`, buf, 'application/pdf');
         driveFileId = stored.fileId || stored.id || null;
       } catch (e) { report.pdfFailed++; console.error('Pay stub PDF error (non-fatal):', e.message); }
@@ -1187,7 +1205,7 @@ module.exports = function createPayrollRoutes(deps) {
         const base = getAppBaseUrl ? await getAppBaseUrl() : '';
         await queueNotification('paystub_ready', user.id, user.email, user.name, {
           subject: 'Your pay stub is ready',
-          body: `Your pay stub for the pay date ${run.period.payDate} is ready. Sign in to GFC to view it.`,
+          body: `Your pay stub for payday ${longDay(run.period.payDate)} is ready. Sign in to GFC to view or download it.`,
           ctaUrl: `${base}${links.payFor(user)}`, ctaLabel: 'View Pay Stub'
         }, { relatedEntityId: `${run.id}:${w.userId}`, relatedEntityType: 'paystub' });
       }
