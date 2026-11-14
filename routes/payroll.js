@@ -214,6 +214,14 @@ module.exports = function createPayrollRoutes(deps) {
       const ctx = ctxFor(req);
       const b = req.body || {};
       let change;
+      // The official forms are filled from the legal name and address, and the
+      // W-4 and withholding certificates from the SSN too (owner, 2026-11-14),
+      // so a signed copy is never missing them. The SSN is asked for only once
+      // it can be stored.
+      if (['w4', 'g4', 'state-cert', 'i9'].includes(req.params.form)) {
+        if (!p.taxAddress) return res.status(409).json({ error: 'Save your legal name and mailing address first. The form is filled in from them.', code: 'FORM_NEEDS_ADDRESS' });
+        if (req.params.form !== 'i9' && !p.ssn && pc.configured(env)) return res.status(409).json({ error: 'Save your Social Security number first. The form is filled in from it.', code: 'FORM_NEEDS_SSN' });
+      }
       switch (req.params.form) {
         case 'tax-residence': {
           if (!pp.isContractor(p)) return res.status(409).json({ error: 'This is for contractors.', code: 'RESIDENCE_NOT_CONTRACTOR' });
@@ -288,6 +296,12 @@ module.exports = function createPayrollRoutes(deps) {
       const saved = await saveProfile(req.user.id, p, change, req.user);
       const signed = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' }[req.params.form];
       if (signed) fileGovForm(req.user, saved, signed, req.user).catch(e => console.error('Form filing (non-fatal):', e.message));
+      // A corrected name, address or SSN re-files the forms already signed, so
+      // the copy in their folder matches what they would download now.
+      if (['tax-address', 'ssn'].includes(req.params.form)) {
+        (async () => { for (const k of gov.formsFor(saved).filter(k => ['w4', 'g4', 'state', 'i9'].includes(k))) await fileGovForm(req.user, saved, k, req.user); })()
+          .catch(e => console.error('Form re-filing (non-fatal):', e.message));
+      }
       res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved), overseasAllowed: overseasOf(await readSettings()).enabled || saved.taxResidence === 'foreign' }) });
     } catch (e) {
       if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });

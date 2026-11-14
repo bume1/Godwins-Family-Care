@@ -119,7 +119,8 @@ test('routes: sign the I-9, the numbers are sealed, the form is filed and downlo
   assert.ok(!JSON.stringify(r.body).includes('123456789'), 'the number never comes back');
   const raw = JSON.stringify(store.get('payroll_profiles'));
   assert.ok(!raw.includes('123456789'), 'sealed in the store');
-  await new Promise(res => setTimeout(res, 300));
+  for (let i = 0; i < 100 && !filed.some(f => /^Form I-9 signed/.test(f.name)); i++) await new Promise(res => setTimeout(res, 50));
+  for (let i = 0; i < 100 && !(store.get('payroll_profiles').cg1.formsFiled || {}).i9; i++) await new Promise(res => setTimeout(res, 50));
   assert.ok(filed.some(f => /^Form I-9 signed/.test(f.name) && f.bytes > 1000), 'filed to Drive');
   assert.equal(store.get('payroll_profiles').cg1.formsFiled.i9.driveFileId, 'drv1');
   r = await call('cg1', 'GET', '/api/my/pay-setup/forms/i9.pdf');
@@ -129,4 +130,43 @@ test('routes: sign the I-9, the numbers are sealed, the form is filed and downlo
   assert.equal((await call('cg1', 'GET', '/api/my/pay-setup/forms/w4.pdf')).body.code, 'FORM_NOT_SIGNED');
   assert.equal((await call('cg1', 'GET', '/api/payroll/admin/people/cg1/forms/i9.pdf')).status, 403, 'only the Super Admin opens someone else\'s');
   assert.equal((await call('own', 'GET', '/api/payroll/admin/people/cg1/forms/i9.pdf')).status, 200);
+});
+
+// Signing needs the legal name and address first, and the W-4 the SSN too
+// (owner, 2026-11-14), so the copy filed in their folder is never missing them.
+// A later correction re-files the forms already signed.
+test('a form cannot be signed before its name, address and SSN; a correction re-files it', async () => {
+  const store = new Map();
+  const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); } };
+  const users = [{ id: 'own', role: 'admin', name: 'Owner', email: 'o@x' }, { id: 'cg1', role: 'vendor', licenseLevel: 'pca', name: 'Pat Care', email: 'p@x' }];
+  const filed = [];
+  const app = express(); app.use(express.json());
+  app.use(require('../routes/payroll')({
+    db, env: { PAYROLL_ENCRYPTION_KEY: 'a'.repeat(64) }, payrollKey: 'k'.repeat(40), logActivity: async () => {}, getUsers: async () => users,
+    authenticateToken: (req, res, next) => { req.user = users[1]; next(); }, requireAdmin: (req, res) => res.status(403).end(),
+    uuidv4: () => `id${Math.random()}`, accountTypeOf: () => 'caregiver', localDate: (v) => String(v).slice(0, 10),
+    resolvePayRate: () => ({ rate: 18 }), queueNotification: async () => {}, hashIp: () => 'h', pdf: require('../pdf-generator'),
+    drive: { uploadStaffDocumentFile: async (r, w, name) => { filed.push(name); return { fileId: `d${filed.length}` }; } },
+    roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => ''
+  }));
+  const srv = app.listen(0);
+  const put = async (form, body) => { const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/my/pay-setup/${form}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; };
+  try {
+    const w4 = { filingStatus: 'single', signedName: 'Pat Care', agree: true };
+    assert.equal((await put('w4', w4)).body.code, 'FORM_NEEDS_ADDRESS');
+    assert.equal((await put('i9', { status: 'citizen', dob: '1990-01-01', signedName: 'Pat Care', agree: true })).body.code, 'FORM_NEEDS_ADDRESS');
+    await put('tax-address', { firstName: 'Pat', lastName: 'Care', line1: '1 Main St', city: 'Atlanta', state: 'GA', zip: '30303' });
+    assert.equal((await put('w4', w4)).body.code, 'FORM_NEEDS_SSN');
+    assert.equal((await put('i9', { status: 'citizen', dob: '1990-01-01', signedName: 'Pat Care', agree: true })).status, 200, 'the I-9 does not need the SSN');
+    await put('ssn', { ssn: '123-45-6789' });
+    assert.equal((await put('w4', w4)).status, 200);
+    // Filing runs after the reply; wait for it rather than for a fixed time.
+    const until = async (ok) => { for (let i = 0; i < 100 && !ok(); i++) await new Promise(r => setTimeout(r, 50)); };
+    await until(() => filed.some(n => /^Form W-4/.test(n)));
+    assert.equal(filed.filter(n => /^Form W-4/.test(n)).length, 1);
+    await put('tax-address', { firstName: 'Pat', lastName: 'Care', line1: '2 New St', city: 'Atlanta', state: 'GA', zip: '30303' });
+    await until(() => filed.filter(n => /^Form W-4/.test(n)).length >= 2 && filed.filter(n => /^Form I-9/.test(n)).length >= 2);
+    assert.equal(filed.filter(n => /^Form W-4/.test(n)).length, 2, 'the W-4 was filed again with the new address');
+    assert.ok(filed.filter(n => /^Form I-9/.test(n)).length >= 2, 'and the I-9');
+  } finally { srv.close(); }
 });

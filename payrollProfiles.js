@@ -377,6 +377,11 @@ function checklist(p, opts = {}) {
   // PAY AND TAX ONLY (owner, 2026-11-09). The offer letter and handbook are
   // hiring paperwork and live in onboarding; listing them here as well is
   // what made this read as "the list, plus more". Each row names its group.
+  // Your legal name and address come first, and for an employee the SSN:
+  // every form is filled from them (owner, 2026-11-14), so the signed copy is
+  // never missing them.
+  rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your tax forms)', done: !!p.taxAddress });
+  if (emp) rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   if (emp) {
     rows.push({ key: 'w4', label: 'Form W-4 (federal withholding)', done: !!p.w4 });
     // Georgia's G-4 for a Georgia worker; another state's certificate only
@@ -385,16 +390,13 @@ function checklist(p, opts = {}) {
     else if (opts.stateIncomeTax) rows.push({ key: 'statecert', label: `${STATE_NAMES[p.workState] || p.workState} withholding certificate`, done: !!(p.stateCert && p.stateCert.state === p.workState) });
     rows.push({ key: 'i9', label: 'Form I-9, Section 1', done: !!(p.i9 && (p.i9.section1 || p.i9.onFile)), locked: !!(p.i9 && p.i9.onFile && !p.i9.section1),
       note: p.i9 && p.i9.onFile && !p.i9.section1 ? 'Already on file from your earlier hire paperwork. Nothing to do.' : p.i9 && p.i9.section1 && !p.i9.section2 ? 'The office completes Section 2 when they see your documents.' : null });
-    rows.push({ key: 'ssn', label: 'Social Security number', done: !!p.ssn });
   }
   if (con && opts.overseasAllowed) rows.push({ key: 'residence', label: 'Where you live for tax', done: !!p.taxResidence, note: p.taxResidence === 'foreign' ? 'Outside the U.S.: you give a W-8BEN, and no 1099 is issued.' : p.taxResidence === 'us' ? 'In the U.S.: you give a W-9.' : null });
   if (con && p.taxResidence === 'foreign') rows.push({ key: 'w8ben', label: 'Form W-8BEN (living outside the U.S.)', done: !!p.w8ben });
   else if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
-  // Printed on the W-2 or 1099 (and the copy filed with the IRS and SSA).
-  rows.push({ key: 'taxaddress', label: 'Legal name and mailing address (for your W-2 or 1099)', done: !!p.taxAddress });
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
-  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'paid', edelivery: 'paid' };
+  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'tax', edelivery: 'paid' };
   return rows.map(r => ({ ...r, group: GROUP[r.key] }));
 }
 

@@ -180,6 +180,7 @@ function OnboardingSummary({ onboarding, compact }) {
 
 // ---- Documents --------------------------------------------------------------
 const signedFileUrl = (d) => (d.pdf === 'packet' ? '/api/caregiver/welcome-packet/signed.pdf'
+  : d.pdf === 'taxform' ? `/api/my/pay-setup/forms/${d.form}.pdf`
   : `/api/caregiver/welcome-packet/attestations/${d.kind}.pdf`);
 
 function Signed({ signed, onError }) {
