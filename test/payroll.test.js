@@ -747,3 +747,43 @@ test('pay periods: approved hours flow into that period\'s payroll, the screen s
   r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-12&end=2026-10-18');
   assert.equal(r.body.run.status, 'gusto');
 });
+
+// Deleting a draft (owner, 2026-11-14): the Super Admin's alone, drafts only,
+// and the morning automation does not draft that period again until someone
+// drafts it by hand.
+test('a draft can be deleted by the Super Admin; an approved run cannot; the automation does not bring it back', async () => {
+  const store = new Map();
+  const settings = { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } };
+  // The last ended caregiver week, whatever today is: the period the morning
+  // automation drafts.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const last = tax.periodFor(tax.addDays(tax.periodFor(today, settings, 'caregivers').start, -1), settings, 'caregivers');
+  store.set('time_logs', [log('a', last.start, 480)]);
+  store.set('payroll_settings', settings);
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(me.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 403, 'only the Super Admin deletes a draft');
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(store.get('payroll_runs').length, 0, 'the draft is gone');
+  assert.ok(own.acts.some(a => a[2] === 'payroll_run_draft_deleted'));
+  // The morning automation skips the deleted period.
+  r = await req(own.app, 'POST', '/api/payroll/automation/period-close', {}, { 'X-GFC-Payroll-Key': 'k'.repeat(40) });
+  assert.equal(r.status, 200);
+  assert.match(r.body.summary, /caregivers: draft deleted/);
+  assert.equal(store.get('payroll_runs').length, 0, 'not drafted again');
+  // Drafting it by hand brings it back, for the automation too.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  assert.equal(r.status, 200);
+  assert.equal((store.get('payroll_deleted_drafts') || []).length, 0);
+  // An approved run is never deleted.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${r.body.run.id}`);
+  assert.equal(r.body.code, 'RUN_LOCKED');
+  assert.equal(store.get('payroll_runs').length, 1);
+});

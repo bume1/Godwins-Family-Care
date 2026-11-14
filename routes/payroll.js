@@ -36,6 +36,9 @@ const TAX_TABLES = 'payroll_tax_tables';
 const RUNS = 'payroll_runs';
 const CONTRACTOR_INVOICES = 'contractor_invoices';
 const TIMESHEETS = 'payroll_timesheets';
+// A draft deleted by the Super Admin (owner, 2026-11-14): who, when and which
+// period, so the morning automation does not draft that period again.
+const DELETED_DRAFTS = 'payroll_deleted_drafts';
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
 const YEAR_END = 'payroll_year_end';          // one row per released tax year
@@ -731,6 +734,7 @@ module.exports = function createPayrollRoutes(deps) {
   // A run saved before the two schedules existed has none, and is read as
   // "staff" (the single schedule it was cut from).
   const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
+  const wasDeleted = (x, period) => x && period && x.start === period.start && x.end === period.end && x.schedule === (period.schedule || 'staff');
   const sameRun = (r, period) => r && r.period && r.period.start === period.start && (!period.end || !r.period.end || r.period.end === period.end) && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
   // The pay periods to pick from (owner, 2026-11-14): the schedule's standard
   // periods around today, and any custom period a run was drafted for, each
@@ -975,9 +979,31 @@ module.exports = function createPayrollRoutes(deps) {
       const run = { id: existing ? existing.id : uuidv4(), status: 'draft', ...d.run, adjustments: existing ? existing.adjustments || [] : [], createdAt: existing ? existing.createdAt : nowIso(), rebuiltAt: nowIso(), createdBy: req.user.name };
       const next = existing ? runs.map(r => (r.id === run.id ? run : r)) : [...runs, run];
       await db.set(RUNS, next);
+      // Drafting a deleted period by hand brings it back for the automation too.
+      const gone = await rows(DELETED_DRAFTS);
+      if (gone.some(x => wasDeleted(x, period))) await db.set(DELETED_DRAFTS, gone.filter(x => !wasDeleted(x, period)));
       await logActivity(req.user.id, req.user.name, 'payroll_run_drafted', 'payroll_run', run.id, { period: period.start, workers: run.workers.length, grossCents: run.totals.grossCents });
       res.json({ run });
     } catch (e) { console.error('Payroll draft error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // Delete a draft (owner, 2026-11-14). A draft has paid nothing, locked no
+  // hours and sent no stubs, so it is removed outright. An approved run is
+  // never deleted; a mistake there goes on the next run. The Super Admin's
+  // alone, since a draft can carry their channel choice and hand-entered taxes.
+  router.delete('/api/payroll/admin/runs/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const run = runs.find(r => r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.status !== 'draft') return res.status(409).json({ error: 'Only a draft can be deleted. An approved payroll is corrected on the next run.', code: 'RUN_LOCKED' });
+      await db.set(RUNS, runs.filter(r => r.id !== run.id));
+      const gone = (await rows(DELETED_DRAFTS)).filter(x => !wasDeleted(x, run.period));
+      gone.push({ schedule: runSchedule(run), start: run.period.start, end: run.period.end, custom: !!run.period.custom, runId: run.id, deletedAt: nowIso(), deletedBy: req.user.name || req.user.email });
+      await db.set(DELETED_DRAFTS, gone);
+      await logActivity(req.user.id, req.user.name, 'payroll_run_draft_deleted', 'payroll_run', run.id, { period: run.period.start, end: run.period.end, schedule: runSchedule(run), workers: (run.workers || []).length });
+      res.json({ deleted: true });
+    } catch (e) { console.error('Payroll draft delete error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   router.get('/api/payroll/admin/runs/:id', authenticateToken, requirePayrollPreparer, async (req, res) => {
@@ -1702,6 +1728,7 @@ module.exports = function createPayrollRoutes(deps) {
         const runs = await rows(RUNS);
         const existing = runs.find(r => sameRun(r, period));
         if (existing && existing.status !== 'draft') { out.push({ schedule, summary: 'already approved', period }); continue; }
+        if (!existing && (await rows(DELETED_DRAFTS)).some(x => wasDeleted(x, period))) { out.push({ schedule, summary: 'draft deleted by the Super Admin', period }); continue; }
         const d = await draftFor(period, settings, existing ? existing.adjustments || [] : [], existing ? existing.channels : null, existing ? existing.manualTaxes : null);
         if (d.error) { await tellOwner('payroll_period_close', `${label} payroll could not be drafted`, d.error, `close:${schedule}:${period.start}`); out.push({ schedule, summary: d.code, period }); continue; }
         // Nobody on this schedule had pay: no empty run to review.

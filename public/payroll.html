@@ -95,6 +95,7 @@ const call = async (path, opts = {}) => {
   return data;
 };
 const post = (p, b) => call(p, { method: 'POST', body: JSON.stringify(b || {}) });
+const del = (p) => call(p, { method: 'DELETE' });
 const put = (p, b) => call(p, { method: 'PUT', body: JSON.stringify(b || {}) });
 const enc = encodeURIComponent;
 const usd = (c) => (c === null || c === undefined ? '—' : `$${(Number(c) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`);
@@ -256,6 +257,11 @@ const RunDetail = ({ id, onBack, reload }) => {
                 if (window.confirm('Approve this payroll? Its hours lock and pay stubs go out.')) act(() => post(`/api/payroll/admin/runs/${enc(id)}/approve`, pending.length ? { timesheetReason } : undefined), 'Approved. Pay stubs are out.');
               }}>Approve Payroll</button>
                 : <span className="text-[12.5px] text-stone-500 self-center">Ready? Tell the Super Admin to approve it.</span>}
+              {SUPER && <button className="btn ghost !text-red-700 ml-auto" disabled={busy} onClick={() => {
+                if (!window.confirm(`Delete this draft for ${day(run.period.start)} to ${day(run.period.end)}? Nobody is paid or told. Lines you added and taxes you entered are removed. The morning automation will not draft this period again; draft it here to bring it back.`)) return;
+                setBusy(true); setErr('');
+                del(`/api/payroll/admin/runs/${enc(id)}`).then(() => { reload(); onBack(); }).catch(e => setErr(e.message)).finally(() => setBusy(false));
+              }}>Delete Draft</button>}
             </div>
           </div>
         )}
