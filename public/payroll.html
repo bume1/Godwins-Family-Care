@@ -245,7 +245,7 @@ const RunDetail = ({ id, onBack, reload }) => {
               <button className="btn ghost" disabled={busy || !adj.userId || !adj.amount} onClick={() => act(() => post(`/api/payroll/admin/runs/${enc(id)}/adjustments`, adj), 'Added.')}>Add Line</button>
             </div>
             <div className="flex gap-2">
-              <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
+              <button className="btn ghost" disabled={busy} onClick={() => act(() => post('/api/payroll/admin/runs', run.period.custom ? { schedule: run.schedule || run.period.schedule || 'staff', custom: { start: run.period.start, end: run.period.end, payDate: run.period.payDate, frequency: run.period.frequency } } : { periodStart: run.period.start, schedule: run.schedule || (run.period && run.period.schedule) || 'staff' }), 'Rebuilt from the latest hours.')}>Rebuild From Hours</button>
               {SUPER ? <button className="btn gold" disabled={busy} onClick={() => {
                 const pending = run.unapprovedTimesheets || [];
                 let timesheetReason;
@@ -423,16 +423,20 @@ const HoursLine = ({ l, mode, onDone }) => {
 const Timesheets = ({ data }) => {
   const scheds = data.schedules || [];
   const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'caregivers');
-  const [date, setDate] = useState('');
+  const [pick, setPick] = useState('');
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const [open, setOpen] = useState(null); const [busy, setBusy] = useState(false);
-  const load = (sch = schedule, dt = date) => call(`/api/payroll/admin/timesheets?schedule=${enc(sch)}${dt ? `&date=${enc(dt)}` : ''}`).then(x => { setD(x); if (!dt) setDate(x.period.start); }).catch(e => setErr(e.message));
+  const tsPeriods = ((scheds.find(x => x.key === schedule) || {}).periods) || [];
+  const load = (sch = schedule, pk = pick) => {
+    const [st, en] = pk ? pk.split('|') : [];
+    return call(`/api/payroll/admin/timesheets?schedule=${enc(sch)}${st ? `&start=${enc(st)}&end=${enc(en)}` : ''}`).then(x => { setD(x); if (!pk) setPick(periodKey(x.period)); }).catch(e => setErr(e.message));
+  };
   useEffect(() => { load(); }, []);
   const decide = async (t, decision) => {
     let note = '';
     if (decision === 'send_back') { note = window.prompt(`What should ${t.name} correct?`) || ''; if (!note.trim()) return; }
     setBusy(true); setErr(''); setMsg('');
-    try { await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision, note }); setMsg(decision === 'approve' ? `${t.name}: approved.` : `${t.name}: sent back.`); await load(); }
+    try { await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, periodEnd: d.period.end, userId: t.userId, decision, note }); setMsg(decision === 'approve' ? `${t.name}: approved.` : `${t.name}: sent back.`); await load(); }
     catch (e) { setErr(e.message); }
     setBusy(false);
   };
@@ -440,7 +444,7 @@ const Timesheets = ({ data }) => {
   const approveAll = async () => {
     if (!window.confirm(`Approve ${waiting.length} timesheet(s) nobody flagged or sent back?`)) return;
     setBusy(true); setErr('');
-    try { for (const t of waiting) await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, userId: t.userId, decision: 'approve' }); setMsg(`${waiting.length} approved.`); await load(); }
+    try { for (const t of waiting) await post('/api/payroll/admin/timesheets/decide', { schedule: d.schedule, periodStart: d.period.start, periodEnd: d.period.end, userId: t.userId, decision: 'approve' }); setMsg(`${waiting.length} approved.`); await load(); }
     catch (e) { setErr(e.message); }
     setBusy(false);
   };
@@ -449,13 +453,14 @@ const Timesheets = ({ data }) => {
       <Err e={err} /><Ok m={msg} />
       <p className="text-stone-500 mb-3">Everyone's hours for the pay period, the same hours they see in My GFC. Check them, fix them, then approve each person before you draft payroll, or send them back with what to correct.</p>
       <div className="flex flex-wrap gap-2 items-end mb-4">
-        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); setDate(''); load(e.target.value, ''); }}>{scheds.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}</select></div>
-        <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} /></div>
-        <button className="btn ghost" onClick={() => load()}>Show</button>
+        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); setPick(''); load(e.target.value, ''); }}>{scheds.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}</select></div>
+        <div><div className="lblu mb-1">Pay period</div><select className="inp !w-[27rem]" value={pick} onChange={e => { setPick(e.target.value); load(schedule, e.target.value); }}>
+          {pick && !tsPeriods.some(x => periodKey(x) === pick) && d && <option value={pick}>{periodLabel(d.period)}</option>}
+          {tsPeriods.map(x => <option key={periodKey(x)} value={periodKey(x)}>{periodLabel(x)}</option>)}</select></div>
         {d && SUPER !== null && !TIMESHEETS_ONLY && <button className="btn ghost" onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${d.period.start}&to=${d.period.end}`, `payroll-hours-${d.period.start}-to-${d.period.end}.csv`, setErr); }}>Export Hours CSV</button>}
         {d && d.canDecide && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
       </div>
-      {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· paid {day(d.period.payDate)}{d.ended ? '' : ' · this period is still going'}</span></p>}
+      {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· payday {day(d.period.payDate)} · {runWord(d.run && d.run.status)}{d.ended ? '' : ' · this period is still going'}</span></p>}
       {d && d.timesheets.length === 0 && <p className="text-stone-500">Nobody has hours in this period yet.</p>}
       {d && d.timesheets.map(t => {
         const [lbl, cls] = t.paid ? ['PAID', 'bg-emerald-50 text-emerald-700'] : (OFFICE_CHIP[t.status.office] || OFFICE_CHIP.waiting);
@@ -482,12 +487,30 @@ const Timesheets = ({ data }) => {
   );
 };
 
+// Where a period's payroll stands, in words. "Payday" is a date; only a run
+// marked paid means anyone was paid.
+const runWord = (s) => ({ draft: 'payroll drafted, not approved', approved: 'payroll approved, not sent yet', paid: 'paid', gusto: 'paid in Gusto' })[s] || 'no payroll yet';
+// Pay periods are picked from the schedule's real periods, or set as a custom
+// period (owner, 2026-11-14). A date "somewhere in the period" made the weeks
+// look like they started on odd days.
+const periodLabel = (x) => `${day(x.start)} to ${day(x.end)} · payday ${day(x.payDate)}${x.custom ? ' · custom' : ''} · ${runWord(x.status)}`;
+const periodKey = (x) => `${x.start}|${x.end}`;
 const Runs = ({ data, reload }) => {
   const [open, setOpen] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
   const scheds = data.schedules || [];
   const [schedule, setSchedule] = useState(scheds[0] ? scheds[0].key : 'staff');
   const cur = scheds.find(x => x.key === schedule);
-  const [start, setStart] = useState(cur ? cur.current.start : (data.nextPeriod ? data.nextPeriod.start : ''));
+  // Start on the newest period that has ended and is not paid yet: that is
+  // the one waiting for payroll, not the week still going.
+  const due = (x) => x ? ((x.periods || []).find(p => p.end < x.current.start && !p.custom && p.status !== 'approved' && p.status !== 'paid' && p.status !== 'gusto') || x.current) : null;
+  const [pick, setPick] = useState(cur ? periodKey(due(cur)) : '');
+  const [custom, setCustom] = useState({ start: '', end: '', payDate: '', frequency: '' });
+  const periods = (cur && cur.periods) || [];
+  const draft = () => {
+    setBusy(true); setErr('');
+    const body = pick === 'custom' ? { schedule, custom } : { schedule, periodStart: pick.split('|')[0] };
+    post('/api/payroll/admin/runs', body).then(r => { reload(); setOpen(r.run.id); }).catch(e => setErr(e.message)).finally(() => setBusy(false));
+  };
   if (open) return <RunDetail id={open} onBack={() => setOpen(null)} reload={reload} />;
   const schedLabel = (k) => { const x = scheds.find(y => y.key === k); return x ? `${x.label} · ${x.frequency === 'weekly' ? 'weekly' : 'every two weeks'}` : ''; };
   return (
@@ -498,10 +521,21 @@ const Runs = ({ data, reload }) => {
       <Err e={err} />
       {!data.tablesActive && <Warn>No approved tax tables for this year. Approve them under Tax Tables before any run can be drafted.</Warn>}
       <div className="flex flex-wrap gap-2 items-end mb-4">
-        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); const x = scheds.find(y => y.key === e.target.value); if (x) setStart(x.current.start); }}>{scheds.map(x => <option key={x.key} value={x.key}>{schedLabel(x.key)} ({x.people})</option>)}</select></div>
-        <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={start} onChange={e => setStart(e.target.value)} /></div>
-        <button className="btn" disabled={busy || !start} onClick={() => { setBusy(true); setErr(''); post('/api/payroll/admin/runs', { periodStart: start, schedule }).then(r => { reload(); setOpen(r.run.id); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); }}>Draft Payroll</button>
+        <div><div className="lblu mb-1">Pay schedule</div><select className="inp" value={schedule} onChange={e => { setSchedule(e.target.value); const x = scheds.find(y => y.key === e.target.value); if (x) setPick(periodKey(due(x))); }}>{scheds.map(x => <option key={x.key} value={x.key}>{schedLabel(x.key)} ({x.people})</option>)}</select></div>
+        <div><div className="lblu mb-1">Pay period</div><select className="inp !w-[27rem]" value={pick} onChange={e => setPick(e.target.value)}>
+          {periods.map(x => <option key={periodKey(x)} value={periodKey(x)}>{periodLabel(x)}{cur && periodKey(x) === periodKey(cur.current) ? ' · this period' : ''}</option>)}
+          <option value="custom">Custom period…</option></select></div>
+        <button className="btn" disabled={busy || !pick || (pick === 'custom' && !(custom.start && custom.end && custom.payDate))} onClick={draft}>Draft Payroll</button>
       </div>
+      {pick === 'custom' && (
+        <div className="flex flex-wrap gap-2 items-end mb-4 -mt-2">
+          <label>First day<input type="date" className="inp !w-44" value={custom.start} onChange={e => setCustom({ ...custom, start: e.target.value })} /></label>
+          <label>Last day<input type="date" className="inp !w-44" value={custom.end} onChange={e => setCustom({ ...custom, end: e.target.value })} /></label>
+          <label>Payday<input type="date" className="inp !w-44" value={custom.payDate} onChange={e => setCustom({ ...custom, payDate: e.target.value })} /></label>
+          <label>Withhold tax as<select className="inp !w-44" value={custom.frequency} onChange={e => setCustom({ ...custom, frequency: e.target.value })}><option value="">From its length</option><option value="weekly">Weekly paycheck</option><option value="biweekly">Two-week paycheck</option></select></label>
+          <p className="text-[12px] text-stone-500 w-full">For a catch-up or an odd-length payroll, up to 31 days. Hours already paid in another run are never paid twice.</p>
+        </div>
+      )}
       {data.runs.length === 0 && <p className="text-stone-500">No runs yet.</p>}
       {data.runs.map(r => (
         <button key={r.id} className="w-full text-left flex justify-between gap-3 py-2.5 border-b border-stone-100 cw-row" onClick={() => setOpen(r.id)}>
@@ -974,7 +1008,7 @@ const Settings = ({ data, reload }) => {
       <div className="grid sm:grid-cols-2 gap-3 max-w-3xl">
         {(data.schedules || []).map(x => (
           <div key={x.key} className="sm:col-span-2 border border-stone-200 rounded-xl p-3 grid sm:grid-cols-2 gap-2">
-            <div className="sm:col-span-2"><b className="text-primary">{x.label} pay schedule</b> <span className="text-[12.5px] text-stone-500">· {x.people} {x.people === 1 ? 'person' : 'people'} · this period {day(x.current.start)} to {day(x.current.end)}, paid {day(x.current.payDate)}</span></div>
+            <div className="sm:col-span-2"><b className="text-primary">{x.label} pay schedule</b> <span className="text-[12.5px] text-stone-500">· {x.people} {x.people === 1 ? 'person' : 'people'} · this period {day(x.current.start)} to {day(x.current.end)}, payday {day(x.current.payDate)}</span></div>
             <label>How often<select className="inp" value={sch[x.key].frequency} onChange={e => setS(x.key, 'frequency', e.target.value)}><option value="weekly">Weekly (Monday to Sunday)</option><option value="biweekly">Every two weeks (Monday through the second Sunday)</option></select></label>
             <label>Payday, days after the period ends<input className="inp" type="number" value={sch[x.key].payDateOffsetDays} onChange={e => setS(x.key, 'payDateOffsetDays', e.target.value)} />
               <span className="text-[12px] text-stone-500">5 = the Friday after the period's last Sunday.</span></label>

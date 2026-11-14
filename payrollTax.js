@@ -149,6 +149,29 @@ function periodFor(ymd, settings, schedule) {
   if (schedule) out.schedule = schedule;
   return out;
 }
+// The standard pay periods around a date, newest first (owner, 2026-11-14:
+// pick a real pay period, not "a date in it").
+function periodsAround(ymd, settings, schedule, { back = 8, ahead = 2 } = {}) {
+  const cur = periodFor(ymd, settings, schedule);
+  const len = FREQUENCIES[cur.frequency].days;
+  const out = [];
+  for (let k = ahead; k >= -back; k--) out.push(periodFor(addDays(cur.start, k * len), settings, schedule));
+  return out;
+}
+// A custom pay period (owner, 2026-11-14): for a catch-up or an odd-length
+// payroll. Any start and end up to 31 days, a payday on or after the end, and
+// the frequency withholding is figured for (weekly or every two weeks).
+function customPeriod(b, schedule) {
+  b = b || {};
+  if (!isYmd(b.start) || !isYmd(b.end) || b.end < b.start) return { error: 'Give the first and last day of the custom period.', code: 'CUSTOM_PERIOD_DATES' };
+  const days = Math.round((ymdMs(b.end) - ymdMs(b.start)) / DAY) + 1;
+  if (days > 31) return { error: 'A custom period is at most 31 days.', code: 'CUSTOM_PERIOD_LENGTH' };
+  if (!isYmd(b.payDate) || b.payDate < b.end || ymdMs(b.payDate) - ymdMs(b.end) > 30 * DAY) return { error: 'Payday is on or after the last day, within 30 days.', code: 'CUSTOM_PERIOD_PAYDAY' };
+  const frequency = FREQUENCIES[b.frequency] ? b.frequency : days <= 10 ? 'weekly' : 'biweekly';
+  const out = { start: b.start, end: b.end, payDate: b.payDate, frequency, perYear: FREQUENCIES[frequency].perYear, custom: true };
+  if (schedule) out.schedule = schedule;
+  return { value: out };
+}
 // The Monday that starts the overtime workweek a date falls in.
 function workweekStart(ymd) {
   const dow = new Date(ymdMs(ymd)).getUTCDay();   // 0 Sun .. 6 Sat
@@ -324,5 +347,6 @@ function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perY
 
 module.exports = {
   FREQUENCIES, DEFAULT_SETTINGS, PAY_SCHEDULES, scheduleSettings, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
-  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck
+  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck,
+  periodsAround, customPeriod
 };

@@ -687,3 +687,63 @@ test('taxes entered by hand: paid without a W-4, owed paperwork listed, banner l
   // Clearing is refused once approved.
   assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { clear: true })).body.code, 'RUN_LOCKED');
 });
+
+// Pay periods (owner, 2026-11-14): pick a real pay period or set a custom one,
+// and a timesheet approved for a week is what that week's payroll pays. The
+// screen says whether payroll exists; a payday is not a payment.
+test('pay periods: approved hours flow into that period\'s payroll, the screen says it is not paid yet, and custom periods work', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', periodEnd: '2026-11-08', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.run, null, 'approving a timesheet is not a payroll, and nothing reads as paid');
+  assert.equal(r.body.timesheets.find(t => t.userId === 'cg1').paid, false);
+  // The period list: real Monday-to-Sunday weeks, with the payday.
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  const cg = r.body.schedules.find(x => x.key === 'caregivers');
+  const nov2 = cg.periods.find(p => p.start === '2026-11-02');
+  assert.ok(nov2, 'the week of Nov 2 is offered');
+  assert.equal(nov2.end, '2026-11-08'); assert.equal(nov2.payDate, '2026-11-13'); assert.equal(nov2.status, null);
+  assert.ok(cg.periods.every(p => p.custom || tax.periodFor(p.start, store.get('payroll_settings'), 'caregivers').start === p.start), 'every standard period starts on the schedule');
+  // Drafting that week pays the approved hours, with no unapproved warning.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.equal(w.earnings.reduce((a, e) => a + (e.minutes || 0), 0), 780, 'the 13 approved hours are on the payroll');
+  assert.deepEqual(r.body.run.unapprovedTimesheets, []);
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-11-02').status, 'draft');
+  // A custom period: checked, then listed with its run.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-28' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_PAYDAY');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-01', end: '2026-11-05', payDate: '2026-11-06' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_LENGTH');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-31' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.period.custom, true); assert.equal(r.body.run.period.frequency, 'weekly');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-20&end=2026-10-29');
+  assert.equal(r.status, 200); assert.equal(r.body.period.custom, true); assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-21&end=2026-10-29');
+  assert.equal(r.status, 404, 'a made-up period is refused');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.ok(r.body.schedules.find(x => x.key === 'caregivers').periods.some(p => p.custom && p.start === '2026-10-20'));
+  // The screen never reads a payday as a payment.
+  const page = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.doesNotMatch(page, /A date in the pay period/);
+  assert.doesNotMatch(page, /· paid \{day\(/);
+  assert.match(page, /no payroll yet/);
+  // A week paid in Gusto before the app reads as paid there.
+  store.set('payroll_runs', [...store.get('payroll_runs'), { id: 'gusto:2026-10-23:2026-10-12:2026-10-18', status: 'paid', source: 'gusto', period: { start: '2026-10-12', end: '2026-10-18', payDate: '2026-10-23' }, workers: [] }]);
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-10-12').status, 'gusto');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-12&end=2026-10-18');
+  assert.equal(r.body.run.status, 'gusto');
+});

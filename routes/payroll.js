@@ -516,9 +516,10 @@ module.exports = function createPayrollRoutes(deps) {
       const settings = await readSettings();
       // A manager or care coordinator without the Payroll module: timesheets only.
       if (!isPreparer(req.user)) {
+        const allRuns = await rows(RUNS);
         return res.json({
           superAdmin: false, timesheetsOnly: true, stateNames: tables.STATE_NAMES,
-          schedules: Object.entries(tax.PAY_SCHEDULES).map(([key, v]) => ({ key, label: v.label, ...tax.scheduleSettings(settings, key), current: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings, key) }))
+          schedules: Object.entries(tax.PAY_SCHEDULES).map(([key, v]) => ({ key, label: v.label, ...tax.scheduleSettings(settings, key), current: tax.periodFor(today(), settings, key), periods: periodList(allRuns, settings, key) }))
         });
       }
       const people = await staffPeople();
@@ -543,10 +544,12 @@ module.exports = function createPayrollRoutes(deps) {
         runs: runs.map(r => ({ id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null }))
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
         nextPeriod: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings),
-        // Both schedules, each with the period running today.
+        // Both schedules, each with the period running today and the pay
+        // periods to pick from (standard ones, then any custom run's).
         schedules: Object.entries(tax.PAY_SCHEDULES).map(([key, v]) => ({
           key, label: v.label, ...tax.scheduleSettings(settings, key),
           current: tax.periodFor((localDate(nowIso()) || nowIso().slice(0, 10)), settings, key),
+          periods: periodList(runs, settings, key),
           people: people.filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === key).length
         })),
         contractorInvoices: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status !== 'paid' && x.status !== 'rejected'),
@@ -728,7 +731,29 @@ module.exports = function createPayrollRoutes(deps) {
   // A run saved before the two schedules existed has none, and is read as
   // "staff" (the single schedule it was cut from).
   const runSchedule = (r) => (r && (r.schedule || (r.period && r.period.schedule))) || 'staff';
-  const sameRun = (r, period) => r && r.period && r.period.start === period.start && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
+  const sameRun = (r, period) => r && r.period && r.period.start === period.start && (!period.end || !r.period.end || r.period.end === period.end) && runSchedule(r) === (period.schedule || 'staff') && (r.source || 'app') === 'app';
+  // The pay periods to pick from (owner, 2026-11-14): the schedule's standard
+  // periods around today, and any custom period a run was drafted for, each
+  // with the run's status when there is one.
+  const periodList = (runs, settings, schedule) => {
+    const appRuns = (runs || []).filter(r => r && r.status !== 'void' && (r.source || 'app') === 'app' && runSchedule(r) === schedule);
+    // A week paid before the app (imported from Gusto) reads as paid in Gusto,
+    // never as "no payroll yet".
+    const gusto = (runs || []).filter(r => r && r.source === 'gusto' && r.period);
+    const status = (p) => { const r = appRuns.find(x => x.period.start === p.start && x.period.end === p.end); if (r) return r.status; return gusto.some(x => x.period.start === p.start && x.period.end === p.end) ? 'gusto' : null; };
+    const std = tax.periodsAround(today(), settings, schedule).map(p => ({ start: p.start, end: p.end, payDate: p.payDate, custom: false, status: status(p) }));
+    const custom = appRuns.filter(r => r.period.custom).map(r => ({ start: r.period.start, end: r.period.end, payDate: r.period.payDate, frequency: r.period.frequency, custom: true, status: r.status }));
+    return [...std, ...custom].sort((a, b) => String(b.start).localeCompare(String(a.start)));
+  };
+  // A period named by its first and last day: a standard one, or the custom
+  // period a run was drafted for. Null when it is neither.
+  const resolvePeriod = async (schedule, start, end, settings) => {
+    const std = tax.periodFor(start, settings, schedule);
+    if (std.start === start && (!end || std.end === end)) return std;
+    const r = (await rows(RUNS)).find(x => x && x.status !== 'void' && x.period && x.period.custom && x.period.start === start && x.period.end === end && runSchedule(x) === schedule);
+    return r ? { ...r.period, schedule } : null;
+  };
+  const sheetKey = (schedule, period) => (period.custom ? `${period.start}~${period.end}` : period.start);
   const draftFor = async (period, settings, adjustments, channels, manualTaxes) => {
     const runs = await rows(RUNS);
     const tbl = await activeTables(Number(period.payDate.slice(0, 4)));
@@ -751,7 +776,7 @@ module.exports = function createPayrollRoutes(deps) {
     return { run, gathered };
   };
   const printsFrom = (gathered) => new Map([...gathered.byUser.entries()].map(([uid, items]) => [String(uid), ts.fingerprint(items)]));
-  const sheetsFor = async (period) => (await rows(TIMESHEETS)).filter(x => x.schedule === (period.schedule || 'staff') && x.periodStart === period.start);
+  const sheetsFor = async (period) => (await rows(TIMESHEETS)).filter(x => x.schedule === (period.schedule || 'staff') && x.periodStart === period.start && (period.custom ? x.periodEnd === period.end && x.custom : !x.custom));
   const unapprovedFor = async (period, workers, gathered) => {
     const prints = printsFrom(gathered);
     const empty = ts.fingerprint([]);
@@ -818,7 +843,7 @@ module.exports = function createPayrollRoutes(deps) {
       const out = [];
       for (const period of periods) {
         const gathered = await gatherFor(period, paid);
-        out.push(await sheetView(req.user, period, gathered, all.filter(x => x.schedule === schedule && x.periodStart === period.start), runs));
+        out.push(await sheetView(req.user, period, gathered, all.filter(x => x.schedule === schedule && x.periodStart === period.start && !x.custom), runs));
       }
       res.json({ employee: true, timesheets: out });
     } catch (e) { console.error('My timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
@@ -857,8 +882,14 @@ module.exports = function createPayrollRoutes(deps) {
     try {
       const settings = await readSettings();
       const schedule = tax.PAY_SCHEDULES[req.query.schedule] ? req.query.schedule : 'caregivers';
-      const date = tax.isYmd(req.query.date) ? req.query.date : tax.addDays(tax.periodFor(today(), settings, schedule).start, -1);
-      const period = tax.periodFor(date, settings, schedule);
+      let period;
+      if (tax.isYmd(req.query.start) && tax.isYmd(req.query.end)) {
+        period = await resolvePeriod(schedule, req.query.start, req.query.end, settings);
+        if (!period) return res.status(404).json({ error: 'No such pay period.', code: 'TIMESHEET_UNKNOWN' });
+      } else {
+        const date = tax.isYmd(req.query.date) ? req.query.date : tax.addDays(tax.periodFor(today(), settings, schedule).start, -1);
+        period = tax.periodFor(date, settings, schedule);
+      }
       const runs = await rows(RUNS);
       const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
       const sheets = await sheetsFor(period);
@@ -872,7 +903,11 @@ module.exports = function createPayrollRoutes(deps) {
       // How this viewer edits hours: the Super Admin directly (with a reason),
       // a manager or coordinator by request, a preparer not at all.
       const isSuper = !!req.user && req.user.role === 'admin';
-      res.json({ period, schedule, ended: period.end < today(), superAdmin: isSuper, canDecide: isSuper || isHoursEditor(req.user), editHours: isSuper ? 'direct' : isHoursEditor(req.user) ? 'request' : null, timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
+      // Whether this period's payroll exists yet, so the screen never reads
+      // the payday as though it had already been paid (owner, 2026-11-14).
+      const run = runs.find(r => sameRun(r, period) && r.status !== 'void')
+        || runs.find(r => r && r.source === 'gusto' && r.period && r.period.start === period.start && r.period.end === period.end);
+      res.json({ period, schedule, ended: period.end < today(), run: run ? { id: run.id, status: run.source === 'gusto' ? 'gusto' : run.status } : null, superAdmin: isSuper, canDecide: isSuper || isHoursEditor(req.user), editHours: isSuper ? 'direct' : isHoursEditor(req.user) ? 'request' : null, timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
     } catch (e) { console.error('Office timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
@@ -886,8 +921,8 @@ module.exports = function createPayrollRoutes(deps) {
       const b = req.body || {};
       if (!tax.PAY_SCHEDULES[b.schedule] || !tax.isYmd(b.periodStart)) return res.status(400).json({ error: 'Which schedule and period?', code: 'TIMESHEET_UNKNOWN' });
       const settings = await readSettings();
-      const period = tax.periodFor(b.periodStart, settings, b.schedule);
-      if (period.start !== b.periodStart) return res.status(400).json({ error: 'No such period.', code: 'TIMESHEET_UNKNOWN' });
+      const period = await resolvePeriod(b.schedule, b.periodStart, tax.isYmd(b.periodEnd) ? b.periodEnd : null, settings);
+      if (!period) return res.status(400).json({ error: 'No such period.', code: 'TIMESHEET_UNKNOWN' });
       const user = await userFor(b.userId);
       if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
       const n = ts.normalizeOffice(b); if (n.error) return res.status(400).json(n);
@@ -896,9 +931,9 @@ module.exports = function createPayrollRoutes(deps) {
       const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
       const print = ts.fingerprint(gathered.byUser.get(String(user.id)) || []);
       const all = await rows(TIMESHEETS);
-      const id = ts.sheetId(b.schedule, period.start, user.id);
+      const id = ts.sheetId(b.schedule, sheetKey(b.schedule, period), user.id);
       const i = all.findIndex(x => x.id === id);
-      const next = ts.record(i === -1 ? null : all[i], { id, schedule: b.schedule, periodStart: period.start, periodEnd: period.end, userId: String(user.id), name: user.name || user.email }, 'office', n.value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
+      const next = ts.record(i === -1 ? null : all[i], { id, schedule: b.schedule, periodStart: period.start, periodEnd: period.end, custom: !!period.custom, userId: String(user.id), name: user.name || user.email }, 'office', n.value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
       if (i === -1) all.push(next); else all[i] = next;
       await db.set(TIMESHEETS, all);
       await logActivity(req.user.id, req.user.name, `timesheet_${n.value.status}`, 'payroll_timesheet', id, { period: period.start, userId: String(user.id) });
@@ -918,11 +953,20 @@ module.exports = function createPayrollRoutes(deps) {
   router.post('/api/payroll/admin/runs', authenticateToken, requirePayrollPreparer, async (req, res) => {
     try {
       const settings = await readSettings();
-      const start = String((req.body || {}).periodStart || '');
-      if (!tax.isYmd(start)) return res.status(400).json({ error: 'Give a date in the pay period.', code: 'RUN_PERIOD' });
-      const schedule = String((req.body || {}).schedule || '');
+      const b = req.body || {};
+      const schedule = String(b.schedule || '');
       if (!tax.PAY_SCHEDULES[schedule]) return res.status(400).json({ error: 'Choose the caregivers (weekly) or everyone-else schedule.', code: 'RUN_SCHEDULE' });
-      const period = tax.periodFor(start, settings, schedule);
+      // A standard pay period (by its first day), or a custom one.
+      let period;
+      if (b.custom) {
+        const c = tax.customPeriod(b.custom, schedule);
+        if (c.error) return res.status(400).json(c);
+        period = c.value;
+      } else {
+        const start = String(b.periodStart || '');
+        if (!tax.isYmd(start)) return res.status(400).json({ error: 'Choose a pay period.', code: 'RUN_PERIOD' });
+        period = tax.periodFor(start, settings, schedule);
+      }
       const runs = await rows(RUNS);
       const existing = runs.find(r => sameRun(r, period) && r.status !== 'void');
       if (existing && existing.status !== 'draft') return res.status(409).json({ error: 'That period is already approved.', code: 'RUN_ALREADY_APPROVED', runId: existing.id });
