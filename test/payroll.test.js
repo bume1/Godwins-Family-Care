@@ -547,7 +547,7 @@ test('timesheets: confirm or flag, approve or send back, and an approval goes st
   r = await req(me.app, 'POST', '/api/my/timesheets/caregivers/2026-11-02', { status: 'confirmed' });
   assert.equal(r.status, 200); assert.equal(r.body.timesheet.status.employee, 'confirmed');
   r = await req(me.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
-  assert.equal(r.status, 403, 'only the Super Admin decides');
+  assert.equal(r.status, 403, 'a caregiver does not decide timesheets');
   r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'send_back' });
   assert.equal(r.body.code, 'TIMESHEET_NOTE_REQUIRED', 'a send-back says what to correct');
   r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
@@ -629,6 +629,9 @@ test('timesheets: each line carries its times and pending change; managers see t
   assert.deepEqual([b.edited, b.editReason, b.pendingChange], [true, 'Forgot to clock out', null]);
   r = await req(mgr.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&date=2026-11-04');
   assert.equal(r.status, 200); assert.equal(r.body.editHours, 'request');
+  assert.equal(r.body.canDecide, true, 'a manager approves or sends back timesheets');
+  r = await req(mgr.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(r.body.timesheet.office.by, 'Mary Manager');
   r = await req(mgr.app, 'GET', '/api/payroll/admin/overview');
   assert.equal(r.body.timesheetsOnly, true); assert.equal(r.body.people, undefined, 'no pay figures');
   assert.equal((await req(mgr.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' })).status, 403);

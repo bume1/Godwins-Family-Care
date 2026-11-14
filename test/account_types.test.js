@@ -166,7 +166,13 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   // (owner, 2026-11-13), so the overview and Timesheets admit them, and the
   // overview tells them it is timesheets only.
   const timesheetViewer = ["/api/payroll/admin/overview'", "/api/payroll/admin/timesheets'"];
-  for (const r of regs) assert.match(r, timesheetViewer.some(t => r.includes(t)) ? /authenticateToken, requireTimesheetViewer\b/ : /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  // Managers and care coordinators also approve or send back timesheets
+  // (owner, 2026-11-14). Approving the payroll run stays the Super Admin's.
+  for (const r of regs) {
+    if (timesheetViewer.some(t => r.includes(t))) assert.match(r, /authenticateToken, requireTimesheetViewer\b/, r);
+    else if (r.includes("/api/payroll/admin/timesheets/decide'")) assert.match(r, /authenticateToken, requireTimesheetDecider\b/, r);
+    else assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+  }
   assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
   // What a preparer must never reach: approving, paying, bank numbers,
   // settings, people's pay setup, tax tables, contractor approvals, the Gusto

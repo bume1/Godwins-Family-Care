@@ -411,7 +411,7 @@ const Timesheets = ({ data }) => {
         <div><div className="lblu mb-1">A date in the pay period</div><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} /></div>
         <button className="btn ghost" onClick={() => load()}>Show</button>
         {d && SUPER !== null && !TIMESHEETS_ONLY && <button className="btn ghost" onClick={() => { setErr(''); download(`/api/scheduling/payroll.csv?from=${d.period.start}&to=${d.period.end}`, `payroll-hours-${d.period.start}-to-${d.period.end}.csv`, setErr); }}>Export Hours CSV</button>}
-        {d && d.superAdmin && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
+        {d && d.canDecide && waiting.length > 0 && <button className="btn" disabled={busy} onClick={approveAll}>Approve All Not Flagged ({waiting.length})</button>}
       </div>
       {d && <p className="mb-2"><b className="text-primary">{day(d.period.start)} to {day(d.period.end)}</b> <span className="text-stone-500 text-[12.5px]">· paid {day(d.period.payDate)}{d.ended ? '' : ' · this period is still going'}</span></p>}
       {d && d.timesheets.length === 0 && <p className="text-stone-500">Nobody has hours in this period yet.</p>}
@@ -424,8 +424,8 @@ const Timesheets = ({ data }) => {
                 <b className="text-primary">{t.name}</b> <span className="text-stone-500 text-[12.5px]">· {hm(t.paid && t.paidMinutes !== null ? t.paidMinutes : t.totals.minutes)}{t.totals.visits ? ` · ${t.totals.visits} visits` : ''}{t.totals.exams ? ` · ${t.totals.exams} exams` : ''} · {EMP_TEXT[t.status.employee]}</span>
               </button>
               <span className="flex gap-2 items-center"><span className={`chip ${cls}`}>{lbl}</span>
-                {d.superAdmin && !t.paid && !t.status.approved && <button className="btn !py-1" disabled={busy} onClick={() => decide(t, 'approve')}>Approve</button>}
-                {d.superAdmin && !t.paid && <button className="btn ghost !py-1" disabled={busy} onClick={() => decide(t, 'send_back')}>Send Back</button>}</span>
+                {d.canDecide && !t.paid && !t.status.approved && <button className="btn !py-1" disabled={busy} onClick={() => decide(t, 'approve')}>Approve</button>}
+                {d.canDecide && !t.paid && <button className="btn ghost !py-1" disabled={busy} onClick={() => decide(t, 'send_back')}>Send Back</button>}</span>
             </div>
             {t.employee && t.employee.status === 'flagged' && <div className="text-[12.5px] text-red-700 mt-1">They say: {t.employee.note}</div>}
             {t.office && t.office.status === 'sent_back' && <div className="text-[12.5px] text-stone-500 mt-1">You sent it back: {t.office.note}</div>}
@@ -481,9 +481,14 @@ const Person = ({ p, data, reload }) => {
   const i9Done = !!(pr.i9 && ((pr.i9.section1 && pr.i9.section2) || pr.i9.onFile));
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const save = () => put(`/api/payroll/admin/people/${enc(p.userId)}`, { ...f, workerType: p.employmentTypeOnUser ? undefined : f.workerType, hireDate: f.hireDate || null }).then(() => { setMsg('Saved.'); reload(); }).catch(e => setErr(e.message));
+  // The signed official forms, filled from what they entered (owner,
+  // 2026-11-13). They carry the full SSN, so only the Super Admin downloads.
+  const signedForms = [['w4', 'W-4', pr.w4], ['g4', 'G-4', pr.g4], ['state', 'State certificate', pr.stateCert], ['i9', 'I-9', pr.i9 && pr.i9.section1], ['w9', 'W-9', pr.w9]].filter(x => x[2]);
   return (
     <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
       <Err e={err} /><Ok m={msg} />
+      {SUPER && signedForms.length > 0 && <div className="flex flex-wrap gap-2 items-center text-[12.5px]"><span className="text-stone-500">Signed forms:</span>
+        {signedForms.map(([k, l]) => <button key={k} className="btn ghost !py-0.5 !px-2" onClick={() => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }}>{l} PDF</button>)}</div>}
       <div className="grid sm:grid-cols-3 gap-2">
         {p.employmentTypeOnUser
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>
@@ -526,12 +531,15 @@ const Person = ({ p, data, reload }) => {
             <div key={k} className="flex flex-wrap gap-2 mb-2">
               <select className="inp !w-24" value={d.list} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, list: e.target.value } : x)) })}><option>A</option><option>B</option><option>C</option></select>
               <input className="inp !w-64" placeholder="Document title (e.g. U.S. Passport)" value={d.title} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, title: e.target.value } : x)) })} />
+              <input className="inp !w-44" placeholder="Issuing authority" value={d.issuer || ''} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, issuer: e.target.value } : x)) })} />
+              <input className="inp !w-40" autoComplete="off" placeholder="Document number" value={d.number || ''} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, number: e.target.value } : x)) })} />
               <input type="date" className="inp !w-44" value={d.expires} onChange={e => setI9({ ...i9, docs: i9.docs.map((x, j) => (j === k ? { ...x, expires: e.target.value } : x)) })} />
             </div>
           ))}
           <button className="btn ghost !py-1 mr-2" onClick={() => setI9({ ...i9, docs: [...i9.docs, { list: 'C', title: '', expires: '' }] })}>Add Document</button>
           <label className="inline-block">First day of work <input type="date" className="inp !w-44" value={i9.firstDay} onChange={e => setI9({ ...i9, firstDay: e.target.value })} /></label>
-          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
+          <label className="inline-block ml-2">Your title <input className="inp !w-40" value={i9.reviewerTitle || ''} onChange={e => setI9({ ...i9, reviewerTitle: e.target.value })} placeholder="Owner" /></label>
+          <button className="btn ml-2" onClick={() => put(`/api/payroll/admin/people/${enc(p.userId)}/i9-section2`, { firstDay: i9.firstDay, documents: i9.docs, reviewerTitle: i9.reviewerTitle }).then(() => { setMsg('I-9 complete.'); reload(); }).catch(e => setErr(e.message))}>Complete I-9</button>
         </div>
       )}
     </div>
@@ -928,7 +936,7 @@ const App = () => {
         <Err e={err} />
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && !SUPER && !TIMESHEETS_ONLY && <Warn>You prepare payroll here. Approving a run, paying it and full bank numbers are the Super Admin's.</Warn>}
-        {data && TIMESHEETS_ONLY && <Warn>You can check and edit hours here. Your edits go to the Super Admin to approve before payroll.</Warn>}
+        {data && TIMESHEETS_ONLY && <Warn>Check each person's hours here, then approve them or send them back. A change to someone's times goes to the Super Admin, the same request as Request Correction on Staff Scheduling.</Warn>}
         {data && tab === 'runs' && <Runs data={data} reload={load} />}
         {data && tab === 'timesheets' && <Timesheets data={data} />}
         {data && tab === 'people' && <People data={data} reload={load} />}

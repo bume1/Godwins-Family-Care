@@ -110,6 +110,56 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(by.id, by.name || by.email, 'payroll_profile_updated', 'payroll_profile', String(userId), { change });
     return next;
   };
+  // ---- The official forms, filled (owner, 2026-11-13) ---------------------------
+  // What a signed W-4, G-4, I-9 or W-9 puts on the real government form. The
+  // secrets are opened here, on the server, only to draw that form.
+  const gov = require('../govForms');
+  const openJson = (box) => { try { return box && box.enc ? JSON.parse(pc.open(box.enc, env)) : null; } catch (e) { return null; } };
+  const openPlain = (box) => { try { return box && box.enc ? pc.open(box.enc, env) : null; } catch (e) { return null; } };
+  const govPdf = async (user, p, key) => {
+    const settings = await readSettings();
+    const person = { address: p.taxAddress || null, email: user.email || null, phone: user.phone || null };
+    // The employer block is the Year End one when set (Settings → Year End), so
+    // the forms and the W-2 name GFC the same way.
+    const yeE = settings.yearEnd || {};
+    const ya = yeE.employerAddress;
+    const employer = { name: yeE.employerName || ORG.name, address: ya && ya.line1 ? [ya.line1, ya.line2, ya.city, `${ya.state || ''} ${ya.zip || ''}`.trim()].filter(Boolean).join(', ') : ORG.address,
+      ein: settings.employerEin || null, gaWithholdingNumber: yeE.gaWithholdingId || null };
+    const firstDay = (p.i9 && ((p.i9.section2 && p.i9.section2.firstDay) || (p.i9.onFile && p.i9.onFile.firstDay))) || null;
+    if (key === 'w4' && p.w4) return gov.fillW4({ person, ssn: openPlain(p.ssn), w4: p.w4, employer, firstDay });
+    if (key === 'g4' && p.g4) return gov.fillG4({ person, ssn: openPlain(p.ssn), g4: p.g4, employer });
+    if (key === 'i9' && p.i9 && p.i9.section1) return gov.fillI9({ person, ssn: openPlain(p.ssn), i9: p.i9, employer, immigration: openJson(p.i9Ids), docNumbers: openJson(p.i9DocNumbers) });
+    if (key === 'w9' && p.w9) return gov.fillW9({ w9: p.w9, tin: openPlain(p.tin) });
+    if (key === 'state' && p.stateCert) return gov.fillStateCert({ person, stateCert: p.stateCert, stateName: tables.stateName(p.stateCert.state), employer });
+    return null;
+  };
+  // File the signed copy on their Staff Record folder in Drive, and note it on
+  // the profile. Best-effort: a Drive failure never undoes a signature, and the
+  // form can always be produced again from what was signed.
+  const fileGovForm = async (user, p, key, by) => {
+    if (!drive || !drive.uploadStaffDocumentFile) return null;
+    const buf = await govPdf(user, p, key);
+    if (!buf) return null;
+    const stamp = (localDate(nowIso()) || nowIso().slice(0, 10));
+    const stored = await drive.uploadStaffDocumentFile(roleFolderFor(accountTypeOf(user)), personFolderName(user.name, user.id), `${gov.FILE_NAMES[key]} signed ${stamp}.pdf`, buf, 'application/pdf');
+    const all = await readProfiles();
+    const cur = all[String(user.id)];
+    if (!cur) return null;
+    cur.formsFiled = { ...(cur.formsFiled || {}), [key]: { driveFileId: (stored && (stored.fileId || stored.id)) || null, at: nowIso() } };
+    all[String(user.id)] = cur;
+    await db.set(PROFILES, all);
+    await logActivity(by.id, by.name || by.email, 'payroll_form_filed', 'payroll_profile', String(user.id), { form: key });
+    return stored;
+  };
+  const sendGovPdf = async (res, user, p, key) => {
+    const buf = await govPdf(user, p, key);
+    if (!buf) return res.status(404).json({ error: 'That form is not signed yet.', code: 'FORM_NOT_SIGNED' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `${gov.FILE_NAMES[key]} - ${user.name || 'employee'}.pdf`));
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(buf);
+  };
+
   // The tables in force: an approved table for the year of the pay date.
   const activeTables = async (year) => {
     const all = await rows(TAX_TABLES);
@@ -169,7 +219,12 @@ module.exports = function createPayrollRoutes(deps) {
           const n = pp.normalizeStateCert(b, ctx, st); if (n.error) return res.status(400).json(n);
           p.stateCert = n.value; change = `${tables.stateName(st)} withholding certificate signed`; break;
         }
-        case 'i9': { const n = pp.normalizeI9Section1(b, ctx); if (n.error) return res.status(400).json(n); p.i9 = { ...(p.i9 || {}), section1: n.value }; change = 'I-9 Section 1 signed'; break; }
+        case 'i9': {
+          const n = pp.normalizeI9Section1(b, ctx); if (n.error) return res.status(400).json(n);
+          p.i9 = { ...(p.i9 || {}), section1: n.value };
+          p.i9Ids = n.ids ? { enc: pc.seal(JSON.stringify(n.ids), env), at: ctx.at } : null;
+          change = 'I-9 Section 1 signed'; break;
+        }
         case 'ssn': {
           const bad = pp.checkSsn(b.ssn); if (bad) return res.status(400).json({ error: bad, code: 'SSN_INVALID' });
           const d = String(b.ssn).replace(/\D/g, '');
@@ -208,6 +263,8 @@ module.exports = function createPayrollRoutes(deps) {
         default: return res.status(404).json({ error: 'Unknown form.' });
       }
       const saved = await saveProfile(req.user.id, p, change, req.user);
+      const signed = { w4: 'w4', g4: 'g4', 'state-cert': 'state', i9: 'i9', w9: 'w9' }[req.params.form];
+      if (signed) fileGovForm(req.user, saved, signed, req.user).catch(e => console.error('Form filing (non-fatal):', e.message));
       res.json({ profile: pp.publicProfile(saved, { stateIncomeTax: await stateTaxesWages(saved) }) });
     } catch (e) {
       if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
@@ -216,6 +273,25 @@ module.exports = function createPayrollRoutes(deps) {
     }
   });
 
+
+  // The signed official form, filled. Their own, or anyone's for the Super
+  // Admin. It carries their full SSN, so every download is logged.
+  router.get('/api/my/pay-setup/forms/:form.pdf', authenticateToken, requireStaff, async (req, res) => {
+    try {
+      if (!gov.FILE_NAMES[req.params.form]) return res.status(404).json({ error: 'Unknown form.' });
+      await logActivity(req.user.id, req.user.name, 'payroll_form_downloaded', 'payroll_profile', String(req.user.id), { form: req.params.form });
+      return sendGovPdf(res, req.user, await profileFor(req.user), req.params.form);
+    } catch (e) { console.error('Form PDF error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+  router.get('/api/payroll/admin/people/:userId/forms/:form.pdf', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      if (!gov.FILE_NAMES[req.params.form]) return res.status(404).json({ error: 'Unknown form.' });
+      const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      await logActivity(req.user.id, req.user.name, 'payroll_form_downloaded', 'payroll_profile', String(user.id), { form: req.params.form });
+      return sendGovPdf(res, user, await profileFor(user), req.params.form);
+    } catch (e) { console.error('Form PDF error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
 
   // ---- contractor invoices (step 8) -------------------------------------------------
   const normalizeContractorInvoice = (b, existingNumbers) => {
@@ -442,6 +518,7 @@ module.exports = function createPayrollRoutes(deps) {
   });
 
   router.put('/api/payroll/admin/people/:userId/i9-section2', authenticateToken, requireAdmin, async (req, res) => {
+   try {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
     const p = await profileFor(user);
@@ -449,8 +526,14 @@ module.exports = function createPayrollRoutes(deps) {
     const n = pp.normalizeI9Section2(req.body, { at: nowIso(), by: req.user.name || req.user.email });
     if (n.error) return res.status(400).json(n);
     p.i9 = { ...p.i9, section2: n.value };
+    p.i9DocNumbers = n.numbers.some(Boolean) ? { enc: pc.seal(JSON.stringify(n.numbers), env), at: nowIso() } : null;
     const saved = await saveProfile(user.id, p, 'I-9 Section 2 completed', req.user);
+    fileGovForm(user, saved, 'i9', req.user).catch(e => console.error('I-9 filing (non-fatal):', e.message));
     res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+   } catch (e) {
+    if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
+    console.error('I-9 Section 2 error:', e); res.status(500).json({ error: 'Server error' });
+   }
   });
 
   // An I-9 already on file from Gusto or paper (owner, 2026-11-13). The
@@ -680,12 +763,16 @@ module.exports = function createPayrollRoutes(deps) {
       // How this viewer edits hours: the Super Admin directly (with a reason),
       // a manager or coordinator by request, a preparer not at all.
       const isSuper = !!req.user && req.user.role === 'admin';
-      res.json({ period, schedule, ended: period.end < today(), superAdmin: isSuper, editHours: isSuper ? 'direct' : isHoursEditor(req.user) ? 'request' : null, timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
+      res.json({ period, schedule, ended: period.end < today(), superAdmin: isSuper, canDecide: isSuper || isHoursEditor(req.user), editHours: isSuper ? 'direct' : isHoursEditor(req.user) ? 'request' : null, timesheets: out.sort((a, b) => a.name.localeCompare(b.name)) });
     } catch (e) { console.error('Office timesheets error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
-  // Approve, or send back with what to correct. The Super Admin's alone.
-  router.post('/api/payroll/admin/timesheets/decide', authenticateToken, requireAdmin, async (req, res) => {
+  // Approve, or send back with what to correct. The Super Admin, managers and
+  // care coordinators (owner, 2026-11-14: they review hours). Approving the
+  // payroll itself stays the Super Admin's.
+  const requireTimesheetDecider = (req, res, next) => (req.user && (req.user.role === 'admin' || isHoursEditor(req.user)) ? next()
+    : res.status(403).json({ error: 'Approving timesheets is for the Super Admin, managers and care coordinators.', code: 'TIMESHEET_DECIDER_ONLY' }));
+  router.post('/api/payroll/admin/timesheets/decide', authenticateToken, requireTimesheetDecider, async (req, res) => {
     try {
       const b = req.body || {};
       if (!tax.PAY_SCHEDULES[b.schedule] || !tax.isYmd(b.periodStart)) return res.status(400).json({ error: 'Which schedule and period?', code: 'TIMESHEET_UNKNOWN' });

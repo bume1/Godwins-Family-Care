@@ -119,24 +119,45 @@ function normalizeStateCert(b, ctx, state) {
   if (sig.error) return sig;
   return { value: { state, filingStatus: b.filingStatus, allowances, extraWithholdingCents: extra, exempt: b.exempt === true, ...sig.value } };
 }
+// Section 1 has everything the official form asks the employee (owner,
+// 2026-11-13: the app fills the real I-9). The A-Number, Form I-94 number and
+// foreign passport are returned apart as `ids`: the route seals them, and they
+// never come back to a browser.
+const ALIEN_NO = /^A?\d{7,9}$/i;
 function normalizeI9Section1(b, ctx) {
   b = b || {};
   if (!I9_STATUS[b.status]) return { error: 'Choose your citizenship or immigration status.', code: 'I9_STATUS' };
+  if (!isYmd(b.dob) || b.dob > (ctx.at || '').slice(0, 10)) return { error: 'Give your date of birth.', code: 'I9_DOB' };
   if (b.status === 'authorized' && b.workAuthExpires && !isYmd(b.workAuthExpires)) return { error: 'Work authorization expiration must be a date.', code: 'I9_EXPIRES' };
+  const alien = str(b.alienNumber, 12).replace(/[\s-]/g, '').toUpperCase();
+  const i94 = str(b.i94Number, 11).replace(/\s/g, '');
+  const passport = str(b.passport, 80);
+  if (alien && !ALIEN_NO.test(alien)) return { error: 'An A-Number or USCIS number is 7 to 9 digits.', code: 'I9_ALIEN_NUMBER' };
+  if (i94 && !/^[A-Z0-9]{11}$/i.test(i94)) return { error: 'A Form I-94 admission number is 11 characters.', code: 'I9_I94' };
+  if (b.status === 'lpr' && !alien) return { error: 'Give your A-Number or USCIS number.', code: 'I9_ALIEN_NUMBER' };
+  if (b.status === 'authorized' && !alien && !i94 && !passport) return { error: 'Give one of: A-Number or USCIS number, Form I-94 number, or foreign passport number and country.', code: 'I9_AUTH_NUMBER' };
   const sig = signature(b, ctx);
   if (sig.error) return sig;
-  return { value: { status: b.status, workAuthExpires: b.status === 'authorized' ? (b.workAuthExpires || null) : null, ...sig.value } };
+  const ids = b.status === 'lpr' ? { alienNumber: alien.replace(/^A/, '') } : b.status === 'authorized' ? { alienNumber: alien.replace(/^A/, '') || null, i94Number: i94 || null, passport: passport || null } : null;
+  return {
+    value: { status: b.status, workAuthExpires: b.status === 'authorized' ? (b.workAuthExpires || null) : null, dob: b.dob, otherLastNames: str(b.otherLastNames, 80) || null, phone: str(b.phone, 20) || null, idsOnFile: !!ids, ...sig.value },
+    ids
+  };
 }
 // Section 2 is the employer's: which documents were examined. Document
 // numbers are not stored, only what they were and when they expire.
 function normalizeI9Section2(b, { at, by }) {
   b = b || {};
-  const docs = (Array.isArray(b.documents) ? b.documents : []).map(d => ({ list: str(d && d.list, 1).toUpperCase(), title: str(d && d.title, 120), expires: d && isYmd(d.expires) ? d.expires : null }))
+  // The document number is kept for the official form, sealed by the route
+  // (returned apart as `numbers`, in the same order as the documents).
+  const raw = (Array.isArray(b.documents) ? b.documents : []).map(d => ({ list: str(d && d.list, 1).toUpperCase(), title: str(d && d.title, 120), issuer: str(d && d.issuer, 120) || null, expires: d && isYmd(d.expires) ? d.expires : null, number: str(d && d.number, 40) }))
     .filter(d => d.title && ['A', 'B', 'C'].includes(d.list));
+  const numbers = raw.map(d => d.number || null);
+  const docs = raw.map(({ number, ...d }) => d);
   const hasA = docs.some(d => d.list === 'A'), hasBC = docs.some(d => d.list === 'B') && docs.some(d => d.list === 'C');
   if (!hasA && !hasBC) return { error: 'Record one List A document, or one List B and one List C document.', code: 'I9_DOCUMENTS' };
   if (!isYmd(b.firstDay)) return { error: 'Give the employee\'s first day of work.', code: 'I9_FIRST_DAY' };
-  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by } };
+  return { value: { documents: docs, firstDay: b.firstDay, reviewedAt: at, reviewedBy: by, reviewerTitle: str(b.reviewerTitle, 60) || null, numbersOnFile: numbers.some(Boolean) }, numbers };
 }
 // An I-9 already on file (owner, 2026-11-13). Someone hired before GFC moved
 // payroll into the app has a completed Form I-9 from Gusto or on paper. That
@@ -333,7 +354,7 @@ function checklist(p, opts = {}) {
 // is on file. `full` is for the owner's audited reveal only.
 function publicProfile(p, opts = {}) {
   if (!p) return null;
-  const { ssn, tin, payMethod, history, ...rest } = p;
+  const { ssn, tin, payMethod, history, i9Ids, i9DocNumbers, ...rest } = p;
   return {
     ...rest,
     paySchedule: scheduleFor(p), paySchedulePinned: PAY_SCHEDULE_KEYS.includes(p.paySchedule),

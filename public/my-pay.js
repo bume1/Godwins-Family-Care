@@ -111,8 +111,24 @@ function FormBody({ which, data, form, set }) {
       <select value={form.status || ''} onChange={e => set({ ...form, status: e.target.value })}>
         <option value="">Choose…</option>{Object.entries(o.i9Status).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
       </select>
-      {form.status === 'authorized' && <div><label>Work authorization expires (if it does)</label><input type="date" value={form.workAuthExpires || ''} onChange={e => set({ ...form, workAuthExpires: e.target.value })} /></div>}
-      <p className="mg-note">Bring your identity and work authorization documents to the office. They complete Section 2 when they see them.</p>
+      <div className="mp-grid">
+        <div><label>Date of birth</label><input type="date" value={form.dob || ''} onChange={e => set({ ...form, dob: e.target.value })} /></div>
+        <div><label>Other last names used (if any)</label><input type="text" value={form.otherLastNames || ''} onChange={e => set({ ...form, otherLastNames: e.target.value })} /></div>
+        <div><label>Phone (optional)</label><input type="tel" value={form.phone || ''} onChange={e => set({ ...form, phone: e.target.value })} /></div>
+      </div>
+      {form.status === 'lpr' && <div><label>A-Number or USCIS number</label><input type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} placeholder="7 to 9 digits" /></div>}
+      {form.status === 'authorized' && (
+        <div>
+          <div><label>Work authorization expires (if it does)</label><input type="date" value={form.workAuthExpires || ''} onChange={e => set({ ...form, workAuthExpires: e.target.value })} /></div>
+          <p className="mg-note">Give one of these three.</p>
+          <div className="mp-grid">
+            <div><label>A-Number or USCIS number</label><input type="text" autoComplete="off" value={form.alienNumber || ''} onChange={e => set({ ...form, alienNumber: e.target.value })} /></div>
+            <div><label>Form I-94 admission number</label><input type="text" autoComplete="off" value={form.i94Number || ''} onChange={e => set({ ...form, i94Number: e.target.value })} /></div>
+            <div><label>Foreign passport number and country</label><input type="text" autoComplete="off" value={form.passport || ''} onChange={e => set({ ...form, passport: e.target.value })} /></div>
+          </div>
+        </div>
+      )}
+      <p className="mg-note">Your name and address come from "Legal name and mailing address" above. Bring your identity and work authorization documents to the office; they complete Section 2 when they see them. Signing fills in the official Form I-9.</p>
       <Sign statement="I am aware that federal law provides for imprisonment and/or fines for false statements, or the use of false documents, in connection with the completion of this form." form={form} set={set} />
     </div>
   );
@@ -185,6 +201,17 @@ function FormBody({ which, data, form, set }) {
 }
 
 const ROUTE = { w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
+// The signed official form, filled from your answers (owner, 2026-11-13).
+const FORM_PDF = { w4: 'w4', g4: 'g4', statecert: 'state', i9: 'i9', w9: 'w9' };
+const downloadForm = async (key, setErr) => {
+  try {
+    const res = await fetch(`/api/my/pay-setup/forms/${FORM_PDF[key]}.pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) { let m = 'That form could not be opened.'; try { m = (await res.json()).error || m; } catch (e) { /* not json */ } throw new Error(m); }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a'); a.href = url; a.download = `${key.toUpperCase()}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (e) { setErr(e.message); }
+};
 
 function PaySetup() {
   const [data, setData] = useState(null);
@@ -221,6 +248,7 @@ function PaySetup() {
             <div><b>{c.label}</b><small>{c.done ? (detail(c.key) || 'Done') : c.optional ? 'Optional' : 'Not done yet'}{c.note ? ` · ${c.note}` : ''}</small></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={`mg-pill ${c.done ? 'mg-ok' : c.optional ? 'mg-wait' : 'mg-bad'}`}>{c.done ? 'Done' : 'To do'}</span>
+              {c.done && FORM_PDF[c.key] && !(c.key === 'i9' && p.i9 && p.i9.onFile && !p.i9.section1) && <button className="mg-btn mg-ghost mg-sm" onClick={() => { setErr(''); downloadForm(c.key, setErr); }}>Download PDF</button>}
               {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
             </div>
           </div>
