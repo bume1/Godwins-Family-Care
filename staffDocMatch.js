@@ -75,17 +75,56 @@ function smartMatch(text) {
   return null;
 }
 
+// The boxes the office copies from a paper form (owner, 2026-11-15: "pre-fill;
+// office checks"). The AI scan reads them so the office checks rather than
+// types. NONE IS A SECRET NUMBER: no SSN, TIN, A-number, passport or bank
+// number is ever asked for or kept; the person enters those in My GFC. This
+// list is also the allow-list: any other key the model returns is dropped.
+const PREFILL_FIELDS = Object.freeze({
+  name: 'string', businessName: 'string', taxClass: 'string', tinType: 'string',
+  filingStatus: 'string', multipleJobs: 'boolean', dependentsAmount: 'string', otherIncome: 'string',
+  deductions: 'string', extraWithholding: 'string', exempt: 'boolean',
+  allowances: 'string', dependentAllowances: 'string', additionalAllowances: 'string',
+  citizenship: 'string', firstDay: 'string', signedName: 'string', signedOn: 'string'
+});
+// Anything that looks like a secret number is refused even in an allowed box.
+const SECRET_LIKE = /\d{3}\D?\d{2}\D?\d{4}|\d{2}-?\d{7}|\b[A-Z]?\d{8,}\b/i;
+
 // What the AI scan is asked for. A closed list, so it can only name a kind
-// this app knows, or "other". No number is asked for: a full SSN or TIN is
-// never read out of a document by the model.
+// this app knows, or "other", plus the printed boxes above.
 const AI_SCHEMA = Object.freeze({
   fields: {
     kind: { type: 'string', enum: [...KIND_KEYS, 'other'] },
     confidence: { type: 'number' },
     nameOnForm: { type: 'string' },
-    formRevision: { type: 'string' }
+    formRevision: { type: 'string' },
+    fields: {
+      type: 'object',
+      items: Object.fromEntries(Object.entries(PREFILL_FIELDS).map(([k, t]) => [k, { type: t }])),
+      description: 'Copy only what is printed or handwritten in these boxes, exactly as written. Leave a box out if it is blank or unreadable. Never return a Social Security number, taxpayer ID, EIN, A-number, passport, document or bank number.'
+    }
   }
 });
+
+/** Only the allowed, non-secret boxes, trimmed. */
+function cleanFields(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [k, t] of Object.entries(PREFILL_FIELDS)) {
+    const v = raw[k];
+    if (t === 'boolean' && typeof v === 'boolean') out[k] = v;
+    else if (t === 'string' && (typeof v === 'string' || typeof v === 'number')) {
+      const s = String(v).trim().slice(0, 160);
+      if (s && !SECRET_LIKE.test(s)) out[k] = s;
+    }
+  }
+  // Dates as the form fields take them.
+  for (const k of ['signedOn', 'firstDay']) if (out[k] && !/^\d{4}-\d{2}-\d{2}$/.test(out[k])) {
+    const m = out[k].match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+    if (m) out[k] = `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; else delete out[k];
+  }
+  return out;
+}
 
 /**
  * The AI scan. `aiRead({ purpose, input, schema })` is the model engine's
@@ -101,7 +140,7 @@ async function aiScan({ bytes, mimeType, aiRead }) {
     const kind = KIND_KEYS.includes(out.kind) ? out.kind : out.kind === 'other' ? 'other' : null;
     if (!kind) return { status: 'not_run', reason: 'The AI check gave no usable answer.' };
     const confidence = typeof out.confidence === 'number' && out.confidence >= 0 && out.confidence <= 1 ? out.confidence : null;
-    return { status: 'ok', kind, confidence, nameOnForm: typeof out.nameOnForm === 'string' ? out.nameOnForm.slice(0, 120) : null };
+    return { status: 'ok', kind, confidence, nameOnForm: typeof out.nameOnForm === 'string' ? out.nameOnForm.slice(0, 120) : null, fields: cleanFields(out.fields) };
   } catch (e) {
     const reason = e && e.code === 'MODEL_BOUNDARY_REFUSED' ? 'The AI check is not switched on yet (Vertex setup).' : `The AI check could not run: ${(e && e.message) || 'unknown error'}`;
     return { status: 'not_run', reason: String(reason).slice(0, 200) };
@@ -183,4 +222,4 @@ async function textOf({ bytes, mimeType, createWorker }) {
   }
 }
 
-module.exports = { KINDS, KIND_KEYS, MARKERS, AI_SCHEMA, smartMatch, aiScan, verdict, summary, matchDocument, textOf };
+module.exports = { KINDS, KIND_KEYS, MARKERS, AI_SCHEMA, PREFILL_FIELDS, cleanFields, smartMatch, aiScan, verdict, summary, matchDocument, textOf };

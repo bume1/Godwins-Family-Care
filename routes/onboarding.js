@@ -166,7 +166,9 @@ module.exports = function createOnboardingRoutes(deps) {
     const p = (((await db.get('payroll_profiles')) || {})[String(userId)]) || {};
     const i9Done = !!(p.i9 && (p.i9.section1 || p.i9.onFile));
     const state = { w4: [!!p.w4, !!(p.w4 && p.w4.onFile)], i9: [i9Done, !!(p.i9 && p.i9.onFile && !p.i9.section1)],
-      w9: [!!(p.w9 || p.w8ben), !!((p.w9 && p.w9.onFile) || (p.w8ben && p.w8ben.onFile))], pay: [!!p.payMethod, false] };
+      // A W-9 on file from paper is done once they have entered their full
+      // taxpayer ID too (2026-11-15): the office never types it.
+      w9: [!!(p.w8ben || (p.w9 && p.tin)), !!((p.w9 && p.w9.onFile) || (p.w8ben && p.w8ben.onFile))], pay: [!!p.payMethod, false] };
     return Object.entries(state).map(([k, [done, office]]) => ({ kind: `payform:${k}`, item: 'PAY', title: PAYFORM_TITLES[k], required: true,
       source: office ? 'office' : 'caregiver', status: done ? 'complete' : 'missing' }));
   }

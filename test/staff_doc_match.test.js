@@ -50,8 +50,9 @@ test('the AI scan reports "not run" when the model is off, and never guesses', a
   assert.equal(odd.status, 'not_run', 'a kind outside the closed list is not an answer');
   const ok = await M.aiScan({ bytes: Buffer.from('x'), mimeType: 'x', aiRead: async () => ({ proposal: { kind: 'w9', confidence: 0.97 } }) });
   assert.deepEqual([ok.status, ok.kind, ok.confidence], ['ok', 'w9', 0.97]);
-  // It is never asked for a number.
-  assert.deepEqual(Object.keys(M.AI_SCHEMA.fields).sort(), ['confidence', 'formRevision', 'kind', 'nameOnForm']);
+  // It is never asked for a number: the kind, and the printed boxes in PREFILL_FIELDS.
+  assert.deepEqual(Object.keys(M.AI_SCHEMA.fields).sort(), ['confidence', 'fields', 'formRevision', 'kind', 'nameOnForm']);
+  assert.deepEqual(Object.keys(M.AI_SCHEMA.fields.fields.items).sort(), Object.keys(M.PREFILL_FIELDS).sort());
 });
 
 test('the verdict: agree, disagree, one read, unknown; "not run" never counts as agreement', () => {
@@ -79,14 +80,20 @@ test('matchDocument reads, scans and keeps both, without throwing on a bad file'
 const at = '2026-11-15T15:00:00.000Z';
 const w9Body = { name: 'Test Person', taxClass: Object.keys(pp.W9_CLASS)[0], tin: '123-45-6789', signedName: 'Test Person', signedOn: '2026-10-01' };
 
-test('a paper W-9 needs the taxpayer ID, the name signed and the date signed', () => {
+test('ONE RULE: a paper W-9 goes on file with no taxpayer ID; a number the office sends is ignored', () => {
   const ctx = { at, by: 'Office', documentId: 'cgdoc_1' };
-  assert.equal(pp.normalizeFormOnFile('w9', { ...w9Body, tin: '' }, ctx).code, 'W9_TIN');
+  // Many paper W-9s show only the last 4: it still goes on file.
+  const noTin = pp.normalizeFormOnFile('w9', { ...w9Body, tin: '' }, ctx);
+  assert.equal(noTin.error, undefined);
+  assert.equal(noTin.tin, undefined);
   assert.equal(pp.normalizeFormOnFile('w9', { ...w9Body, signedName: '' }, ctx).code, 'ON_FILE_SIGNED_NAME');
   assert.equal(pp.normalizeFormOnFile('w9', { ...w9Body, signedOn: '2027-01-01' }, ctx).code, 'ON_FILE_SIGNED_ON', 'not a future date');
   assert.equal(pp.normalizeFormOnFile('w9', w9Body, { ...ctx, documentId: '' }).code, 'ON_FILE_DOCUMENT');
   const n = pp.normalizeFormOnFile('w9', w9Body, ctx);
-  assert.equal(n.tin, '123456789');
+  assert.equal(n.tin, undefined, 'the office never supplies the full number');
+  assert.ok(!JSON.stringify(n).includes('123456789'));
+  // The W-9 signed in the app still needs it.
+  assert.equal(pp.normalizeW9({ ...w9Body, tin: '', agree: true }, { at, ipHash: null }).code, 'W9_TIN');
   assert.equal(n.value.signedAt, '2026-10-01T12:00:00.000Z', 'the paper\'s date, not today');
   assert.deepEqual([n.value.onFile.documentId, n.value.onFile.source], ['cgdoc_1', 'paper']);
   assert.equal(n.value.ipHash, null);
@@ -103,11 +110,22 @@ test('on file counts as done in Pay Setup and clears what stops pay; the copy is
   const p = { workerType: '1099', taxAddress: {}, payMethod: { method: 'check' } };
   assert.deepEqual(pp.missingForPay(p, { asContractor: true }), ['W-9']);
   p.w9 = pp.normalizeFormOnFile('w9', w9Body, { at, by: 'O', documentId: 'cgdoc_9' }).value;
-  assert.deepEqual(pp.missingForPay(p, { asContractor: true }), []);
+  // On file, but the full number is theirs to enter: it still stops pay.
+  assert.deepEqual(pp.missingForPay(p, { asContractor: true }), ['Taxpayer ID (they add it in Pay Setup)']);
   const row = pp.checklist(p).find(r => r.key === 'w9');
   assert.equal(row.done, true);
   assert.equal(row.onFileDocumentId, 'cgdoc_9');
   assert.match(row.note, /signed on paper and filed by the office/);
+  const tinRow = pp.checklist(p).find(r => r.key === 'tin');
+  assert.deepEqual([tinRow.done, tinRow.group], [false, 'tax']);
+  assert.match(tinRow.note, /Enter your full Social Security number or EIN/);
+  // They enter it; pay clears and the row reads done.
+  assert.equal(pp.normalizeTin({ tin: '12-34' }).code, 'TIN_INVALID');
+  const t = pp.normalizeTin({ tinType: 'ein', tin: '12-3456789' });
+  assert.deepEqual(t.value, { type: 'ein', digits: '123456789' });
+  p.tin = { enc: 'x', last4: '6789', type: 'ein', source: 'self' };
+  assert.deepEqual(pp.missingForPay(p, { asContractor: true }), []);
+  assert.equal(pp.checklist(p).find(r => r.key === 'tin').done, true);
   // A W-9 signed in the app has no on-file copy.
   const app = pp.checklist({ workerType: '1099', w9: { signedAt: at } }).find(r => r.key === 'w9');
   assert.equal(app.onFileDocumentId, undefined);
@@ -145,7 +163,7 @@ test('SAFETY: on-file checks whose document it is, its type, that it was accepte
   assert.match(body, /ON_FILE_KIND/, 'only a document filed as that form');
   assert.match(body, /doc\.status !== 'accepted'/, 'only an accepted document');
   assert.match(body, /readsOther && b\.confirmDifferent !== true/, 'the reads must not contradict it unless the office confirms');
-  assert.match(body, /p\.tin = \{ enc: pc\.seal\(n\.tin, env\)/, 'the TIN is sealed, never stored plain');
+  assert.doesNotMatch(body, /p\.tin\s*=/, 'the office never sets the taxpayer ID');
   // The copy that opens is the uploaded one.
   assert.match(r, /const paper = await onFileDocFor\(user, p, key\);\s*if \(paper\)/);
 });
@@ -166,4 +184,52 @@ test('nothing on My GFC is wider than a phone: the availability row and the form
   assert.match(pay, /\.mp-ws-body\{grid-template-columns:minmax\(0,1fr\)/);
   assert.match(pay, /\.mp-ws-fields input\[type=text\][^{]*\{[^}]*box-sizing:border-box[^}]*font-size:16px/, '16px so iPhone does not zoom into a box');
   assert.match(src('public/document-sign-ui.js'), /\.ds-ws-body\{grid-template-columns:minmax\(0,1fr\)/);
+});
+
+// ── one rule for every paper form (owner, 2026-11-15) ───────────────────────────
+test('the person enters their own taxpayer ID: sealed, typed SSN or EIN, only for a W-9 on file', () => {
+  const r = src('routes/payroll.js');
+  const i = r.indexOf("case 'tin': {");
+  assert.ok(i > 0, 'Pay Setup has a taxpayer ID step');
+  const body = r.slice(i, r.indexOf('break; }', i));
+  assert.match(body, /!pp\.isContractor\(p\) \|\| !p\.w9/, 'only a contractor with a W-9');
+  assert.match(body, /pc\.seal\(n\.value\.digits, env\)/, 'sealed, never stored plain');
+  assert.match(body, /source: 'self'/);
+  assert.match(body, /change = 'Taxpayer ID saved'/, 'the history line carries no number');
+  // Taking a paper W-9 off file keeps a number the person entered themselves.
+  assert.match(r, /if \(form === 'w9' && !\(p\.tin && p\.tin\.source === 'self'\)\) p\.tin = null;/);
+  // Year end names what is missing.
+  assert.match(r, /else if \(!p\.tin\) missing\.push\('Taxpayer ID'\)/);
+  // My Pay draws the step and routes it.
+  const ui = src('public/my-pay.js');
+  assert.match(ui, /if \(which === 'tin'\)/);
+  assert.match(ui, /tin: 'tin'/);
+});
+
+test('a work permit card is never offered as an I-9', () => {
+  assert.deepEqual(pp.ON_FILE_KINDS.i9, ['i9']);
+  for (const kinds of Object.values(pp.ON_FILE_KINDS)) assert.ok(!kinds.includes('work_authorization'));
+});
+
+test('onboarding counts a paper W-9 done only once the full number is entered', () => {
+  assert.match(src('routes/onboarding.js'), /w9: \[!!\(p\.w8ben \|\| \(p\.w9 && p\.tin\)\)/);
+});
+
+test('the AI scan pre-fills printed boxes only, and never a secret number', async () => {
+  const keys = Object.keys(M.PREFILL_FIELDS);
+  for (const bad of ['ssn', 'tin', 'ein', 'aNumber', 'accountNumber', 'routingNumber', 'passport']) assert.ok(!keys.includes(bad), bad);
+  const out = await M.aiScan({ bytes: Buffer.from('x'), mimeType: 'application/pdf', aiRead: async () => ({ proposal: {
+    kind: 'w4', confidence: 0.9, fields: { filingStatus: 'single', multipleJobs: true, extraWithholding: '25', signedName: 'Pat Test', signedOn: '10/01/2026',
+      ssn: '123-45-6789', name: '123-45-6789', otherIncome: 123456789 } } }) });
+  assert.deepEqual(out.fields, { filingStatus: 'single', multipleJobs: true, extraWithholding: '25', signedName: 'Pat Test', signedOn: '2026-10-01' },
+    'unlisted keys and anything shaped like an SSN or long ID are dropped');
+  // The model engine accepts the schema it is sent.
+  assert.equal(require('../modelEngine').validateSchemaShape(M.AI_SCHEMA), null);
+  // The office panel marks pre-filled boxes until checked, and says when the scan did not run.
+  const hub = src('public/admin-hub.html');
+  assert.match(hub, /From the scan, check it/);
+  assert.match(hub, /AI check not run: type what the paper says\./);
+  assert.match(hub, /Their SSN or taxpayer ID is never typed here/);
+  assert.doesNotMatch(hub.slice(hub.indexOf('const OnFilePanel'), hub.indexOf('const CaregiverDocsSection')), /txt\('tin'/, 'the office panel has no taxpayer ID box');
+  assert.match(hub, /Their name as signed on the paper/);
 });

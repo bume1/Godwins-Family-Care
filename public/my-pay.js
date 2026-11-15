@@ -154,6 +154,18 @@ function FormBody({ which, data, form, set }) {
     <div><label>Social Security number</label><input name="ssn" type="password" autoComplete="off" value={form.ssn || ''} onChange={e => set({ ...form, ssn: e.target.value })} placeholder="9 digits" />
       <p className="mg-note">Stored encrypted. Only the last four show after you save.</p></div>
   );
+  // Their full taxpayer ID, for a W-9 the office put on file from paper
+  // (2026-11-15). Only they enter it; the office never types it.
+  if (which === 'tin') return (
+    <div>
+      <p className="mg-note" style={{ marginTop: 0 }}>Your W-9 is on file. The 1099 needs your full number, and only you enter it.</p>
+      <label>Taxpayer ID type</label>
+      <select name="tinType" value={form.tinType || 'ssn'} onChange={e => set({ ...form, tinType: e.target.value })}><option value="ssn">Social Security number</option><option value="ein">EIN (business)</option></select>
+      <label>{form.tinType === 'ein' ? 'EIN' : 'Social Security number'}</label>
+      <input name="tin" type="password" autoComplete="off" inputMode="numeric" value={form.tin || ''} onChange={e => set({ ...form, tin: e.target.value })} placeholder="9 digits" />
+      <p className="mg-note">Stored encrypted. Only the last four show after you save.</p>
+    </div>
+  );
   if (which === 'w9') return (
     <div>
       <label>Name on your tax return</label><input name="name" type="text" value={form.name || ''} onChange={e => set({ ...form, name: e.target.value })} />
@@ -273,7 +285,7 @@ function FormBody({ which, data, form, set }) {
   return null;
 }
 
-const ROUTE = { residence: 'tax-residence', w8ben: 'w8ben', w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
+const ROUTE = { residence: 'tax-residence', w8ben: 'w8ben', w4: 'w4', g4: 'g4', statecert: 'state-cert', i9: 'i9', ssn: 'ssn', tin: 'tin', w9: 'w9', pay: 'pay-method', taxaddress: 'tax-address', edelivery: 'e-delivery' };
 // The signed official form, filled from your answers (owner, 2026-11-13).
 const FORM_PDF = { w4: 'w4', g4: 'g4', statecert: 'state', i9: 'i9', w9: 'w9', w8ben: 'w8ben' };
 const downloadForm = async (key, setErr) => {
@@ -406,7 +418,7 @@ function PaySetup() {
     setBusy(false);
   };
   const p = data.profile;
-  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : k === 'w9' && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
+  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : (k === 'w9' || k === 'tin') && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
   return (
     <div className="mp-form">
       <p className="mg-note" style={{ marginTop: 0 }}>What payroll needs to pay you and send your W-2 or 1099. Your other hiring paperwork is in onboarding.</p>
@@ -424,7 +436,7 @@ function PaySetup() {
               {/* A form signed on paper and put on file by the office (2026-11-15)
                   opens as that uploaded copy. */}
               {c.done && FORM_PDF[c.key] && (c.onFileDocumentId || !(c.key === 'i9' && p.i9 && p.i9.onFile && !p.i9.section1)) && <button className="mg-btn mg-ghost mg-sm" onClick={() => { setErr(''); downloadForm(c.key, setErr); }}>{c.onFileDocumentId ? 'Open Copy' : 'Download PDF'}</button>}
-              {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'residence' ? { residence: p.taxResidence || '' } : c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
+              {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9' || c.key === 'tin')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'residence' ? { residence: p.taxResidence || '' } : c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
             </div>
           </div>
           {/* The form opens right under the item clicked (owner report,
