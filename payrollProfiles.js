@@ -195,7 +195,10 @@ function normalizeI9OnFile(b, { at, by }) {
 // The signature is the one on the paper: its printed name and date.
 const ON_FILE_FORMS = Object.freeze({ w4: 'w4', g4: 'g4', 'state-cert': 'stateCert', w9: 'w9', w8ben: 'w8ben' });
 // The document kinds a form may be put on file from (routes/caregiver.js).
-const ON_FILE_KINDS = Object.freeze({ w4: ['w4'], g4: ['g4'], 'state-cert': ['state_cert'], w9: ['w9'], w8ben: ['w8ben'], i9: ['i9', 'work_authorization'] });
+// An I-9 is put on file only from an I-9 (owner, 2026-11-15): a work permit
+// card or other work authorization document is evidence for Section 2, never
+// the form itself, so it is not offered as one.
+const ON_FILE_KINDS = Object.freeze({ w4: ['w4'], g4: ['g4'], 'state-cert': ['state_cert'], w9: ['w9'], w8ben: ['w8ben'], i9: ['i9'] });
 function normalizeFormOnFile(form, b, { at, by, documentId, state, match }) {
   b = b || {};
   if (!ON_FILE_FORMS[form]) return { error: 'That form cannot be put on file.', code: 'ON_FILE_FORM' };
@@ -209,7 +212,11 @@ function normalizeFormOnFile(form, b, { at, by, documentId, state, match }) {
   if (form === 'w4') n = normalizeW4(body, ctx);
   else if (form === 'g4') n = normalizeG4(body, ctx);
   else if (form === 'state-cert') n = normalizeStateCert(body, ctx, state);
-  else if (form === 'w9') n = normalizeW9(body, ctx);
+  // ONE RULE FOR EVERY PAPER FORM (owner, 2026-11-15): the office copies what
+  // is printed and never types a full SSN or TIN. Many paper W-9s show only
+  // the last four anyway. The person enters their own taxpayer ID in My GFC
+  // (PUT /api/my/pay-setup/tin), so a number sent here is ignored.
+  else if (form === 'w9') { const { tin, ...rest } = body; n = normalizeW9(rest, ctx, { withoutTin: true }); }
   else {
     // A W-8BEN on file: the name and country of citizenship are what payroll
     // and year end read (a foreign contractor gets no 1099). The rest stays on
@@ -231,17 +238,29 @@ const onFileOf = (p, key) => {
 // The I-9 is complete when both sections were done in the app, or a completed
 // form is on file from before.
 const i9Complete = (p) => !!(p && p.i9 && ((p.i9.section1 && p.i9.section2) || p.i9.onFile));
-function normalizeW9(b, ctx) {
+function normalizeW9(b, ctx, { withoutTin = false } = {}) {
   b = b || {};
   const name = str(b.name, 160);
   if (!name) return { error: 'Give the name on your tax return.', code: 'W9_NAME' };
   if (!W9_CLASS[b.taxClass]) return { error: 'Choose a tax classification.', code: 'W9_CLASS' };
   const tinType = b.tinType === 'ein' ? 'ein' : 'ssn';
-  const bad = tinType === 'ein' ? checkEin(b.tin) : checkSsn(b.tin);
-  if (bad) return { error: bad, code: 'W9_TIN' };
+  if (!withoutTin) {
+    const bad = tinType === 'ein' ? checkEin(b.tin) : checkSsn(b.tin);
+    if (bad) return { error: bad, code: 'W9_TIN' };
+  }
   const sig = signature(b, ctx);
   if (sig.error) return sig;
-  return { value: { name, businessName: str(b.businessName, 160), taxClass: b.taxClass, tinType, address: str(b.address, 300), ...sig.value }, tin: String(b.tin).replace(/\D/g, '') };
+  const value = { name, businessName: str(b.businessName, 160), taxClass: b.taxClass, tinType, address: str(b.address, 300), ...sig.value };
+  return withoutTin ? { value } : { value, tin: String(b.tin).replace(/\D/g, '') };
+}
+// The taxpayer ID a contractor enters themselves (2026-11-15), for a W-9 the
+// office put on file from paper. Same checks as the in-app W-9.
+function normalizeTin(b) {
+  b = b || {};
+  const type = b.tinType === 'ein' ? 'ein' : 'ssn';
+  const bad = type === 'ein' ? checkEin(b.tin) : checkSsn(b.tin);
+  if (bad) return { error: bad, code: 'TIN_INVALID' };
+  return { value: { type, digits: String(b.tin).replace(/\D/g, '') } };
 }
 
 // Form W-8BEN (owner, 2026-11-13): a contractor who is not a U.S. person and
@@ -433,6 +452,9 @@ function missingForPay(p, { asContractor = false, p2p = false } = {}) {
     // Living outside the U.S. (owner, 2026-11-13): a W-8BEN instead of a W-9.
     if (p.taxResidence === 'foreign') { if (!p.w8ben) out.push('W-8BEN'); }
     else if (!p.w9) out.push('W-9');
+    // A W-9 on file from paper still needs the full taxpayer ID, which the
+    // person enters themselves (2026-11-15).
+    else if (!p.tin) out.push('Taxpayer ID (they add it in Pay Setup)');
     return out;
   }
   if (!p.ssn) out.push('SSN');
@@ -484,10 +506,16 @@ function checklist(p, opts = {}) {
   }
   if (con && opts.overseasAllowed) rows.push({ key: 'residence', label: 'Where you live for tax', done: !!p.taxResidence, note: p.taxResidence === 'foreign' ? 'Outside the U.S.: you give a W-8BEN, and no 1099 is issued.' : p.taxResidence === 'us' ? 'In the U.S.: you give a W-9.' : null });
   if (con && p.taxResidence === 'foreign') rows.push({ key: 'w8ben', label: 'Form W-8BEN (living outside the U.S.)', done: !!p.w8ben });
-  else if (con) rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
+  else if (con) {
+    rows.push({ key: 'w9', label: 'Form W-9 (for your 1099)', done: !!p.w9 });
+    // Their W-9 is on file from paper and the full number is not (2026-11-15):
+    // they enter it here. The office never types it.
+    if (p.w9 && p.w9.onFile) rows.push({ key: 'tin', label: 'Taxpayer ID for your 1099', done: !!p.tin,
+      note: p.tin ? null : 'Your W-9 is on file. Enter your full Social Security number or EIN for your 1099.' });
+  }
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
-  const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'tax', edelivery: 'paid' };
+  const GROUP = { tin: 'tax', w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'tax', edelivery: 'paid' };
   // A form signed on paper and put on file by the office (2026-11-15) is done,
   // and its own copy is what opens: never a form regenerated from the values.
   const FORM_KEY = { w4: 'w4', g4: 'g4', statecert: 'state-cert', w9: 'w9', w8ben: 'w8ben', i9: 'i9' };
@@ -520,6 +548,6 @@ function publicProfile(p, opts = {}) {
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
-  normalizeW4, normalizeG4, normalizeW8BEN, previewValue, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, ON_FILE_FORMS, ON_FILE_KINDS, normalizeFormOnFile, onFileOf, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeW8BEN, previewValue, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, ON_FILE_FORMS, ON_FILE_KINDS, normalizeFormOnFile, onFileOf, i9Complete, normalizeW9, normalizeTin, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

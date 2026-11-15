@@ -110,7 +110,7 @@ test('abroad is off until Settings turn it on; then W-8BEN, a wire, and no 1099'
 
 test('invoices: upload a PDF with its total; managers review, only the Super Admin pays; wrong files refused', async () => {
   const h = harness();
-  h.store.set('payroll_profiles', { ana: { ...pp.defaultProfile({ id: 'ana', role: 'user' }), workerType: '1099', taxResidence: 'us', w9: { name: 'Ana' }, payMethod: { method: 'check' } } });
+  h.store.set('payroll_profiles', { ana: { ...pp.defaultProfile({ id: 'ana', role: 'user' }), workerType: '1099', taxResidence: 'us', w9: { name: 'Ana' }, tin: { enc: 'x', last4: '1234', type: 'ssn' }, payMethod: { method: 'check' } } });
   const pdf = Buffer.from('%PDF-1.4\n% test invoice\n').toString('base64');
   const base = { invoiceNo: 'INV-7', periodStart: '2026-11-01', periodEnd: '2026-11-07' };
   assert.equal((await h.call('ana', 'POST', '/api/my/contractor-invoices', { ...base, lines: [] })).body.code, 'CI_NO_LINES');

@@ -1730,7 +1730,10 @@ module.exports = function createCaregiverRoutes(deps) {
     return {
       verdict: m.verdict, readsAs: m.readsAs, readsAsLabel: m.readsAs ? ((staffDocMatch.KINDS[m.readsAs] || {}).label || m.readsAs) : null,
       filedAsDiffers: !!m.filedAsDiffers, smart: m.smart ? { kind: m.smart.kind, evidence: m.smart.evidence } : null,
-      ai: m.ai ? { status: m.ai.status, kind: m.ai.kind || null, confidence: m.ai.confidence ?? null, reason: m.ai.reason || null } : null,
+      // The printed boxes the scan read (2026-11-15), for the office to check
+      // on Mark On File. Never a secret number (staffDocMatch.cleanFields).
+      ai: m.ai ? { status: m.ai.status, kind: m.ai.kind || null, confidence: m.ai.confidence ?? null, reason: m.ai.reason || null,
+        fields: m.ai.status === 'ok' ? staffDocMatch.cleanFields(m.ai.fields) : {} } : null,
       summary: staffDocMatch.summary(m, r.kind), at: m.at,
       // The Pay Setup form this document can be put on file for, if any.
       form: m.readsAs && !m.filedAsDiffers ? ((staffDocMatch.KINDS[m.readsAs] || {}).form || null) : null

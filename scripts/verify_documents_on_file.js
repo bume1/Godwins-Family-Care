@@ -3,8 +3,9 @@
  * Documents on file fulfil their requirements (owner, 2026-11-15), through the
  * REAL server and routes. The office uploads a paper W-9, the app reads it two
  * ways (printed title + AI check, which reports "not run" here), the office
- * marks it on file with the TIN, and the person's Pay Setup, My Documents and
- * the money gates all count it. Stored values are read back. TEST DATA only:
+ * marks it on file WITHOUT the taxpayer ID (one rule: the office never types a
+ * full SSN or TIN), the person enters their own in Pay Setup, and Pay Setup,
+ * My Documents and the money gates all count it. Stored values are read back. TEST DATA only:
  * the "paper" forms are the blank government forms the app already fills.
  *   node scripts/verify_documents_on_file.js
  */
@@ -80,15 +81,31 @@ const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 
 
   console.log('\n── Mark On File ──');
   const base = { documentId: w9Id, name: 'Probe Person', taxClass: 'individual', signedName: 'Probe Person', signedOn: '2026-10-01' };
-  r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a, base);
-  check('without the taxpayer ID it is refused', r.status === 400 && r.body.code === 'W9_TIN', r.body);
   r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w4/on-file`, a, { ...base, filingStatus: 'single' });
   check('a W-9 cannot be put on file as a W-4', r.status === 409 && r.body.code === 'ON_FILE_KIND', r.body);
-  r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a, { ...base, tin: '123-45-6789' });
-  check('with the TIN it is on file', r.status === 200 && !(r.body.missing || []).includes('W-9'), r.body);
-  const stored = STORE.get('payroll_profiles')[PERSON.id];
-  check('the TIN is sealed, last four shown, never stored plain', stored.tin && stored.tin.last4 === '6789' && !JSON.stringify(stored).includes('123456789'));
+  // A number the office sends anyway is ignored: the office never sets it.
+  r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a, { ...base, tin: '987-65-4321' });
+  check('it goes on file with no taxpayer ID (paper showing only the last 4 is fine)', r.status === 200 && !(r.body.missing || []).includes('W-9'), r.body);
+  check('…and pay still waits on the full number, which is theirs to enter', (r.body.missing || []).includes('Taxpayer ID (they add it in Pay Setup)'), r.body.missing);
+  let stored = STORE.get('payroll_profiles')[PERSON.id];
+  check('the office\'s number was not stored', !stored.tin && !JSON.stringify(stored).includes('987654321'));
   check('the W-9 names its document and what the reads found', stored.w9.onFile.documentId === w9Id && stored.w9.onFile.match.readsAs === 'w9');
+
+  console.log('\n── The person enters their own taxpayer ID ──');
+  r = await call('GET', '/api/my/pay-setup', me);
+  let tinRow = (r.body.profile.checklist || []).find(c => c.key === 'tin');
+  check('Pay Setup shows "Taxpayer ID for your 1099" as To do', tinRow && tinRow.done === false && /full Social Security number or EIN/.test(tinRow.note || ''), r.body.profile.checklist);
+  r = await call('PUT', '/api/my/pay-setup/tin', me, { tinType: 'ssn', tin: '12-34' });
+  check('a short number is refused', r.status === 400 && r.body.code === 'TIN_INVALID', r.body);
+  r = await call('PUT', '/api/my/pay-setup/tin', tok(CG), { tinType: 'ssn', tin: '123-45-6789' });
+  check('someone with no W-9 on file cannot use this step', r.status === 409 && r.body.code === 'TIN_NO_W9', r.body);
+  r = await call('PUT', '/api/my/pay-setup/tin', me, { tinType: 'ssn', tin: '123-45-6789' });
+  tinRow = r.body.profile && (r.body.profile.checklist || []).find(c => c.key === 'tin');
+  check('they save it; the row reads done, ending 6789', r.status === 200 && tinRow && tinRow.done === true && r.body.profile.tinLast4 === '6789', r.body);
+  stored = STORE.get('payroll_profiles')[PERSON.id];
+  check('it is sealed, last four shown, never stored plain', stored.tin && stored.tin.last4 === '6789' && stored.tin.source === 'self' && !JSON.stringify(stored).includes('123456789'));
+  const gate = require(path.join(__dirname, '..', 'payrollProfiles.js')).missingForPay(stored, { asContractor: true });
+  check('the money gate clears (nothing missing for pay on the stored record)', Array.isArray(gate) && !gate.some(m => /W-9|Taxpayer/.test(m)), gate);
 
   console.log('\n── After: the person sees it done, with their copy ──');
   r = await call('GET', '/api/my/pay-setup', me);
@@ -111,16 +128,26 @@ const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 
   check('a caregiver cannot change a type (the office only)', r.status === 403, r.body);
 
   // KEEP=<file>: stop here with the server up, for screenshots of this state.
-  if (process.env.KEEP) { fs.writeFileSync(process.env.KEEP, JSON.stringify({ admin: a, person: me, personId: PERSON.id, base: BASE })); await new Promise(() => {}); }
+  if (process.env.KEEP) {
+    // For screenshots only: a stand-in AI answer on the W-4 (Vertex is off
+    // here), and the person's number cleared so the Pay Setup to-do shows.
+    const docs = STORE.get('caregiver_documents');
+    const w4 = docs.find(d => d.id === otherId);
+    w4.match = { ...w4.match, verdict: 'agree', ai: { status: 'ok', kind: 'w4', confidence: 0.96, fields: { filingStatus: 'single', extraWithholding: '20', signedName: 'Probe Person', signedOn: '2026-09-15' } } };
+    STORE.set('caregiver_documents', docs);
+    const all = STORE.get('payroll_profiles'); all[PERSON.id].tin = null; STORE.set('payroll_profiles', all);
+    fs.writeFileSync(process.env.KEEP, JSON.stringify({ admin: a, person: me, personId: PERSON.id, base: BASE })); await new Promise(() => {});
+  }
 
   console.log('\n── Take Off File ──');
   r = await call('DELETE', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a);
-  check('taken off file, Pay Setup asks again and the TIN goes with it', r.status === 200 && (r.body.missing || []).includes('W-9') && !STORE.get('payroll_profiles')[PERSON.id].tin, r.body);
+  check('taken off file, Pay Setup asks for the W-9 again; the number they entered stays theirs', r.status === 200 && (r.body.missing || []).includes('W-9') && STORE.get('payroll_profiles')[PERSON.id].tin.last4 === '6789', r.body);
   r = await call('DELETE', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a);
   check('a form not on file cannot be taken off', r.status === 409 && r.body.code === 'ON_FILE_NONE');
 
   const acts = JSON.stringify(STORE.get('activity_log') || []);
-  check('the activity log never carries the TIN', !acts.includes('123456789') && !acts.includes('123-45-6789'));
+  const hist = JSON.stringify(STORE.get('payroll_profiles')[PERSON.id].history || []);
+  check('the activity log and history never carry the number', !acts.includes('123456789') && !acts.includes('123-45-6789') && !acts.includes('987') && !hist.includes('123456789'));
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

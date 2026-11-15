@@ -291,6 +291,15 @@ module.exports = function createPayrollRoutes(deps) {
           const d = String(b.ssn).replace(/\D/g, '');
           p.ssn = { enc: pc.seal(d, env), last4: pc.last4(d), at: ctx.at }; change = 'SSN saved'; break;
         }
+        case 'tin': {
+          // Their full taxpayer ID, for a W-9 the office put on file from paper
+          // (owner, 2026-11-15). Only they enter it; it is sealed like the SSN.
+          if (!pp.isContractor(p) || !p.w9) return res.status(409).json({ error: 'This is for a contractor whose W-9 is on file.', code: 'TIN_NO_W9' });
+          const n = pp.normalizeTin(b); if (n.error) return res.status(400).json(n);
+          p.tin = { enc: pc.seal(n.value.digits, env), last4: pc.last4(n.value.digits), type: n.value.type, source: 'self', at: ctx.at };
+          p.w9 = { ...p.w9, tinType: n.value.type };
+          change = 'Taxpayer ID saved'; break;
+        }
         case 'w9': {
           const n = pp.normalizeW9(b, ctx); if (n.error) return res.status(400).json(n);
           p.w9 = n.value; p.tin = { enc: pc.seal(n.tin, env), last4: pc.last4(n.tin), type: n.value.tinType }; change = 'W-9 signed'; break;
@@ -777,10 +786,9 @@ module.exports = function createPayrollRoutes(deps) {
       } else {
         const n = pp.normalizeFormOnFile(form, b, { at, by, documentId: doc.id, state: p.workState || 'GA', match: matchSnap });
         if (n.error) return res.status(400).json(n);
-        if (form === 'w9') {
-          // The taxpayer ID the 1099 needs, sealed exactly as the in-app W-9 seals it.
-          p.tin = { enc: pc.seal(n.tin, env), last4: pc.last4(n.tin), type: n.value.tinType };
-        }
+        // A W-9 goes on file WITHOUT its taxpayer ID (owner, 2026-11-15): the
+        // office never types a full number. Any TIN already on their record
+        // stays; if there is none, Pay Setup asks them for it.
         p[pp.ON_FILE_FORMS[form]] = n.value;
       }
       const saved = await saveProfile(user.id, p, `${ON_FILE_LABEL[form]} on file (signed on paper)`, req.user);
@@ -822,7 +830,9 @@ module.exports = function createPayrollRoutes(deps) {
       if (!pp.onFileOf(p, form)) return res.status(409).json({ error: 'That form is not on file from paper.', code: 'ON_FILE_NONE' });
       if (form === 'i9') { const { onFile, ...rest } = p.i9; p.i9 = rest; }
       else {
-        if (form === 'w9') p.tin = null;
+        // A number the office typed (before 2026-11-15) went with the paper;
+        // one the person entered themselves is theirs and stays.
+        if (form === 'w9' && !(p.tin && p.tin.source === 'self')) p.tin = null;
         p[pp.ON_FILE_FORMS[form]] = null;
       }
       const saved = await saveProfile(user.id, p, `${ON_FILE_LABEL[form]} taken off file`, req.user);
@@ -1817,7 +1827,8 @@ module.exports = function createPayrollRoutes(deps) {
       const p = profiles[String(e.userId)] || {};
       const missing = [];
       if (!p.taxAddress) missing.push('Mailing address');
-      if (!(p.w9 && p.tin)) missing.push('W-9');
+      if (!p.w9) missing.push('W-9');
+      else if (!p.tin) missing.push('Taxpayer ID');
       return { userId: String(e.userId), name: (p.w9 && (p.w9.businessName || p.w9.name)) || e.name, boxes: { box1a: e.box1, box4: 0 }, missing, eDelivery: !!(p.eDelivery && p.eDelivery.consented) };
     });
     return {

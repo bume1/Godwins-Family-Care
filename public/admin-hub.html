@@ -1938,13 +1938,52 @@
     // unless the office confirms it looked. The choice lists come from the
     // server, never restated here.
     const MATCH_CHIP = { agree: 'bg-green-50 text-green-800 border-green-200', one_read: 'bg-sky-50 text-sky-800 border-sky-200', disagree: 'bg-red-50 text-red-700 border-red-200', unknown: 'bg-gray-100 text-gray-600 border-gray-200' };
+    // ONE RULE FOR EVERY PAPER FORM (owner, 2026-11-15): the office checks what
+    // the paper says. It never signs anything here and never types a full SSN
+    // or taxpayer ID; the person enters theirs in My GFC. The AI scan pre-fills
+    // the printed boxes it could read, marked until the office checks them.
+    const ON_FILE_BOXES = {
+      w9: ['name', 'businessName', 'taxClass', 'tinType'],
+      w4: ['filingStatus', 'multipleJobs', 'dependentsAmount', 'otherIncome', 'deductions', 'extraWithholding', 'exempt'],
+      g4: ['filingStatus', 'dependentAllowances', 'additionalAllowances', 'extraWithholding', 'exempt'],
+      'state-cert': ['filingStatus', 'allowances', 'extraWithholding', 'exempt'],
+      w8ben: ['name', 'citizenship'],
+      i9: ['firstDay']
+    };
+    const scanPrefill = (doc, form, options) => {
+      const ai = doc && doc.match && doc.match.ai;
+      const got = (ai && ai.status === 'ok' && ai.fields) || {};
+      const keys = [...(ON_FILE_BOXES[form] || []), ...(form === 'i9' ? [] : ['signedName', 'signedOn'])];
+      // A choice box takes only a value on its list; a label the scan read is
+      // matched to its value.
+      const lists = { taxClass: options.w9Class, filingStatus: form === 'w4' ? options.w4Filing : form === 'g4' ? options.g4Filing : form === 'state-cert' ? { single: 'Single', married: 'Married' } : null, tinType: { ssn: 'SSN', ein: 'EIN' } };
+      const out = {};
+      for (const k of keys) {
+        let v = got[k];
+        if (v === undefined || v === null || v === '') continue;
+        const list = lists[k];
+        if (list) {
+          const hit = Object.entries(list).find(([key, lbl]) => String(key).toLowerCase() === String(v).toLowerCase() || String(lbl).toLowerCase() === String(v).toLowerCase());
+          if (!hit) continue; v = hit[0];
+        }
+        out[k] = v;
+      }
+      return out;
+    };
     const OnFilePanel = ({ token, caregiverId, doc, form, info, onClose, onDone }) => {
-      const [f, setF] = React.useState({ signedName: '', signedOn: '', tinType: 'ssn' });
+      const pre = React.useMemo(() => scanPrefill(doc, form, (info && info.options) || {}), [doc.id, form]);
+      const [f, setF] = React.useState(() => ({ signedName: '', signedOn: '', tinType: 'ssn', ...pre }));
+      // Boxes the scan filled and the office has not touched yet.
+      const [fromScan, setFromScan] = React.useState(() => new Set(Object.keys(pre)));
+      const scanRan = !!(doc.match && doc.match.ai && doc.match.ai.status === 'ok');
       const [pages, setPages] = React.useState(null);
       const [imgUrl, setImgUrl] = React.useState(null);
       const [err, setErr] = React.useState('');
       const [busy, setBusy] = React.useState(false);
-      const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+      const set = (k) => (e) => {
+        setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+        if (fromScan.has(k)) { const n = new Set(fromScan); n.delete(k); setFromScan(n); }
+      };
       React.useEffect(() => {
         let url = null;
         (async () => {
@@ -1973,16 +2012,17 @@
         }
         setBusy(false);
       };
-      const inp = 'w-full px-3 py-2 border border-gray-200 rounded-lg text-sm';
-      const F = (lbl, el) => <label className="block text-xs font-medium text-gray-600 mt-2">{lbl}{el}</label>;
-      const sel = (k, opts) => <select className={inp} value={f[k] || ''} onChange={set(k)}><option value="">Choose…</option>{Object.entries(opts || {}).map(([k2, v]) => <option key={k2} value={k2}>{v}</option>)}</select>;
-      const txt = (k, extra) => <input className={inp} value={f[k] || ''} onChange={set(k)} {...(extra || {})} />;
-      const chk = (k, lbl) => <label className="flex items-center gap-2 text-sm mt-2"><input type="checkbox" checked={!!f[k]} onChange={set(k)} />{lbl}</label>;
+      const inpFor = (k) => `w-full px-3 py-2 border rounded-lg text-sm ${fromScan.has(k) ? 'border-amber-400 bg-amber-50' : 'border-gray-200'}`;
+      const scanTag = (k) => fromScan.has(k) ? <span className="ml-1 text-[11px] font-normal text-amber-700">From the scan, check it</span> : null;
+      const F = (lbl, el, k) => <label className="block text-xs font-medium text-gray-600 mt-2">{lbl}{k ? scanTag(k) : null}{el}</label>;
+      const sel = (k, opts) => <select data-box={k} className={inpFor(k)} value={f[k] || ''} onChange={set(k)}><option value="">Choose…</option>{Object.entries(opts || {}).map(([k2, v]) => <option key={k2} value={k2}>{v}</option>)}</select>;
+      const txt = (k, extra) => <input data-box={k} className={inpFor(k)} value={f[k] || ''} onChange={set(k)} {...(extra || {})} />;
+      const chk = (k, lbl) => <label className={`flex items-center gap-2 text-sm mt-2 ${fromScan.has(k) ? 'text-amber-800' : ''}`}><input data-box={k} type="checkbox" checked={!!f[k]} onChange={set(k)} />{lbl}{scanTag(k)}</label>;
       return ReactDOM.createPortal(
         <div className="fixed inset-0 z-[100000] bg-black/40 flex items-stretch justify-center p-0 md:p-6" role="dialog" aria-modal="true" aria-label={`Put ${label} on file`}>
           <div className="bg-white w-full max-w-6xl md:rounded-xl flex flex-col overflow-hidden">
             <div className="flex items-center justify-between gap-3 px-4 py-3 border-b">
-              <div><b className="text-gray-900">Put {label} on file</b><div className="text-xs text-gray-500">{doc.fileName}. Type what the paper form says. Nothing counts until you press Mark On File.</div></div>
+              <div><b className="text-gray-900">Put {label} on file</b><div className="text-xs text-gray-500">{doc.fileName}. Check that this is their signed form and that the boxes match the paper. You are not signing anything. Nothing counts until you press Mark On File.</div></div>
               <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm" onClick={onClose}>Close</button>
             </div>
             <div className="flex-1 min-h-0 grid md:grid-cols-[3fr_2fr]">
@@ -1993,48 +2033,56 @@
               </div>
               <div className="overflow-auto p-4 border-t md:border-t-0 md:border-l">
                 {doc.match && <div className={`text-xs border rounded-lg p-2 mb-2 ${MATCH_CHIP[doc.match.verdict] || ''}`}>{doc.match.summary}</div>}
+                <div className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg p-2 mb-1">
+                  {scanRan
+                    ? (fromScan.size ? 'Boxes marked "From the scan" were read off the paper. Check each one against the form.' : 'The AI check could not read the boxes. Type what the paper says.')
+                    : 'AI check not run: type what the paper says.'}
+                  {' '}Their SSN or taxpayer ID is never typed here.
+                </div>
                 {form === 'w9' && <>
-                  {F('Name on line 1', txt('name'))}
-                  {F('Business name, if any', txt('businessName'))}
-                  {F('Tax classification', sel('taxClass', o.w9Class))}
-                  {F('Taxpayer ID type', <select className={inp} value={f.tinType} onChange={set('tinType')}><option value="ssn">SSN</option><option value="ein">EIN</option></select>)}
-                  {F('Taxpayer ID number, as written on the form', txt('tin', { type: 'password', autoComplete: 'off' }))}
+                  {F('Name on line 1', txt('name'), 'name')}
+                  {F('Business name, if any', txt('businessName'), 'businessName')}
+                  {F('Tax classification', sel('taxClass', o.w9Class), 'taxClass')}
+                  {F('Taxpayer ID type ticked on the form', sel('tinType', { ssn: 'SSN', ein: 'EIN' }), 'tinType')}
+                  <p className="text-[11px] text-gray-500 mt-1">If the form shows only the last 4 digits, that is fine. They enter their full number in My GFC → Pay Setup, and it shows there as a to-do.</p>
                   {F('Address', txt('address'))}
                 </>}
                 {form === 'w4' && <>
-                  {F('Step 1(c): filing status', sel('filingStatus', o.w4Filing))}
+                  {F('Step 1(c): filing status', sel('filingStatus', o.w4Filing), 'filingStatus')}
                   {chk('multipleJobs', 'Step 2(c) is checked')}
-                  {F('Step 3: dependents ($ a year)', txt('dependentsAmount', { inputMode: 'decimal' }))}
-                  {F('Step 4(a): other income ($ a year)', txt('otherIncome', { inputMode: 'decimal' }))}
-                  {F('Step 4(b): deductions ($ a year)', txt('deductions', { inputMode: 'decimal' }))}
-                  {F('Step 4(c): extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {F('Step 3: dependents ($ a year)', txt('dependentsAmount', { inputMode: 'decimal' }), 'dependentsAmount')}
+                  {F('Step 4(a): other income ($ a year)', txt('otherIncome', { inputMode: 'decimal' }), 'otherIncome')}
+                  {F('Step 4(b): deductions ($ a year)', txt('deductions', { inputMode: 'decimal' }), 'deductions')}
+                  {F('Step 4(c): extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }), 'extraWithholding')}
                   {chk('exempt', 'Exempt is written on the form')}
                 </>}
                 {form === 'g4' && <>
-                  {F('Line 3: marital status', sel('filingStatus', Object.fromEntries(Object.entries(o.g4Filing || {}).map(([k, v]) => [k, `${k}. ${v}`]))))}
-                  {F('Line 4: dependent allowances', txt('dependentAllowances', { inputMode: 'numeric' }))}
-                  {F('Line 5: additional allowances', txt('additionalAllowances', { inputMode: 'numeric' }))}
-                  {F('Line 6: extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {F('Line 3: marital status', sel('filingStatus', Object.fromEntries(Object.entries(o.g4Filing || {}).map(([k, v]) => [k, `${k}. ${v}`]))), 'filingStatus')}
+                  {F('Line 4: dependent allowances', txt('dependentAllowances', { inputMode: 'numeric' }), 'dependentAllowances')}
+                  {F('Line 5: additional allowances', txt('additionalAllowances', { inputMode: 'numeric' }), 'additionalAllowances')}
+                  {F('Line 6: extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }), 'extraWithholding')}
                   {chk('exempt', 'Line 8 exempt is claimed')}
                 </>}
                 {form === 'state-cert' && <>
-                  {F('Filing status', <select className={inp} value={f.filingStatus || ''} onChange={set('filingStatus')}><option value="">Choose…</option><option value="single">Single</option><option value="married">Married</option></select>)}
-                  {F('Allowances', txt('allowances', { inputMode: 'numeric' }))}
-                  {F('Extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {F('Filing status', sel('filingStatus', { single: 'Single', married: 'Married' }), 'filingStatus')}
+                  {F('Allowances', txt('allowances', { inputMode: 'numeric' }), 'allowances')}
+                  {F('Extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }), 'extraWithholding')}
                   {chk('exempt', 'Exempt is claimed')}
                 </>}
                 {form === 'w8ben' && <>
-                  {F('Name on line 1', txt('name'))}
-                  {F('Country of citizenship', txt('citizenship'))}
+                  {F('Name on line 1', txt('name'), 'name')}
+                  {F('Country of citizenship', txt('citizenship'), 'citizenship')}
                 </>}
                 {form === 'i9' && <>
-                  {F('First day of work, as on the form', txt('firstDay', { type: 'date' }))}
+                  <p className="text-[11px] text-gray-500 mt-1">Use this only for their completed I-9 form. A work permit or ID card is not the form.</p>
+                  {F('First day of work, as on the form', txt('firstDay', { type: 'date' }), 'firstDay')}
                   {F('Date Section 2 was completed (if shown)', txt('completedOn', { type: 'date' }))}
                   {F('Note (optional)', txt('note'))}
                 </>}
                 {form !== 'i9' && <>
-                  {F('Name signed on the form', txt('signedName'))}
-                  {F('Date signed on the form', txt('signedOn', { type: 'date' }))}
+                  {F('Their name as signed on the paper', txt('signedName'), 'signedName')}
+                  {F('Date they signed it', txt('signedOn', { type: 'date' }), 'signedOn')}
+                  <p className="text-[11px] text-gray-500 mt-1">Copied from their signature on the paper. No office signature is needed.</p>
                 </>}
                 {err && <p className="text-xs text-red-600 mt-2">{err}</p>}
                 <div className="flex gap-2 mt-4">
@@ -2203,12 +2251,15 @@
       return (
         <div className={inRecord ? '' : 'mt-5 border-t pt-4'}>
           {!inRecord && <h4 className="font-medium text-gray-800 mb-1">Documents</h4>}
-          <p className="text-xs text-gray-500 mb-3">
+          <p className="text-xs text-gray-500 mb-1">
             Onboarding and payroll paperwork, plus anything {caregiverName || 'this person'} has sent in. These are the office's copies.
-            <span className="font-medium"> A W-4, G-4, I-9 or W-9 is either signed by them in My GFC (Hours &amp; Pay), or, if it was signed on paper,
-            uploaded here and marked on file</span>: then it counts in Pay Setup, onboarding and payroll. Each upload is read two ways
-            (the printed title and an AI check) to confirm what it is; you confirm before it counts.
+            Each upload is read two ways (the printed title and an AI check) to confirm what it is.
           </p>
+          <ul className="text-xs text-gray-600 mb-3 list-disc pl-4 space-y-0.5" data-help="one-rule">
+            <li><span className="font-medium">Tax forms signed on paper (W-4, G-4, W-9, I-9, W-8BEN):</span> press Use For, check the boxes against the paper, then Mark On File. You are not signing anything.</li>
+            <li><span className="font-medium">Their SSN or taxpayer ID is never typed here.</span> If the paper only shows the last 4, they enter the full number in My GFC (Hours &amp; Pay → Pay Setup).</li>
+            <li><span className="font-medium">ID, Social Security card, work permit, direct deposit form, TB test, CPR and other papers</span> count toward onboarding as soon as you accept them under the right type. Bank details for pay are still entered by them in My GFC.</li>
+          </ul>
           <button type="button" onClick={checkAll} disabled={checking}
             className="mb-3 px-3 py-1.5 border border-gray-300 rounded-lg text-xs disabled:opacity-50">{checking ? 'Checking…' : 'Check Documents'}</button>
 
