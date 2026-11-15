@@ -286,28 +286,9 @@ const downloadForm = async (key, setErr) => {
 // the left is the real government form, filled with the answers so far by the
 // server and marked PREVIEW; it redraws half a second after each change, and
 // the box being filled is outlined. Nothing is saved until Sign and Save.
-const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
-const loadPdfJs = () => (window.pdfjsLib ? Promise.resolve(window.pdfjsLib) : (window.__gfcPdfjs = window.__gfcPdfjs || new Promise((ok, bad) => {
-  const el = document.createElement('script');
-  el.src = `${PDFJS}pdf.min.js`;
-  el.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS}pdf.worker.min.js`; ok(window.pdfjsLib); };
-  el.onerror = () => { window.__gfcPdfjs = null; bad(new Error('The form viewer could not load.')); };
-  document.head.appendChild(el);
-})));
-const pagesFromPdf = async (buf) => {
-  const lib = await loadPdfJs();
-  const doc = await lib.getDocument({ data: buf }).promise;
-  const out = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const pg = await doc.getPage(i);
-    const vp = pg.getViewport({ scale: 1.6 });
-    const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
-    await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-    out.push(c.toDataURL('image/png'));
-  }
-  doc.destroy();
-  return out;
-};
+// The page images come from the shared renderer (/pdf-pages.js), the same one
+// the Documents to Sign workspace uses.
+const pagesFromPdf = async (buf) => (await window.GFCPdfPages.pages(buf)).map(p => p.src);
 const FORM_TITLE = { w4: 'Form W-4', g4: 'Georgia Form G-4', statecert: 'State withholding certificate', i9: 'Form I-9, Section 1', w9: 'Form W-9', w8ben: 'Form W-8BEN' };
 function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) {
   const route = ROUTE[which];
@@ -320,6 +301,8 @@ function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) 
   const abort = React.useRef(null);
   const prev = React.useRef(form);
   const hl = React.useRef(null);
+  const paneRef = React.useRef(null);
+  const zoomer = window.GFCPdfPages.useZoom(paneRef);
   useEffect(() => {
     const was = document.body.style.overflow; document.body.style.overflow = 'hidden';
     call(`/api/my/pay-setup/preview/${route}/fields`).then(setBoxes).catch(() => setBoxes({ pages: [], fields: {} }));
@@ -364,14 +347,15 @@ function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) 
         </div>
       </div>
       <div className="mp-ws-body">
-        <div className={`mp-ws-pdf${showForm ? '' : ' mp-hide'}`}>
+        <div ref={paneRef} className={`mp-ws-pdf${showForm ? '' : ' mp-hide'}`}>
+          {!problem && !fallback && pages && zoomer.bar}
           {problem && <p className="mp-ws-msg">{problem}</p>}
           {!problem && fallback && <iframe title="Form preview" src={fallback} style={{ width: '100%', height: '100%', minHeight: 600, border: 0 }} />}
           {!problem && !fallback && !pages && <p className="mp-ws-msg">Drawing the form…</p>}
           {!problem && !fallback && pages && pages.map((src, i) => {
             const size = boxes && boxes.pages[i];
             return (
-              <div className="mp-ws-page" key={i}>
+              <div className="mp-ws-page" key={i} style={zoomer.pageStyle || undefined}>
                 <img src={src} alt={`${FORM_TITLE[which]}, page ${i + 1}`} />
                 {size && marks.filter(m => m.page === i).map((m, j) => (
                   <div key={j} ref={m === firstMark ? hl : null} className="mp-ws-hl" style={{ left: `${(m.x - 2) / size.width * 100}%`, top: `${(size.height - m.y - m.h - 2) / size.height * 100}%`, width: `${(m.w + 4) / size.width * 100}%`, height: `${(m.h + 4) / size.height * 100}%` }} />

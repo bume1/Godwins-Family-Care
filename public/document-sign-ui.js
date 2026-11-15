@@ -6,6 +6,11 @@
 // and the office sends one the same way from a person's record or by type.
 //
 //   GFCDocSign.WaitingOnYou   the staff member's list: open, acknowledge, sign
+//   GFCDocSign.SignWorkspace  full screen: the document on the left, the
+//                             questions and signature on the right, and the
+//                             page their signing adds drawn as a PREVIEW
+//                             (owner, 2026-11-15: sign the way the tax forms
+//                             are signed). Page images come from /pdf-pages.js.
 //   GFCDocSign.OfficeDocuments the office: send a document, see who has done it
 //
 // The signature pad is the shared one in /welcome-packet-ui.js. Every class
@@ -39,6 +44,19 @@ const { useState, useEffect, useCallback } = React;
 .ds-okmsg{background:#e7f4ee;color:var(--ok);border-radius:10px;padding:10px 12px;margin:8px 0;font-size:14px}
 .ds-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .ds-who{font-size:13px;color:var(--m);margin-top:4px}
+.ds-ws{position:fixed;inset:0;z-index:100000;background:#f4f1ea;display:flex;flex-direction:column}
+.ds-ws-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--e);background:#fff}
+.ds-ws-head b{display:block;color:var(--n);font-size:16px;overflow-wrap:anywhere} .ds-ws-head small{display:block;color:var(--m);font-size:12.5px}
+.ds-ws-head .ds-btn{white-space:nowrap}
+.ds-ws-body{flex:1;display:grid;grid-template-columns:minmax(0,3fr) minmax(320px,2fr);min-height:0}
+.ds-ws-doc{overflow:auto;padding:16px;background:#e7e3db}
+.ds-ws-page{margin:0 auto 14px;max-width:820px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.18)}
+.ds-ws-page img{display:block;width:100%;height:auto}
+.ds-ws-added{max-width:820px;margin:4px auto 8px;font-size:12.5px;font-weight:600;color:var(--m);text-align:center}
+.ds-ws-side{overflow:auto;padding:16px 20px 28px;background:#fff;border-left:1px solid var(--e)}
+.ds-ws-msg{color:var(--m);text-align:center;padding:40px 10px}
+.ds-ws-toggle{display:none}
+@media(max-width:899px){.ds-ws-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.ds-ws-doc{max-height:45vh}.ds-ws-doc.ds-hide{display:none}.ds-ws-side{border-left:0;border-top:1px solid var(--e)}.ds-ws-toggle{display:inline-flex}}
 .ds button.btn{display:inline-flex;align-items:center;border-radius:10px;padding:7px 12px;font:600 13.5px/1.3 inherit;font-family:inherit;cursor:pointer;background:#fff;color:var(--n);border:1.5px solid var(--e);width:auto}`;
   document.head.appendChild(el);
 })();
@@ -73,53 +91,124 @@ const verb = (action) => (action === 'sign' ? 'Sign' : 'Acknowledge');
 const done = (action) => (action === 'sign' ? 'Signed' : 'Acknowledged');
 
 // ---- The staff member ---------------------------------------------------------
-// Open the document, then acknowledge or sign it. Nothing is recorded by
-// opening it; the button records it.
-function SignPanel({ doc, onDone, onCancel }) {
+// ---- The workspace -------------------------------------------------------------
+// Full screen, drawn on the page body so no header or bottom menu sits over
+// it. Left: the document as the office sent it, then the page their signing
+// adds, redrawn half a second after the name or signature changes and marked
+// PREVIEW. Right: the same questions and the same POST as before. Nothing is
+// recorded until they press Sign or Acknowledge.
+const fetchPdf = async (path, opts) => {
+  const res = await fetch(path, Object.assign({ headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' } }, opts || {}));
+  if (!res.ok) { let m = 'The document could not be drawn.'; try { m = (await res.json()).error || m; } catch (_) { /* not json */ } throw new Error(m); }
+  return res.arrayBuffer();
+};
+function SignWorkspace({ doc, onDone, onCancel }) {
   const [name, setName] = useState('');
   const [ack, setAck] = useState(false);
   const [sig, setSig] = useState('');
-  const [opened, setOpened] = useState(false);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const [pages, setPages] = useState(null); const [problem, setProblem] = useState('');
+  const [added, setAdded] = useState(null);
+  const [showDoc, setShowDoc] = useState(true);
+  const abort = React.useRef(null);
+  const addedRef = React.useRef(null);
+  const paneRef = React.useRef(null);
   const Pad = window.GFCWelcomePacketUI && window.GFCWelcomePacketUI.SignaturePad;
-  const open = () => openPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/file`, doc.fileName).then(() => setOpened(true)).catch(e => setErr(e.message));
-  const ready = name.trim() && ack && (doc.action !== 'sign' || sig);
+  const Pdf = window.GFCPdfPages;
+  const zoomer = Pdf && Pdf.useZoom ? Pdf.useZoom(paneRef) : { bar: null, pageStyle: null };
+  const signing = doc.action === 'sign';
+  useEffect(() => {
+    const was = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    let gone = false;
+    (async () => {
+      try {
+        if (!Pdf) throw new Error('The document viewer could not load.');
+        const imgs = await Pdf.pages(await fetchPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/file`));
+        if (!gone) setPages(imgs);
+      } catch (e) { if (!gone) setProblem(e.message); }
+    })();
+    return () => { gone = true; document.body.style.overflow = was; if (abort.current) abort.current.abort(); };
+  }, [doc.id]);
+  // The page their signing adds, redrawn as they type and sign.
+  useEffect(() => {
+    if (!Pdf) return undefined;
+    const t = setTimeout(async () => {
+      if (abort.current) abort.current.abort();
+      const ctl = new AbortController(); abort.current = ctl;
+      try {
+        const buf = await fetchPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/preview`, { method: 'POST', signal: ctl.signal,
+          body: JSON.stringify({ printedName: name.trim(), signaturePng: signing ? sig : undefined }) });
+        if (ctl.signal.aborted) return;
+        const imgs = await Pdf.pages(buf, { lastOnly: true });
+        if (!ctl.signal.aborted) setAdded(imgs[0] || null);
+      } catch (e) { /* the preview is a help, never a blocker */ }
+    }, added ? 500 : 0);
+    return () => clearTimeout(t);
+  }, [name, sig]);
+  const toAdded = () => { if (addedRef.current && addedRef.current.scrollIntoView) addedRef.current.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
+  const ready = name.trim() && ack && (!signing || sig);
   const submit = async () => {
     setBusy(true); setErr('');
     try {
       await call(`/api/my/document-sends/${encodeURIComponent(doc.id)}/sign`, { method: 'POST',
-        body: { printedName: name.trim(), acknowledged: ack, signaturePng: doc.action === 'sign' ? sig : undefined } });
+        body: { printedName: name.trim(), acknowledged: ack, signaturePng: signing ? sig : undefined } });
       await onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
-  return (
-    <div className="ds-box">
-      {doc.note && <div className="ds-note">{doc.note}</div>}
-      <button className="ds-btn ds-ghost" onClick={open}><i className="ti ti-file-text" />Open Document</button>
-      {!opened && <div className="ds-who">Read it before you {doc.action === 'sign' ? 'sign' : 'acknowledge'} it.</div>}
-      <label className="ds-check"><input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />
-        <span>I have read and understood this document{doc.action === 'sign' ? ', and I agree to it' : ''}.</span></label>
-      <label className="ds-l">Your full name</label>
-      <input type="text" value={name} maxLength={160} onChange={e => setName(e.target.value)} autoComplete="name" />
-      {doc.action === 'sign' && (
-        <div>
-          <label className="ds-l">Your signature</label>
-          {Pad ? <Pad onChange={setSig} /> : <div className="ds-note">Loading the signature pad…</div>}
+  const fallback = () => openPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/file`, doc.fileName).catch(e => setErr(e.message));
+  return ReactDOM.createPortal(
+    <div className="ds ds-ws" role="dialog" aria-modal="true" aria-label={doc.title}>
+      <div className="ds-ws-head">
+        <div><b>{doc.title}</b><small>Sent {fmtDate(doc.sentAt)}{doc.sentByName ? ` by ${doc.sentByName}` : ''}. It is a preview until you {signing ? 'sign' : 'acknowledge'}.</small></div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="ds-btn ds-ghost ds-ws-toggle" onClick={() => setShowDoc(!showDoc)}>{showDoc ? 'Hide Document' : 'Show Document'}</button>
+          <button className="ds-btn ds-ghost" disabled={busy} onClick={onCancel}>Close</button>
         </div>
-      )}
-      <div className="ds-who">Your {doc.action === 'sign' ? 'signed' : 'acknowledged'} copy files to My Documents, where you and the office can open it.</div>
-      {err && <div className="ds-err">{err}</div>}
-      <div className="ds-acts">
-        <button className="ds-btn" disabled={busy || !ready} onClick={submit}>{busy ? 'Saving…' : verb(doc.action)}</button>
-        {onCancel && <button className="ds-btn ds-ghost" disabled={busy} onClick={onCancel}>Cancel</button>}
       </div>
-    </div>
+      <div className="ds-ws-body">
+        <div ref={paneRef} className={`ds-ws-doc${showDoc ? '' : ' ds-hide'}`}>
+          {!problem && pages && zoomer.bar}
+          {problem && <div className="ds-ws-msg">{problem}<div className="ds-acts" style={{ justifyContent: 'center' }}><button className="ds-btn ds-ghost" onClick={fallback}><i className="ti ti-file-text" />Open Document</button></div></div>}
+          {!problem && !pages && <p className="ds-ws-msg">Drawing the document…</p>}
+          {!problem && pages && pages.map((p, i) => (
+            <div className="ds-ws-page" key={i} style={zoomer.pageStyle || undefined}><img src={p.src} alt={`${doc.title}, page ${i + 1}`} /></div>
+          ))}
+          {!problem && pages && added && (
+            <div ref={addedRef}>
+              <div className="ds-ws-added">This page is added when you {signing ? 'sign' : 'acknowledge'}. Preview, not signed.</div>
+              <div className="ds-ws-page" style={zoomer.pageStyle || undefined}><img src={added.src} alt={`The page your ${signing ? 'signature' : 'acknowledgment'} adds, preview`} /></div>
+            </div>
+          )}
+        </div>
+        <div className="ds-ws-side">
+          {doc.note && <div className="ds-note">{doc.note}</div>}
+          <div className="ds-who">Read the whole document before you {signing ? 'sign' : 'acknowledge'} it. Its last page shows what your {signing ? 'signature' : 'acknowledgment'} adds, and fills in as you type.</div>
+          <label className="ds-check"><input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />
+            <span>I have read and understood this document{signing ? ', and I agree to it' : ''}.</span></label>
+          <label className="ds-l">Your full name</label>
+          <input type="text" value={name} maxLength={160} onFocus={toAdded} onChange={e => setName(e.target.value)} autoComplete="name" />
+          {signing && (
+            <div onPointerDown={toAdded}>
+              <label className="ds-l">Your signature</label>
+              {Pad ? <Pad onChange={setSig} /> : <div className="ds-note">Loading the signature pad…</div>}
+            </div>
+          )}
+          <div className="ds-who">Your {signing ? 'signed' : 'acknowledged'} copy files to My Documents, where you and the office can open it.</div>
+          {err && <div className="ds-err">{err}</div>}
+          <div className="ds-acts">
+            <button className="ds-btn" disabled={busy || !ready} onClick={submit}>{busy ? 'Saving…' : verb(doc.action)}</button>
+            <button className="ds-btn ds-ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
 // `only` limits the list to one sent document (the onboarding drawer).
 function WaitingOnYou({ only, showDone = true, onChanged, emptyText }) {
-  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [open, setOpen] = useState(only || null);
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [open, setOpen] = useState(null);
   const [msg, setMsg] = useState('');
   const load = useCallback(() => call('/api/my/document-sends').then(setD).catch(e => setErr(e.message)), []);
   useEffect(() => { load(); }, [load]);
@@ -140,7 +229,7 @@ function WaitingOnYou({ only, showDone = true, onChanged, emptyText }) {
             <span className="ds-pill ds-wait">Waiting on you</span>
             {open !== x.id && <button className="ds-btn" onClick={() => setOpen(x.id)}>{verb(x.action)}</button>}
           </div>
-          {open === x.id && <SignPanel doc={x} onDone={() => after(x)} onCancel={only ? null : () => setOpen(null)} />}
+          {open === x.id && <SignWorkspace doc={x} onDone={() => after(x)} onCancel={() => setOpen(null)} />}
         </div>
       ))}
       {showDone && finished.map(x => (
@@ -270,5 +359,5 @@ function OfficeDocuments({ userId, userName }) {
   );
 }
 
-window.GFCDocSign = { WaitingOnYou, SignPanel, SendForm, OfficeDocuments, openPdf };
+window.GFCDocSign = { WaitingOnYou, SignWorkspace, SendForm, OfficeDocuments, openPdf };
 })();

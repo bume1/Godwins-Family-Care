@@ -249,6 +249,93 @@ test('the signature page names the signer and the original', async () => {
   assert.ok(text.toUpperCase().includes(hex(out.originalSha256.slice(0, 16))), 'the original document hash is drawn');
 });
 
+// ---- The signing workspace (owner, 2026-11-15) --------------------------------
+const pdfText = (bytes) => {
+  const zlib = require('zlib');
+  let text = '';
+  for (const m of Buffer.from(bytes).toString('latin1').matchAll(/stream\r?\n([\s\S]*?)endstream/g)) {
+    try { text += zlib.inflateSync(Buffer.from(m[1], 'latin1')).toString('latin1'); } catch (_) { text += m[1]; }
+  }
+  return text.toUpperCase();
+};
+const hexOf = (str) => Buffer.from(str).toString('hex').toUpperCase();
+
+test('the preview draws the page signing adds, marked not signed, and records nothing', async (t) => {
+  const h = await mount(t);
+  await h.send({ title: 'Employment Agreement', action: 'sign', scope: { userId: RN.id } });
+  const id = h.store.staff_document_sends[0].id;
+  h.as(RN);
+  const before = JSON.stringify(h.store);
+  const r = await h.call('POST', `/api/my/document-sends/${id}/preview`, { printedName: 'Rae Nurse', signaturePng: SIG });
+  assert.strictEqual(r.status, 200);
+  const pdf = await PDFDocument.load(r.bytes);
+  assert.strictEqual(pdf.getPageCount(), 2, 'the original page plus the page signing adds');
+  const text = pdfText(r.bytes);
+  assert.ok(text.includes(hexOf('PREVIEW, NOT SIGNED')), 'marked in words');
+  assert.ok(text.includes(hexOf('Rae Nurse')), 'their typed name');
+  assert.ok(!text.includes(hexOf('Network (hashed)')), 'no network hash on a preview');
+  assert.strictEqual(JSON.stringify(h.store), before, 'nothing stored');
+  assert.strictEqual(h.uploads.length, 1, 'nothing filed to Drive beyond the office\'s original');
+  assert.ok(!h.logged.some(a => /document_(signed|acknowledged)/.test(a[2])));
+  // A preview with nothing typed yet still draws.
+  assert.strictEqual((await h.call('POST', `/api/my/document-sends/${id}/preview`, {})).status, 200);
+  // A junk signature is ignored rather than drawn.
+  assert.strictEqual((await h.call('POST', `/api/my/document-sends/${id}/preview`, { printedName: 'Rae', signaturePng: 'not a png' })).status, 200);
+});
+
+test('the preview is refused to someone it was not sent to, and once it is done', async (t) => {
+  const h = await mount(t);
+  await h.send({ title: 'Policy', action: 'acknowledge', scope: { userId: RN.id } });
+  const id = h.store.staff_document_sends[0].id;
+  h.as(NP);
+  assert.strictEqual((await h.call('POST', `/api/my/document-sends/${id}/preview`, {})).status, 404);
+  h.as(RN);
+  await h.call('POST', `/api/my/document-sends/${id}/sign`, { printedName: 'Rae', acknowledged: true });
+  assert.strictEqual((await h.call('POST', `/api/my/document-sends/${id}/preview`, {})).data.code, 'DOC_ALREADY_DONE');
+});
+
+test('a signed copy carries no preview mark', async () => {
+  const out = await signedDocument.buildSignedCopy(await makePdf('Agreement'), { action: 'sign', title: 'Agreement', printedName: 'Rae Nurse',
+    email: 'rae@gfc.test', signedAt: '2026-11-09T15:00:00Z', signedAtLabel: 'November 9, 2026 10:00 AM Eastern', ipHash: 'abc', signaturePng: SIG });
+  const text = pdfText(out.bytes);
+  assert.ok(!text.includes(hexOf('PREVIEW')), 'no preview wording');
+  assert.ok(text.includes(hexOf('Network (hashed): abc')));
+  assert.ok(text.includes(hexOf('November 9, 2026 10:00 AM Eastern')));
+});
+
+test('documents to sign open in the full-screen workspace, sharing the tax forms\' page renderer', () => {
+  const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const ui = strip(read('public/document-sign-ui.js'));
+  assert.match(ui, /function SignWorkspace\(/);
+  assert.match(ui, /ReactDOM\.createPortal\([\s\S]*className="ds ds-ws"[\s\S]*document\.body\s*\)/, 'drawn on the page body, over the app\'s header and menu');
+  assert.match(ui, /open === x\.id && <SignWorkspace /, 'Waiting on You opens the workspace');
+  assert.doesNotMatch(ui, /SignPanel/, 'no inline signing box left');
+  assert.match(ui, /\/api\/my\/document-sends\/\$\{encodeURIComponent\(doc\.id\)\}\/preview/, 'the live preview');
+  assert.match(ui, /GFCPdfPages/);
+  assert.match(strip(read('public/my-pay.js')), /window\.GFCPdfPages\.pages/, 'the tax forms use the same renderer');
+  for (const f of ['public/my-pay.js', 'public/document-sign-ui.js']) {
+    assert.doesNotMatch(strip(read(f)), /pdf\.min\.js|cdnjs/, `${f} loads no pdf.js of its own`);
+  }
+  // Zoom (owner, 2026-11-15): both signing screens zoom the document the same way.
+  const pages = strip(read('public/pdf-pages.js'));
+  assert.match(pages, /useZoom/);
+  assert.match(pages, /addEventListener\('wheel', onWheel, \{ passive: false \}\)/, 'a trackpad pinch zooms the document, not the page');
+  for (const f of ['public/my-pay.js', 'public/document-sign-ui.js']) {
+    const src = strip(read(f));
+    assert.match(src, /useZoom\(paneRef\)/, `${f} uses the shared zoom`);
+    assert.match(src, /ref=\{paneRef\}/, `${f} hands it the document pane`);
+    assert.match(src, /zoomer\.bar/, `${f} shows the zoom buttons`);
+  }
+  for (const f of ['public/my.html', 'public/caregiver.html', 'public/admin-hub.html', 'public/onboarding.html']) {
+    assert.doesNotMatch(read(f), /user-scalable\s*=\s*no|maximum-scale\s*=\s*1(\.0)?\b/, `${f} lets phones pinch-zoom`);
+  }
+  for (const f of ['public/my.html', 'public/caregiver.html', 'public/admin-hub.html', 'public/onboarding.html']) {
+    const src = read(f);
+    const at = src.indexOf('src="/pdf-pages.js"');
+    assert.ok(at > 0 && at < src.indexOf('src="/document-sign-ui.js"'), `${f} loads the renderer first`);
+  }
+});
+
 // ---- Build-enforced wiring ---------------------------------------------------
 const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 

@@ -794,6 +794,34 @@ module.exports = function createStaffPortalRoutes(deps) {
       return res.status(502).json({ error: 'That document could not be opened just now.', code: 'FILE_STORAGE_UNAVAILABLE' });
     }
   });
+  // The page their signing will add, drawn now and marked PREVIEW (owner,
+  // 2026-11-15: sign the way the tax forms are signed, the document beside
+  // the fields). Same gate and the same builder as the real signing, so the
+  // preview cannot show something the signed copy will not. Writes nothing.
+  router.post('/api/my/document-sends/:id/preview', authenticateToken, requireStaff, async (req, res) => {
+    const s = (await sends()).find(x => x.id === req.params.id);
+    const me = await personOf(req.user);
+    if (!s || !DS.reaches(s, me)) return res.status(404).json({ error: 'No such document.', code: 'DOC_UNKNOWN' });
+    if (DS.signingFor(await signings(), s.id, me.userId)) return res.status(409).json({ error: s.action === 'sign' ? 'You have already signed this document.' : 'You have already acknowledged this document.', code: 'DOC_ALREADY_DONE' });
+    const b = req.body || {};
+    const printedName = String(b.printedName || '').trim().slice(0, 160);
+    let sig = String(b.signaturePng || '');
+    // A preview takes whatever has been drawn so far, or nothing yet.
+    if (s.action !== 'sign' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig) || sig.length > 400000) sig = null;
+    let original;
+    try { original = await drive.downloadFileBuffer(s.driveFileId); } catch (err) {
+      return res.status(502).json({ error: 'That document could not be opened just now.', code: 'FILE_STORAGE_UNAVAILABLE' });
+    }
+    if (s.sha256 && signedDocument.sha256(original) !== s.sha256) return res.status(409).json({ error: 'This document changed after it was sent. Ask the office to send it again.', code: 'DOC_CHANGED' });
+    try {
+      const built = await signedDocument.buildSignedCopy(original, { action: s.action, title: s.title, printedName, email: req.user.email, signaturePng: sig, preview: true });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(built.bytes);
+    } catch (err) {
+      return res.status(500).json({ error: 'The preview could not be drawn.', code: 'PREVIEW_FAILED' });
+    }
+  });
   router.post('/api/my/document-sends/:id/sign', authenticateToken, requireStaff, async (req, res) => {
     const s = (await sends()).find(x => x.id === req.params.id);
     const me = await personOf(req.user);
