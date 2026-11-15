@@ -49,6 +49,9 @@ const call = async (method, url, token, body) => {
 const blank = (f) => fs.readFileSync(path.join(__dirname, '..', 'govforms', f));
 const b64 = (buf) => `data:application/pdf;base64,${buf.toString('base64')}`;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// A test number on its own, never digits that happen to sit inside a
+// timestamp-based id (cgdoc_1763234567890 holds "234567890").
+const holds = (text, ...nums) => nums.some(n => new RegExp(`(?<![0-9])${n.replace(/-/g, '-?')}(?![0-9])`).test(text));
 
 const ADMIN = { id: 'admin_dof', role: 'admin', email: 'dofadmin@example.test', name: 'Dof Admin' };
 // A 1099 contractor on staff whose W-9 was signed on paper. (A caregiver is
@@ -108,7 +111,7 @@ const P2U = { id: 'cg_dof3', role: 'user', accountType: 'coordinator', email: 'd
   tinRow = r.body.profile && (r.body.profile.checklist || []).find(c => c.key === 'tin');
   check('they save it; the row reads done, ending 6789', r.status === 200 && tinRow && tinRow.done === true && r.body.profile.tinLast4 === '6789', r.body);
   stored = STORE.get('payroll_profiles')[PERSON.id];
-  check('it is sealed, last four shown, never stored plain', stored.tin && stored.tin.last4 === '6789' && stored.tin.source === 'self' && !JSON.stringify(stored).includes('123456789'));
+  check('it is sealed, last four shown, never stored plain', stored.tin && stored.tin.last4 === '6789' && stored.tin.source === 'self' && !holds(JSON.stringify(stored), '123-45-6789'));
   const gate = require(path.join(__dirname, '..', 'payrollProfiles.js')).missingForPay(stored, { asContractor: true });
   check('the money gate clears (nothing missing for pay on the stored record)', Array.isArray(gate) && !gate.some(m => /W-9|Taxpayer/.test(m)), gate);
 
@@ -145,7 +148,7 @@ const P2U = { id: 'cg_dof3', role: 'user', accountType: 'coordinator', email: 'd
   const card = (r.body.documents || []).find(d => d.id === cardId);
   check('the number is read off the card: ending 6789, printed digits', card && card.ssnRead && card.ssnRead.last4 === '6789' && card.ssnRead.reads === 'text', card && card.ssnRead);
   const raw = (STORE.get('caregiver_documents') || []).find(d => d.id === cardId);
-  check('it is stored SEALED on the document, never plain', raw.ssnRead.enc && !JSON.stringify(raw).includes('123456789') && !JSON.stringify(raw).includes('123-45-6789'));
+  check('it is stored SEALED on the document, never plain', raw.ssnRead.enc && !holds(JSON.stringify(raw), '123-45-6789'));
   check('the document list never carries the sealed value', !JSON.stringify(card).includes(raw.ssnRead.enc.slice(0, 20)));
   r = await call('GET', `/api/payroll/admin/people/${P2}/forms/on-file`, a);
   check('Mark On File knows the card read (last 4 only)', r.body.ssn && r.body.ssn.cards.length === 1 && r.body.ssn.cards[0].last4 === '6789' && !r.body.ssn.last4, r.body.ssn);
@@ -170,7 +173,43 @@ const P2U = { id: 'cg_dof3', role: 'user', accountType: 'coordinator', email: 'd
   r = await call('PUT', `/api/payroll/admin/people/${P2}/ssn`, tok(CG), { ssn: '234-56-7890' });
   check('a caregiver cannot set someone\'s SSN', r.status === 403 || r.status === 401, r.status);
   const logs = JSON.stringify(STORE.get('activity_log') || []) + JSON.stringify(s2.history || []);
-  check('logs and history never carry either number', !/123456789|123-45-6789|234567890|234-56-7890/.test(logs));
+  check('logs and history never carry either number', !holds(logs, '123-45-6789', '234-56-7890'));
+
+  console.log('\n── A W-4 uploaded as "W-9" (owner report, 2026-11-15) ──');
+  const CGID = 'cg_dof2';
+  r = await call('POST', '/api/caregiver/documents', a, { caregiverId: CGID, kind: 'w9', fileName: 'Tasha W-9.pdf', fileDataB64: b64(blank('fw4-2026.pdf')) });
+  const misId = r.body.document.id;
+  // As before the reads existed: no reading on the row yet.
+  { const all = STORE.get('caregiver_documents'); delete all.find(d => d.id === misId).match; STORE.set('caregiver_documents', all); }
+  const w4Body = { documentId: misId, name: 'Probe Caregiver', taxClass: 'individual', signedName: 'Probe Caregiver', signedOn: '2026-10-01' };
+  r = await call('PUT', `/api/payroll/admin/people/${CGID}/forms/w9/on-file`, a, w4Body);
+  check('an unchecked document is never put on file on its filed type alone', r.status === 409 && r.body.code === 'ON_FILE_NOT_READ', r.body);
+  r = await call('POST', `/api/caregiver/admin/caregivers/${CGID}/documents/match`, a, {});
+  const mis = (r.body.results || []).find(x => x.id === misId);
+  check('checked, it reads as a W-4 and is flagged as filed under the wrong type', mis && mis.match.readsAs === 'w4' && mis.match.filedAsDiffers === true, mis);
+  r = await call('PUT', `/api/payroll/admin/people/${CGID}/forms/w9/on-file`, a, w4Body);
+  check('and it cannot be used as a W-9', r.status === 409 && r.body.code === 'ON_FILE_READS_DIFFERENT', r.body);
+  r = await call('PUT', `/api/caregiver/documents/${misId}/kind`, a, { kind: 'w4' });
+  check('Change Type files it as a W-4', r.status === 200 && r.body.document.kind === 'w4' && r.body.document.match.filedAsDiffers === false, r.body);
+  r = await call('PUT', `/api/payroll/admin/people/${CGID}/forms/w4/on-file`, a, { documentId: misId, filingStatus: 'mfj', signedName: 'Probe Caregiver', signedOn: '2026-10-01' });
+  check('then it goes on file as their W-4', r.status === 200 && !(r.body.missing || []).includes('W-4'), r.body);
+  r = await call('PUT', `/api/caregiver/documents/${misId}/kind`, a, { kind: 'tb_test' });
+  check('a document on file cannot change type until it is taken off file', r.status === 409 && r.body.code === 'DOC_ON_FILE', r.body);
+  // Change Type before acceptance works too: a caregiver's own upload waits on review.
+  r = await call('POST', '/api/caregiver/documents', tok(CG), { kind: 'other', fileName: 'scan.pdf', fileDataB64: b64(blank('fw4-2026.pdf')) });
+  const pendingId = r.body.document && r.body.document.id;
+  r = await call('PUT', `/api/caregiver/documents/${pendingId}/kind`, a, { kind: 'w4' });
+  check('Change Type works before the office accepts it', r.status === 200 && r.body.document.kind === 'w4' && r.body.document.status === 'received', r.body);
+  // An SS card filed as "Something else" and never read: changing its type reads it.
+  r = await call('POST', '/api/caregiver/documents', a, { caregiverId: CGID, kind: 'other', fileName: 'card.pdf', fileDataB64: b64(await cardPdf()) });
+  const lateCard = r.body.document.id;
+  await sleep(1500);
+  { const all = STORE.get('caregiver_documents'); const row = all.find(d => d.id === lateCard); delete row.match; delete row.ssnRead; STORE.set('caregiver_documents', all); }
+  r = await call('PUT', `/api/caregiver/documents/${lateCard}/kind`, a, { kind: 'ssn_card' });
+  await sleep(2000);
+  r = await call('GET', `/api/caregiver/documents?caregiverId=${CGID}`, a);
+  const lc = (r.body.documents || []).find(d => d.id === lateCard);
+  check('changing an unread file to Social Security card reads it and its number', lc && lc.match && lc.ssnRead && lc.ssnRead.last4 === '6789', lc);
 
   // KEEP=<file>: stop here with the server up, for screenshots of this state.
   if (process.env.KEEP) {
@@ -194,7 +233,7 @@ const P2U = { id: 'cg_dof3', role: 'user', accountType: 'coordinator', email: 'd
 
   const acts = JSON.stringify(STORE.get('activity_log') || []);
   const hist = JSON.stringify(STORE.get('payroll_profiles')[PERSON.id].history || []);
-  check('the activity log and history never carry the number', !acts.includes('123456789') && !acts.includes('123-45-6789') && !acts.includes('987') && !hist.includes('123456789'));
+  check('the activity log and history never carry the number', !holds(acts, '123-45-6789', '987-65-4321') && !holds(hist, '123-45-6789'));
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

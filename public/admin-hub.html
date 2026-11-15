@@ -2176,6 +2176,28 @@
       }, [token, caregiverId]);
 
       React.useEffect(() => { load(); }, [load]);
+      // A file never checked is checked as soon as the section opens (owner
+      // report, 2026-11-15: a W-4 uploaded as "W-9" offered Use For W-9 because
+      // nobody had pressed Check Documents). Once per person per visit; the
+      // server reads only the files with no reading yet.
+      const autoChecked = React.useRef(null);
+      React.useEffect(() => {
+        if (!caregiverId || autoChecked.current === caregiverId || !docs.some(d => !d.match)) return;
+        autoChecked.current = caregiverId;
+        srFetch(token, `/api/caregiver/admin/caregivers/${encodeURIComponent(caregiverId)}/documents/match`, { method: 'POST', body: JSON.stringify({}) })
+          .then(r => { if (r && r.checked) load(); }).catch(() => {});
+      }, [docs, caregiverId]);
+      // Change a document's type, before or after it is accepted (owner,
+      // 2026-11-15). The office only; the server keeps the history.
+      const [typeEdit, setTypeEdit] = React.useState(null);   // { id, kind }
+      const saveType = async () => {
+        try {
+          await srFetch(token, `/api/caregiver/documents/${encodeURIComponent(typeEdit.id)}/kind`, { method: 'PUT', body: JSON.stringify({ kind: typeEdit.kind }) });
+          const label = (kinds.find(k => k.kind === typeEdit.kind) || {}).label || typeEdit.kind;
+          setTypeEdit(null); await load(); setMsg({ ok: true, text: `Filed as ${label}.` });
+          window.dispatchEvent(new Event('gfc-staff-docs-changed'));
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+      };
 
       const upload = async () => {
         if (!file) { setMsg({ ok: false, text: 'Choose a file first.' }); return; }
@@ -2368,9 +2390,21 @@
                     </div>
                     <button type="button" onClick={() => open(d)}
                       className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">Open</button>
+                    <button type="button" data-change-type={d.id} onClick={() => setTypeEdit(typeEdit && typeEdit.id === d.id ? null : { id: d.id, kind: d.kind })}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">Change Type</button>
                     <button type="button" onClick={() => remove(d)}
                       className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs">Remove</button>
                     </div>
+                    {typeEdit && typeEdit.id === d.id && (
+                      <div data-type-edit={d.id} className="flex flex-wrap items-center gap-2 mt-1.5 text-xs">
+                        <span className="text-gray-600">File this as</span>
+                        <select className="px-2 py-1 border border-gray-200 rounded-lg text-xs" value={typeEdit.kind} onChange={e => setTypeEdit({ ...typeEdit, kind: e.target.value })}>
+                          {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+                        </select>
+                        <button type="button" disabled={typeEdit.kind === d.kind} onClick={saveType} className="px-2 py-1 rounded-md text-white disabled:opacity-50" style={{ backgroundColor: '#033D50' }}>Save</button>
+                        <button type="button" className="underline text-gray-500" onClick={() => setTypeEdit(null)}>Cancel</button>
+                      </div>
+                    )}
                     {d.match && (
                       <div className={`text-[11px] border rounded-md px-2 py-1 mt-1.5 ${MATCH_CHIP[d.match.verdict] || ''}`}>{d.match.summary}
                         {d.match.filedAsDiffers && d.match.readsAs && kinds.some(k => k.kind === d.match.readsAs) && (
@@ -2392,6 +2426,10 @@
                       );
                       if (fm.signedInApp) return <div className="text-xs text-gray-500 mt-1.5">{fm.label} already signed in My GFC.</div>;
                       if (fm.done) return <div className="text-xs text-gray-500 mt-1.5">{fm.label} is already on file from another document.</div>;
+                      // Never offered on a file nobody has checked, or one that
+                      // reads as a different form (owner report, 2026-11-15).
+                      if (!d.match) return <div className="text-xs text-gray-500 mt-1.5">Not checked yet. Press Check Documents to confirm what this is before using it.</div>;
+                      if (d.match.filedAsDiffers) return <div className="text-xs text-red-700 mt-1.5">This reads as {d.match.readsAsLabel}, not {fm.label}. Change its type first.</div>;
                       return (
                         <button type="button" onClick={() => setPanel({ doc: d, form: d.onFileForm })}
                           className="mt-1.5 px-3 py-1.5 rounded-lg text-xs text-white" style={{ backgroundColor: '#033D50' }}>Use For {fm.label}</button>

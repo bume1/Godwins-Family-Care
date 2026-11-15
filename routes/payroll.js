@@ -860,6 +860,10 @@ module.exports = function createPayrollRoutes(deps) {
       if (!doc || String(doc.caregiver_id) !== String(user.id)) return res.status(404).json({ error: 'Choose one of their uploaded documents.', code: 'ON_FILE_DOCUMENT' });
       if (!pp.ON_FILE_KINDS[form].includes(doc.kind)) return res.status(409).json({ error: `That document is filed as something else. File it as a ${ON_FILE_LABEL[form]} on their Documents first.`, code: 'ON_FILE_KIND' });
       if (doc.status !== 'accepted') return res.status(409).json({ error: 'Accept the document on their Documents first.', code: 'ON_FILE_NOT_ACCEPTED' });
+      // A document nobody has checked is never put on file on its filed type
+      // alone (owner report, 2026-11-15: a W-4 uploaded as "W-9" was offered
+      // as a W-9). Check Documents first.
+      if (!doc.match) return res.status(409).json({ error: 'This document has not been checked yet. Press Check Documents first, so the app can confirm what it is.', code: 'ON_FILE_NOT_READ' });
       // The reads must not say it is a different form, unless the office has
       // looked and says they are wrong.
       const m = doc.match || null;

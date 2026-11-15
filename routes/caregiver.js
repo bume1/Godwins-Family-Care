@@ -1785,10 +1785,26 @@ module.exports = function createCaregiverRoutes(deps) {
       const i = rows.findIndex(r => r && r.id === req.params.id && !r.deleted_at);
       if (i === -1) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
       const was = rows[i].kind;
+      if (was === kind) return res.json({ document: publicCaregiverDoc(rows[i]) });
+      // A document already put on file in payroll is that form's copy: take it
+      // off file first, so a W-4 on file never silently becomes "a TB test".
+      const prof = ((await db.get('payroll_profiles')) || {})[String(rows[i].caregiver_id)] || {};
+      const usedBy = ['w4', 'g4', 'stateCert', 'w9', 'w8ben'].find(k => prof[k] && prof[k].onFile && prof[k].onFile.documentId === rows[i].id)
+        || (prof.i9 && prof.i9.onFile && prof.i9.onFile.documentId === rows[i].id ? 'i9' : null);
+      if (usedBy) return res.status(409).json({ error: 'This document is on file in payroll. Take it off file first, then change its type.', code: 'DOC_ON_FILE' });
       const m = rows[i].match ? { ...rows[i].match, ...staffDocMatch.verdict(rows[i].match.smart, rows[i].match.ai, kind) } : null;
       rows[i] = { ...rows[i], kind, match: m, kind_history: [...(rows[i].kind_history || []), { from: was, to: kind, at: new Date().toISOString(), by: req.user.name || req.user.email }] };
       await db.set('caregiver_documents', rows);
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_type_changed', 'caregiver_document', rows[i].id, { from: was, to: kind });
+      // Never read, or now a Social Security card (its number is read off it):
+      // read it now, after answering, exactly as an upload is.
+      const row = rows[i];
+      if (shouldMatch(kind) && row.drive_file_id && (!row.match || kind === 'ssn_card')) {
+        setImmediate(async () => {
+          try { const bytes = await drive.downloadFileBuffer(row.drive_file_id); await matchAndKeep(row.id, bytes, row.mime_type, kind, req.user); }
+          catch (e) { console.error('Staff document read after type change (non-fatal):', e.message); }
+        });
+      }
       res.json({ document: publicCaregiverDoc(rows[i]) });
     } catch (e) { console.error('Document type change error:', e); res.status(500).json({ error: 'Server error' }); }
   });
