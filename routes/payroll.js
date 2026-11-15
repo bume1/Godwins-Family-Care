@@ -996,11 +996,15 @@ module.exports = function createPayrollRoutes(deps) {
       const runs = await rows(RUNS);
       if (runs.some(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void')) return res.status(409).json({ error: 'This period is already paid. A correction goes on the next run as an adjustment.', code: 'TIMESHEET_PAID' });
       const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
-      const print = ts.fingerprint(gathered.byUser.get(String(user.id)) || []);
+      const items = gathered.byUser.get(String(user.id)) || [];
+      const print = ts.fingerprint(items);
       const all = await rows(TIMESHEETS);
       const id = ts.sheetId(b.schedule, sheetKey(b.schedule, period), user.id);
       const i = all.findIndex(x => x.id === id);
-      const next = ts.record(i === -1 ? null : all[i], { id, schedule: b.schedule, periodStart: period.start, periodEnd: period.end, custom: !!period.custom, userId: String(user.id), name: user.name || user.email }, 'office', n.value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
+      // The shifts approved and their minutes, so Billing invoices exactly the
+      // hours approved (invoiceRuns.approvalIndex, owner 2026-11-15).
+      const value = n.value.status === 'approved' ? { ...n.value, hours: ts.approvedHours(items) } : n.value;
+      const next = ts.record(i === -1 ? null : all[i], { id, schedule: b.schedule, periodStart: period.start, periodEnd: period.end, custom: !!period.custom, userId: String(user.id), name: user.name || user.email }, 'office', value, { at: nowIso(), by: req.user.name || req.user.email, byId: req.user.id, print });
       if (i === -1) all.push(next); else all[i] = next;
       await db.set(TIMESHEETS, all);
       await logActivity(req.user.id, req.user.name, `timesheet_${n.value.status}`, 'payroll_timesheet', id, { period: period.start, userId: String(user.id) });

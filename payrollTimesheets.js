@@ -82,6 +82,10 @@ function normalizeOffice(b) {
   return { value: { status: decision, note: note || null } };
 }
 
+// The hour items an approval covers, with their minutes. Billing reads these
+// (invoiceRuns.js): a shift is invoiced once its approved minutes match.
+const approvedHours = (items) => (items || []).filter(it => it && it.kind === 'hours' && it.ref).map(it => ({ ref: it.ref, minutes: Number(it.minutes) || 0 }));
+
 // Apply a change to a stored sheet (or a new one), keeping the history.
 function record(sheet, base, part, value, { at, by, byId, print }) {
   const s = sheet ? { ...sheet } : { ...base, history: [] };
@@ -99,4 +103,4 @@ function unapproved(workers, sheets, printsByUser) {
     .map(w => ({ userId: w.userId, name: w.name, status: statusOf(byUser.get(String(w.userId)), printsByUser.get(String(w.userId))) }));
 }
 
-module.exports = { EMPLOYEE_STATUSES, OFFICE_DECISIONS, sheetId, fingerprint, totals, lines, statusOf, normalizeEmployee, normalizeOffice, record, unapproved };
+module.exports = { EMPLOYEE_STATUSES, OFFICE_DECISIONS, sheetId, fingerprint, approvedHours, totals, lines, statusOf, normalizeEmployee, normalizeOffice, record, unapproved };

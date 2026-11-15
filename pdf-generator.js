@@ -2591,7 +2591,8 @@ async function generatePhcInvoicePDF(inv) {
       doc.on('error', reject);
       const NAVY = '#033D50', GOLD = '#C9A44A', CREAM = '#FAF7F2', INK = '#1a1a1a', MUTED = '#777777', RULE = '#BBBBBB';
       const L = 48, R = 612 - 48, W = R - L, MID = 312, BOTTOM = 715;
-      const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+      // A credit line from an invoice run is negative: "-$20.00", never "$-20.00".
+      const usd = (c) => `${Number(c) < 0 ? '-' : ''}$${(Math.abs(Number(c || 0)) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
       let y = 0;
       const room = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 48; } };
 
@@ -2651,10 +2652,12 @@ async function generatePhcInvoicePDF(inv) {
         y = Math.max(doc.y, y + 10) + 3.5;
       };
       if (inv.format === 'carrier') {
+        detail('Client', inv.clientName);
+        // A carrier billed once for the period (no daily maximum) gets the period too.
+        if (!inv.serviceDate && inv.periodLabel) detail('Service period', inv.periodLabel);
         (inv.shifts || []).forEach((s, i) => {
           room(100);
           if (i > 0) { y += 6; doc.moveTo(L, y - 4).lineTo(L + 220, y - 4).lineWidth(0.4).strokeColor(RULE).stroke(); }
-          if (i === 0) detail('Client', inv.clientName);
           detail('Caregiver', `${s.caregiverName}${s.levelLabel ? `, ${s.levelLabel}` : ''}`);
           detail('Service', s.service);
           detail('Date of service', s.date);
@@ -2690,8 +2693,11 @@ async function generatePhcInvoicePDF(inv) {
         const h = Math.max(rowMin, doc.font('Helvetica').fontSize(8.3).heightOfString(l.description, { width: cHours - 40 - L }) + pad * 2 - 2);
         if (y + h > BOTTOM) { doc.addPage(); y = 48; header(); }
         doc.fillColor(INK).font('Helvetica').fontSize(8.3).text(l.description, L + 8, y + pad, { width: cHours - 40 - L });
-        doc.text(Number(l.hours).toFixed(2), cHours - 30, y + pad, { width: 60, align: 'right' });
-        doc.text(`${usd(l.rateCents)}/hr`, cRate - 20, y + pad, { width: 70, align: 'right' });
+        // A fixed-amount line added in an invoice run has no hours and no rate.
+        if (l.hours !== null && l.hours !== undefined) {
+          doc.text(Number(l.hours).toFixed(2), cHours - 30, y + pad, { width: 60, align: 'right' });
+          doc.text(`${usd(l.rateCents)}/hr`, cRate - 20, y + pad, { width: 70, align: 'right' });
+        }
         doc.text(usd(l.amountCents), cAmt - 10, y + pad, { width: 72, align: 'right' });
         y += h;
         doc.moveTo(L, y).lineTo(R, y).lineWidth(0.4).strokeColor('#E2E2E2').stroke();

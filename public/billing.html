@@ -141,7 +141,7 @@ const api = {
 const { fmtTs, npiLabel, FormattedView, SignedNoteView, SvcEditor } = window.GFC_CLAIM_SHARED;
 window.GFC_CLAIM_SHARED.configure({ codeSearch: api.codeSearch });
 
-const usd = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
+const usd = (c) => `${Number(c) < 0 ? '-' : ''}$${(Math.abs(Number(c || 0)) / 100).toFixed(2)}`;
 const fmtDate = (iso) => {
   if (!iso) return '';
   try { return window.GFC_TIME ? window.GFC_TIME.fmtDate(iso) : new Date(iso).toLocaleDateString(); }
@@ -1023,81 +1023,316 @@ const HoursExport = () => {
   );
 };
 
-const GenerateInvoices = ({ data, reload }) => {
+// ---- Invoice runs (owner, 2026-11-15) ---------------------------------------
+// The billing side of a payroll run. A period's approved hours become a DRAFT:
+// change a shift's billed hours (with a reason), leave one off, add a line,
+// then Approve to make the invoices and Send to email each client's invoices
+// as one PDF. The server decides every number and which hours are approved.
+const runApi = {
+  list: () => call('/api/gfc/admin/billing-runs'),
+  get: (id) => call(`/api/gfc/admin/billing-runs/${enc(id)}`),
+  create: (body) => post('/api/gfc/admin/billing-runs', body),
+  edit: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/edits`, body),
+  addLine: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/lines`, body),
+  removeLine: (id, lineId) => call(`/api/gfc/admin/billing-runs/${enc(id)}/lines/${enc(lineId)}`, { method: 'DELETE' }),
+  includeWaiting: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/include-waiting`, body),
+  remove: (id) => call(`/api/gfc/admin/billing-runs/${enc(id)}`, { method: 'DELETE' }),
+  approve: (id) => post(`/api/gfc/admin/billing-runs/${enc(id)}/approve`),
+  send: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/send`, body)
+};
+const hrs = (m) => (Number(m || 0) / 60).toFixed(2);
+const APPROVAL_CHIP = {
+  approved: ['Approved', 'bg-emerald-50 text-emerald-700'], paid: ['Paid in payroll', 'bg-emerald-50 text-emerald-700'],
+  file: ['From file', 'bg-sky-50 text-sky-800'], changed: ['Changed since approved', 'bg-amber-50 text-amber-800'],
+  waiting: ['Timesheet not approved', 'bg-amber-50 text-amber-800']
+};
+// A spreadsheet is read here, in the browser, cell by cell as Excel stores it
+// (a date is a day number), and sent on as plain rows. The server checks every row.
+const SHEETJS = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js';
+let sheetJsLoading = null;
+const loadSheetJs = () => window.XLSX ? Promise.resolve(window.XLSX) : (sheetJsLoading = sheetJsLoading || new Promise((ok, bad) => {
+  const el = document.createElement('script'); el.src = SHEETJS;
+  el.onload = () => ok(window.XLSX); el.onerror = () => { sheetJsLoading = null; bad(new Error('The spreadsheet reader could not load.')); };
+  document.head.appendChild(el);
+}));
+const csvCell = (v) => { const t = String(v === null || v === undefined ? '' : v); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+const readHoursFile = async (f) => {
+  if (/\.(xlsx|xls)$/i.test(f.name)) {
+    const XLSX = await loadSheetJs();
+    const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+    return rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+  }
+  return f.text();
+};
+const downloadTemplate = () => {
+  const href = URL.createObjectURL(new Blob(['Caregiver,Client,Date,Start,End,Hours\r\n'], { type: 'text/csv' }));
+  const a = document.createElement('a'); a.href = href; a.download = 'hours-template.csv'; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 60000);
+};
+const openRunPdf = async (runId, clientId) => {
+  const w = window.open('', '_blank');
+  try {
+    const res = await fetch(`${API}/api/gfc/admin/billing-runs/${enc(runId)}/clients/${enc(clientId)}/pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) { let j = {}; try { j = await res.json(); } catch (e) { /* not json */ } throw new Error(j.error || `Could not open the PDF (${res.status})`); }
+    const url = URL.createObjectURL(await res.blob());
+    if (w) w.location.href = url; else window.location.href = url;
+  } catch (e) { if (w) w.close(); throw e; }
+};
+const runStatusChip = (r) => r.status === 'draft' ? ['DRAFT', 'bg-stone-100 text-stone-600']
+  : r.clientCount && r.sentCount >= r.clientCount ? ['APPROVED · ALL SENT', 'bg-emerald-50 text-emerald-700']
+  : r.sentCount ? [`APPROVED · ${r.sentCount} OF ${r.clientCount || '?'} CLIENTS SENT`, 'bg-amber-50 text-amber-800'] : ['APPROVED · NOT SENT', 'bg-amber-50 text-amber-800'];
+
+const NewRunForm = ({ data, onMade }) => {
   const [source, setSource] = useState('app');
   const [range, setRange] = useState(() => (data.lastPeriod ? { ...data.lastPeriod } : { from: '', to: '' }));
-  const [file, setFile] = useState(null);   // { name, text }
-  const [preview, setPreview] = useState(null);
-  const [rowErrors, setRowErrors] = useState(null);
-  const [err, setErr] = useState('');
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState('');
-  const body = () => ({ source, from: range.from, to: range.to, ...(source === 'import' && file ? { csv: file.text, fileName: file.name } : {}) });
-  const reset = () => { setPreview(null); setRowErrors(null); setErr(''); setMsg(''); };
-  const run = (key, fn) => { setBusy(key); setErr(''); setMsg(''); setRowErrors(null);
-    return fn().catch(e => { setErr(e.message); if (e.data && e.data.rowErrors) setRowErrors(e.data.rowErrors); return null; }).finally(() => setBusy('')); };
+  const [file, setFile] = useState(null);   // { name, csv }
+  const [err, setErr] = useState(''); const [rowErrors, setRowErrors] = useState(null); const [busy, setBusy] = useState(false);
   const ready = range.from && range.to && (source === 'app' || file);
+  const go = () => {
+    setBusy(true); setErr(''); setRowErrors(null);
+    runApi.create({ source, from: range.from, to: range.to, ...(source === 'import' ? { csv: file.csv, fileName: file.name } : {}) })
+      .then(onMade).catch(e => { setErr(e.message); if (e.data && e.data.rowErrors) setRowErrors(e.data.rowErrors); }).finally(() => setBusy(false));
+  };
   return (
-    <div className="card">
-      <div className="card-h"><h2>Generate Invoices</h2></div>
-      <div className="p-4 grid gap-4 text-[13.5px]">
-        <p className="text-stone-500">Private home care only. Hours are billed as worked, with the client's daily minimum as its own line. LTC carriers get one invoice per client per date of service; families get one for the period.</p>
-        <div className="flex flex-wrap gap-2">
-          {[['app', 'Hours in the app'], ['import', 'Import an hours file']].map(([k, l]) => (
-            <button key={k} onClick={() => { setSource(k); reset(); }}
-              className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border ${source === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
-          ))}
-        </div>
-        {source === 'import' && (
-          <Field label="Hours file">
-            <p className="text-[12.5px] text-stone-500 mb-1.5">The payroll export from the Scheduling page, as downloaded or edited. Every row is checked; one bad row stops the import and is named.</p>
-            <input type="file" accept=".csv,text/csv" onChange={e => {
-              reset();
+    <div className="grid gap-3 text-[13.5px]">
+      <div className="flex flex-wrap gap-2">
+        {[['app', 'Approved hours in the app'], ['import', 'Upload a spreadsheet']].map(([k, l]) => (
+          <button key={k} onClick={() => { setSource(k); setErr(''); setRowErrors(null); }}
+            className={`px-3.5 py-1.5 rounded-full text-[13px] font-semibold border ${source === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+        ))}
+      </div>
+      {source === 'app'
+        ? <p className="text-[12.5px] text-stone-500">Completed home care shifts whose caregiver's timesheet is approved, or that payroll has paid. Shifts still waiting on approval are listed in the draft, not billed.</p>
+        : <Field label="Hours spreadsheet">
+            <p className="text-[12.5px] text-stone-500 mb-1.5">An Excel (.xlsx) or CSV file with columns Caregiver, Client, Date, Start, End and Hours, or the Client Hours Export. Names must match the app exactly. Every row is checked; one bad row stops the upload and is named. <button className="underline text-primary" onClick={downloadTemplate}>Download a blank template</button></p>
+            <input type="file" accept=".csv,.xlsx,.xls,text/csv" onChange={e => {
+              setErr(''); setRowErrors(null);
               const f = e.target.files && e.target.files[0];
               if (!f) { setFile(null); return; }
-              f.text().then(text => setFile({ name: f.name, text })).catch(() => setErr('That file could not be read.'));
+              readHoursFile(f).then(csv => setFile({ name: f.name, csv })).catch(er => { setFile(null); setErr(er.message || 'That file could not be read.'); });
             }} />
-          </Field>
-        )}
-        <Field label="Dates of service">
-          <div className="flex flex-wrap items-center gap-2">
-            <input className="inp !w-44" type="date" value={range.from} onChange={e => { setRange({ ...range, from: e.target.value }); reset(); }} />
-            <span>to</span>
-            <input className="inp !w-44" type="date" value={range.to} onChange={e => { setRange({ ...range, to: e.target.value }); reset(); }} />
-            <button className="btn ghost" disabled={!ready || busy === 'preview'} onClick={() => run('preview', () => post('/api/gfc/admin/billing-invoices/preview', body())).then(r => r && setPreview(r))}>Preview</button>
-          </div>
-          {data.lastPeriod && <p className="text-[12.5px] text-stone-500 mt-1">Starts on the last finished two-week period, Monday through the second Sunday.</p>}
-        </Field>
-        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}
-          {rowErrors && <ul className="list-disc pl-5 mt-2 text-[12.5px]">{rowErrors.map((r, k) => <li key={k}>Row {r.line}: {r.message}</li>)}</ul>}
-        </div>}
+          </Field>}
+      <Field label="Dates of service">
+        <div className="flex flex-wrap items-center gap-2">
+          <input className="inp !w-44" type="date" value={range.from} onChange={e => setRange({ ...range, from: e.target.value })} />
+          <span>to</span>
+          <input className="inp !w-44" type="date" value={range.to} onChange={e => setRange({ ...range, to: e.target.value })} />
+          <button className="btn" disabled={!ready || busy} onClick={go}>Start Draft</button>
+        </div>
+        {data.lastPeriod && <p className="text-[12.5px] text-stone-500 mt-1">Starts on the last finished two-week period, Monday through the second Sunday.</p>}
+      </Field>
+      {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}
+        {rowErrors && <ul className="list-disc pl-5 mt-2 text-[12.5px]">{rowErrors.map((r, k) => <li key={k}>Row {r.line}: {r.message}</li>)}</ul>}
+      </div>}
+    </div>
+  );
+};
+
+const AddLineForm = ({ run, clients, onDone }) => {
+  const blank = { clientId: '', date: run.from, description: '', kind: 'hours', hours: '', amount: '', reason: '' };
+  const [f, setF] = useState(blank); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  return (
+    <div className="grid gap-2 max-w-xl text-[13.5px] border border-stone-200 rounded-lg p-3">
+      <span className="lblu">Add a line</span>
+      <select className="inp" value={f.clientId} onChange={set('clientId')}>
+        <option value="">-- Client --</option>
+        {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+      <div className="flex flex-wrap gap-2 items-center">
+        <input className="inp !w-44" type="date" min={run.from} max={run.to} value={f.date} onChange={set('date')} />
+        {[['hours', 'Hours at the client\'s rate'], ['amount', 'Fixed amount']].map(([k, l]) => (
+          <button key={k} onClick={() => setF({ ...f, kind: k })} className={`px-3 py-1 rounded-full text-[12.5px] font-semibold border ${f.kind === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{l}</button>
+        ))}
+        {f.kind === 'hours'
+          ? <input className="inp !w-28" placeholder="Hours, e.g. 2:30" value={f.hours} onChange={set('hours')} />
+          : <input className="inp !w-32" placeholder="$ (- for credit)" value={f.amount} onChange={set('amount')} />}
+      </div>
+      <input className="inp" placeholder="What the line says on the invoice, e.g. Personal care services" value={f.description} onChange={set('description')} />
+      <input className="inp" placeholder="Why it is added (office record only)" value={f.reason} onChange={set('reason')} />
+      {err && <div className="text-red-700 text-[13px]">{err}</div>}
+      <div className="flex gap-2">
+        <button className="btn" disabled={busy} onClick={() => { setBusy(true); setErr(''); runApi.addLine(run.id, f).then(r => { setF(blank); onDone(r); }).catch(e => setErr(e.message)).finally(() => setBusy(false)); }}>Add Line</button>
+        <button className="btn ghost" onClick={() => onDone(null)}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
+const RunDetail = ({ id, data, onBack, onChanged }) => {
+  const [v, setV] = useState(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState(''); const [busy, setBusy] = useState('');
+  const [adding, setAdding] = useState(false);
+  const load = useCallback(() => { runApi.get(id).then(setV).catch(e => setErr(e.message)); }, [id]);
+  useEffect(() => { load(); }, [load]);
+  const act = (key, fn, done) => { setBusy(key); setErr(''); setMsg('');
+    return fn().then(r => { if (r) { if (r.run) setV(r); if (done) done(r); onChanged(); } }).catch(e => setErr(e.message)).finally(() => setBusy('')); };
+  if (!v) return <div className="card p-5">{err ? <div className="text-red-700">{err}</div> : <p className="text-stone-500">Loading…</p>}</div>;
+  const run = v.run;
+  const draft = run.status === 'draft';
+  const clients = (data.clients || []).filter(c => String(c.serviceLine || '').toUpperCase() !== 'IHPC');
+  const editShift = (s) => {
+    const h = window.prompt(`Hours to bill for ${s.caregiverName} on ${s.date} (clocked ${hrs(s.clockedMinutes)}). Use 4.5 or 4:30.`, hrs(s.billedMinutes));
+    if (h === null) return;
+    const reason = window.prompt('Why? This stays in the office record, never on the invoice.');
+    if (!reason || !reason.trim()) return;
+    act(`e${s.sourceKey}`, () => runApi.edit(run.id, { sourceKey: s.sourceKey, hours: h, reason }));
+  };
+  const leaveOff = (s) => {
+    const reason = window.prompt(`Leave ${s.caregiverName}'s shift on ${s.date} off this run? Say why.`);
+    if (reason && reason.trim()) act(`e${s.sourceKey}`, () => runApi.edit(run.id, { sourceKey: s.sourceKey, remove: true, reason }));
+  };
+  const byClient = new Map();
+  for (const s of v.shifts || []) byClient.set(s.clientName, [...(byClient.get(s.clientName) || []), s]);
+  const waiting = (v.shifts || []).filter(s => s.waiting);
+  const included = draft && run.includeWaiting;
+  const [label, chip] = runStatusChip(run);
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h2>Invoice Run · {fmtDate(`${run.from}T12:00:00Z`)} to {fmtDate(`${run.to}T12:00:00Z`)}</h2>
+        <span className="flex items-center gap-2"><span className={`chip ${chip}`}>{label}</span><button className="btn ghost !py-1.5" onClick={onBack}>All Runs</button></span>
+      </div>
+      <div className="p-4 grid gap-4 text-[13.5px]">
+        <p className="text-stone-500">{run.source === 'import' ? `Hours from ${run.fileName || 'an uploaded file'}.` : 'Hours from the app.'} Started by {run.createdBy && run.createdBy.name}{run.approvedBy ? `; approved by ${run.approvedBy.name} ${fmtDate(run.approvedAt)}` : ''}.</p>
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
         {msg && <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 p-3">{msg}</div>}
-        {preview && (
-          <div className="border border-stone-200 rounded-lg p-3">
-            {preview.invoices.length === 0 && <p className="text-stone-500">Nothing new to invoice in those dates.</p>}
-            {preview.invoices.map(i => (
-              <div key={i.displayNumber} className="py-2 border-b border-stone-100">
-                <div className="flex justify-between gap-3"><span><b className="text-primary">{i.clientName}</b> · {i.displayNumber} · {i.format === 'carrier' ? `to ${i.billTo}` : `to ${i.billTo} (family)`}</span><b>{i.total}</b></div>
-                {i.lines.map((l, k) => <div key={k} className={`flex justify-between text-[12.5px] ${l.minimum ? 'text-amber-800' : 'text-stone-500'}`}><span>{l.description}</span><span>{Number(l.hours).toFixed(2)} hrs · {l.amount}</span></div>)}
+        {v.error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{v.error}</div>}
+
+        {draft && waiting.length > 0 && !included && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3">
+            <b>{waiting.length} shift{waiting.length === 1 ? ' is' : 's are'} not billed yet:</b> the caregiver's timesheet is not approved for {waiting.length === 1 ? 'it' : 'them'}. Approve the timesheet under Payroll, then Rebuild From Hours, or bill them now.
+            <div className="mt-2"><button className="btn ghost !py-1.5" disabled={!!busy} onClick={() => { const r = window.prompt('Why bill these before their timesheet is approved?'); if (r && r.trim()) act('inc', () => runApi.includeWaiting(run.id, { reason: r })); }}>Bill Them Anyway</button></div>
+          </div>
+        )}
+        {included && <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3">Billing shifts whose timesheet is not approved: "{run.includeWaiting.reason}" ({run.includeWaiting.by && run.includeWaiting.by.name}). <button className="underline" onClick={() => act('inc', () => runApi.includeWaiting(run.id, { include: false }))}>Leave them off again</button></div>}
+        {draft && v.skipped && v.skipped.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3 text-[12.5px]"><b>Not invoiced:</b>
+            <ul className="list-disc pl-5">{v.skipped.map((x, k) => <li key={k}>{x.clientName}: {x.reason}</li>)}</ul></div>
+        )}
+
+        {draft && (
+          <div>
+            <span className="lblu block mb-2">Shifts</span>
+            {byClient.size === 0 && <p className="text-stone-500">No completed home care shifts in these dates.</p>}
+            {[...byClient.entries()].map(([name, list]) => (
+              <div key={name} className="mb-3">
+                <b className="text-primary">{name}</b>
+                <div className="overflow-x-auto"><table className="w-full text-[12.5px] mt-1">
+                  <thead><tr className="text-left text-stone-500"><th className="py-1 pr-3">Date</th><th className="pr-3">Caregiver</th><th className="pr-3">Clocked</th><th className="pr-3 text-right">Clocked hrs</th><th className="pr-3 text-right">Billed hrs</th><th className="pr-3">Timesheet</th><th></th></tr></thead>
+                  <tbody>{list.map(s => {
+                    const [al, ac] = APPROVAL_CHIP[s.approval] || ['', ''];
+                    return (
+                      <tr key={s.sourceKey} className={`border-t border-stone-100 ${s.invoiced || (s.edit && s.edit.remove) || s.waiting ? 'text-stone-400' : ''}`}>
+                        <td className="py-1.5 pr-3 whitespace-nowrap">{s.date}</td>
+                        <td className="pr-3">{s.caregiverName}</td>
+                        <td className="pr-3 whitespace-nowrap">{s.start} to {s.end}</td>
+                        <td className="pr-3 text-right">{hrs(s.clockedMinutes)}</td>
+                        <td className="pr-3 text-right">{s.invoiced ? '—' : s.edit && s.edit.remove ? 'Left off' : <b className={s.edit ? 'text-amber-800' : ''}>{hrs(s.billedMinutes)}</b>}
+                          {s.edit && <div className="text-[11px] text-stone-500">{s.edit.reason}</div>}</td>
+                        <td className="pr-3">{s.invoiced ? <span className="chip bg-stone-100 text-stone-600">Already invoiced</span> : <span className={`chip ${ac}`}>{al}</span>}</td>
+                        <td className="text-right whitespace-nowrap">{!s.invoiced && (s.edit
+                          ? <button className="btn ghost !py-1 !px-2.5" disabled={!!busy} onClick={() => act(`e${s.sourceKey}`, () => runApi.edit(run.id, { sourceKey: s.sourceKey, clear: true }))}>Undo</button>
+                          : <span className="inline-flex gap-1.5"><button className="btn ghost !py-1 !px-2.5" disabled={!!busy} onClick={() => editShift(s)}>Edit Hours</button><button className="btn ghost !py-1 !px-2.5" disabled={!!busy} onClick={() => leaveOff(s)}>Leave Off</button></span>)}</td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table></div>
               </div>
             ))}
-            {preview.skipped.length > 0 && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3 mt-3 text-[12.5px]">
-                <b>Not invoiced:</b>
-                <ul className="list-disc pl-5">{preview.skipped.map((s, k) => <li key={k}>{s.clientName}: {s.reason}</li>)}</ul>
+          </div>
+        )}
+
+        {draft && (
+          <div>
+            <span className="lblu block mb-2">Added lines</span>
+            {(run.adjustments || []).length === 0 && <p className="text-stone-500 mb-2">None.</p>}
+            {(run.adjustments || []).map(a => (
+              <div key={a.id} className="flex flex-wrap justify-between gap-2 py-1.5 border-b border-stone-100">
+                <span>{(clients.find(c => c.id === a.clientId) || {}).name || 'Client'} · {a.date} · {a.description} · {a.minutes ? `${hrs(a.minutes)} hrs` : usd(a.amountCents)}<span className="text-stone-500"> ({a.reason})</span></span>
+                <button className="btn ghost !py-1 !px-2.5" disabled={!!busy} onClick={() => act(`l${a.id}`, () => runApi.removeLine(run.id, a.id))}>Remove</button>
               </div>
-            )}
-            {preview.alreadyInvoiced > 0 && <p className="text-[12.5px] text-stone-500 mt-2">{preview.alreadyInvoiced} shift{preview.alreadyInvoiced === 1 ? ' is' : 's are'} already on an invoice and left off.</p>}
-            {preview.invoices.length > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
-                <b>{preview.invoices.length} invoice{preview.invoices.length === 1 ? '' : 's'} · {usd(preview.totalCents)}</b>
-                <button className="btn" disabled={busy === 'create'} onClick={() => run('create', () => post('/api/gfc/admin/billing-invoices', body())).then(r => {
-                  if (r) { setPreview(null); setMsg(`${r.created.length} draft invoice${r.created.length === 1 ? '' : 's'} made. Check each under Statements, then send.`); reload(); }
-                })}>Create Draft Invoices</button>
+            ))}
+            {adding ? <AddLineForm run={run} clients={clients} onDone={(r) => { setAdding(false); if (r) { setV(r); onChanged(); } }} />
+              : <button className="btn ghost mt-2" onClick={() => setAdding(true)}>Add Line</button>}
+          </div>
+        )}
+
+        {draft && (
+          <div>
+            <span className="lblu block mb-2">Invoices this run will make</span>
+            {(v.invoices || []).length === 0 && <p className="text-stone-500">Nothing to invoice yet.</p>}
+            {(v.invoices || []).map(i => (
+              <div key={i.displayNumber} className="py-2 border-b border-stone-100">
+                <div className="flex justify-between gap-3"><span><b className="text-primary">{i.clientName}</b> · {i.displayNumber} · to {i.billTo}{i.format === 'carrier' ? (i.invoiceMode === 'period' ? ' (one invoice for the period)' : ' (one invoice per day)') : ' (family)'}</span><b>{i.total}</b></div>
+                {i.lines.map((l, k) => <div key={k} className={`flex justify-between text-[12.5px] ${l.kind === 'minimum' || l.edited ? 'text-amber-800' : l.kind === 'adjustment' ? 'text-sky-800' : 'text-stone-500'}`}><span>{l.description}{l.edited ? ' (hours changed)' : ''}</span><span>{l.hours !== null && l.hours !== undefined ? `${Number(l.hours).toFixed(2)} hrs · ` : ''}{l.amount}</span></div>)}
               </div>
+            ))}
+            {v.alreadyInvoiced > 0 && <p className="text-[12.5px] text-stone-500 mt-2">{v.alreadyInvoiced} shift{v.alreadyInvoiced === 1 ? ' is' : 's are'} already on an invoice and left off.</p>}
+            <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
+              <b>{(v.invoices || []).length} invoice{(v.invoices || []).length === 1 ? '' : 's'} · {usd(v.totalCents)}</b>
+              <span className="flex flex-wrap gap-2">
+                <button className="btn ghost" disabled={!!busy} onClick={() => { setErr(''); load(); }}>Rebuild From Hours</button>
+                <button className="btn ghost" disabled={!!busy} onClick={() => { if (window.confirm('Delete this draft? Nothing has been invoiced from it.')) act('del', () => runApi.remove(run.id), () => onBack()); }}>Delete Draft</button>
+                <button className="btn" disabled={!!busy || !(v.invoices || []).length} onClick={() => { if (window.confirm(`Approve? This makes ${(v.invoices || []).length} invoice${(v.invoices || []).length === 1 ? '' : 's'} totaling ${usd(v.totalCents)}. Nothing is sent until you press Send.`)) act('approve', () => runApi.approve(run.id), () => setMsg('Approved. The invoices are made. Check the PDFs, then send.')); }}>Approve</button>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {!draft && (
+          <div>
+            <span className="lblu block mb-2">Send</span>
+            <p className="text-[12.5px] text-stone-500 mb-2">Each client's invoices go as one PDF from the office mailbox, with the office copied. A carrier gets them at its claims email. A family gets them at the Bill To email, and the client and their POA are told a statement is ready (no amount in that email). Mark Sent is for invoices you mail or fax yourself.</p>
+            {(v.send || []).map(p => (
+              <div key={p.clientId} className="flex flex-wrap justify-between gap-3 py-2 border-b border-stone-100">
+                <div><b className="text-primary">{p.clientName}</b> · to {p.billTo}{p.format === 'carrier' ? ' (carrier)' : ' (family)'} · {p.invoiceIds.length} invoice{p.invoiceIds.length === 1 ? '' : 's'}
+                  <div className="text-[12.5px] text-stone-500">{p.sent ? 'Sent.' : p.blocked ? p.blocked : p.toEmail ? `Emails to ${p.toEmail}.` : 'No Bill To email: the client and POA are told in the portal.'}</div></div>
+                <span className="flex flex-wrap gap-2">
+                  <button className="btn ghost !py-1.5" onClick={() => openRunPdf(run.id, p.clientId).catch(e => setErr(e.message))}>View PDF</button>
+                  {!p.sent && !p.blocked && <button className="btn !py-1.5" disabled={!!busy} onClick={() => act(`s${p.clientId}`, () => runApi.send(run.id, { clientId: p.clientId }), (r) => { const x = (r.results || [])[0]; setMsg(x && x.sent ? `Sent for ${x.clientName}.` : ''); if (x && !x.sent) setErr(x.reason); })}>Send</button>}
+                  {!p.sent && <button className="btn ghost !py-1.5" disabled={!!busy} onClick={() => { if (window.confirm(`Mark ${p.clientName}'s invoices sent without emailing them?`)) act(`m${p.clientId}`, () => runApi.send(run.id, { clientId: p.clientId, manual: true })); }}>Mark Sent</button>}
+                </span>
+              </div>
+            ))}
+            {(v.send || []).some(p => !p.sent && !p.blocked) && (
+              <button className="btn mt-3" disabled={!!busy} onClick={() => { if (window.confirm('Send every client\'s invoices that are not sent yet?')) act('all', () => runApi.send(run.id, {}), (r) => {
+                const bad = (r.results || []).filter(x => !x.sent);
+                setMsg(`${(r.results || []).filter(x => x.sent).length} sent.`);
+                if (bad.length) setErr(bad.map(x => `${x.clientName}: ${x.reason}`).join(' '));
+              }); }}>Send All</button>
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+const InvoiceRuns = ({ data, reload }) => {
+  const [runs, setRuns] = useState(null); const [open, setOpen] = useState(null); const [err, setErr] = useState('');
+  const load = useCallback(() => { runApi.list().then(r => setRuns(r.runs)).catch(e => setErr(e.message)); }, []);
+  useEffect(() => { load(); }, [load]);
+  const changed = () => { load(); reload(); };
+  if (open) return <RunDetail id={open} data={data} onBack={() => { setOpen(null); load(); }} onChanged={changed} />;
+  return (
+    <div className="card">
+      <div className="card-h"><h2>Invoice Runs</h2></div>
+      <div className="p-4 grid gap-4 text-[13.5px]">
+        <p className="text-stone-500">Private home care only. A run turns a period's approved hours into that period's invoices: billed as worked, money figured from minutes, the client's daily minimum as its own line. An LTC carrier gets one invoice per date of service or one for the period, as set on the carrier; a family gets one for the period.</p>
+        <NewRunForm data={data} onMade={(r) => { setOpen(r.run.id); load(); }} />
+        {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
+        <div>
+          <span className="lblu block mb-1">Runs</span>
+          {runs && runs.length === 0 && <p className="text-stone-500">No invoice runs yet.</p>}
+          {(runs || []).map(r => { const [l, c] = runStatusChip(r); return (
+            <button key={r.id} onClick={() => setOpen(r.id)} className="cw-row w-full text-left flex flex-wrap justify-between gap-2 py-2.5 px-2 border-b border-stone-100">
+              <span><b className="text-primary">{fmtDate(`${r.from}T12:00:00Z`)} to {fmtDate(`${r.to}T12:00:00Z`)}</b> · {r.source === 'import' ? 'from a spreadsheet' : 'app hours'}</span>
+              <span className="flex items-center gap-2">{r.status !== 'draft' && <b>{usd(r.totalCents)}</b>}<span className={`chip ${c}`}>{l}</span></span>
+            </button>
+          ); })}
+        </div>
       </div>
     </div>
   );
@@ -1189,7 +1424,7 @@ const ClientBilling = ({ data, reload }) => {
 };
 
 // ---- The office's LTC carriers ----------------------------------------------
-const EMPTY_PAYER = { name: '', attn: '', addressLines: '', claimsEmail: '', phone: '' };
+const EMPTY_PAYER = { name: '', attn: '', addressLines: '', claimsEmail: '', phone: '', invoiceMode: 'daily' };
 const PayersCard = ({ payers, reload }) => {
   const [form, setForm] = useState(EMPTY_PAYER);
   const [editing, setEditing] = useState(null);
@@ -1209,7 +1444,7 @@ const PayersCard = ({ payers, reload }) => {
         {live.length === 0 && <p className="text-stone-500">No carriers yet.</p>}
         {live.map(p => (
           <div key={p.id} className="flex flex-wrap justify-between gap-2 py-2 border-b border-stone-100">
-            <div><b className="text-primary">{p.name}</b>{p.attn ? ` · Attn: ${p.attn}` : ''}<div className="text-[12.5px] text-stone-500">{(p.addressLines || []).join(', ')}{p.claimsEmail ? ` · ${p.claimsEmail}` : ''}</div></div>
+            <div><b className="text-primary">{p.name}</b>{p.attn ? ` · Attn: ${p.attn}` : ''}<div className="text-[12.5px] text-stone-500">{(p.addressLines || []).join(', ')}{p.claimsEmail ? ` · ${p.claimsEmail}` : ' · no claims email'} · {p.invoiceMode === 'period' ? 'one invoice per period' : 'one invoice per day'}</div></div>
             <div className="flex gap-2">
               <button className="btn ghost !py-1.5" onClick={() => { setEditing(p.id); setForm({ ...EMPTY_PAYER, ...p, addressLines: (p.addressLines || []).join('\n') }); }}>Edit</button>
               <button className="btn ghost !py-1.5" onClick={() => { if (window.confirm(`Retire ${p.name}? Invoices already made keep their copy.`)) call(`/api/gfc/admin/billing-payers/${enc(p.id)}`, { method: 'PUT', body: JSON.stringify({ retired: true }) }).then(reload).catch(e => setErr(e.message)); }}>Retire</button>
@@ -1221,7 +1456,13 @@ const PayersCard = ({ payers, reload }) => {
           <input className="inp" placeholder="Carrier name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           <input className="inp" placeholder="Attn (e.g. Claims Department)" value={form.attn} onChange={e => setForm({ ...form, attn: e.target.value })} />
           <textarea className="inp" rows={3} placeholder="Mailing address, one line each" value={form.addressLines} onChange={e => setForm({ ...form, addressLines: e.target.value })} />
-          <input className="inp" placeholder="Claims email" value={form.claimsEmail} onChange={e => setForm({ ...form, claimsEmail: e.target.value })} />
+          <input className="inp" placeholder="Claims email (invoices are emailed here)" value={form.claimsEmail} onChange={e => setForm({ ...form, claimsEmail: e.target.value })} />
+          <label className="text-[12.5px] text-stone-600">How this carrier is billed
+            <select className="inp mt-1" value={form.invoiceMode || 'daily'} onChange={e => setForm({ ...form, invoiceMode: e.target.value })}>
+              <option value="daily">Bill each day: one invoice per date of service (a daily maximum)</option>
+              <option value="period">One invoice for the whole period</option>
+            </select>
+          </label>
           {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
           <div className="flex gap-2">
             <button className="btn" disabled={busy || !form.name.trim()} onClick={save}>{editing ? 'Save Carrier' : 'Add Carrier'}</button>
@@ -1382,7 +1623,7 @@ const App = () => {
         {!data && !err && <p className="text-sm text-stone-500 py-8 text-center">Loading…</p>}
         {data && tab === 'claims' && <ClaimsView names={names} initialClaim={initialClaim} isAdmin={isAdmin} />}
         {data && tab === 'statements' && <Statements data={data} reload={load} />}
-        {data && tab === 'new' && <div className="grid gap-4"><GenerateInvoices data={data} reload={load} />{isAdmin && <HoursExport />}<ClientBilling data={data} reload={load} /></div>}
+        {data && tab === 'new' && <div className="grid gap-4"><InvoiceRuns data={data} reload={load} />{isAdmin && <HoursExport />}<ClientBilling data={data} reload={load} /></div>}
         {data && tab === 'ime' && <ImeBilling />}
         {data && tab === 'settings' && <div className="max-w-3xl"><BillingSettings /><PayersCard payers={data.payers} reload={load} /></div>}
       </div>
