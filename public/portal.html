@@ -17,6 +17,10 @@
        outlives a shim. See public/gfc-time.js. -->
   <script src="/gfc-time.js"></script>
   <script src="/note-format.js"></script>
+  <!-- The formatted reader's own styles, so a client announcement written with
+       formatting is styled wherever it sits on this page. The portal's own
+       `.gfc .fmt` rules are more specific and still win inside the shell. -->
+  <script type="text/babel" src="/components/formatted-field.jsx"></script>
   <script src="/patient-files.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
@@ -1175,7 +1179,13 @@
                         {ann.priority && (
                           <p className="text-xs text-red-600 mt-1 italic">This is a priority announcement. Please review carefully.</p>
                         )}
-                        <p className="text-gray-600 mt-2 whitespace-pre-wrap">{ann.content}</p>
+                        {/* Written in the formatted editor (2026-11-15) → the six
+                            shapes, through the renderer that escapes before it
+                            formats. Anything else is plain and keeps pre-wrap,
+                            so an older announcement is never reinterpreted. */}
+                        {ann.body_format === 'markup' && window.GFC_NOTE_FORMAT
+                          ? <div className="fmt text-gray-600 mt-2" dangerouslySetInnerHTML={{ __html: window.GFC_NOTE_FORMAT.renderHtml(ann.content || '') }} />
+                          : <p className="text-gray-600 mt-2 whitespace-pre-wrap">{ann.content}</p>}
                         {ann.attachmentUrl && (
                           <a
                             href={ann.attachmentUrl}
@@ -8183,7 +8193,20 @@
         if (isAdmin) {
           if (activePage === 'home') return <AdminHomePage token={token} />;
           if (activePage === 'admin_settings') return <AdminSettingsPage token={token} settings={settings} onSettingsChange={handleSettingsChange} />;
-          if (activePage === 'admin_announcements') return <AdminAnnouncementsPage token={token} />;
+          // Client announcements are posted in My GFC → Announcements, beside
+          // the team's (owner, 2026-11-15). One screen, two audiences, each
+          // saying who it reaches. A bookmark to this page still lands here
+          // and is told where to go rather than failing.
+          if (activePage === 'admin_announcements') return (
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="font-semibold text-gray-800 mb-1">Announcements</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                Announcements are posted in My GFC → Announcements — the team's and your clients' in one place,
+                each saying who it reaches. They are written with formatting there, the same as a clinical note.
+              </p>
+              <a href="/my#announcements" className="inline-block px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium">Open Announcements</a>
+            </div>
+          );
           if (activePage === 'admin_documents') return <AdminDocumentsPage token={token} />;
           if (activePage === 'admin_clients') return <AdminClientsPage token={token} />;
         }

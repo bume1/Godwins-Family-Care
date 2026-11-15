@@ -18,6 +18,9 @@
 'use strict';
 
 const express = require('express');
+// Posting to CLIENTS is the Super Admin's alone, and this file must compare
+// against the same value server.js's requireClientPortalAdmin does.
+const config = require('../config');
 const accountTypes = require('../accountTypes');
 const { contentDisposition } = require('../contentDisposition');
 const crypto = require('crypto');
@@ -277,6 +280,11 @@ module.exports = function createStaffPortalRoutes(deps) {
       id: req.user.id, name: req.user.name || req.user.email, email: req.user.email || null,
       type, typeLabel: TYPE_LABELS[type],
       isAdmin: isAdminTeam(req.user),
+      // Posting an announcement to CLIENTS is the Super Admin's alone
+      // (requireClientPortalAdmin in server.js, narrowed 2026-10-15). It is a
+      // separate fact from `isAdmin` above, which is the wider admin team: a
+      // manager who saw that composer would be refused on submit.
+      canPostToClients: req.user.role === config.ROLES.ADMIN,
       isCaregiver: type === 'caregiver',
       isLiaison: type === 'liaison',
       employmentType: req.user.employmentType || null,

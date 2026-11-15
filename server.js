@@ -41,6 +41,12 @@ const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
+// The one answer to "how was this message written" (plain or the six-shape
+// markup), shared with the staff announcement board so the two cannot drift.
+// Named in full because `announcements` is a local in these handlers: it is
+// the array of rows, and calling a module function on it would fail only at
+// request time.
+const staffAnnouncements = require('./staffAnnouncements');
 const emailCopy = require('./emailCopy');             // the editable wording of every notice (2026-11-09)
 const enrollmentGate = require('./enrollmentGate');
 const { createNotifier } = require('./notifications');
@@ -7376,6 +7382,10 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
       pinned: pinned || false,
       targetAll: targetAll !== false,
       targetClients: targetClients || [],
+      // How the message was written. Only an exact 'markup' opts into the
+      // formatter; anything else is plain and is read literally, so an
+      // announcement posted before the editor existed is never reinterpreted.
+      body_format: staffAnnouncements.bodyFormatOf({ body_format: (req.body || {}).format }),
       attachmentUrl: attachmentUrl || '',
       attachmentName: attachmentName || '',
       createdAt: new Date().toISOString(),
@@ -7417,11 +7427,12 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
         };
         // Safeguard: always include full announcement content even if admin edited {{content}} out of template
         let annBody = annTpl.body || '';
-        let annHtml = annTpl.htmlBody || '';
         if (!annBody.includes('{{content}}')) annBody += '\n\n{{content}}';
-        if (annHtml && !annHtml.includes('{{content}}')) {
-          annHtml = annHtml.replace(/<hr/, '<div style="color: #374151; line-height: 1.6; white-space: pre-wrap;">{{content}}</div><hr');
-        }
+        // The template's stored HTML body is deliberately NOT read here any
+        // more. The drain renders every announcement in the house style, so a
+        // hand-written copy can no longer override it — which is what let a
+        // client announcement skip the house template and the formatting with
+        // it. The template screen says so, rather than ignoring it silently.
 
         // Queue one notification per recipient with recipient-specific rendered content
         let queued = 0, skipped = 0;
@@ -7429,24 +7440,26 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
           const textBody = renderTemplate(annBody, vars);
-          // An announcement has structure — a title, a body, a priority flag,
-          // an attachment — so it is handed to the house template as those
-          // pieces rather than as one blob of prose. An admin who has written
-          // their own HTML still wins; nobody else hand-rolls chrome.
-          const htmlBody = annHtml
-            ? renderTemplate(annHtml, vars)
-            : emailTemplates.renderGfcEmail({
-                greeting: user.name || null,
-                headline: renderTemplate(newAnnouncement.title || 'A new announcement', vars),
-                paragraphs: String(renderTemplate(newAnnouncement.content || '', vars))
-                  .split(/\n{2,}/).map(t => t.trim()).filter(Boolean),
-                callout: newAnnouncement.priority ? 'This is a priority announcement.' : null,
-                ctaUrl: newAnnouncement.attachmentUrl || null,
-                ctaLabel: newAnnouncement.attachmentUrl ? (newAnnouncement.attachmentName || 'View attachment') : null
-              }).html;
+          // ⚠️ THIS NO LONGER RENDERS ITS OWN HTML (2026-11-15). It used to,
+          // and `buildQueuedEmail` short-circuits on `if (t.htmlBody) return`,
+          // so a client announcement never reached the house template's own
+          // reading and never saw a `format` at all. The pieces go to the
+          // queue instead and the drain renders them, which is what lets a
+          // formatted announcement arrive formatted — and closes the last
+          // email that could opt out of the house style with hand-written
+          // HTML. An admin who has stored their own htmlBody now gets a
+          // warning on the template screen rather than a silent override.
           const result = await queueNotification(
             'announcement', user.id, user.email, user.name || user.email,
-            { subject, body: textBody, htmlBody },
+            {
+              subject,
+              body: textBody,
+              ctaUrl: newAnnouncement.attachmentUrl || null,
+              ctaLabel: newAnnouncement.attachmentUrl ? (newAnnouncement.attachmentName || 'View attachment') : null,
+              // The same two values the staff board uses, so there is one
+              // vocabulary for "how was this written".
+              format: staffAnnouncements.bodyFormatOf(newAnnouncement) === 'markup' ? 'announcement-markup' : 'announcement'
+            },
             { relatedEntityId: newAnnouncement.id, relatedEntityType: 'announcement', createdBy: req.user.id }
           );
           // `queueNotification` answers a TRUTHY `{ skipped: true, reason }`

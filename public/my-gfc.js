@@ -669,6 +669,98 @@ function AnnouncementList({ items, onReviewed, onError }) {
   ));
 }
 
+// Announcements to CLIENTS (owner, 2026-11-15: "move client announcements into
+// myGFC ... and then a section to send announcements to clients"). It posts to
+// the SAME /api/announcements routes the client portal screen used, so there is
+// one store and one audience rule; only the screen moved.
+//
+// The Super Admin alone, matching requireClientPortalAdmin on the server. The
+// caller passes `canPost` from the profile's own `canPostToClients`, which is a
+// narrower fact than `isAdmin`: a manager shown this form would be refused.
+function ManageClientAnnouncements({ canPost }) {
+  const [rows, setRows] = useState(null);
+  const [clients, setClients] = useState([]);
+  const [form, setForm] = useState({ title: '', content: '', type: 'info', priority: false, pinned: false, everyone: true, slugs: [] });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => Promise.all([
+    call('/api/announcements').then(setRows).catch(e => setErr(e.message)),
+    call('/api/users').then(u => setClients((u || []).filter(x => x && x.role === 'client'))).catch(() => setClients([]))
+  ]), []);
+  useEffect(() => { load(); }, [load]);
+  const post = async () => {
+    setBusy(true); setErr('');
+    try {
+      await call('/api/announcements', { method: 'POST', body: {
+        title: form.title, content: form.content, format: WRITES_MARKUP ? 'markup' : 'plain',
+        type: form.type, priority: form.priority, pinned: form.pinned,
+        targetAll: form.everyone, targetClients: form.everyone ? [] : form.slugs
+      } });
+      setForm({ title: '', content: '', type: 'info', priority: false, pinned: false, everyone: true, slugs: [] });
+      await load();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const remove = async (id) => {
+    if (!window.confirm('Delete this client announcement?')) return;
+    try { await call(`/api/announcements/${id}`, { method: 'DELETE' }); await load(); } catch (e) { setErr(e.message); }
+  };
+  const toggleSlug = (v) => setForm(f => ({ ...f, slugs: f.slugs.includes(v) ? f.slugs.filter(x => x !== v) : f.slugs.concat([v]) }));
+  if (!canPost) return <p className="mg-note">Announcements to clients are posted by the Super Admin.</p>;
+  if (!rows) return err ? <div className="mg-err">{err}</div> : <p className="mg-note">Loading…</p>;
+  return (
+    <div>
+      {err && <div className="mg-err">{err}</div>}
+      <p className="mg-note">This goes to <b>clients</b>, on their portal home and by email. It never reaches the team — team news is the section above. Carry no other client's name and nothing clinical.</p>
+      <label>Title</label>
+      <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Holiday office hours" />
+      <label>Message</label>
+      <FormattedField value={form.content} onChange={v => setForm(f => ({ ...f, content: v }))} minRows={5}
+        placeholder="What your clients need to know" />
+      <label>Kind</label>
+      <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
+        <option value="info">Information</option>
+        <option value="success">Good news</option>
+        <option value="warning">Please read</option>
+      </select>
+      <div className="mg-checks">
+        <label><input type="checkbox" checked={form.priority} onChange={() => setForm(f => ({ ...f, priority: !f.priority }))} />Priority — asks them to read it carefully</label>
+        <label><input type="checkbox" checked={form.pinned} onChange={() => setForm(f => ({ ...f, pinned: !f.pinned }))} />Pinned — stays at the top</label>
+      </div>
+      <label>Who sees it</label>
+      <div className="mg-checks">
+        <label><input type="checkbox" checked={form.everyone} onChange={() => setForm(f => ({ ...f, everyone: !f.everyone }))} />Every client</label>
+        {!form.everyone && clients.map(c => (
+          <label key={c.slug || c.id}><input type="checkbox" checked={form.slugs.includes(c.slug)} disabled={!c.slug}
+            onChange={() => toggleSlug(c.slug)} />{c.name || c.email}{c.slug ? '' : ' (no portal link yet)'}</label>
+        ))}
+      </div>
+      <button className="mg-btn" disabled={busy || !form.title || !form.content} onClick={post}>
+        {busy ? 'Posting…' : 'Post to Clients'}
+      </button>
+      <h4 style={{ marginTop: 18 }}>Posted</h4>
+      {rows.length === 0 ? <p className="mg-note">Nothing posted yet.</p> : rows.map(a => (
+        <div className="mg-row" key={a.id} style={{ alignItems: 'flex-start' }}>
+          <i className="ti ti-speakerphone mg-big" />
+          <div className="mg-grow">
+            <b>{a.title}</b>
+            <small>
+              {fmtDate(a.createdAt)}
+              {/* Who it actually reached. This figure was being computed and
+                  shown on no screen at all, because the only component that
+                  rendered it was never mounted. */}
+              {a.emailQueued ? ` · emailed ${a.emailQueued.queued} of ${a.emailQueued.total} clients` : ''}
+              {a.emailQueued && a.emailQueued.skipped ? ` (${a.emailQueued.skipped} unsubscribed or inactive)` : ''}
+              {a.targetAll === false ? ` · ${(a.targetClients || []).length} chosen` : ''}
+            </small>
+          </div>
+          <button className="mg-btn mg-ghost mg-sm" onClick={() => remove(a.id)}>Delete</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ManageAnnouncements({ onChanged }) {
   const [data, setData] = useState(null);
   const [form, setForm] = useState({ title: '', body: '', link: '', everyone: true, roles: [], userIds: [] });
@@ -858,6 +950,7 @@ function StaffView({ view, data }) {
       <div>
         <Section><AnnouncementList items={data.news} onReviewed={data.loadNews} onError={setErr} /></Section>
         {profile.isAdmin && <Section title="Post an Announcement" sub="One place to post for the whole team, caregivers included."><ManageAnnouncements onChanged={data.loadNews} /></Section>}
+        {profile.canPostToClients && <Section title="Post to Clients" sub="An announcement for clients, on their portal home and by email."><ManageClientAnnouncements canPost={profile.canPostToClients} /></Section>}
       </div>
     );
   }
