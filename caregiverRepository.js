@@ -822,6 +822,19 @@ const CAREGIVER_FORBIDDEN_FIELDS = Object.freeze([
   'openEmrPatientId', 'messages'
 ]);
 
+// A LEAD CAREGIVER (owner, 2026-11-11): a GFC caregiver an admin has named,
+// per patient, to also see what was shared with the patient — the documents
+// shared to their portal, their medicines and allergies, the patient-facing
+// visit summaries and their upcoming appointments. Never clinical notes,
+// results, billing or provider-to-family messages. They must still be assigned
+// to the patient; the tick alone grants nothing.
+function isLeadCaregiver(caregiver, client) {
+  if (!isCaregiver(caregiver) || !client) return false;
+  if (!isAssignedToCaregiver(caregiver, client)) return false;
+  const leads = client.careTeam && Array.isArray(client.careTeam.leadCaregivers) ? client.careTeam.leadCaregivers : [];
+  return leads.map(String).includes(String(caregiver.id));
+}
+
 function caregiverClientView(client) {
   if (!client) return null;
   const out = {};
@@ -885,7 +898,7 @@ module.exports = {
   CONCERN_TYPES, CONCERN_META, normalizeConcernType, severityForConcernType,
   ESCALATION_STATUSES, ESCALATION_TRANSITIONS, ESCALATION_NOTE_REQUIRED, canAdvanceEscalation,
   routeEscalation, describeRecipients, escalationConfirmation,
-  isAssignedToCaregiver, isCaregiver, caregiverClientView,
+  isAssignedToCaregiver, isCaregiver, caregiverClientView, isLeadCaregiver,
   CAREGIVER_CLIENT_FIELDS, CAREGIVER_CARE_PLAN_FIELDS, CAREGIVER_FORBIDDEN_FIELDS,
   idempotencyKeyFor, incidentsFromSubmission
 };

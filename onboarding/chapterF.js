@@ -25,11 +25,12 @@
 
 'use strict';
 
-const { ref } = require('./sources');
+const { ref, PAY_GUIDE } = require('./sources');
 const V = require('./vocabulary');
 const { ACTORS: A, ACTIONS: X, classification: cls } = V;
 const { ACKNOWLEDGMENTS: C_ACKS } = require('./chapterC');
 const { SOURCES } = require('./sources');
+const CS = require('./coordinatorScope');
 
 const P = (section) => ref('PLAYBOOK', section);
 const F2 = P('F.2');
@@ -37,6 +38,7 @@ const step = (actor, action, actorBasis) => Object.freeze({ actor, action, actor
 const STATED = 'STATED';
 const INFERRED = 'INFERRED';
 const NO_F2_ROW = 'Playbook F.2 carries no row for this item.';
+const OWNER_ITEM = 'Added by the owner for care coordinators (2026-11-09); not a Playbook row.';
 
 const CHAPTER = Object.freeze({
   id: 'F',
@@ -91,7 +93,7 @@ const ITEMS = Object.freeze([
   { id: 'F.5.02', phase: 'F.5', title: 'Wage and hour classification', ref: P('F.2'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, STATED)],
     classifications: [cls('Statutory', 'Wage and hour classification', F2)] },
-  { id: 'F.5.03', phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
+  { id: 'F.5.03', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9 within three business days of the start date', 'Form W-4', 'Direct deposit authorization', 'Emergency contact information'],
     classifications: [cls('Statutory and regulatory', 'Work authorization', F2)] },
@@ -119,7 +121,7 @@ const ITEMS = Object.freeze([
   { id: 'F.6.02', phase: 'F.6', title: 'Compensation gate', ref: P('F.6'), when: { outOfState: true },
     steps: [step(A.PAYROLL_FINANCE_OFFICER, X.RECORD, INFERRED)],
     classifications: [], classificationNote: NO_F2_ROW },
-  { id: 'F.6.03', phase: 'F.6', title: 'Time recording', ref: P('F.6'),
+  { id: 'F.6.03', link: { label: 'Open Time Clock', url: '/my#hours/clock' }, phase: 'F.6', title: 'Time recording', ref: P('F.6'),
     steps: [step(A.PAYROLL_FINANCE_OFFICER, X.PROVISION, STATED), step(A.NEW_HIRE, X.COMPLETE, INFERRED)],
     classifications: [], classificationNote: NO_F2_ROW },
 
@@ -139,6 +141,32 @@ const ITEMS = Object.freeze([
   { id: 'F.7.05', phase: 'F.7', title: 'Documentation practice', ref: P('F.7'),
     steps: [step(A.SUPERVISOR, X.RECORD, INFERRED)],
     classifications: [], classificationNote: NO_F2_ROW },
+  // ---- A care coordinator's clinical scope (owner, 2026-11-09) --------------
+  // Not Playbook rows: the owner added them so a coordinator knows which
+  // clinician to support with what. The lines are built from the capability
+  // list the app enforces (onboarding/coordinatorScope.js), never typed here.
+  { id: 'F.CC.01', phase: 'F.7', title: 'Clinical scope: who does what', ref: null, when: { careCoordinator: true },
+    elements: CS.scopeLines(),
+    steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, STATED), step(A.CLINICAL_DIRECTOR, X.RECORD, STATED)],
+    classifications: [], classificationNote: OWNER_ITEM },
+  { id: 'F.CC.02', phase: 'F.7', title: 'What a coordinator does, and never does', ref: null, when: { careCoordinator: true },
+    elements: [
+      `What you do, for a licensed clinician: ${CS.sentence(CS.coordinatorDoes())}.`,
+      `What you never do (a licensed clinician does it): ${CS.sentence(CS.coordinatorNever())}.`,
+      'A note you prepare is signed by a licensed clinician. The app says so if you try: "A care coordinator prepares the note. A licensed clinician signs it."',
+      'A care plan you write becomes active only when a clinician co-signs it.'
+    ],
+    steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, STATED)],
+    classifications: [], classificationNote: OWNER_ITEM },
+  { id: 'F.CC.03', phase: 'F.7', title: 'Supporting each clinician, observed', ref: null, when: { careCoordinator: true },
+    elements: [
+      'A note prepared for a provider, then signed by the provider',
+      'A care plan drafted, then co-signed by a clinician',
+      'An RN visit with an order placed under a signed standing order',
+      'A case manager (LMSW) screening and referral worked through'
+    ],
+    steps: [step(A.SUPERVISOR, X.OBSERVE, STATED)],
+    classifications: [], classificationNote: OWNER_ITEM },
   // F.8, where applicable: counsel review before the first commission is paid.
   { id: 'F.8.01', phase: 'F.7', title: 'Variable compensation plan reviewed by counsel', ref: P('F.8'), when: { variableComp: true },
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, INFERRED)],

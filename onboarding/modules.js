@@ -88,7 +88,6 @@ const S = V.SIGNOFF;
 // Library lists; `sopRefs` likewise.
 const MODULES_RAW = [
   // §3.1 Credentialing and Compliance Activation, exams lane (C.6)
-  { id: 'TRN-101', title: 'What an examination is and is not: evaluative, no treatment, no solicitation', phase: 'C.6', stage: 'EXAMS', lanes: ['EXAMS'], format: 'VIDEO', minutes: 10, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['determination:IME'], sopRefs: ['SOP-EXM-01'] },
   { id: 'TRN-102', title: 'Veterans disability examination training', phase: 'C.6', stage: 'EXAMS', lanes: ['EXAMS'], format: 'EXTERNAL', minutes: 1200, host: H.SELF_PACED, signoff: S.CERTIFICATE, requiredFor: ['determination:IME'] },
   { id: 'TRN-103', title: "Contracting organization's required training", phase: 'C.6', stage: 'EXAMS', lanes: ['EXAMS'], format: 'EXTERNAL', minutes: null, host: H.SELF_PACED, signoff: S.CERTIFICATE, requiredFor: ['determination:IME'] },
   { id: 'TRN-104', title: 'GFC examination workflow: scheduling, check-in, templates, report turnaround, quality review, restricted access', phase: 'C.6', stage: 'EXAMS', lanes: ['EXAMS'], format: 'LIVE', minutes: 120, host: H.EXECUTIVE_DIRECTOR, signoff: S.OBSERVED, requiredFor: ['determination:IME'], sopRefs: ['SOP-EXM-01'] },
@@ -101,13 +100,22 @@ const MODULES_RAW = [
   { id: 'TRN-001', title: 'GFC: the organization, the service lines, and who holds which responsibility', phase: 'C.7', stage: 'WELCOME', format: 'VIDEO', minutes: 15, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.7'] },
   { id: 'TRN-002', title: 'Role card: assigned responsibilities, boundaries of the role, escalation contacts, and the expected weekly pattern', phase: 'C.7', stage: 'WELCOME', format: 'READ', minutes: 10, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.7'] },
   { id: 'TRN-003', title: 'Systems: the GFC app, electronic prescribing, faxing, Google Workspace, telephone lines, and team chat standards', phase: 'C.7', stage: 'WELCOME', format: 'VIDEO', minutes: 15, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: ['phase:C.7'], sopRefs: ['SOP-SYS-01'] },
-  { id: 'TRN-004', title: 'Application tour at first login', phase: 'C.7', stage: 'WELCOME', format: 'IN_APP', minutes: 10, host: H.SYSTEM, signoff: S.NONE, requiredFor: ['phase:C.7'] },
+  { id: 'TRN-004', title: 'The GFC app: signing in, onboarding, hours and pay, scheduling and availability', phase: 'C.7', stage: 'WELCOME', format: 'IN_APP', minutes: 10, host: H.SYSTEM, signoff: S.NONE, requiredFor: ['phase:C.7'] },
   { id: 'TRN-005', title: 'Privacy and security in the residence and in GFC systems', phase: 'C.7', stage: 'WELCOME', format: 'VIDEO', minutes: 15, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.7'], sopRefs: ['SOP-SYS-01'] },
   { id: 'TRN-006', title: 'Clinical Policies and Procedures Manual: read, attest, and apply to scenarios', phase: 'C.7', stage: 'WELCOME', format: 'READ', minutes: 60, host: H.CLINICAL_DIRECTOR, signoff: S.COUNTERSIGN, requiredFor: ['phase:C.8'], wholeManual: true },
   { id: 'TRN-007', title: 'Home-based clinical care procedure', phase: 'C.7', stage: 'WELCOME', format: 'READ', minutes: 20, host: H.CLINICAL_DIRECTOR, signoff: S.COUNTERSIGN, requiredFor: ['phase:C.7'] },
   { id: 'TRN-008', title: 'Artificial intelligence: what is permitted, what is not, and how it is attested', phase: 'C.7', stage: 'WELCOME', format: 'VIDEO', minutes: 12, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.7'],
     manualRefs: ['10.7', '10.8', '10.9', '10.10'], sopRefs: ['SOP-SYS-01'], unlocksAfter: ['TRN-003', 'TRN-005'],
     sourceClass: { libraryStates: 'REGULATORY', classes: ['REGULATORY'] }, checksFrom: L('TRN-008') },
+
+  // Owner additions, 2026-11-10 (Training Material Tracker). A module with an
+  // `audience` reaches only those account types, in each one's own training
+  // phase (libraryTrainings.TRAINING_PHASE), and is required there.
+  { id: 'TRN-009', title: 'KaiCare Ai: the care management platform and what GFC logs there', phase: 'C.7', stage: 'WELCOME', format: 'VIDEO', minutes: 12, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: [],
+    manualRefs: ['3.4', '13.3', '13.7'], audience: ['provider', 'rn', 'lcsw', 'lmsw', 'coordinator'] },
+  { id: 'TRN-501', title: 'Accepting shifts and clocking in', phase: 'A.7', stage: 'CAREGIVER', format: 'VIDEO', minutes: null, host: H.SELF_PACED, signoff: S.ATTEST, requiredFor: [], audience: ['caregiver'] },
+  { id: 'TRN-502', title: 'Submitting the visit report and clocking out', phase: 'A.7', stage: 'CAREGIVER', format: 'VIDEO', minutes: null, host: H.SELF_PACED, signoff: S.ATTEST, requiredFor: [], audience: ['caregiver'] },
+  { id: 'TRN-503', title: 'Onboarding documents for home care staff', phase: 'A.7', stage: 'CAREGIVER', format: 'VIDEO', minutes: null, host: H.SELF_PACED, signoff: S.ATTEST, requiredFor: [], audience: ['caregiver'] },
 
   // §3.3 Systems Access and Clinical Orientation, clinical preparation stage (C.7)
   { id: 'TRN-201', title: 'Referral to first visit: acceptance, intake, consents, and the first-visit standard', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 15, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
@@ -139,7 +147,7 @@ const MODULES_RAW = [
   { id: 'TRN-210', title: 'Medical emergencies in the residence', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 10, host: H.CLINICAL_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
   { id: 'TRN-211', title: 'Psychiatric risk assessment, safety planning, and crisis response', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], credentials: ['PMHNP'], format: 'VIDEO', minutes: 20, host: H.CLINICAL_DIRECTOR, signoff: S.ATTEST, requiredFor: ['determination:BEHAVIORAL'] },
   { id: 'TRN-212', title: 'Psychiatric visit workflow and note set', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], credentials: ['PMHNP'], format: 'VIDEO', minutes: 15, host: H.CLINICAL_DIRECTOR, signoff: S.ATTEST, requiredFor: ['determination:BEHAVIORAL'] },
-  { id: 'TRN-213', title: 'Care management programs: consent, assigned responsibilities, and time logging', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 15, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
+  { id: 'TRN-213', title: 'Continuous Care Management Program: consent, assigned responsibilities, and time logging', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 15, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
   { id: 'TRN-214', title: 'Transitions of care: discharge follow-up and medication reconciliation', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 10, host: H.CLINICAL_OPS_COORDINATOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
   { id: 'TRN-215', title: 'Coding and billing integrity', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 15, host: H.EXECUTIVE_DIRECTOR, signoff: S.ATTEST, requiredFor: ['determination:INSURED'] },
   { id: 'TRN-216', title: 'Mandatory reporting', phase: 'C.7', stage: 'CLINICAL_PREP', lanes: ['CLINICAL'], format: 'VIDEO', minutes: 10, host: H.CLINICAL_DIRECTOR, signoff: S.ATTEST, requiredFor: ['phase:C.8'] },
@@ -199,7 +207,9 @@ function buildModule(m) {
     chapter: 'C',
     phase: m.phase,
     stage: m.stage || null,
-    roles: Object.freeze(['NP']),
+    roles: Object.freeze(m.audience ? m.audience.slice() : ['NP']),
+    // Account types it reaches (2026-11-10); null = the chapter curriculum decides.
+    audience: m.audience ? Object.freeze(m.audience.slice()) : null,
     lanes: Object.freeze((m.lanes || []).slice()),
     credentials: Object.freeze((m.credentials || []).slice()),
     format: m.format,

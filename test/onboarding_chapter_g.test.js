@@ -39,7 +39,9 @@ test('G.4: three review points at days 30, 60 and 90, verified by the supervisor
 
 test('G.1: a liaison gets no clinical step, no Training Library module and no readiness gate', () => {
   const t = T.buildTrack({ inputs: { chapter: 'G' }, record: {}, audience: 'office' });
-  assert.strictEqual(t.modules.length, 0);
+  // Only the general modules every role gets (owner, 2026-11-10), in G.2.
+  assert.deepStrictEqual(t.modules.map(m => m.id).sort(), [...require('../onboarding/libraryTrainings').SHARED_MODULE_IDS].sort());
+  t.modules.forEach(m => assert.strictEqual(m.phase, 'G.2', m.id));
   assert.strictEqual(t.determinations.length, 0);
   G.ITEMS.forEach(it => it.steps.forEach(s => assert.ok(!['CLINICAL_DIRECTOR', 'DELEGATING_PHYSICIAN', 'CREDENTIALING_OWNER'].includes(s.actor) || it.chapter !== 'G', it.id)));
 });

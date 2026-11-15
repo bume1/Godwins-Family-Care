@@ -590,11 +590,14 @@ test('a caregiver cannot approve or decline — that is the office\'s call', asy
   } finally { h.close(); }
 });
 
-test('a case manager reaches none of it', async () => {
+test('a case manager reaches only their own requests, and cannot ask about someone else\'s shift', async () => {
+  // Since 2026-11-09 an LMSW / case manager is scheduled here too (staff
+  // shifts by role), so the list opens to them, scoped to their own rows.
   const h = harness({ shifts: [CONFIRMED()] });
   try {
+    await h.call(...ask({ kind: 'drop', reason: 'x' }));
     const list = await h.call('GET', '/api/scheduling/change-requests', undefined, 'cm-1');
-    assert.strictEqual(list.status, 403);
+    assert.ok(list.status === 403 || (list.status === 200 && list.body.requests.length === 0), 'never someone else\'s request');
     const asked = await h.call(...ask({ kind: 'drop', reason: 'x' }, 'cm-1'));
     assert.strictEqual(asked.status === 200, false);
   } finally { h.close(); }
@@ -717,7 +720,7 @@ test('the newest submission per caregiver is flagged in force, by the SERVER', a
     submitted_at: '2026-07-01T00:00:00.000Z' };
   const h = harness({ caregiver_availability: [older, newer, other] });
   try {
-    const res = await h.call('GET', '/api/scheduling/availability', undefined, 'mgr-1');
+    const res = await h.call('GET', '/api/scheduling/availability?scope=all', undefined, 'mgr-1');
     assert.strictEqual(res.status, 200);
     const byId = Object.fromEntries(res.body.availability.map(a => [a.id, a]));
     assert.strictEqual(byId['av-2'].current, true, 'the newest is in force');
@@ -730,6 +733,37 @@ test('the newest submission per caregiver is flagged in force, by the SERVER', a
     assert.strictEqual(mine.body.availability.length, 2, 'a caregiver sees only their own');
     assert.strictEqual(mine.body.availability.find(a => a.id === 'av-2').current, true);
   } finally { h.close(); }
+});
+
+test('a staff member\'s own availability card never lists other people\'s rows (owner report, 2026-11-09)', async () => {
+  // The personal Availability card on My GFC asks with no parameters. For an
+  // office viewer that used to mean "everyone", so a manager reading their own
+  // availability saw every caregiver's submissions as if they were theirs.
+  const row = (id, who) => ({ id, caregiver_id: who, caregiver_name: who, effective_from: '2026-12-01',
+    windows: [{ day: 'Mon', start: '09:00', end: '17:00' }], blackout_dates: [], note: '',
+    status: 'submitted', submitted_at: '2026-09-01T00:00:00.000Z' });
+  const h = harness({ caregiver_availability: [row('a1', 'cna-1'), row('a2', 'cna-2'), row('a3', 'mgr-1')] });
+  try {
+    const own = await h.call('GET', '/api/scheduling/availability', undefined, 'mgr-1');
+    assert.strictEqual(own.status, 200);
+    assert.deepStrictEqual(own.body.availability.map(a => a.id), ['a3'], 'a manager\'s own card shows only their own');
+    const office = await h.call('GET', '/api/scheduling/availability?scope=all', undefined, 'mgr-1');
+    assert.strictEqual(office.body.availability.length, 3, 'the office view is asked for by name');
+    const one = await h.call('GET', '/api/scheduling/availability?caregiverId=cna-2', undefined, 'mgr-1');
+    assert.deepStrictEqual(one.body.availability.map(a => a.id), ['a2']);
+    // A caregiver asking for the office view gets their own rows, never 200 with everyone's.
+    const sneaky = await h.call('GET', '/api/scheduling/availability?scope=all', undefined, 'cna-1');
+    assert.deepStrictEqual(sneaky.body.availability.map(a => a.id), ['a1']);
+    const sneaky2 = await h.call('GET', '/api/scheduling/availability?caregiverId=cna-2', undefined, 'cna-1');
+    assert.deepStrictEqual(sneaky2.body.availability.map(a => a.id), ['a1']);
+  } finally { h.close(); }
+});
+
+test('the scheduling board asks for the office view by name', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'scheduling.html'), 'utf8');
+  assert.ok(src.includes("api('/api/scheduling/availability?scope=all')"));
+  const comp = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'components', 'caregiver-schedule.js'), 'utf8');
+  assert.ok(!/availability\?scope=all/.test(comp), 'the personal card never asks for everyone');
 });
 
 test('a resubmission supersedes rather than erases — the old one stays readable', async () => {

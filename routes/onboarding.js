@@ -19,9 +19,13 @@
 
 const express = require('express');
 const multer = require('multer');
+const packetSync = require('../onboarding/packetSync');
 const T = require('../onboarding/track');
 const RN = require('../onboarding/renewals');
 const accountTypes = require('../accountTypes');
+const practiceTime = require('../public/gfc-time');  // Georgia's clock, never the container's
+const links = require('../appLinks');            // the ONE place that answers "where does this person go?"
+const N = require('../onboarding/notices');      // who is told, when, and what goes in one envelope
 
 // Who is onboarded on which chapter. Clinicians on C; the admin team on F;
 // the liaison on G, which carries F's screening and paperwork (owner, 2026-11-08). The office can change it in Setup.
@@ -57,7 +61,9 @@ const wpRepo = require('../welcomePacketRepository');
 const welcomePacketPdf = require('../welcomePacketPdf');
 const attestations = require('../caregiverAttestations');
 const CC = require('../onboarding/caregiverCourses');
-const { MODULES, findModule } = require('../onboarding/modules');
+const { MODULES, findModule: findCatalogModule } = require('../onboarding/modules');
+const LT = require('../onboarding/libraryTrainings');
+const LC = require('../onboarding/libraryCatalog');
 const VF = require('../onboarding/versionFlags');
 const P = require('../onboarding/sourceParsers');
 const { driveViewUrl } = require('../onboarding/sources');
@@ -96,7 +102,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // ---- who ----------------------------------------------------------------
   // The office is an admin or a manager: a provider must never verify her own
   // licence or sign her own service line open.
-  const isOffice = (u) => !!u && (u.role === 'admin' || u.isManager === true);
+  // Whoever holds Staff Onboarding in the Modules grid (owner, 2026-11-13).
+  const isOffice = (u) => !!u && (u.role === 'admin' || accountTypes.hasModule(u, 'onboarding'));
   const requireOffice = (req, res, next) => (isOffice(req.user) ? next()
     : res.status(403).json({ error: 'This is the office\'s onboarding view.', code: 'ONBOARDING_OFFICE_ONLY' }));
   const requireStaff = (req, res, next) => (req.user && (req.user.hasClinicalAccess || isOffice(req.user) || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(req.user))) ? next()
@@ -148,6 +155,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // Chapter A reads the caregiver's welcome packet checklist, derived the
   // same way the caregiver app and the scheduling gate derive it. Never
   // stored here: a stored copy goes stale the moment a document is accepted.
+  const isChapterA = (rec) => !!(rec && rec.inputs && rec.inputs.chapter === 'A');
+
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
   async function packetFor(rec) {
     if (!rec) return { rows: undefined, certified: false, licenseLevel: null };
@@ -157,7 +166,10 @@ module.exports = function createOnboardingRoutes(deps) {
     if (!rec.inputs || rec.inputs.chapter !== 'A') {
       const sp = ((await db.get('staff_welcome_packets')) || []).find(r => r && String(r.user_id) === String(rec.userId)) || null;
       const signed = !!(sp && sp.status === 'submitted');
-      return { rows: [{ kind: 'staff_welcome', item: 'WELCOME', title: 'Welcome packet', required: true, source: 'gfc_sign',
+      // A care coordinator gets the clinical scope items (owner, 2026-11-09):
+      // read from their account, like a caregiver's license level.
+      const who = ((await getUsers()) || []).find(x => String(x.id) === String(rec.userId)) || {};
+      return { careCoordinator: accountTypes.accountTypeOf(who) === 'coordinator', rows: [{ kind: 'staff_welcome', item: 'WELCOME', title: 'Welcome packet', required: true, source: 'gfc_sign',
         status: signed ? 'complete' : 'missing', signedAt: signed ? (sp.signed_at || null) : null }],
         certified: false, licenseLevel: null };
     }
@@ -182,7 +194,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const uploads = pk.docs.filter(d => kinds.includes(d.kind) && !d.deleted_at && d.status !== 'rejected')
       .map(d => ({ id: `packet:${d.id}`, name: d.file_name || 'Document', uploadedAt: d.uploaded_at,
         uploadedByName: d.uploaded_by_name || null, filedBy: d.uploaded_by_office ? 'OFFICE_ON_BEHALF' : 'SELF',
-        fromWelcomePacket: true, status: d.status }));
+        fromWelcomePacket: true, status: d.status, documentId: d.id }));
     const forms = (pk.atts || []).filter(a => kinds.includes(a.kind) && a.signed_at)
       .map(a => ({ id: `form:${a.kind}`, name: `${attestations.titleFor(a.kind) || a.kind} (signed)`, uploadedAt: a.signed_at,
         filedBy: 'SELF', fromWelcomePacket: true, status: 'signed' }));
@@ -192,12 +204,27 @@ module.exports = function createOnboardingRoutes(deps) {
   // Her inputs with what the packet says about her certificates.
   // Her license level is read from her account, like her certificates from
   // her packet: facts about her, never typed into Setup.
-  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null });
+  const withPacketFacts = (inputs, pk) => Object.assign({}, inputs || {}, { holdsCareCertificate: !!(pk && pk.certified), licenseLevel: (pk && pk.licenseLevel) || null, careCoordinator: !!(pk && pk.careCoordinator) });
+
+  // ---- the whole team's library (owner, 2026-11-10) -------------------------
+  // Trainings the office added, scoped to account types. Read fresh on every
+  // request that needs them; `libCache` lets the synchronous lookups below
+  // (material, completion) resolve an office-added id from the same read.
+  let libCache = [];
+  const libraryRows = async () => { libCache = (await db.get(LT.COLLECTION)) || []; return libCache; };
+  const findModule = (id) => LT.findAny(id, libCache);
+  const typeOfRec = async (rec) => {
+    const u = ((await getUsers()) || []).find(x => String(x.id) === String(rec.userId));
+    return u ? accountTypes.accountTypeOf(u) : null;
+  };
 
   // ---- training material (owner, 2026-11-09) --------------------------------
   // What each module teaches from: a written SOP read live from Drive, or
   // material the office added. A module with neither is greyed out for staff.
   const materials = async () => (await db.get(MATERIALS)) || {};
+  // Which policy line a training shows (2026-11-10): the office's own edit,
+  // else what an office-added training was given, else the catalog's.
+  const effectivePolicy = (id, mod, matRow) => TM.policyOverride(matRow) || (mod && mod.policy) || LC.policyFor(id);
   async function sopState() {
     if (!loader.sops) return { ok: false, ids: null, sections: {}, reason: 'SOP reader unavailable' };
     try { return await loader.sops(); } catch (e) { return { ok: false, ids: null, sections: {}, reason: e.message }; }
@@ -208,6 +235,30 @@ module.exports = function createOnboardingRoutes(deps) {
     moduleIds.forEach(id => { out[id] = TM.materialFor(findModule(id), mats[id] || null, sops.ids); });
     return { byModule: out, sops };
   }
+  // The Library's next step for a module: the office's choice, else the
+  // tracker's (an "attach" with something attached reads as covered).
+  function nextStepFor(id, mats, mat, addedByOffice) {
+    const entry = LC.entryFor(id) || {};
+    return ((mats[id] || {}).office || {}).nextStep
+      || ((entry.next === 'attach' && mat && mat.ready) ? 'done' : null)
+      || entry.next || (addedByOffice ? 'write' : null);
+  }
+  // Greyed out ONLY while it waits on an SOP still to be written (owner,
+  // 2026-11-10). An outside course, a document to sign, or one needing no
+  // material stays open, so onboarding agrees with the Library.
+  const WAITING = ['write', 'gap'];
+  function waitingOnSop(id, mats, mat) {
+    const mod = findModule(id);
+    return !mat.ready && WAITING.includes(nextStepFor(id, mats, mat, !!(mod && mod.addedByOffice)));
+  }
+  // Whether a module can be worked now, for the checklist's phase completion.
+  async function readyCheck() {
+    const [mats, sops] = await Promise.all([materials(), sopState()]);
+    return (id) => { const mod = findModule(id); if (!mod) return false; return !waitingOnSop(id, mats, TM.materialFor(mod, mats[id] || null, sops.ids)); };
+  }
+  // Instructions the office wrote for an item or a training (2026-11-10).
+  const INSTRUCTIONS = 'onboarding_instructions';
+  const instructions = async () => (await db.get(INSTRUCTIONS)) || {};
 
   async function buildFor(rec, audience) {
     const m = await manual();
@@ -218,7 +269,10 @@ module.exports = function createOnboardingRoutes(deps) {
       moduleReviews: await reviews(),
       legacy: await legacyFor(rec.userId),
       packetRows: pk.rows,
-      customTasks: await customTasks()
+      customTasks: await customTasks(),
+      libraryTrainings: await libraryRows(),
+      accountType: await typeOfRec(rec),
+      materialReady: await readyCheck()
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -232,17 +286,43 @@ module.exports = function createOnboardingRoutes(deps) {
       // Chapter A: what she sent or signed in the welcome wizard shows on the
       // item it belongs to (owner, 2026-11-09), read from the stores the
       // welcome packet writes, never copied. Opened through doDownload.
-      if (pk.docs) it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk));
+      if (pk.docs) {
+        // A file uploaded here is also a packet row now: list it once, with
+        // its review status, so the office can accept it right here.
+        it.files = (st.files || []).map(f => {
+          const row = f.documentId ? pk.docs.find(d => d.id === f.documentId && !d.deleted_at) : null;
+          const out = { id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy };
+          if (row && row.kind !== 'clinician_onboarding') { out.status = row.status; out.documentId = row.id; }
+          return out;
+        });
+        const own = new Set((st.files || []).map(f => f.documentId).filter(Boolean));
+        it.files = it.files.concat(welcomeFilesFor(T.findItem(it.id), pk).filter(f => !own.has(f.id.replace(/^packet:/, ''))));
+      }
       it.notes = st.notes || [];
-      it.sourceUrl = it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
+      // Which packet document a file uploaded here can be (a choice when several).
+      if (isChapterA(rec)) it.uploadKinds = packetSync.uploadKindsOf(T.findItem(it.id)).map(k => ({ kind: k, title: (pk.rows || []).find(r => r.kind === k)?.title || k }));
+      // The Playbook is the office's working document (owner, 2026-11-09):
+      // its link goes to admins and managers only, never to the person onboarding.
+      it.sourceUrl = audience === 'office' && it.ref && it.ref.source ? driveViewUrl(it.ref.source) : null;
     });
     // Material per module. Staff see only ready / not ready; a module with no
     // material is not available to them, whoever's turn it would otherwise be.
     const mm = await materialMap(track.modules.map(x => x.id));
+    const mats = await materials();
+    const ins = await instructions();
+    track.items.forEach(it => { if (ins[it.id] && ins[it.id].text) it.description = ins[it.id].text; if (audience === 'office') it.instructionsEditedBy = (ins[it.id] || {}).byName || null; });
     track.modules.forEach(x => {
       const mat = mm.byModule[x.id];
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
-      if (!mat.ready && !x.complete) x.available = false;
+      // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
+      // The office's own edit wins; then the chapter's own line; then the default.
+      const mod = findModule(x.id);
+      x.policy = TM.policyOverride(mats[x.id]) || (x.policyOverride !== undefined ? x.policyOverride : ((mod && mod.policy) || LC.policyFor(x.id)));
+      delete x.policyOverride;
+      x.waitingOnSop = !x.complete && waitingOnSop(x.id, mats, mat);
+      if (x.waitingOnSop) x.available = false;
+      if (ins[x.id] && ins[x.id].text) x.description = ins[x.id].text;
+      if (audience === 'office') x.instructionsEditedBy = (ins[x.id] || {}).byName || null;
     });
     track.person = { userId: rec.userId, name: rec.userName, startDate: rec.inputs && rec.inputs.startDate || null };
     track.manual = { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : (m.reason || null) };
@@ -293,6 +373,7 @@ module.exports = function createOnboardingRoutes(deps) {
     } catch (e) { return send(res, e); }
   }
   async function doRecheck(req, res, rec, actor) {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     try {
@@ -310,16 +391,93 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.status(status).json({ error: err.message, code: err.code || 'ONBOARDING_ERROR', outstanding: err.outstanding, missing: err.missing });
   }
 
+  // ---- email (2026-11-09) --------------------------------------------------
+  //
+  // Owner: "make sure email notifications updates accordingly. Esp for new
+  // employees who need onboarding or credentialing reminders." Everything
+  // below was computed and shown on a screen and emailed to nobody.
+  //
+  // THE NOTIFIER IS READ LAZILY. It is built far below where this router is
+  // registered in server.js, so taking it by value here would read the
+  // temporal dead zone. A MISSING NOTIFIER IS LOUD, never a silent skip:
+  // "nothing was emailed" and "nobody needed emailing" are different facts.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : deps.notify;
+    if (!n) console.error('[ONB] no notifier injected — staff were NOT emailed');
+    return n || null;
+  };
+  const baseUrl = () => (typeof deps.getAppBaseUrl === 'function' ? deps.getAppBaseUrl() : Promise.resolve(''));
+  const myCta = async () => `${await baseUrl()}${links.myOnboardingFor()}`;
+  const officeCta = async () => `${await baseUrl()}${links.staffOnboardingFor()}`;
+  // The office is an admin or a manager — the same `isOffice` the gate uses,
+  // so a role narrowed there narrows who is emailed on the next send.
+  const officeRecipients = async () => (await getUsers()).filter(u =>
+    u && u.email && isOffice(u) && u.accountStatus !== 'inactive');
+  const userById = async (userId) => (await getUsers()).find(u => String(u.id) === String(userId)) || null;
+
+  // She submitted a step and the item now waits on the office.
+  async function maybeNotifySubmitted(rec, item, actor) {
+    try {
+      if (actor.isOffice) return;                 // the office does not notify itself
+      const n = notifier(); if (!n) return;
+      const track = await buildFor(rec, 'office');
+      const row = (track.items || []).find(i => i.id === item.id);
+      if (!row || row.status !== T.STATUS.SUBMITTED) return;
+      const cta = await officeCta();
+      for (const u of await officeRecipients()) {
+        await n.staffItemSubmitted({ user: u, staffName: rec.userName || 'A staff member', itemTitle: row.title, ctaUrl: cta, actorId: actor.id });
+      }
+    } catch (e) { console.error('[ONB] submitted notice failed (non-fatal):', e.message); }
+  }
+
+  // The office sent a step back. THE REASON IS WHY THIS EXISTS: the route
+  // requires one and was storing it where only a screen could show it.
+  async function notifyReturned(rec, item, reason, byName) {
+    try {
+      const n = notifier(); if (!n) return;
+      const her = await userById(rec.userId);
+      if (!her || !her.email) return;
+      await n.staffOnboardingReturned({ user: her, itemTitle: item.title, reason: reason || null, returnedByName: byName || null, ctaUrl: await myCta() });
+    } catch (e) { console.error('[ONB] return notice failed (non-fatal):', e.message); }
+  }
+
+  // Her track has just been opened.
+  async function notifyStarted(rec) {
+    try {
+      const n = notifier(); if (!n) return;
+      const her = await userById(rec.userId);
+      if (!her || !her.email) return;
+      const track = await buildFor(rec, 'new_hire');
+      const ch = (track.chapter && track.chapter.label) || null;
+      await n.staffOnboardingStarted({ user: her, chapterLabel: ch, waitingCount: (track.counts || {}).waitingOnHer || 0, ctaUrl: await myCta() });
+    } catch (e) { console.error('[ONB] start notice failed (non-fatal):', e.message); }
+  }
+
   async function doStep(req, res, rec, actor) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    // A document attached to her item is done by signing it, never by Mark Done.
+    const linked = ((rec.items || {})[item.id] || {}).document;
+    const idx = Number(req.params.index);
+    if (linked && item.steps[idx] && item.steps[idx].actor === 'NEW_HIRE' && idx === item.steps.findIndex(s => s.actor === 'NEW_HIRE')) {
+      return res.status(409).json({ error: 'This step is done by signing the attached document.', code: 'DOCUMENT_SIGN_ROUTE' });
+    }
     try {
       rec.items = rec.items || {};
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
         T.recordStep(item, rec.items[item.id], req.params.index, actor, req.body || {}, nowIso()));
       await save(rec);
+      // The office's approval reaches her welcome packet, which her clearance
+      // list and her own checklist read (owner, 2026-11-13). Only the office's
+      // own step: marking her step done for her is not an approval (no Chapter
+      // A item pairs her step with an upload today, so this is defensive).
+      if (actor.isOffice && isChapterA(rec) && item.steps[Number(req.params.index)].actor !== 'NEW_HIRE') {
+        try { await packetSync.syncApproval(db, { item, caregiverId: rec.userId, by: actor, now: nowIso() }); }
+        catch (e) { console.error('[ONB] packet sync failed (non-fatal):', e.message); }
+      }
       await event({ userId: rec.userId, type: 'step', itemId: item.id, step: Number(req.params.index), byId: actor.id, byName: actor.name, onBehalf: actor.isOffice && item.steps[Number(req.params.index)].actor === 'NEW_HIRE' });
       await logActivity(req.user.id, req.user.name, 'onboarding_step', 'onboarding', rec.userId, { itemId: item.id, step: Number(req.params.index) });
+      await maybeNotifySubmitted(rec, item, actor);
       return res.json({ ok: true });
     } catch (e) { return send(res, e); }
   }
@@ -346,6 +504,18 @@ module.exports = function createOnboardingRoutes(deps) {
       maxBytes: STAFF_MAX, keyPrefix: item.id
     });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
+    // A caregiver's file is filed under the welcome packet item it answers,
+    // so it ticks that item on her clearance list. One the office uploads is
+    // already reviewed. Anything else stays an onboarding file.
+    const kinds = isChapterA(rec) ? packetSync.uploadKindsOf(item) : [];
+    let kind = 'clinician_onboarding';
+    if (kinds.length === 1) kind = kinds[0];
+    else if (kinds.length > 1) {
+      const asked = String((req.body || {}).kind || '');
+      if (!kinds.includes(asked)) return res.status(400).json({ error: 'Choose which document this is.', code: 'PACKET_KIND_REQUIRED', kinds });
+      kind = asked;
+    }
+    const packetFile = kind !== 'clinician_onboarding';
     let stored;
     try {
       stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter((rec.inputs && rec.inputs.chapter) || 'C'),
@@ -361,10 +531,10 @@ module.exports = function createOnboardingRoutes(deps) {
     const docId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const docRows = (await db.get('caregiver_documents')) || [];
     docRows.push(staffDocs.buildStaffDocumentRow({
-      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind: 'clinician_onboarding',
+      id: docId, ownerId: rec.userId, ownerName: rec.userName, kind,
       fileName: req.file.originalname || prepared.safeName, storedName: prepared.safeName, mime: prepared.mime,
       sizeBytes: req.file.buffer.length, driveFileId: stored.fileId || stored.id || null, driveUrl: stored.webViewLink || null,
-      note: `Onboarding: ${item.title}`, status: 'received',
+      note: `Onboarding: ${item.title}`, status: packetFile && actor.isOffice ? 'accepted' : 'received',
       uploadedById: req.user.id, uploadedByName: req.user.name || req.user.email, uploadedByOffice: actor.isOffice,
       extra: { onboarding_item_id: item.id }
     }));
@@ -492,9 +662,16 @@ module.exports = function createOnboardingRoutes(deps) {
     const f = (st.files || []).find(x => x.id === req.params.fileId);
     if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
     try {
-      const buf = await drive.downloadFileBuffer(f.driveFileId);
+      // A signed copy points at her Documents row, where the Drive file is.
+      let driveId = f.driveFileId; let mime = f.mime;
+      if (!driveId && f.documentId) {
+        const row = ((await db.get('caregiver_documents')) || []).find(d => d.id === f.documentId && String(d.caregiver_id) === String(rec.userId));
+        driveId = row && row.drive_file_id; mime = mime || (row && row.mime_type) || 'application/pdf';
+      }
+      if (!driveId) return res.status(404).json({ error: 'No stored file is attached to that record.', code: 'DOC_FILE_MISSING' });
+      const buf = await drive.downloadFileBuffer(driveId);
       await logActivity(req.user.id, req.user.name, 'onboarding_file_read', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
-      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Type', mime || 'application/octet-stream');
       res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
       return res.send(buf);
     } catch (e) {
@@ -573,6 +750,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // modules are signed off by the office.
   router.post('/api/onboarding/me/modules/:moduleId/complete', authenticateToken, requireStaff, async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     if (!['ATTEST', 'NONE'].includes(m.signoff)) return res.status(403).json({ error: 'The office signs this module off.', code: 'MODULE_OFFICE_SIGNOFF' });
@@ -580,7 +758,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const row = track.modules.find(x => x.id === m.id);
     if (!row) return res.status(409).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
     if (row.underReview) return res.status(409).json({ error: 'This module is being updated. It opens again once it is reviewed.', code: 'MODULE_UNDER_REVIEW' });
-    if (!row.material || !row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (row.available === false) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
     const blocked = m.unlocksAfter.filter(id => !(track.modules.find(x => x.id === id) || {}).complete);
     if (blocked.length) return res.status(409).json({ error: 'Finish the modules before this one first.', code: 'MODULE_LOCKED', outstanding: blocked });
     rec.training = rec.training || {};
@@ -611,7 +789,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const track = await buildFor(rec, 'new_hire');
     const row = track.modules.find(x => x.id === req.params.moduleId);
     if (!row) return res.status(404).json({ error: 'This module is not part of your onboarding.', code: 'MODULE_NOT_APPLICABLE' });
-    if (!row.material.ready) return res.status(409).json({ error: 'The training material for this module has not been added yet.', code: 'MODULE_NO_MATERIAL' });
+    if (!row.material.ready) return res.status(409).json({ error: 'This training has no material to open.', code: 'MODULE_NO_MATERIAL' });
     await logActivity(req.user.id, req.user.name, 'onboarding_material_read', 'onboarding', rec.userId, { moduleId: row.id });
     return res.json(await materialBody(row.id, row.material));
   });
@@ -661,9 +839,12 @@ module.exports = function createOnboardingRoutes(deps) {
     const packets = {};
     for (const rec of rows) packets[rec.userId] = await packetFor(rec);
     const custom = await customTasks();
+    const lib = await libraryRows();
+    const ready = await readyCheck();
     const people = rows.map(rec => {
-      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom });
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
+      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom,
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready });
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
@@ -711,7 +892,9 @@ module.exports = function createOnboardingRoutes(deps) {
     const users = await getUsers();
     const tasks = (await customTasks()).filter(t => !t.removedAt)
       .map(t => Object.assign({}, t, { scopeLabel: scopeLabel(t, users) }));
-    return res.json({ tasks, chapters: CHAPTER_CHOICES });
+    // The phases of each chapter, so the office picks where a task sits.
+    const phases = Object.fromEntries(CHAPTER_CHOICES.map(c => [c.id, ((T.CHAPTERS[c.id] || {}).PHASES || []).map(p => ({ id: p.id, number: p.number, label: p.label }))]));
+    return res.json({ tasks, chapters: CHAPTER_CHOICES, phases });
   });
   router.post('/api/onboarding/admin/custom-tasks', authenticateToken, requireOffice, async (req, res) => {
     const b = req.body || {};
@@ -731,7 +914,20 @@ module.exports = function createOnboardingRoutes(deps) {
     } else {
       return res.status(400).json({ error: 'Choose who gets this task: one person, or everyone of a type.', code: 'TASK_SCOPE_REQUIRED' });
     }
-    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope,
+    // A task can carry a document the office already sent (owner, 2026-11-09).
+    let send = null;
+    if (b.documentSendId) {
+      send = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(b.documentSendId) && !x.removedAt);
+      if (!send) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'TASK_DOCUMENT_UNKNOWN' });
+    }
+    // Which phase it sits in, on that chapter's own checklist (2026-11-10).
+    let chapterId = scope.chapter;
+    if (scope.userId) { const r = find(await all(), scope.userId); chapterId = (r && r.inputs && r.inputs.chapter) || 'C'; }
+    const phaseIds = ((T.CHAPTERS[chapterId] || {}).PHASES || []).map(p => p.id);
+    const phase = b.phase ? String(b.phase) : null;
+    if (phase && !phaseIds.includes(phase)) return res.status(400).json({ error: 'That phase is not on this checklist.', code: 'TASK_PHASE_UNKNOWN' });
+    const task = { id: `GFC-${uuidv4().replace(/-/g, '').slice(0, 8)}`, title, details: trim(b.details, 2000) || null, scope, phase,
+      documentSendId: send ? send.id : null, documentAction: send ? send.action : null,
       review: !!b.review, askForFile: !!b.askForFile, createdById: String(req.user.id), createdByName: req.user.name || req.user.email,
       createdAt: nowIso(), removedAt: null };
     const rows = await customTasks(); rows.push(task); await db.set(CUSTOM, rows);
@@ -772,14 +968,46 @@ module.exports = function createOnboardingRoutes(deps) {
   // Starts onboarding (creates the record) or changes what she will cover.
   router.put('/api/onboarding/admin/people/:userId/inputs', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res, { create: true }); if (!rec) return;
+    // `save` stamps updatedAt, so its absence means this record is being
+    // created right now — i.e. her onboarding is being opened for the first
+    // time, which is the one moment the welcome email belongs.
+    const isNew = !rec.updatedAt;
     const before = rec.inputs;
     // The chapter: what the office chose, else what the record already has,
     // else what the person's account type implies.
     const u = (await getUsers()).find(x => String(x.id) === String(rec.userId));
     const chapter = (req.body && req.body.chapter) || (before && before.chapter) || defaultChapterFor(u);
-    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
+    rec.inputs = Object.assign(T.normalizeInputs(Object.assign({}, req.body || {}, { chapter, holdsCareCertificate: false, licenseLevel: null, careCoordinator: false })), { relationship: (T.CHAPTERS[chapter] && T.CHAPTERS[chapter].CHAPTER.relationship) || 'W2' });
     await save(rec);
     await event({ userId: rec.userId, type: 'inputs', byId: req.user.id, byName: req.user.name, before, after: rec.inputs });
+    if (isNew) await notifyStarted(rec);
+    return res.json({ ok: true });
+  });
+  // Attach a document the office sent this person to one of her items
+  // (owner, 2026-11-10). She signs it from the item; signing completes her
+  // step and files the signed copy. documentSendId null detaches it.
+  router.put('/api/onboarding/admin/people/:userId/items/:itemId/document', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const item = await itemFor(rec, req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    if (!item.steps.some(s => s.actor === 'NEW_HIRE')) return res.status(409).json({ error: 'This item has no step for her to sign.', code: 'ITEM_NOT_HERS' });
+    rec.items = rec.items || {};
+    const st = rec.items[item.id] = rec.items[item.id] || {};
+    const sendId = (req.body || {}).documentSendId;
+    if (!sendId) { delete st.document; await save(rec); return res.json({ ok: true }); }
+    const s = ((await db.get('staff_document_sends')) || []).find(x => x.id === String(sendId) && !x.removedAt);
+    if (!s) return res.status(400).json({ error: 'That document was not found. Send it again.', code: 'ITEM_DOCUMENT_UNKNOWN' });
+    if (!s.scope || String(s.scope.userId) !== String(rec.userId)) return res.status(400).json({ error: 'That document was not sent to this person.', code: 'ITEM_DOCUMENT_NOT_THEIRS' });
+    st.document = { sendId: s.id, action: s.action, title: s.title };
+    // Attaching it is the office issuing it: any office step before hers
+    // (e.g. "Executive Director issues" the offer letter) is recorded now.
+    const hersAt = item.steps.findIndex(x => x.actor === 'NEW_HIRE');
+    for (let i = 0; i < hersAt; i++) {
+      if ((st.steps || {})[i]) continue;
+      try { Object.assign(st, T.recordStep(item, st, i, officeActorOf(req), { source: 'Document sent in the app', verifiedOn: nowIso().slice(0, 10) }, nowIso())); } catch (_) { break; }
+    }
+    await save(rec);
+    await event({ userId: rec.userId, type: 'document_attached', itemId: item.id, sendId: s.id, byId: req.user.id, byName: req.user.name });
     return res.json({ ok: true });
   });
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/steps/:index', authenticateToken, requireOffice, async (req, res) => {
@@ -795,6 +1023,7 @@ module.exports = function createOnboardingRoutes(deps) {
         T.returnStep(item, rec.items[item.id], (req.body || {}).step, officeActorOf(req), (req.body || {}).reason, nowIso()));
       await save(rec);
       await event({ userId: rec.userId, type: 'returned', itemId: item.id, byId: req.user.id, byName: req.user.name });
+      await notifyReturned(rec, item, (req.body || {}).reason, req.user.name || req.user.email);
       return res.json({ ok: true });
     } catch (e) { return send(res, e); }
   });
@@ -878,8 +1107,12 @@ module.exports = function createOnboardingRoutes(deps) {
   // records it for her.
   router.post('/api/onboarding/admin/people/:userId/modules/:moduleId/complete', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
+    // Only a training on this person's own checklist (2026-11-10).
+    const onTrack = (await buildFor(rec, 'office')).modules.some(x => x.id === m.id);
+    if (!onTrack) return res.status(409).json({ error: "That training isn't on this person's onboarding.", code: 'MODULE_NOT_ON_TRACK' });
     rec.training = rec.training || {};
     rec.training[m.id] = { completedAt: nowIso(), version: m.version, byName: req.user.name || req.user.email, signedOffByOffice: true, note: trim((req.body || {}).note, 500) || null };
     await save(rec);
@@ -906,20 +1139,68 @@ module.exports = function createOnboardingRoutes(deps) {
   router.get('/api/onboarding/admin/library', authenticateToken, requireOffice, async (req, res) => {
     const m = await manual();
     const revs = await reviews();
-    const mm = await materialMap(MODULES.map(x => x.id));
+    const added = LT.live(await libraryRows()).map(LT.toModule);
+    const pool = MODULES.concat(added);
+    const who = LT.whoGets(LT.live(await libraryRows()), T.chapterBaseIds);
+    const mm = await materialMap(pool.map(x => x.id));
+    const mats = await materials();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
     return res.json({
       settings: await settings(),
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
-      modules: MODULES.map(x => ({
-        id: x.id, title: x.title, phase: x.phase, phaseLabel: (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
+      roles: LT.STAFF_TYPES.map(t => ({ value: t, label: LT.TYPE_LABELS[t] })),
+      modules: pool.map(x => ({
+        // Who it is for (2026-11-10): Clinicians, Everyone, or the roles the
+        // office chose. An office-added training carries no manual flag.
+        audience: LT.audienceLabel(x), addedByOffice: !!x.addedByOffice, types: x.types || null, description: x.description || null,
+        forTypes: who[x.id] || [],
+        id: x.id, title: x.title, phase: x.phase, phaseLabel: (x.addedByOffice || x.audience || LT.SHARED_MODULE_IDS.includes(x.id)) ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
         format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
-        plannedSop: x.plannedSop, flag: flags[x.id], review: revs[x.id] || null,
-        sopRefs: x.sopRefs, material: mm.byModule[x.id]
+        plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,
+        sopRefs: x.sopRefs, material: mm.byModule[x.id],
+        // The tracker's fields (2026-11-10). Status is the material above, never typed.
+        group: (LC.entryFor(x.id) || {}).group || 'Added by GFC',
+        policy: effectivePolicy(x.id, x, mats[x.id]),
+        policyEdited: !!TM.policyOverride(mats[x.id]),
+        catalogPolicy: x.policy || LC.policyFor(x.id),
+        // The office's own choice wins. Otherwise the catalog's, except that an
+        // "attach" once something is attached reads as covered.
+        nextStep: nextStepFor(x.id, mats, mm.byModule[x.id], !!x.addedByOffice),
+        officeNote: ((mats[x.id] || {}).office || {}).note != null ? mats[x.id].office.note : ((LC.entryFor(x.id) || {}).note || ''),
+        officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null
       })),
+      groups: LC.GROUPS.concat(['Added by GFC']), nextSteps: LC.NEXT,
+      referenceRows: LC.referenceRows(),
       sopDocument: { ok: !!mm.sops.ok, version: mm.sops.version || null, reason: mm.sops.ok ? null : (mm.sops.reason || null), url: driveViewUrl('CLINICAL_SOPS_SET1') }
     });
+  });
+  // The office adds a training to the library for chosen roles (owner,
+  // 2026-11-10). It is required in the onboarding of everyone of those roles,
+  // in their chapter's training phase. Its material is added the same way as
+  // any module's (Manage Material). Removing keeps the row and every
+  // completion anyone recorded.
+  router.post('/api/onboarding/admin/library/trainings', authenticateToken, requireOffice, async (req, res) => {
+    const v = LT.validate(req.body);
+    if (!v.ok) return res.status(400).json({ error: v.error, code: v.code });
+    const rows = await libraryRows();
+    const row = Object.assign({ id: `LIB-${uuidv4().replace(/-/g, '').slice(0, 8)}`, version: '1',
+      createdAt: nowIso(), createdById: String(req.user.id), createdByName: req.user.name || req.user.email, removedAt: null }, v.row);
+    rows.push(row);
+    await db.set(LT.COLLECTION, rows);
+    libCache = rows;
+    await logActivity(req.user.id, req.user.name, 'onboarding_training_added', 'onboarding', row.id, { types: row.types });
+    return res.json({ ok: true, training: row });
+  });
+  router.delete('/api/onboarding/admin/library/trainings/:trainingId', authenticateToken, requireOffice, async (req, res) => {
+    const rows = await libraryRows();
+    const row = rows.find(r => r && r.id === req.params.trainingId && !r.removedAt);
+    if (!row) return res.status(404).json({ error: 'No such training.', code: 'TRAINING_UNKNOWN' });
+    row.removedAt = nowIso(); row.removedById = String(req.user.id); row.removedByName = req.user.name || req.user.email;
+    await db.set(LT.COLLECTION, rows);
+    libCache = rows;
+    await logActivity(req.user.id, req.user.name, 'onboarding_training_removed', 'onboarding', row.id, {});
+    return res.json({ ok: true });
   });
   router.put('/api/onboarding/admin/settings', authenticateToken, requireOffice, async (req, res) => {
     const next = Object.assign(await settings(), { checkQuestionsForStaff: req.body && req.body.checkQuestionsForStaff === true,
@@ -932,6 +1213,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // clears a flag; or confirms a module's drafted manual sections, which makes
   // them drive the flag from then on.
   router.post('/api/onboarding/admin/library/:moduleId/review', authenticateToken, requireOffice, async (req, res) => {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) return res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     const man = await manual();
@@ -954,7 +1236,8 @@ module.exports = function createOnboardingRoutes(deps) {
   // The office adds what a module teaches from when no written SOP covers it,
   // or alongside one. Every change is stamped with who and when, and removing
   // keeps the row, so what someone learned from stays on record.
-  const moduleOr404 = (req, res) => {
+  const moduleOr404 = async (req, res) => {
+    await libraryRows();
     const m = findModule(req.params.moduleId);
     if (!m) res.status(404).json({ error: 'Unknown module.', code: 'MODULE_UNKNOWN' });
     return m;
@@ -970,29 +1253,46 @@ module.exports = function createOnboardingRoutes(deps) {
     return res.json({ ok: true, material: TM.materialFor(m, all[m.id], sops.ids) });
   }
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
+  // The office edits what an item or a training tells the person to do.
+  // Blank goes back to the default wording.
+  router.put('/api/onboarding/admin/instructions/:id', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    if (!T.findItem(id) && !findModule(id) && !(await customTasks()).some(t => t.id === id)) return res.status(404).json({ error: 'No such item or training.', code: 'INSTRUCTIONS_UNKNOWN' });
+    const text = trim((req.body || {}).text, 2000);
+    const all = await instructions();
+    if (text) all[id] = { text, byName: req.user.name || req.user.email, at: nowIso() }; else delete all[id];
+    await db.set(INSTRUCTIONS, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_instructions_edited', 'onboarding', id, {});
+    return res.json({ ok: true });
+  });
+  // The office's next step, note and policy line for a training (2026-11-10).
+  router.put('/api/onboarding/admin/library/:moduleId/office', authenticateToken, requireOffice, async (req, res) => {
+    const m = await moduleOr404(req, res); if (!m) return;
+    return saveMaterial(req, res, m, (e) => TM.setOffice(e, req.body, officeActor(req), nowIso()), { action: 'office_fields_set' });
+  });
   router.get('/api/onboarding/admin/library/:moduleId/material', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     const sops = await sopState();
     return res.json(await materialBody(m.id, TM.materialFor(m, (await materials())[m.id] || null, sops.ids)));
   });
   router.get('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return sendMaterialFile(req, res, m.id);
   });
   router.post('/api/onboarding/admin/library/:moduleId/material/links', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.addLink(e, req.body, officeActor(req), nowIso(), uuidv4()), { action: 'link_added' });
   });
   router.delete('/api/onboarding/admin/library/:moduleId/material/links/:linkId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.remove(e, 'links', req.params.linkId, officeActor(req), nowIso()), { action: 'link_removed' });
   });
   router.put('/api/onboarding/admin/library/:moduleId/material/note', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.setNote(e, (req.body || {}).note, officeActor(req), nowIso()), { action: 'note_set' });
   });
   router.post('/api/onboarding/admin/library/:moduleId/material/files', authenticateToken, requireOffice, upload.single('file'), async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
     const prepared = staffDocs.prepareStaffDocument({ buffer: req.file.buffer, fileName: req.file.originalname, detectFileType, maxBytes: STAFF_MAX, keyPrefix: m.id });
     if (!prepared.ok) return res.status(prepared.status).json({ error: prepared.error, code: prepared.code });
@@ -1009,9 +1309,110 @@ module.exports = function createOnboardingRoutes(deps) {
     return saveMaterial(req, res, m, (e) => TM.addFile(e, file, officeActor(req), nowIso()), { action: 'file_added' });
   });
   router.delete('/api/onboarding/admin/library/:moduleId/material/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
-    const m = moduleOr404(req, res); if (!m) return;
+    const m = await moduleOr404(req, res); if (!m) return;
     return saveMaterial(req, res, m, (e) => TM.remove(e, 'files', req.params.fileId, officeActor(req), nowIso()), { action: 'file_removed' });
   });
+
+  // ---- the daily and weekly sweep (2026-11-09) -----------------------------
+  //
+  // It rides the notification scanner that already runs rather than a timer of
+  // its own. That is the opposite call to the to-do reminders, and the reason
+  // is the precision each one needs: a to-do names its own MINUTE, so a
+  // 30-minute scan is a broken promise there. Onboarding is a morning digest
+  // and a Monday roll-up, so the scanner's cadence is finer than the promise
+  // and the keys below hold each notice to one.
+  //
+  // Judged on GEORGIA'S date and hour, never the container's: UTC is already
+  // tomorrow for four hours of every evening, so a 9am send would fire at 4am
+  // and a Monday roll-up would go out on Sunday night.
+  // Takes the date and the hour so a caller can state them, the same shape
+  // `renewals` and `notices` have. Defaults to GEORGIA'S clock, which is what
+  // the scanner uses; a test that had to run at 9am Eastern to mean anything
+  // would be a test that mostly means nothing.
+  async function sweepOnboardingNotices({ today: todayIn, hourEt: hourIn } = {}) {
+    try {
+      const n = notifier(); if (!n) return { sent: 0, reason: 'no notifier' };
+      const parts = practiceTime.zonedParts(new Date());
+      const todayYmd = todayIn || (parts && parts.isoDate) || null;
+      const hourEt = Number.isFinite(hourIn) ? hourIn : (parts ? parts.hour : null);
+      if (!todayYmd || !N.sendHourReached(hourEt)) return { sent: 0, reason: 'before the send hour' };
+
+      const rows = await all();
+      const users = await getUsers();
+      const office = await officeRecipients();
+      const myUrl = await myCta();
+      const officeUrl = await officeCta();
+      let sent = 0;
+
+      // ---- 1. HER daily digest, and the office's credential milestones ----
+      const overview = [];
+      for (const rec of rows) {
+        const her = users.find(u => String(u.id) === String(rec.userId)) || null;
+        let track;
+        try { track = await buildFor(rec, 'office'); } catch (e) { console.error('[ONB] track failed for', rec.userId, e.message); continue; }
+        const digest = N.digestFor(track);
+
+        // ONE EMAIL A DAY, and never an empty one: a daily email that says
+        // "nothing to do" is how a daily email stops being read.
+        if (her && her.email && digest.total > 0) {
+          const out = await n.staffOnboardingDigest({
+            user: her, digest, ctaUrl: myUrl, dedupeId: N.digestKey(rec.userId, todayYmd)
+          });
+          sent += out.notified || 0;
+        }
+
+        // The office hears about each credential at its own milestones, so a
+        // licence 30 days out is announced once at 30 and again at 14 rather
+        // than every morning in between.
+        for (const cred of digest.expiring) {
+          const milestone = N.officeMilestone(cred.daysLeft);
+          if (milestone === null) continue;
+          // Once lapsed the key carries the DATE as well, so a stop-work
+          // condition is repeated daily instead of announced once.
+          const key = N.expiryKey(rec.userId, cred.id, milestone === 0 ? `0:${todayYmd}` : milestone);
+          for (const u of office) {
+            const out = await n.staffCredentialExpiring({
+              user: u, staffName: rec.userName || (her && her.name) || 'A staff member', staffUserId: rec.userId,
+              credential: cred, milestone, ctaUrl: officeUrl, dedupeId: key
+            });
+            sent += out.notified || 0;
+          }
+        }
+
+        overview.push({
+          userId: rec.userId, name: rec.userName || (her && her.name) || null,
+          startDate: (rec.inputs || {}).startDate || null,
+          waitingOnHer: (track.counts || {}).waitingOnHer || 0,
+          waitingOnOffice: (track.items || []).filter(i => i.next && !i.next.hers && i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE).length,
+          renewalsDue: (track.counts || {}).renewalsDue || 0,
+          expired: (track.items || []).filter(i => i.status === T.STATUS.EXPIRED).length
+        });
+      }
+
+      // ---- 2. the office's weekly roll-up ---------------------------------
+      if (N.isWeeklyDay(todayYmd) && office.length) {
+        const notStarted = users.filter(u => (u.hasClinicalAccess || ONBOARDED_TYPES.includes(accountTypes.accountTypeOf(u)))
+          && u.accountStatus !== 'inactive' && !rows.some(r => String(r.userId) === String(u.id)))
+          .map(u => ({ userId: u.id, name: u.name || u.email }));
+        const rollup = N.weeklyFor(overview, todayYmd, notStarted);
+        if (rollup.total > 0) {
+          for (const u of office) {
+            const out = await n.staffOnboardingWeekly({ user: u, rollup, ctaUrl: officeUrl, dedupeId: N.weeklyKey(u.id, todayYmd) });
+            sent += out.notified || 0;
+          }
+        }
+      }
+
+      if (sent) console.log(`[ONB] Queued ${sent} onboarding/credentialing notice(s) for ${todayYmd}.`);
+      return { sent };
+    } catch (err) {
+      console.error('[ONB] onboarding notice sweep failed (non-fatal):', err.message);
+      return { sent: 0, reason: err.message };
+    }
+  }
+
+  // Exposed for the scanner, the way messaging exposes its SMS drain.
+  router.notices = { sweepOnboardingNotices };
 
   return router;
 };

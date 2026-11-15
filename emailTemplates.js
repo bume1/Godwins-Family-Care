@@ -171,8 +171,15 @@ function renderGfcEmail(opts) {
     ? `<h1 style="font-family:Georgia,serif;font-size:22px;color:${PALETTE.navy};margin:0 0 24px 0;">${esc(o.headline)}</h1>`
     : '';
 
+  // Two opt-in readings (office announcements, 2026-11-10): `lineBreaks`
+  // keeps a paragraph's own line breaks, and `capsHeadings` draws a short
+  // line written in capitals ("WHAT'S COMING") as a heading. Escaped first,
+  // always: a line break becomes <br> only after the text is safe.
+  const isHeading = (p) => o.capsHeadings && !/\n/.test(p) && p.length <= 60 && /[A-Z]/.test(p) && p === p.toUpperCase();
   const bodyHtml = paragraphs
-    .map(p => `<p style="margin:0 0 20px 0;">${esc(p)}</p>`)
+    .map(p => (isHeading(p)
+      ? `<h2 style="font-family:Georgia,serif;font-size:17px;color:${PALETTE.navy};margin:28px 0 10px 0;letter-spacing:.02em;">${esc(p)}</h2>`
+      : `<p style="margin:0 0 20px 0;">${o.lineBreaks ? esc(p).replace(/\n/g, '<br>') : esc(p)}</p>`))
     .join('\n');
 
   const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:${PALETTE.cream};font-family:Arial,Helvetica,sans-serif;">

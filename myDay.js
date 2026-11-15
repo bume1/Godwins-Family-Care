@@ -217,9 +217,45 @@ const addressLineOf = (client) => {
 // already holds. Nothing leaves the boundary.
 const MAP_PADDING = 0.08; // fraction of the box kept clear at each edge
 
-const plotStops = ({ stops, width = 100, height = 100 }) => {
-  const placed = (stops || []).filter(s => s && s.coords);
-  if (!placed.length) return { points: [], bounds: null, unplaceable: (stops || []).length };
+// WHY a stop is not on the map, named per stop. "No coordinates" was the only
+// sentence this screen had, so an empty day, a video visit, and a visit whose
+// OpenEMR patient is not linked to any client in this app all read as "set the
+// coordinates" — and an admin who HAD set them was told to set them again.
+//   not_linked     — the visit has no app client behind it, so there is no
+//                    record to read coordinates from (link the chart).
+//   no_coordinates — the client exists and has none (Scheduling → Locations).
+// A video visit is not a stop at all and is counted apart, never as unplaced.
+//   other_record   — the visit's client has none, but ANOTHER client record
+//                    with the same name does. Scheduling → Locations shows that
+//                    record with coordinates while the visit points at this
+//                    one, which is exactly "it says none, but I added them"
+//                    (owner report, 2026-11-09). Merge or relink the records.
+const normName = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const unplacedReason = (s, namesWithCoords) => {
+  if (!s.clientId) return 'not_linked';
+  const n = normName(s.patientName);
+  const others = (n && namesWithCoords && namesWithCoords.get(n)) || [];
+  return others.some(id => String(id) !== String(s.clientId)) ? 'other_record' : 'no_coordinates';
+};
+
+// `clients` is optional: every client record, so a same-name record holding
+// the coordinates can be named. Without it the reasons stay as before.
+const plotStops = ({ stops, width = 100, height = 100, clients }) => {
+  const all = (stops || []).filter(Boolean);
+  const namesWithCoords = new Map();
+  for (const c of (clients || [])) {
+    if (!c || !coordsOf(c)) continue;
+    const n = normName(c.name);
+    if (!n) continue;
+    namesWithCoords.set(n, [...(namesWithCoords.get(n) || []), c.id]);
+  }
+  const remote = all.filter(s => !s.coords && s.remote).length;
+  const unplaced = all.filter(s => !s.coords && !s.remote).map(s => ({
+    eid: s.eid || null, clientId: s.clientId || null,
+    label: s.patientName || null, time: s.time || null, reason: unplacedReason(s, namesWithCoords)
+  }));
+  const placed = all.filter(s => s.coords);
+  if (!placed.length) return { points: [], bounds: null, unplaceable: unplaced.length, unplaced, remote, total: all.length };
   const lats = placed.map(s => s.coords.lat);
   const lngs = placed.map(s => s.coords.lng);
   const minLat = Math.min(...lats), maxLat = Math.max(...lats);
@@ -248,7 +284,10 @@ const plotStops = ({ stops, width = 100, height = 100 }) => {
   return {
     points,
     bounds: { minLat, maxLat, minLng, maxLng },
-    unplaceable: (stops || []).length - placed.length
+    unplaceable: unplaced.length,
+    unplaced,
+    remote,
+    total: all.length
   };
 };
 

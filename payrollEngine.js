@@ -73,6 +73,20 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     add(String(l.caregiver_id), { ref: `log:${l.id}`, kind: 'hours', source: 'Caregiver shift', date: d, minutes: Number(l.total_minutes), rateCents: Math.round(r.rate * 100), rateSource: r.source });
   }
 
+  // A clinician who is ON THE CLOCK (the staff clock or a staff shift) when
+  // a visit happens is already paid for that time by the clock. Paying the
+  // visit's minutes as well would pay the same hour twice. Per-visit pay is a
+  // different arrangement (a fee per visit), so only hourly visits are held.
+  const clockedSpans = new Map();
+  for (const l of timeLogs || []) {
+    if (!l || !l.clock_in_at || !l.clock_out_at) continue;
+    if (!(l.kind === 'staff' || (!l.shift_id && !l.client_id))) continue;
+    const k = String(l.caregiver_id);
+    if (!clockedSpans.has(k)) clockedSpans.set(k, []);
+    clockedSpans.get(k).push([Date.parse(l.clock_in_at), Date.parse(l.clock_out_at)]);
+  }
+  const onTheClock = (uid, a, b) => (clockedSpans.get(String(uid)) || []).some(([s, e]) => Date.parse(a) < e && Date.parse(b) > s);
+
   for (const t of visitTimings || []) {
     if (!t || !t.startedAt || !t.endedAt || !t.byId) continue;
     if (paidRefs && paidRefs.has(`visit:${t.id}`)) continue;
@@ -81,6 +95,7 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
     const p = profilesById.get(String(t.byId));
     const mins = minutesBetween(t.startedAt, t.endedAt);
     if (!mins || mins > MAX_ITEM_MINUTES) { skipped.push({ userId: t.byId, ref: `visit:${t.id}`, reason: 'Visit start and end do not make a usable length.' }); continue; }
+    if (!(p && p.payType === 'per_visit') && onTheClock(t.byId, t.startedAt, t.endedAt)) continue;   // paid by the clock
     if (p && p.payType === 'per_visit') add(String(t.byId), { ref: `visit:${t.id}`, kind: 'visit', source: 'Clinical visit', date: d, count: 1, rateCents: p.perVisitRateCents || 0 });
     else if (p && p.payType === 'salary') continue;   // salary covers it
     else add(String(t.byId), { ref: `visit:${t.id}`, kind: 'hours', source: 'Clinical visit', date: d, minutes: mins, rateCents: (p && p.hourlyRateCents) || 0 });
@@ -164,8 +179,24 @@ function runTotals(workers) {
   return totals;
 }
 
-function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments }) {
-  const perYear = tax.FREQUENCIES[settings.frequency].perYear;
+// HOW EACH PERSON IS SENT PAY (owner, 2026-11-13): the office chooses per run,
+// Direct deposit or P2P (Cash App from GFC's account), with a per-person
+// override. `channels` = { default, byUser }.
+const PAY_CHANNELS = Object.freeze({ direct_deposit: 'Direct deposit', p2p: 'P2P (Cash App)' });
+const channelOf = (channels, uid) => { const c = channels || {}; const v = (c.byUser || {})[uid] || c.default; return PAY_CHANNELS[v] ? v : 'direct_deposit'; };
+// Taxes entered by hand (owner, 2026-11-14), for the rare period the office
+// must pay before the forms are in, or adjust what was withheld. The Super
+// Admin enters the employee's withholding with a reason; employer taxes are
+// still figured. A missing W-4 or withholding certificate then does not hold
+// pay, and other missing paperwork is listed as still owed rather than
+// blocking: hours worked are paid on payday. How they are paid and a pay rate
+// are still needed, since without them nothing can be paid at all.
+const BLOCKS_EVEN_BY_HAND = (m) => /^How they are paid|^Pay rate|^Works in|also withholds for/.test(m);
+const FORM_ITEMS = (m) => m === 'W-4' || m === 'G-4' || /withholding certificate$/.test(m);
+function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjustments, channels, manualTaxes }) {
+  // The run's own schedule decides the divisor (52 weekly, 26 biweekly).
+  const frequency = (period && period.frequency) || settings.frequency;
+  const perYear = tax.FREQUENCIES[frequency].perYear;
   const workers = [];
   for (const { user, profile } of people) {
     const uid = String(user.id);
@@ -176,7 +207,8 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const { lines, missingRate } = earningsFor(profile, items, perYear);
     for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
     const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
-    const missing = profiles.missingForPay(profile);
+    const channel = channelOf(channels, uid);
+    const missing = profiles.missingForPay(profile, { p2p: channel === 'p2p' });
     // Georgia first; another state is paid only once its table is approved,
     // and never taxed as Georgian.
     const ws = (profile && profile.workState) || 'GA';
@@ -192,10 +224,29 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const w = {
       userId: uid, name: user.name || user.email || uid,
       workerType: profile ? profile.workerType : 'W2', wageAccount: profile ? profile.wageAccount : 'clinical',
-      payMethod: profile && profile.payMethod ? profile.payMethod.method : null,
+      payMethod: channel === 'p2p' ? 'p2p' : profile && profile.payMethod ? profile.payMethod.method : null, channel,
       refs: items.map(i => i.ref), earnings: lines, missing, workState: ws
     };
-    if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
+    const byHand = (manualTaxes || {})[uid];
+    if (byHand && stTable) {
+      // The figured paycheck (with the default forms where theirs are not in)
+      // supplies gross and employer taxes; the employee's withholding is the
+      // office's.
+      const base = tax.paycheck({
+        earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: (profile && profile.w4) || { filingStatus: 'single' }, g4: (profile && profile.g4) || { filingStatus: 'A' },
+        tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: (profile && profile.stateCert) || { filingStatus: 'single', allowances: 0 }
+      });
+      const taxes = { federal: byHand.federal, socialSecurity: byHand.socialSecurity, medicare: byHand.medicare, georgia: ws === 'GA' ? byHand.stateTax : 0 };
+      if (ws !== 'GA') taxes.state = byHand.stateTax;
+      const taxCents = Object.values(taxes).reduce((a, v) => a + v, 0);
+      w.pay = { ...base, taxes, taxCents, netCents: base.grossCents - taxCents + base.reimbursementsCents };
+      // Gross when the taxes were entered: a line added or removed since then
+      // changes gross but not hand-entered taxes, so the screen warns.
+      const enteredOn = Number.isFinite(byHand.grossCents) ? byHand.grossCents : null;
+      w.manualTaxes = { reason: byHand.reason, by: byHand.by, at: byHand.at, grossCents: enteredOn, grossChanged: enteredOn !== null && enteredOn !== base.grossCents };
+      w.paperworkOwed = missing.filter(m => !BLOCKS_EVEN_BY_HAND(m) && !FORM_ITEMS(m));
+      w.missing = missing.filter(BLOCKS_EVEN_BY_HAND);
+    } else if (profile && profile.w4 && (ws !== 'GA' || profile.g4) && stTable && !(stTable.incomeTax && ws !== 'GA' && !profile.stateCert)) {
       w.pay = tax.paycheck({
         earnings: lines, reimbursementsCents, ytd: ytdByUser.get(uid), w4: profile.w4, g4: profile.g4,
         tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: profile.stateCert
@@ -206,7 +257,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
   workers.sort((a, b) => a.name.localeCompare(b.name));
   const totals = runTotals(workers);
   return {
-    period, frequency: settings.frequency, perYear,
+    period, frequency, perYear, schedule: (period && period.schedule) || null,
     workers, totals,
     blocked: workers.filter(w => w.missing.length).map(w => ({ userId: w.userId, name: w.name, missing: w.missing })),
     sutaRateMissing: workers.some(w => w.workState === 'GA') && (settings.gaSutaRatePct === null || settings.gaSutaRatePct === undefined),
@@ -240,4 +291,4 @@ function paidRefsFrom(runs) {
   return s;
 }
 
-module.exports = { RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, runTotals, buildRun, ytdFrom, paidRefsFrom };
+module.exports = { PAY_CHANNELS, channelOf, RUN_STATUSES, ADJUSTMENT_TYPES, MAX_ITEM_MINUTES, gatherItems, earningsFor, runTotals, buildRun, ytdFrom, paidRefsFrom };

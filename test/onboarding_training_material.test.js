@@ -113,27 +113,40 @@ test('the SOP parser returns each procedure up to its check questions, never the
   assert.deepStrictEqual(s['SOP-EXM-01'].lines, ['Purpose. Examine.'], 'a planned SOP is not read as written');
 });
 
-test('today\'s catalog against today\'s Drive: 13 modules open, the rest greyed for staff', () => {
+test('today\'s catalog against today\'s Drive: 12 modules open on a written SOP, the rest greyed for staff', () => {
   const ids = new Set(WRITTEN);
   const ready = MODULES.filter(m => TM.materialFor(m, null, ids).ready);
-  assert.strictEqual(ready.length, 13);
+  assert.strictEqual(ready.length, 12, 'TRN-101 (SOP-EXM-01) was retired 2026-11-10');
   assert.strictEqual(MODULES.filter(m => TM.materialFor(m, null, ids).status === 'SOP_NOT_WRITTEN').length, 10);
 });
 
-test('her door: a module with no material is greyed out, carries nothing to read, and cannot be completed', async (t) => {
+// Greyed out only while it waits on an SOP to be written (2026-11-10).
+test('her door: a module waiting on its SOP is greyed out, carries nothing to read, and cannot be completed', async (t) => {
+  const h = await mount(t);
+  await h.startHer();
+  h.as(NP);
+  const me = await h.call('GET', '/api/onboarding/me');
+  const t216 = me.data.track.modules.find(m => m.id === 'TRN-216');
+  assert.deepStrictEqual(t216.material, { ready: false });
+  assert.strictEqual(t216.available, false);
+  assert.strictEqual(t216.waitingOnSop, true);
+  assert.ok(!JSON.stringify(me.data.track.modules).includes('SOP_NOT_WRITTEN'), 'the unwritten-SOP state is the office\'s');
+  const done = await h.call('POST', '/api/onboarding/me/modules/TRN-216/complete', {});
+  assert.strictEqual(done.data.code, 'MODULE_NO_MATERIAL');
+  assert.ok(!(h.store.onboarding_records[0].training || {})['TRN-216'], 'nothing was written');
+  const read = await h.call('GET', '/api/onboarding/me/modules/TRN-216/material');
+  assert.strictEqual(read.data.code, 'MODULE_NO_MATERIAL');
+});
+
+test('her door: a module not waiting on an SOP stays open with no material, and she can complete it', async (t) => {
   const h = await mount(t);
   await h.startHer();
   h.as(NP);
   const me = await h.call('GET', '/api/onboarding/me');
   const t001 = me.data.track.modules.find(m => m.id === 'TRN-001');
-  assert.deepStrictEqual(t001.material, { ready: false });
-  assert.strictEqual(t001.available, false);
-  assert.ok(!JSON.stringify(me.data.track.modules).includes('SOP_NOT_WRITTEN'), 'the unwritten-SOP state is the office\'s');
-  const done = await h.call('POST', '/api/onboarding/me/modules/TRN-001/complete', {});
-  assert.strictEqual(done.data.code, 'MODULE_NO_MATERIAL');
-  assert.ok(!(h.store.onboarding_records[0].training || {})['TRN-001'], 'nothing was written');
-  const read = await h.call('GET', '/api/onboarding/me/modules/TRN-001/material');
-  assert.strictEqual(read.data.code, 'MODULE_NO_MATERIAL');
+  assert.strictEqual(t001.waitingOnSop, false, 'the Library says "attach existing", not "write SOP"');
+  assert.notStrictEqual(t001.available, false);
+  assert.strictEqual((await h.call('POST', '/api/onboarding/me/modules/TRN-001/complete', {})).status, 200);
 });
 
 test('her door: an SOP module opens with the procedure read from Drive', async (t) => {

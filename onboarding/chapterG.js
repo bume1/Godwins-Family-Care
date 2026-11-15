@@ -79,7 +79,7 @@ const OWN = [
   { id: 'G.2.06', phase: 'G.2', title: 'Liaison Playbook and Training Plan issued', ref: P('G.1'),
     acknowledges: ['LIAISON_PLAYBOOK', 'LIAISON_TRAINING_PLAN'],
     steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED)] },
-  { id: 'G.3.01', phase: 'G.2', title: 'Availability submitted and approved hours set', ref: P('G.3'),
+  { id: 'G.3.01', link: { label: 'Open Availability', url: '/my#hours/availability' }, phase: 'G.2', title: 'Availability submitted and approved hours set', ref: P('G.3'),
     elements: ['Six to twelve pre-approved hours a week', 'Availability submitted at least two weeks ahead',
       'Two more approved hours a week for each client placed on service, up to twelve', 'Hours recorded in the app at the time worked'],
     steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.EXECUTIVE_DIRECTOR, X.RECORD, INFERRED)] },

@@ -41,6 +41,7 @@ const { contentDisposition } = require('../contentDisposition');
 const staffDocs = require('../staffDocuments');
 
 const accountTypes = require('../accountTypes');
+const announcements = require('../staffAnnouncements');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
@@ -49,7 +50,10 @@ module.exports = function createCaregiverRoutes(deps) {
     // module keeps no I/O of its own and the tests can drive a fake Drive.
     drive, detectFileType,
     // The visit-log PDF download (2026-10-03), injected for the same reason.
-    pdfGenerator
+    pdfGenerator,
+    // What a lead caregiver sees of the patient's shared record (2026-11-11).
+    // Built in server.js from the same published copies the patient's portal reads.
+    sharedForLeadCaregiver, serveSharedDocument
   } = deps;
   const router = express.Router();
 
@@ -89,8 +93,10 @@ module.exports = function createCaregiverRoutes(deps) {
   // and those must not answer a different question than the guard does. Two
   // routes restated it inline and so would NOT have picked this up; they call
   // it now, which is what that sentence was asking for.
+  // The office part follows Home Care Oversight in the Modules grid (owner,
+  // 2026-11-13); clinicians and case managers review visit logs by licence.
   const isReviewStaff = (u) =>
-    !!u && (u.role === ROLES.ADMIN || !!u.isManager || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
+    !!u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'caregiverManagement') || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
 
   const requireReviewStaff = (req, res, next) => {
     if (isReviewStaff(req.user)) return next();
@@ -106,7 +112,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // manager and a care coordinator run caregiver management — documents,
   // competencies, the Feed. Read by ACCOUNT TYPE (accountTypes.js), never by
   // `role`, because a coordinator is stored as `role: 'user'`.
-  const isCaregiverOffice = (u) => accountTypes.isHomeCareOffice(u);
+  // Home Care Oversight in the Modules grid (owner, 2026-11-13): the office
+  // by default, plus a grant, minus a removal.
+  const isCaregiverOffice = (u) => accountTypes.hasModule(u, 'caregiverManagement');
   // An employee of any kind: an account type that is not a client or family.
   const isStaffAccount = (u) => {
     const t = accountTypes.accountTypeOf(u);
@@ -276,10 +284,53 @@ module.exports = function createCaregiverRoutes(deps) {
         { role: 'caregiver', licenseLevel: caregiver.licenseLevel, resource: 'care_plan' });
       res.json({
         client: cg.caregiverClientView(client),
-        schema: cg.visitLogSchemaFor(caregiver, client)
+        schema: cg.visitLogSchemaFor(caregiver, client),
+        // Whether this caregiver may also open what was shared with the patient.
+        leadAccess: cg.isLeadCaregiver(caregiver, client)
       });
     } catch (error) {
       console.error('Caregiver client read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // GET /api/caregiver/clients/:clientId/shared — a LEAD caregiver's view of
+  // what was shared with the patient (owner, 2026-11-11): the documents on the
+  // patient's portal, medicines and allergies, the patient-facing visit
+  // summaries and appointments. Read only. Never clinical notes, results,
+  // billing or provider-to-family messages. Every read is logged.
+  // ==========================================================================
+  const loadLeadClient = async (req, res) => {
+    const caregiver = await freshCaregiver(req);
+    const { client, error } = await loadAssignedClient(caregiver, req.params.clientId);
+    if (error) { res.status(403).json({ error: 'You are not assigned to this client.', code: error }); return null; }
+    if (!cg.isLeadCaregiver(caregiver, client)) {
+      res.status(403).json({ error: 'Only a lead caregiver for this client can see what was shared with them. The office sets this.', code: 'NOT_LEAD_CAREGIVER' });
+      return null;
+    }
+    return { caregiver, client };
+  };
+  router.get('/api/caregiver/clients/:clientId/shared', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
+    try {
+      const ctx = await loadLeadClient(req, res);
+      if (!ctx) return;
+      const shared = await sharedForLeadCaregiver(ctx.client);
+      await logActivity(ctx.caregiver.id, ctx.caregiver.name, 'caregiver_shared_record_read', 'client', ctx.client.id,
+        { role: 'caregiver', lead: true, counts: { documents: shared.documents.length, visits: shared.visits.length, medications: shared.medications.rows.length, appointments: shared.appointments.length } });
+      res.json(shared);
+    } catch (error) {
+      console.error('Lead caregiver shared read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  router.get('/api/caregiver/clients/:clientId/shared/documents/:docId/file', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
+    try {
+      const ctx = await loadLeadClient(req, res);
+      if (!ctx) return;
+      await serveSharedDocument(res, ctx.client, req.params.docId, ctx.caregiver);
+    } catch (error) {
+      console.error('Lead caregiver document error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -888,8 +939,10 @@ module.exports = function createCaregiverRoutes(deps) {
       const events = await readRows('escalation_events');
       const mine = events.filter(e => e && e.caregiver_id === req.user.id);
       const items = broadcasts
-        .filter(b => b && b.active !== false)
-        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, at: b.posted_at, byName: b.posted_by_name }))
+        // Caregiver posts and all-staff announcements (2026-11-10), through the
+        // same audience rule My GFC → Announcements reads.
+        .filter(b => announcements.visibleTo(b, 'caregiver', req.user.id))
+        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
         .concat(mine.map(e => ({
           id: e.id, kind: 'escalation', title: `${e.concern_type.replace(/_/g, ' ')} concern — ${e.client_name}`,
           body: `Status: ${String(e.status).replace(/_/g, ' ')}. ${cg.describeRecipients(e.notified) === 'no one — this concern could not be routed' ? '' : `Sent to ${cg.describeRecipients(e.notified)}.`}`.trim(),
@@ -909,11 +962,22 @@ module.exports = function createCaregiverRoutes(deps) {
     try {
       const { title, body } = req.body || {};
       if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.', code: 'TITLE_REQUIRED' });
+      // Who it is for (2026-11-10). No audience means caregivers, as before.
+      const staffIds = (await getUsers()).filter(u => announcements.STAFF_TYPES.includes(accountTypes.accountTypeOf(u)))
+        .filter(u => u.accountStatus !== 'inactive').map(u => u.id);
+      const aud = announcements.parseAudience((req.body || {}).audience, (req.body || {}).userIds, staffIds);
+      if (!aud.ok) return res.status(400).json({ error: aud.error, code: aud.code });
+      const lnk = announcements.parseLink((req.body || {}).link);
+      if (!lnk.ok) return res.status(400).json({ error: lnk.error, code: lnk.code });
       const rows = await readRows('caregiver_broadcasts');
       const row = {
         id: uuidv4(),
-        title: String(title).trim().slice(0, 200),
-        body: String(body || '').trim().slice(0, 4000),
+        title: String(title).trim().slice(0, announcements.TITLE_MAX),
+        // No length limit on the message (owner, 2026-11-10: it cut one off).
+        body: String(body || '').trim(),
+        audience: aud.audience,
+        user_ids: aud.userIds,
+        link: lnk.link,
         active: true,
         posted_at: nowIso(),
         posted_by: req.user.id,
@@ -922,9 +986,44 @@ module.exports = function createCaregiverRoutes(deps) {
       rows.push(row);
       await db.set('caregiver_broadcasts', rows);
       await logActivity(req.user.id, row.posted_by_name, 'caregiver_broadcast_posted', 'broadcast', row.id, { title: row.title });
-      res.json({ broadcast: row });
+      // Everyone it reaches gets it by email too, word for word (owner,
+      // 2026-11-10). Through the queue, so an unsubscribe or an inactive
+      // account is honoured. A failed send never undoes the post.
+      let emailed = 0;
+      const recipients = (await getUsers()).filter(u => u && u.email && u.accountStatus !== 'inactive'
+        && String(u.id) !== String(req.user.id)
+        && announcements.visibleTo(row, accountTypes.accountTypeOf(u), u.id));
+      for (const u of recipients) {
+        try {
+          const q = await queueNotification('staff_announcement', u.id, u.email, u.name || u.email,
+            announcements.emailFor(row, links.announcementsFor(u)),
+            { relatedEntityId: row.id, relatedEntityType: 'announcement', createdBy: req.user.id });
+          if (q && !q.skipped) emailed++;
+        } catch (e) { console.error('Announcement email failed:', e.message); }
+      }
+      res.json({ broadcast: row, emailed });
     } catch (error) {
       console.error('Broadcast error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/caregiver/broadcasts/:id/retire — take a post down. The row is
+  // kept (active: false) with who retired it and when, never deleted.
+  router.post('/api/caregiver/broadcasts/:id/retire', authenticateToken, requireCaregiverOffice, async (req, res) => {
+    try {
+      const rows = await readRows('caregiver_broadcasts');
+      const row = rows.find(b => b && b.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'No such announcement.', code: 'ANNOUNCEMENT_NOT_FOUND' });
+      if (row.active === false) return res.json({ broadcast: row });
+      row.active = false;
+      row.retired_at = nowIso();
+      row.retired_by_name = req.user.name || req.user.email;
+      await db.set('caregiver_broadcasts', rows);
+      await logActivity(req.user.id, row.retired_by_name, 'caregiver_broadcast_retired', 'broadcast', row.id, { title: row.title });
+      res.json({ broadcast: row });
+    } catch (error) {
+      console.error('Broadcast retire error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -956,7 +1055,18 @@ module.exports = function createCaregiverRoutes(deps) {
   });
 
   // GET /api/caregiver/incidents — review staff. ?status=open|closed.
-  router.get('/api/caregiver/incidents', authenticateToken, requireReviewStaff, async (req, res) => {
+  // The Incident Log follows its own row in the Modules grid (owner,
+  // 2026-11-13). Clinicians and case managers still read it by licence.
+  const requireIncidentReader = (req, res, next) => {
+    const u = req.user;
+    if (u && (u.role === ROLES.ADMIN || accountTypes.hasModule(u, 'incidents') || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER)) return next();
+    return res.status(403).json({ error: 'The Incident Log is for the office and clinical staff.', code: 'INCIDENT_READER_ONLY' });
+  };
+  const requireIncidentOffice = (req, res, next) => {
+    if (req.user && (req.user.role === ROLES.ADMIN || accountTypes.hasModule(req.user, 'incidents'))) return next();
+    return res.status(403).json({ error: 'The office closes incidents.', code: 'INCIDENT_OFFICE_ONLY' });
+  };
+  router.get('/api/caregiver/incidents', authenticateToken, requireIncidentReader, async (req, res) => {
     try {
       let rows = await readRows('incident_reports');
       const want = String(req.query.status || '');
@@ -974,7 +1084,7 @@ module.exports = function createCaregiverRoutes(deps) {
 
   // POST /api/caregiver/incidents/:id/close — the caregiver office closes an
   // incident with a follow-up note, and records a state report if one was made.
-  router.post('/api/caregiver/incidents/:id/close', authenticateToken, requireCaregiverOffice, async (req, res) => {
+  router.post('/api/caregiver/incidents/:id/close', authenticateToken, requireIncidentOffice, async (req, res) => {
     try {
       const { note, stateReport } = req.body || {};
       const text = String(note || '').trim();
@@ -1201,10 +1311,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // that names kinds is a page that drifts from the validator that refuses them.
   //
   // `payroll: true` marks the onboarding paperwork (2026-09-13, owner request).
-  // GUSTO IS THE SYSTEM OF RECORD for these — the caregiver submits them there,
-  // and what the app holds is the office's copy. Nothing here transmits to
-  // Gusto and no screen may imply it does, or someone will believe their W9 is
-  // filed because they uploaded it here.
+  // These are the office's copies. The pay and tax paperwork itself (W-4, G-4,
+  // I-9, W-9, direct deposit) is filled in by the person in My GFC → Hours &
+  // Pay (owner, 2026-11-10: Gusto is no longer part of onboarding).
   const BASE_DOC_KINDS = [
     { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true,  payroll: false },
     { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false, payroll: false },
@@ -1233,6 +1342,9 @@ module.exports = function createCaregiverRoutes(deps) {
   // `id_document` and `certification` ALREADY EXIST above and are deliberately
   // reused rather than duplicated: a photo ID is a photo ID, and two buckets
   // for one document is how the office ends up chasing a file it already has.
+  // Kinds only the app files, never chosen on an upload form: a signed copy
+  // of a document the office sent comes only from the sign route (2026-11-09).
+  const FILED_ONLY_KIND_LABELS = { signed_document: 'Signed or acknowledged document' };
   const CAREGIVER_DOC_KINDS = [
     ...BASE_DOC_KINDS,
     ...wp.PACKET_DOCUMENT_KINDS
@@ -1528,7 +1640,7 @@ module.exports = function createCaregiverRoutes(deps) {
     caregiverId: r.caregiver_id,
     caregiverName: r.caregiver_name,
     kind: r.kind,
-    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || r.kind,
+    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || FILED_ONLY_KIND_LABELS[r.kind] || r.kind,
     fileName: r.file_name,
     sizeBytes: r.size_bytes,
     note: r.note || null,

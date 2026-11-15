@@ -14,7 +14,10 @@ For the owner. Do these steps in order. Nothing goes live until the container on
 
 ## 2. In the app: Payroll → Settings
 
-- **Pay frequency.** Weekly runs Monday to Sunday; every two weeks runs Monday through the second Sunday. A change starts with the next period that has not begun, and the withholding follows it automatically.
+- **Two pay schedules.** **Caregivers** (weekly, Monday to Sunday) and **Everyone else** (every two weeks, Monday through the second Sunday). For each one, check:
+  - **How often.** A change starts with the next period that has not begun, and the withholding follows it automatically.
+  - **Payday, days after the period ends.** 5 is the Friday after the period's last Sunday.
+  - **First Monday of a pay period.** Any Monday that starts one of your real pay periods. The card shows "this period … to …, paid …"; if that is not the period you actually pay, enter the right Monday. This matters most for every two weeks, which can be off by a week.
 - **Georgia unemployment rate**, from your GA DOL notice. A new employer is 2.70% (2.64% plus the 0.06% administrative assessment). **No run can be approved until this is set.**
 - **Federal deposit schedule** (monthly for most new employers) and **Georgia withholding filing frequency**, from your IRS and Georgia DOR notices.
 - **GFC's federal EIN.** It prints on pay stubs.
@@ -37,8 +40,10 @@ Each person completes their own:
 - I-9 Section 1
 - SSN
 - how they are paid
-- the offer letter and handbook acknowledgements
-- consent to electronic W-2s
+- their legal name and mailing address for the W-2
+- consent to electronic W-2s (optional; otherwise paper)
+
+The offer letter and handbook are signed in onboarding, not here.
 
 Contractors also complete a W-9.
 
@@ -110,6 +115,12 @@ The run is paid only when everyone has one.
 ## 8. Before retiring Gusto
 
 Run one pay period both ways, in Gusto and in the app, and compare every stub line. Retire Gusto only when they match.
+
+**GFC files 2026 W-2s from the app, not Gusto (owner, 2026-11-09).** Import the year's Gusto pay first (section 10) so those wages are on the app's W-2s, and turn off Gusto's own year-end filing for 2026 so nothing is reported twice.
+
+## 8a. Two pay schedules
+
+Caregivers are paid **weekly** and everyone else **every two weeks**. Each schedule has its own first Monday and payday under **Payroll → Settings**, and each run belongs to one schedule (pick it when you draft). To move one person to the other schedule, open them under **People → Pay schedule**. The daily period-close job drafts each schedule on its own.
 
 ## 9. Year end: W-2s and 1099s (Payroll → Year End)
 

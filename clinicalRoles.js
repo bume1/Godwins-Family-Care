@@ -180,6 +180,13 @@ const isValidClinicalRole = (v) => ALL_CLINICAL_ROLES.includes(String(v || ''));
 const resolveClinicalRole = (user) => {
   if (!user) return null;
   if (user.role === 'admin') return CLINICAL_ROLES.PROVIDER;
+  // The Modules grid (owner, 2026-11-13): a Super Admin can take the Clinical
+  // Workspace away from someone whose role includes it, or give it to someone
+  // whose role does not. A grant is VIEW ONLY: writing follows the licence,
+  // which a tick box does not confer. Read from the record, like the role.
+  const ma = (user.moduleAccess && typeof user.moduleAccess === 'object') ? user.moduleAccess : {};
+  if (Array.isArray(ma.removed) && ma.removed.includes('clinical')) return null;
+  const granted = Array.isArray(ma.granted) && ma.granted.includes('clinical');
   if (isValidClinicalRole(user.clinicalRole)) return String(user.clinicalRole);
   // Derived fallback — today's model, preserved.
   // GFC's case managers ARE LMSW (owner, 2026-10-12), so a case manager with
@@ -187,6 +194,7 @@ const resolveClinicalRole = (user) => {
   // deliberately, and that stored value wins above.
   if (user.role === 'caseManager') return CLINICAL_ROLES.LMSW;
   if (user.hasClinicalAccess) return CLINICAL_ROLES.PROVIDER;
+  if (granted) return CLINICAL_ROLES.READ_ONLY;
   return null;
 };
 
@@ -354,8 +362,11 @@ const canCoSignNote = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinical
 // is an admin or a manager. This is deliberately NOT a clinical role: it is the
 // only thing that may see or change a place of service, and a clinician never
 // can. One predicate, read by every billing route and served to the page.
+// Since the Modules grid (owner, 2026-11-13) it is whoever holds the Billing
+// module: the office by default, plus anyone the Super Admin granted it, minus
+// anyone it was taken from.
 const canSubmitBilling = (user) => !!user && user.accountStatus !== 'inactive' &&
-  (user.role === 'admin' || user.isManager === true);
+  (user.role === 'admin' || require('./accountTypes').hasModule(user, 'billing'));
 
 // WHERE AN ORDER GOES (owner, 2026-09-29): the receiving agency, practice or
 // supplier is usually confirmed AFTER the clinician places the order, by
@@ -451,7 +462,21 @@ const isReferralTarget = (user) => {
 //                     pending provider co-signature
 const CARE_PLAN_OUTCOME = Object.freeze({ COMPLETE: 'complete', PENDING_PROVIDER: 'pending_provider_cosign', REFUSED: 'refused' });
 const isClinicalLine = (serviceLine) => ['IHPC', 'BOTH'].includes(String(serviceLine || 'PHC').toUpperCase());
+// An admin account resolves to `provider` everywhere else (the owner's chart
+// must never lock her out), but a care plan signature from an admin counts as a
+// licensed one only when that account carries an NPI (owner, 2026-11-09). The
+// shared office admin has none: a plan written from it is the AUTHOR's, and it
+// waits for a clinician the same way a coordinator's does. Referrals already
+// read an admin this way (isReferralTarget).
+const ADMIN_AUTHOR = 'admin';
+const adminHasNpi = (user) => /^\d{10}$/.test(String((user && user.npi) || '').replace(/\D/g, ''));
 const evaluateCarePlanSignature = (user, serviceLine) => {
+  if (user && user.role === 'admin' && !adminHasNpi(user)) {
+    return {
+      outcome: CARE_PLAN_OUTCOME.PENDING_PROVIDER, clinicalRole: ADMIN_AUTHOR, signatureRole: 'authoring',
+      reason: 'This plan was written from an admin account with no NPI on file. It becomes active once a licensed clinician co-signs it.'
+    };
+  }
   const role = resolveClinicalRole(user);
   if (role === CLINICAL_ROLES.COORDINATOR) {
     // Owner, 2026-10-14: a care coordinator writes and updates the plan, and
@@ -468,7 +493,7 @@ const evaluateCarePlanSignature = (user, serviceLine) => {
     // A10 authors and never completes a signature alone.
     return {
       outcome: CARE_PLAN_OUTCOME.PENDING_PROVIDER, clinicalRole: role, signatureRole: 'authoring',
-      reason: 'An LMSW authors a care plan; it is held for co-signature by an LCSW or a provider.'
+      reason: 'An LMSW wrote this plan. It becomes active once a licensed clinician co-signs it.'
     };
   }
   if (role === CLINICAL_ROLES.PROVIDER) return { outcome: CARE_PLAN_OUTCOME.COMPLETE, clinicalRole: role, signatureRole: 'signing' };
@@ -492,8 +517,20 @@ const canCoSignCarePlan = (user) => CO_SIGN_ROLES.includes(resolveClinicalRole(u
 // The CARE_PLAN_SIGN check is belt-and-braces: every role whose signature
 // completes a plan also holds it today, so removing it changes nothing until
 // a role is added that completes a plan without the capability.
-const canCompleteCarePlan = (user, serviceLine) =>
-  can(user, CAPABILITIES.CARE_PLAN_SIGN) && evaluateCarePlanSignature(user, serviceLine).outcome === CARE_PLAN_OUTCOME.COMPLETE;
+//
+// An RN co-signs a CLINICAL patient's plan only when an unlicensed or
+// supervised author wrote it — a care coordinator, an LMSW, or an admin account
+// with no NPI (owner, 2026-11-09). A clinical plan an RN wrote still needs a provider or an LCSW,
+// because the co-signature exists to add a credential the author does not
+// carry. Pass the plan so the author's role can be read; without it the rule is
+// the author-blind one.
+const RN_COSIGNABLE_AUTHORS = Object.freeze([CLINICAL_ROLES.COORDINATOR, CLINICAL_ROLES.LMSW, ADMIN_AUTHOR]);
+const canCompleteCarePlan = (user, serviceLine, plan) => {
+  if (!can(user, CAPABILITIES.CARE_PLAN_SIGN)) return false;
+  if (evaluateCarePlanSignature(user, serviceLine).outcome === CARE_PLAN_OUTCOME.COMPLETE) return true;
+  return resolveClinicalRole(user) === CLINICAL_ROLES.RN && isClinicalLine(serviceLine)
+    && !!plan && RN_COSIGNABLE_AUTHORS.includes(plan.authorClinicalRole);
+};
 
 // ---- The credential ceiling (§4) ---------------------------------------
 // A standing order GRANTS authority; it cannot CREATE authority a licence does

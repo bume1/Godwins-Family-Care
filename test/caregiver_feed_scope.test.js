@@ -157,13 +157,22 @@ test('nothing from messaging reaches the Feed', () => {
     'the Feed reads these two collections and no others');
 });
 
-test('the composer tells the admin the broadcast reaches everyone', () => {
-  // The only control on what goes INTO a broadcast is the person typing it,
-  // so the screen has to say who it reaches before they type. A composer that
-  // reads like a message box invites a client name into it.
-  const hub = read('public/admin-hub.html');
-  const panel = hub.slice(hub.indexOf('const CaregiverFeedPanel'));
-  const help = panel.slice(0, panel.indexOf('Post to Feed'));
-  assert.match(help, /every caregiver/i, 'the composer says it goes to every caregiver');
+test('the composer says who it reaches and that it carries no client names', () => {
+  // The only control on what goes INTO an announcement is the person typing
+  // it, so the screen says who it reaches before they type. Since 2026-11-10
+  // the one composer is My GFC → Announcements.
+  const src = read('public/my-gfc.js');
+  const panel = src.slice(src.indexOf('function ManageAnnouncements'));
+  const help = panel.slice(0, panel.indexOf('Post Announcement'));
+  assert.match(help, /reaches everyone you choose/i, 'the composer says who it reaches');
   assert.match(help, /no client names/i, 'and that it carries no client names');
+});
+
+test('there is ONE composer: the old Feed post screens point to My GFC', () => {
+  for (const f of ['public/admin-hub.html', 'public/caregivers.html']) {
+    const page = read(f);
+    assert.ok(!/fetch\([^)]*\/api\/caregiver\/broadcasts|api\('\/api\/caregiver\/broadcasts'/.test(page), `${f} must not post on its own`);
+    assert.ok(page.includes('/my#announcements'), `${f} points to My GFC → Announcements`);
+  }
+  assert.ok(read('public/my-gfc.js').includes("call('/api/caregiver/broadcasts'"), 'My GFC posts');
 });

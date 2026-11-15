@@ -1,7 +1,7 @@
 // ============================================================================
 // CAREGIVER ATTESTATIONS — the forms a caregiver signs HERE, in the app
 // ============================================================================
-// Four of the welcome packet's Part Two items are not documents somebody has
+// Seven of the welcome packet's Part Two items are not documents somebody has
 // to find, print, sign and photograph. They are OUR forms. Making them upload
 // slots meant a caregiver waited on a PDF from us, printed it, signed it,
 // photographed it and sent it back — four steps and a printer, for a form we
@@ -23,12 +23,10 @@
 // one. A caregiver whose signed version is no longer current is asked to sign
 // again; that is a NEW signature on a changed document, not an edit.
 //
-// ⚠️ THE WORDING IS A DRAFT PENDING COUNSEL AND GEORGIA LICENSURE REVIEW —
-// the same status the client consent set carries. In particular the background
-// check authorization is written as a STANDALONE disclosure because the FCRA
-// requires the disclosure to appear in a document consisting solely of it;
-// folding it into the welcome packet's own signature would defeat that. Nobody
-// should treat these as approved text until that review lands.
+// THE WORDING IS APPROVED FOR USE (owner, 2026-11-10). The background check
+// authorization stays a STANDALONE disclosure because the FCRA requires the
+// disclosure to appear in a document consisting solely of it; folding it into
+// the welcome packet's own signature would defeat that.
 //
 // Pure: no storage, no request context, no I/O.
 // ============================================================================
@@ -53,9 +51,13 @@ const choice = (key, label, options, required = true) => ({
   options: options.map(([value, optLabel]) => ({ value, label: optLabel }))
 });
 
-// The version a NEW signature is stamped with. One id for this whole drafting
-// pass keeps the audit trail legible: "signed against the 2026-09 draft".
+// The version a NEW signature is stamped with. The stored id keeps the word
+// "draft" from its first pass and MUST NOT be renamed: every signature on file
+// is matched against it, and a new id would ask every caregiver to sign again.
+// What people SEE is `versionLabel`, which never shows "draft" (owner,
+// 2026-11-10: no draft wording on these forms anywhere).
 const CURRENT_VERSION = '2026-09-draft-1';
+const versionLabel = (v) => (v ? String(v).replace(/-?draft-?/ig, '-').replace(/--+/g, '-').replace(/^-|-$/g, '') : v);
 
 // ---------------------------------------------------------------------------
 // 1. Background check authorization
@@ -154,6 +156,55 @@ const MANDATORY_REPORTER = [
 ];
 
 // ---------------------------------------------------------------------------
+// 5–7. Employment acknowledgments (owner, 2026-11-10)
+// ---------------------------------------------------------------------------
+// These three used to be read and signed in Gusto, with a photographed copy
+// uploaded back here. Gusto is no longer part of caregiver onboarding: they are
+// signed in the app like the four forms above. Each acknowledges a GFC policy
+// document the office keeps current; the key points are restated so the
+// caregiver signs something she has actually read on her phone.
+const EMPLOYEE_HANDBOOK = [
+  p('The Godwins Family Care Employee Handbook explains how we work: pay and pay periods, scheduling and time off, clocking in and out, documentation, safety, and how concerns are raised and handled.'),
+  h('What you are agreeing to'),
+  ul([
+    'You have received the current Employee Handbook, or know how to get it from the office at any time.',
+    'You have read it, or will read it before your first shift, and you will ask the office about anything that is not clear.',
+    'You will follow the handbook and the policies it points to, including the ones that change after today.',
+    'The handbook is not a contract and does not change your status as an at-will W-2 employee.'
+  ]),
+  note('When the handbook changes in a way that affects you, we will tell you and may ask you to sign again.')
+];
+
+const PRIVACY_POLICY = [
+  p("Our clients trust us with their homes, their health and their personal information. Federal law (HIPAA) and Georgia law require us to protect that information, and so do you."),
+  h('What you agree to'),
+  ul([
+    'You use client information only to give care, and you share it only with people who need it for that care.',
+    'You never post about a client, their home or their family on social media, even without a name.',
+    'You never text, email or photograph client information outside the GFC app.',
+    'You keep your app sign-in to yourself and sign out on any shared device.',
+    'You tell the office right away if client information is lost, sent to the wrong person, or seen by someone who should not have it.'
+  ]),
+  p('This duty continues after you stop working with GFC. Breaking it can end your employment and can carry legal penalties.'),
+  note('We do not share any client details with you until this is signed.')
+];
+
+const CODE_OF_CONDUCT = [
+  p('This is what we expect from everyone on a shift, and what our clients and their families can expect from you.'),
+  h('On every shift'),
+  ul([
+    'Arrive on time, clock in and out in the app, and file your visit log before you leave.',
+    'Treat every client with dignity and respect, and honor their choices and routines.',
+    'Do only the tasks on the care plan and within your role. Ask the office before doing anything else.',
+    'Never accept money, gifts or loans from a client or their family, and never borrow from them.'
+  ]),
+  h('Attendance'),
+  p('If you cannot work a shift, tell the office as early as you can. Not showing up without notice leaves a client without care and can end your employment.'),
+  h('Incidents'),
+  p('Report any fall, injury, change in condition, safety concern or unusual event to the office the same day, through the app. Call 911 first in an emergency.')
+];
+
+// ---------------------------------------------------------------------------
 // The registry of bodies.
 // ---------------------------------------------------------------------------
 // `kind` matches the checklist item's kind, so the item and the document it
@@ -187,6 +238,27 @@ const ATTESTATIONS = Object.freeze({
     intro: 'Georgia law makes this your personal duty. Read it before you sign it.',
     standalone: false,
     blocks: Object.freeze(MANDATORY_REPORTER)
+  }),
+  employee_handbook: Object.freeze({
+    kind: 'employee_handbook',
+    title: 'Employee Handbook Acknowledgement',
+    intro: 'How we work, in one place. Read the key points and sign.',
+    standalone: false,
+    blocks: Object.freeze(EMPLOYEE_HANDBOOK)
+  }),
+  privacy_policy: Object.freeze({
+    kind: 'privacy_policy',
+    title: 'Privacy and Confidentiality Agreement',
+    intro: "How we protect our clients' information. Signed before we share any client details with you.",
+    standalone: false,
+    blocks: Object.freeze(PRIVACY_POLICY)
+  }),
+  code_of_conduct: Object.freeze({
+    kind: 'code_of_conduct',
+    title: 'Code of Conduct, Attendance and Incident Reporting',
+    intro: 'What we expect on a shift, and how to tell us when something goes wrong.',
+    standalone: false,
+    blocks: Object.freeze(CODE_OF_CONDUCT)
   })
 });
 
@@ -297,6 +369,7 @@ function isSupersededSignature(record) {
 }
 
 module.exports = {
+  versionLabel,
   CURRENT_VERSION,
   ATTESTATIONS,
   ARCHIVE,

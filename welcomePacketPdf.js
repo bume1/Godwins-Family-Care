@@ -544,7 +544,7 @@ async function generateSignedAttestationPDF(record, caregiver) {
 
   const pdf = await PDFDocument.create();
   pdf.setTitle(`Godwins Family Care - ${title}`);
-  pdf.setSubject(`${title} ${version || ''}`.trim());
+  pdf.setSubject(`${title} ${attest.versionLabel(version) || ''}`.trim());
   const fonts = {
     regular: await pdf.embedFont(StandardFonts.Helvetica),
     bold: await pdf.embedFont(StandardFonts.HelveticaBold)
@@ -556,7 +556,7 @@ async function generateSignedAttestationPDF(record, caregiver) {
 
   const who = (caregiver && caregiver.name) || (record && record.printed_name) || 'Caregiver';
   w.text(who, { size: 13, font: fonts.bold, color: NAVY, gap: 4 });
-  if (version) w.text(`Document version ${version}`, { size: 8, color: MUTED, gap: 3 });
+  if (version) w.text(`Document version ${attest.versionLabel(version)}`, { size: 8, color: MUTED, gap: 3 });
   // Named on the copy rather than left to be inferred: a reader has to be able
   // to tell a current signature from one against wording we have since changed.
   if (version && version !== attest.CURRENT_VERSION) {
@@ -619,7 +619,7 @@ async function generateSignedAttestationPDF(record, caregiver) {
     w.text(`Verification: ${String(record.signer_ip_hash).slice(0, 16)}`, { size: 7, color: MUTED, gap: 3 });
   }
   if (record && record.supersedes && record.supersedes.signedAt) {
-    w.text(`Replaces a signature of ${new Date(record.supersedes.signedAt).toLocaleDateString('en-US')} against version ${record.supersedes.version}.`,
+    w.text(`Replaces a signature of ${new Date(record.supersedes.signedAt).toLocaleDateString('en-US')} against version ${attest.versionLabel(record.supersedes.version)}.`,
       { size: 7, color: MUTED, gap: 3 });
   }
 

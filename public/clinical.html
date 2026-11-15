@@ -1756,6 +1756,8 @@
       const open = (i) => {
         if (i.kind === 'phone_call') return i.actionable ? documentCall(i) : onOpenChart(i.clientId, { tab: 'timeline' });
         if (i.encounterUuid) return onOpenEncounter(i.clientId, i.encounterUuid);
+        // A home care client has no chart here, so their plan opens on its own page.
+        if (i.kind === 'care_plan_co_sign' && i.noChart) { window.location.href = `/clinical?carePlan=${encodeURIComponent(i.clientId)}`; return; }
         return onOpenChart(i.clientId, i.kind === 'care_plan_co_sign' ? { tab: 'careplan' } : i.kind === 'internal_referral' ? { tab: 'referrals' } : undefined);
       };
       const referralStep = (i, fn) => {
@@ -3408,22 +3410,48 @@
     // nothing a relative plot does not. The brief's own sketch is dots joined
     // by lines. Everything here is drawn from coordinates the app already
     // holds, and nothing leaves the boundary.
-    const DayMap = ({ plot }) => {
+    // Why a stop is missing, in words that point at the right fix. Served
+    // per stop by the server (myDay.plotStops), never decided here.
+    const UNPLACED_REASON = {
+      not_linked: 'this visit\'s OpenEMR patient is not linked to a client in this app, so there is no address record to read',
+      no_coordinates: 'no coordinates on file — set them under Scheduling → Locations',
+      other_record: 'there are two client records with this name. The coordinates are on the other one, and this visit points at this one. Merge them, or add the coordinates to the record this visit uses'
+    };
+    const UnplacedList = ({ rows }) => (
+      <ul className="text-[11.5px] text-amber-800 mt-1 space-y-0.5">
+        {rows.map((u, i) => (
+          <li key={u.eid || i}><b>{u.label || 'A patient'}</b>{u.time ? ` (${u.time})` : ''}: {UNPLACED_REASON[u.reason] || UNPLACED_REASON.no_coordinates}</li>
+        ))}
+      </ul>
+    );
+    const DayMap = ({ plot, calendar }) => {
       // SERVED, not computed here. The module that places a stop reaches into
       // the scheduling module for the one coordinate reader, and that chain
       // does not load in a page — so the page renders the server's answer and
       // decides no geometry of its own.
+      //
+      // AN EMPTY MAP HAS FOUR DIFFERENT CAUSES and each one says which. It used
+      // to say "no coordinates" for all four, so an admin who had set them was
+      // told to set them again.
       if (!plot || !plot.points || !plot.points.length) {
+        const unplaced = (plot && plot.unplaced) || [];
+        const msg = calendar && calendar.ok === false
+          ? `There are no visits to plot because the calendar could not be read. ${calendar.error || ''}`
+          : !plot || !plot.total
+            ? 'No visits on this day, so there is nothing to plot.'
+            : (plot.remote && !unplaced.length)
+              ? 'Every visit on this day is a video visit, so there is nowhere to drive.'
+              : 'None of this day\'s visits could be placed on the map:';
         return (
           <div className="p-4 text-[12.5px] text-amber-700">
-            None of today's visits has address coordinates, so there is nothing to plot.
-            An admin sets them under Scheduling → Locations.
+            {msg}
+            {unplaced.length > 0 && <UnplacedList rows={unplaced} />}
           </div>
         );
       }
       return (
         <div className="p-4">
-          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1' }}
+          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1', overflow: 'visible' }}
             role="img" aria-label="Today's stops, plotted by relative position">
             {plot.points.slice(0, -1).map((p, i) => {
               const n = plot.points[i + 1];
@@ -3444,9 +3472,12 @@
             Relative positions only — north is up. Not a street map, and no coordinates leave this app.
           </p>
           {plot.unplaceable > 0 && (
-            <p className="text-[11.5px] text-amber-700 text-center mt-1">
-              {plot.unplaceable} {plot.unplaceable === 1 ? 'stop has' : 'stops have'} no coordinates and could not be plotted.
-            </p>
+            <div className="mt-2">
+              <p className="text-[11.5px] text-amber-700">
+                {plot.unplaceable} {plot.unplaceable === 1 ? 'stop' : 'stops'} could not be plotted:
+              </p>
+              <UnplacedList rows={plot.unplaced || []} />
+            </div>
           )}
         </div>
       );
@@ -3996,7 +4027,7 @@
                   )}
                 </div>
               </div>
-              {mode === 'map' && day && <DayMap plot={day.plot} />}
+              {mode === 'map' && day && <DayMap plot={day.plot} calendar={day.calendar} />}
               {mode === 'nearby' && (
                 <div className="p-4">
                   {selected
@@ -4045,7 +4076,16 @@
                   <span>
                     {day.totals.miles != null
                       ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
-                      : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
+                      // No miles has three causes, and only one of them is
+                      // missing coordinates. A one-visit day has no leg to
+                      // measure at all, and it used to read "no address
+                      // coordinates" for a patient who had them (owner
+                      // report, 2026-11-09).
+                      : day.totals.unplaceableStops > 0
+                        ? <span className="text-amber-700">Distances unavailable — {day.totals.unplaceableStops} {day.totals.unplaceableStops === 1 ? 'stop has' : 'stops have'} no address coordinates</span>
+                        : day.totals.visits > 0
+                          ? <span className="text-stone-500">No drive between stops to measure</span>
+                          : null}
                   </span>
                   <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
                   {day.ime && day.ime.totals.exams > 0 && (
@@ -6558,8 +6598,8 @@
       }, [patient.id]);
       const cp = existing && existing.carePlan;
       // The server answers whether THIS viewer can complete this plan, for
-      // this client's service line (an RN can complete a home care plan a
-      // coordinator wrote, never a clinical patient's).
+      // this client's service line and author (an RN completes a home care plan,
+      // and a clinical one a coordinator or LMSW wrote).
       const canCoSignPlan = !!(existing && existing.canCoSign);
       const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
       // An IHPC plan (or one an LMSW authored) waits on a PROVIDER signature, and
@@ -6602,6 +6642,20 @@
                 </span>
               </div>
               <div className="p-4 lg:p-5 grid gap-4">
+                {/* The co-signature sits ABOVE the plan (owner, 2026-11-09). At the
+                    foot of a long plan it was below the fold, and a clinician who
+                    never scrolled never knew a signature was waiting on them. */}
+                {providerPending && !canCoSignPlan && (
+                  <div className="text-[12.5px] text-amber-900">{cp.providerCoSignReason || 'Waiting for a clinician to co-sign beside the author.'} The plan is not active until then.</div>
+                )}
+                {providerPending && canCoSignPlan && (
+                  <div className="grid gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-[12.5px] text-amber-900">This plan needs your co-signature before it is active and the patient can see it. Read it below, then sign. The author's signature is kept.</div>
+                    <SignaturePad padRef={providerPadRef} />
+                    {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
+                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Co-Sign Plan'}</button>
+                  </div>
+                )}
                 <CarePlanView clientId={patient.id} existing={existing} canWrite={canWrite} onChanged={reload} />
                 {existing.docs && existing.docs[`v${cp.version}`] && existing.docs[`v${cp.version}`].signed && (
                   <div className="text-[13px]"><span className="text-stone-500">Signed PDF: </span>
@@ -6609,17 +6663,6 @@
                       ? <a className="text-primary underline" href={existing.docs[`v${cp.version}`].signed.driveUrl} target="_blank" rel="noreferrer">on Drive</a>
                       : 'stored'}
                     {existing.docs[`v${cp.version}`].signed.emrDocumented && ' · filed to OpenEMR'}
-                  </div>
-                )}
-                {providerPending && !canCoSignPlan && (
-                  <div className="text-[12.5px] text-amber-900">{cp.providerCoSignReason || 'Waiting for a clinician to co-sign beside the author.'} The plan is not active until then.</div>
-                )}
-                {providerPending && canCoSignPlan && (
-                  <div className="grid gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                    <div className="text-[12.5px] text-amber-900">This plan needs your co-signature beside the author's before it is active. The author's signature is kept.</div>
-                    <SignaturePad padRef={providerPadRef} />
-                    {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
-                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Co-sign Plan'}</button>
                   </div>
                 )}
                 {(existing.history || []).length > 1 && (

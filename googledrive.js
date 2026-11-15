@@ -628,6 +628,26 @@ async function uploadStaffDocumentFile(roleFolderName, personName, fileName, fil
   };
 }
 
+// A pay stub, filed in the finance folder (owner, 2026-11-14), never in the
+// person's role documents: <folder>/Pay Stubs/<year>/Payday <date>/. With no
+// folder set, 07 Finance → Payroll.
+async function uploadPayStubFile(baseFolderId, payDate, fileName, fileBuffer) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+  const base = baseFolderId || await findOrCreateFolder('Payroll', await findOrCreateFolder('07 Finance', null));
+  const stubs = await findOrCreateFolder('Pay Stubs', base);
+  const year = await findOrCreateFolder(String(payDate || '').slice(0, 4) || 'Undated', stubs);
+  const day = await findOrCreateFolder(`Payday ${payDate}`, year);
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [day] },
+    media: { mimeType: 'application/pdf', body: Readable.from([fileBuffer]) },
+    fields: 'id, name',
+    ...ALL_DRIVES
+  });
+  console.log(`✅ Filed pay stub in the finance folder: ${response.data.name}`);
+  return { fileId: response.data.id, fileName: response.data.name };
+}
+
 async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
   const drive = await getDriveClient();
   const { Readable } = require('stream');
@@ -765,6 +785,7 @@ module.exports = {
   uploadProviderROIFile,
   uploadOfflinePacketFile,
   uploadCarePlanFile,
+  uploadPayStubFile,
   uploadClientDocumentFile,
   uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,

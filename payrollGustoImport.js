@@ -117,6 +117,19 @@ function parseJournal(text) {
       line[k] = v;
     }
     if (bad) { warnings.push(`Row ${i + 1}: an amount that could not be read; the line was skipped.`); continue; }
+    // Every earning Gusto lists ("Regular", "Overtime", "Bonus", ...) is its
+    // own line on the stub, with its hours and rate, exactly as Gusto paid it.
+    line.earnings = [];
+    for (const h of header) {
+      const m = /^(.+) \(Amount\)$/.exec(h);
+      if (!m) continue;
+      const amountCents = toCents(col(h));
+      const hours = Number(String(col(`${m[1]} (Hours)`) || '0').replace(/,/g, ''));
+      const rateCents = toCents(col(`${m[1]} (Rate)`));
+      if (amountCents === null || !Number.isFinite(hours)) { bad = true; break; }
+      if (amountCents || hours) line.earnings.push({ label: m[1], amountCents, hours, rateCents: rateCents || null });
+    }
+    if (bad) { warnings.push(`Row ${i + 1}: an earning that could not be read; the line was skipped.`); continue; }
     lines.push(line);
   }
   if (!lines.length) return { error: 'No pay-date lines were found. Export the Payroll Journal with "Employee Earnings" by pay date.', code: 'GUSTO_EMPTY' };
@@ -133,7 +146,16 @@ function netEntries(lines) {
   for (const l of lines) {
     const key = [l.lastName.toLowerCase(), l.firstName.toLowerCase(), l.payDate, l.periodStart, l.periodEnd].join('|');
     const e = by.get(key) || { ...l, sections: [], payments: [] };
-    if (by.has(key)) for (const k of Object.keys(MONEY_FIELDS)) e[k] += l[k];
+    if (by.has(key)) {
+      for (const k of Object.keys(MONEY_FIELDS)) e[k] += l[k];
+      // A correction's earnings net against the original's, by name.
+      const earn = (e.earnings || []).map(x => ({ ...x }));
+      for (const x of l.earnings || []) {
+        const same = earn.find(y => y.label === x.label);
+        if (same) { same.amountCents += x.amountCents; same.hours += x.hours; same.rateCents = x.rateCents || same.rateCents; } else earn.push({ ...x });
+      }
+      e.earnings = earn;
+    }
     e.sections.push(l.section);
     if (l.payment && l.gross > 0) e.payments.push(l.payment);
     by.set(key, e);
@@ -162,6 +184,24 @@ function matchUser(entry, users, profiles) {
   });
   if (hits.length === 1) return { user: hits[0] };
   return { reason: hits.length ? 'More than one account has this name.' : 'No account with this name.' };
+}
+
+// The stub's earnings lines, as Gusto listed them. "Regular" reads as "Hours
+// worked"; a historical entry (wages Gusto recorded without hours) says so.
+// If Gusto's lines do not add up to its gross, one line carries the gross and
+// a warning names the pay date, so the stub's totals still match Gusto's.
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'regular';
+function earningsFor(e, name, warnings) {
+  const historical = /historical/i.test(e.payment || '');
+  const list = (e.earnings || []).filter(x => x.amountCents || x.hours).map(x => {
+    const regular = /^regular$/i.test(x.label);
+    const label = regular ? (historical && !x.hours ? 'Wages (recorded in Gusto without hours)' : 'Hours worked') : x.label;
+    return { code: regular ? 'regular' : slug(x.label), label, minutes: Math.round((x.hours || 0) * 60), rateCents: x.rateCents || null, amountCents: x.amountCents };
+  });
+  const sum = list.reduce((a, x) => a + x.amountCents, 0);
+  if (list.length && sum === e.gross) return list;
+  if (list.length) warnings.push(`${name}, pay date ${e.payDate}: Gusto's earnings lines do not add up to its gross pay. The stub shows the gross as one line.`);
+  return [{ code: 'regular', label: historical && !e.hours ? 'Wages (recorded in Gusto without hours)' : 'Hours worked', minutes: Math.round(e.hours * 60), rateCents: null, amountCents: e.gross }];
 }
 
 const PAYMENT_METHOD = Object.freeze({ 'direct deposit': 'direct_deposit', check: 'check' });
@@ -196,7 +236,7 @@ function buildImport({ entries, users, profiles, refsFor, at, by }) {
       userId: uid, name: m.user.name || name, workerType: 'W2',
       payMethod: PAYMENT_METHOD[String(e.payment || '').toLowerCase()] || null,
       refs: refsFor ? refsFor(uid, { start: e.periodStart, end: e.periodEnd }) : [],
-      earnings: [{ code: 'regular', label: 'Hours worked', minutes: Math.round(e.hours * 60), amountCents: e.gross }],
+      earnings: earningsFor(e, name, warnings),
       missing: [],
       pay: {
         grossCents: e.gross, taxes, taxCents, reimbursementsCents, netCents: e.net,
@@ -222,4 +262,4 @@ function buildImport({ entries, users, profiles, refsFor, at, by }) {
   };
 }
 
-module.exports = { MONEY_FIELDS, parseCsv, parseJournal, netEntries, matchUser, buildImport, frequencyOf };
+module.exports = { MONEY_FIELDS, parseCsv, parseJournal, netEntries, matchUser, buildImport, frequencyOf, earningsFor };

@@ -692,7 +692,9 @@ test('the board filters by a Georgia date range and by status', () => {
   // board quietly changed what a payroll or billing export covers.
   assert.ok(!/\bfrom\b/.test(fn) && !/\bto\b/.test(fn),
     'the board filter must not read the payroll from/to');
-  assert.ok(/exportCsv[\s\S]{0,400}payroll\.csv\?from=\$\{from\}&to=\$\{to\}/.test(page),
+  // The payroll export moved to /payroll (2026-11-09), with its own range there.
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.ok(/payroll\.csv\?from=\$\{from\}&to=\$\{to\}/.test(pay),
     'and the payroll export must still read its own range');
 });
 

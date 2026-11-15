@@ -85,6 +85,16 @@ const CLINICAL_ENROLLMENT_STEPS = [
   { key: 'consents',          label: 'IHPC consents (treat / AOB / practice NPP)', kind: 'derived' }
 ];
 const MANUAL_CHECKLIST_STEPS = CLINICAL_ENROLLMENT_STEPS.filter(s => s.kind === 'manual').map(s => s.key);
+// The steps that must be done BEFORE "Approve enrollment" for a clinical
+// client (owner, 2026-11-09). The H&P and the co-signed care plan are left
+// out on purpose: both need a visit, and a visit cannot be booked until the
+// client is enrolled, so requiring them here would lock the client out of the
+// very visit that completes them. Activate still requires all six.
+const PRE_APPROVAL_CHECKLIST_STEPS = ['payerVerification', 'recordsRoi', 'npaConfirmation', 'consents'];
+const missingPreApprovalSteps = (checklist) =>
+  ((checklist && checklist.steps) || [])
+    .filter(s => PRE_APPROVAL_CHECKLIST_STEPS.includes(s.key) && !s.done)
+    .map(s => s.label);
 
 // Compute the full checklist state for a client.
 //  - manualState: client.clinicalEnrollment.steps ({key: {done, byId, byName, at}})
@@ -2984,6 +2994,8 @@ module.exports = {
   CLINICAL_ENROLLMENT_STEPS,
   MANUAL_CHECKLIST_STEPS,
   deriveClinicalChecklist,
+  PRE_APPROVAL_CHECKLIST_STEPS,
+  missingPreApprovalSteps,
   buildMedRecView,
   buildMedicationChangeRows,
   applyMedRecResolution,

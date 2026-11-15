@@ -355,8 +355,7 @@ const STAFF_SIGN_NOTE = 'By signing, you confirm the information in this packet 
 // `source` says who produces the document, and it is the difference between a
 // caregiver who is stuck and one who is waiting:
 //   'caregiver' — they already have it, or they get it
-//   'gusto'     — it is in their Gusto HR onboarding portal to read and sign,
-//                 and the signed copy comes back here
+//   'gfc_sign'  — our own form, read and signed here in the app
 //   'office'    — we do it. They cannot upload their way past it.
 //
 // `upload: true` means a file is expected here. An office item is tracked by
@@ -479,36 +478,17 @@ const DOCUMENT_ITEMS = Object.freeze([
     detail: 'Only if you will be driving clients or driving as part of your shift. The card must be current and show your name. We already have your license from item 1.'
   },
 
-  // E — Paperwork in your Gusto HR onboarding portal
+  // E — Your offer letter
   //
-  // OWNER CHANGE, 2026-09-13. The printed packet said "You do not need to find
-  // these. We email them and you sign and return." That is no longer how it
-  // works: these live in Gusto, the caregiver reads and signs them there, and
-  // the signed copy comes back here. Saying "we email them" would leave someone
-  // waiting for an email that is not coming.
-  //
-  // GUSTO IS THE SYSTEM OF RECORD and nothing here transmits to it — the same
-  // rule the payroll documents already follow. What the app holds is the
-  // office's copy.
+  // OWNER, 2026-11-10: Gusto is no longer part of caregiver onboarding. Pay and
+  // tax paperwork (W-4, G-4, I-9, direct deposit) lives in My GFC → Hours &
+  // Pay; the handbook, privacy and conduct acknowledgments moved to group F and
+  // are signed here. The offer letter stays an upload: it carries her own rate,
+  // so it is a document the office writes for one person, not a form body.
   {
-    item: 16, group: 'E', kind: 'offer_letter', source: 'gusto', upload: true, required: true,
+    item: 16, group: 'E', kind: 'offer_letter', source: 'caregiver', upload: true, required: true,
     title: 'Offer letter and employee agreement',
-    detail: 'Your role, your hourly rate, and your status as a W2 employee. Read it, and ask us about anything that is not clear.'
-  },
-  {
-    item: 17, group: 'E', kind: 'employee_handbook', source: 'gusto', upload: true, required: true,
-    title: 'Employee handbook',
-    detail: 'Read it and sign the acknowledgement.'
-  },
-  {
-    item: 18, group: 'E', kind: 'privacy_policy', source: 'gusto', upload: true, required: true,
-    title: 'Privacy and confidentiality policy',
-    detail: "How we protect our clients' information, and what you agree to. Signed before we give you any client details."
-  },
-  {
-    item: 19, group: 'E', kind: 'code_of_conduct', source: 'gusto', upload: true, required: true,
-    title: 'Code of conduct, attendance, and incident reporting',
-    detail: 'What we expect on a shift, and how to tell us when something goes wrong.'
+    detail: 'Your role, your hourly rate, and your status as a W2 employee. The office gives you this letter. Read it, sign it, and upload the signed copy here, or hand it to the office and they will file it for you.'
   },
 
   // F — Signed here, with us
@@ -518,6 +498,24 @@ const DOCUMENT_ITEMS = Object.freeze([
   // leaving it under a heading whose intro says "each of these is waiting in
   // your Gusto portal" would have been a contradiction on the screen. It keeps
   // its printed item number; only its group moved.
+  // Items 17–19 were Gusto documents until 2026-11-10 and keep their printed
+  // numbers. A copy a caregiver already uploaded and the office accepted
+  // still satisfies them (see LEGACY_UPLOAD_SIGN_KINDS below).
+  {
+    item: 17, group: 'F', kind: 'employee_handbook', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Employee handbook',
+    detail: 'Read the key points and sign the acknowledgement here.'
+  },
+  {
+    item: 18, group: 'F', kind: 'privacy_policy', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Privacy and confidentiality agreement',
+    detail: "How we protect our clients' information, and what you agree to. Signed before we give you any client details."
+  },
+  {
+    item: 19, group: 'F', kind: 'code_of_conduct', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Code of conduct, attendance, and incident reporting',
+    detail: 'What we expect on a shift, and how to tell us when something goes wrong. Sign it here.'
+  },
   {
     item: 20, group: 'F', kind: 'mandatory_reporter', source: 'gfc_sign', upload: false, sign: true, required: true,
     title: 'Mandatory reporter acknowledgement',
@@ -545,12 +543,16 @@ const DOCUMENT_ITEMS = Object.freeze([
   }
 ]);
 
+// Signed-in-the-app items that were upload slots (Gusto copies) until
+// 2026-11-10. An accepted upload of one of these still satisfies it.
+const LEGACY_UPLOAD_SIGN_KINDS = Object.freeze(['employee_handbook', 'privacy_policy', 'code_of_conduct']);
+
 const GROUP_TITLES = Object.freeze({
   A: 'Identification and Payroll',
   B: 'Background Check',
   C: 'Health Records',
   D: 'Certifications and Driving',
-  E: 'Paperwork in your Gusto HR portal',
+  E: 'Your Offer Letter',
   F: 'Forms you sign with us',
   G: 'Before Your First Shift'
 });
@@ -560,9 +562,8 @@ const GROUP_INTROS = Object.freeze({
   B: 'Georgia requires this for every caregiver. We pay for it and we schedule it.',
   C: 'These protect you and the people you care for. Your records go in a private file separate from everything else.',
   D: null,
-  // The one place the printed wording was replaced rather than ported.
-  E: 'Each of these is waiting in your Gusto HR onboarding portal to review and sign. Once you have signed a document in Gusto, upload the signed copy here so the office has it on file. Uploading here does not file it in Gusto, and signing in Gusto does not send it here — both are needed.',
-  F: 'You sign this one right here. Nothing to print, nothing to send back.',
+  E: 'The office gives you your offer letter. Your pay and tax paperwork (W-4, G-4, I-9 and direct deposit) is filled in separately, in My GFC under Hours & Pay.',
+  F: 'You sign these right here. Nothing to print, nothing to send back.',
   G: null
 });
 
@@ -790,6 +791,14 @@ function buildChecklist(packet, documents, office, attestations) {
       row.signedVersion = record ? (record.version || null) : null;
       row.supersededSignature = !!(record && record.signed_at && !current);
       row.status = current ? 'complete' : 'missing';
+      // A copy signed in Gusto and accepted by the office before these moved
+      // into the app still counts: she signed it, the office checked it, and
+      // asking her to sign again would only reopen a cleared caregiver.
+      if (!current && LEGACY_UPLOAD_SIGN_KINDS.includes(item.kind)
+          && docs.some(d => d && d.kind === item.kind && d.status === 'accepted')) {
+        row.status = 'complete';
+        row.legacyUploadAccepted = true;
+      }
       return row;
     }
 
@@ -845,6 +854,7 @@ module.exports = {
   GROUP_INTROS,
   PAY_PROMISE,
   PACKET_DOCUMENT_KINDS,
+  LEGACY_UPLOAD_SIGN_KINDS,
   OFFICE_ITEM_KINDS,
   OFFICE_STATUSES,
   FIELD_INDEX,

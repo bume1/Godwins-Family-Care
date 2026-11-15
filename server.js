@@ -684,7 +684,9 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
         body: templateData.body,
         htmlBody: templateData.htmlBody || null,
         ctaUrl: templateData.ctaUrl || null,
-        ctaLabel: templateData.ctaLabel || null
+        ctaLabel: templateData.ctaLabel || null,
+        // 'announcement': keep line breaks and draw ALL CAPS lines as headings.
+        format: templateData.format || null
       },
       sentAt: null,
       failedAt: null,
@@ -943,9 +945,11 @@ function buildQueuedEmail(templateData, baseUrl) {
   const text = String(t.body || '');
   if (t.htmlBody) return { html: t.htmlBody, text };
   const ctaUrl = absoluteEmailUrl(t.ctaUrl, baseUrl);
-  const rendered = emailTemplates.renderGfcEmail(
-    emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null)
-  );
+  const pieces = emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null);
+  // An office announcement keeps its line breaks and its ALL CAPS headings
+  // (owner, 2026-11-10). Other notices are unchanged.
+  if (t.format === 'announcement') { pieces.lineBreaks = true; pieces.capsHeadings = true; }
+  const rendered = emailTemplates.renderGfcEmail(pieces);
   return { html: rendered.html, text: rendered.text };
 }
 
@@ -1694,6 +1698,12 @@ const scanAndQueueNotifications = async () => {
     // second thing to keep alive, and this one already runs on a schedule the
     // owner controls.
     await sendDueVisitReminders();
+
+    // ── Staff onboarding and credentialing (2026-11-09) ───────────────────
+    // Her daily digest, the office's credential milestones and the Monday
+    // roll-up. It rides this scanner rather than a timer of its own: unlike a
+    // to-do, none of it names a minute, so the scan is finer than the promise.
+    await onboardingRouter.notices.sweepOnboardingNotices();
 
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
@@ -2524,7 +2534,10 @@ const authenticateToken = async (req, res, next) => {
         // from. Read from the FRESH user record, never the token, so a role an
         // admin narrowed this morning takes effect on the next request rather
         // than when the nurse next signs in — the same rule POA status follows.
-        clinicalRole: clinicalRoles.resolveClinicalRole(freshUser)
+        clinicalRole: clinicalRoles.resolveClinicalRole(freshUser),
+        // The Modules grid (owner, 2026-11-13): grants and removals, read fresh
+        // so a change applies on the next request. accountTypes.hasModule reads it.
+        moduleAccess: accountTypes.moduleAccessOf(freshUser)
       };
       // ...and the legacy boolean is DERIVED from that role, so a stale stored
       // flag cannot widen someone the enum has narrowed.
@@ -2716,7 +2729,7 @@ function buildServiceReportFromTicket(ticket, assignedToId, assignedToName, serv
 // patient's facility. Coordinators carry the manager flag (accountTypes.js),
 // so one predicate covers both.
 const canManageEnrollment = (u) => !!u && u.accountStatus !== 'inactive' &&
-  (u.role === config.ROLES.ADMIN || u.isManager === true);
+  (u.role === config.ROLES.ADMIN || accountTypes.hasModule(u, 'clients'));
 const requireEnrollmentManager = (req, res, next) => {
   if (canManageEnrollment(req.user)) return next();
   return res.status(403).json({ error: 'An admin, a manager or a care coordinator makes this change.', code: 'ENROLLMENT_MANAGER_ONLY' });
@@ -2727,6 +2740,19 @@ const requireAdmin = (req, res, next) => {
     return res.status(403).json({ error: 'Super Admin access required' });
   }
   next();
+};
+// The Audit Log (owner, 2026-11-13): the Super Admin, or anyone granted the
+// Audit module in the Modules grid. It only reads.
+const requireAuditReader = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'audit'))) return next();
+  return res.status(403).json({ error: 'The Audit Log is the Super Admin\'s.', code: 'AUDIT_READER_ONLY' });
+};
+// Payroll (owner, 2026-11-13): someone granted the Payroll module PREPARES
+// payroll. Approving a run, full bank numbers, settings and anything that
+// changes who is paid what stay requireAdmin in routes/payroll.js.
+const requirePayrollPreparer = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll'))) return next();
+  return res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' });
 };
 
 // Alias for clarity - Super Admin only routes
@@ -3022,7 +3048,11 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
   detectFileType: (buf) => detectFileType(buf),
   // The visit-log download (2026-10-03). `pdfGenerator` is required at the top
   // of this file, so this one is safe to pass by reference.
-  pdfGenerator }));
+  pdfGenerator,
+  // A lead caregiver's view of what was shared with the patient (2026-11-11).
+  // Arrows for the same temporal-dead-zone reason as detectFileType.
+  sharedForLeadCaregiver: (client) => sharedForLeadCaregiver(client),
+  serveSharedDocument: (res, client, docId, actor) => serveSharedDocument(res, client, docId, actor) }));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
@@ -3040,16 +3070,26 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
 // steps and the office completes or verifies the rest. The office half is
 // gated on admin-or-manager rather than clinical write, so a provider never
 // verifies her own licence or opens her own service line.
-app.use(onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
+const onboardingRouter = onboardingRoutes({ db, config, logActivity, getUsers, authenticateToken, uuidv4,
   drive: googledrive,
-  detectFileType: (buf) => detectFileType(buf)
-}));
+  detectFileType: (buf) => detectFileType(buf),
+  // Read LAZILY: `notify` is built further down this file, so passing it by
+  // value here would read the temporal dead zone.
+  notify: () => notify,
+  getAppBaseUrl
+});
+app.use(onboardingRouter);
 // My GFC: a staff member's own documents, policies and the Drive folders the
 // office assigned to their role or to them by name.
 app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4, drive: googledrive,
   detectFileType: (buf) => detectFileType(buf),
   // Wrapped: the enrollment helpers are declared further down this file.
-  enrollmentSummary: (client) => liaisonEnrollmentView(client) }));
+  enrollmentSummary: (client) => liaisonEnrollmentView(client),
+  // Read lazily: `notify` is built further down this file.
+  notify: () => notify, getAppBaseUrl,
+  // Wrapped: the payroll router is built further down this file. Draws a pay
+  // stub from its run when the Drive copy cannot be read.
+  regeneratePayStub: (row) => payrollRouter.stubPdfForRow(row) }));
 // Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
 // contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
 // approved runs write into the same staff_paystubs store the Apps Script
@@ -3059,10 +3099,11 @@ app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4
 // and every call is best effort: a QuickBooks failure never undoes the event.
 const qbo = quickbooks.createQbo({ db, uuid: uuidv4, logActivity, getUsers: () => getUsers(),
   getRuns: async () => (await db.get('payroll_runs')) || [] });
-app.use(payrollRoutes({
+const payrollRouter = payrollRoutes({
   db, logActivity, getUsers, authenticateToken, uuidv4, queueNotification,
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
+  requirePayrollPreparer: (req, res, next) => requirePayrollPreparer(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
   localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate,
   resolvePayRate: (cg, clientId, shift) => caregiverRepo.resolvePayRate(cg, clientId, shift),
@@ -3076,7 +3117,8 @@ app.use(payrollRoutes({
   onContractorPaid: (inv) => qbo.contractorPaid(inv),
   onTaxPaid: (pay) => qbo.taxPaid(pay),
   qboRetry: () => qbo.retry()
-}));
+});
+app.use(payrollRouter);
 // QuickBooks connection, the owner's (Super Admin).
 app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
   try { res.json(await qbo.status()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
@@ -3926,6 +3968,9 @@ const loginProfileFor = (user) => {
     landing: accountTypes.landingFor(user),
     hubTiles: accountTypes.hubTilesFor(user),
     hubAreas: accountTypes.hubAreasFor(user),
+    // The modules this account opens (accountTypes.modulesFor): the Admin Hub
+    // and the Clients page read it to decide what to draw.
+    modules: accountTypes.modulesFor(user),
     assignedProjects: user.assignedProjects || [],
     assignedClients: user.assignedClients || [],
     // GFC role fields — the login page's directDestination() routes on
@@ -3953,7 +3998,7 @@ app.get('/api/staff/hub', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const me = users.find(u => String(u.id) === String(req.user.id)) || req.user;
-    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me),
+    return res.json({ areas: accountTypes.hubAreasFor(me), landing: accountTypes.landingFor(me), modules: accountTypes.modulesFor(me),
       accountType: accountTypes.accountTypeOf(me), accountTypeLabel: accountTypes.accountTypeLabel(me) });
   } catch (err) {
     console.error('Staff hub read failed:', err.message);
@@ -4172,7 +4217,8 @@ const fmtVeteranTime = (iso) => new Date(iso).toLocaleString('en-US', { timeZone
 const fmtVeteranDob = (ymd) => { const [y, m, d] = String(ymd || '').split('-'); return y ? `${m}/${d}/${y}` : ''; };
 const isVeteranProvider = (u) => !!u && patientRead.canClinicalWrite(u);
 const requireVeteranStaff = (req, res, next) => {
-  if (vetRoster.isOffice(req.user) || isVeteranProvider(req.user)) return next();
+  // The IME module (owner, 2026-11-13): granted or taken away in the grid.
+  if (accountTypes.hasModule(req.user, 'ime')) return next();
   return res.status(403).json({ error: 'Only the office and providers manage veterans.', code: 'VETERAN_STAFF_ONLY' });
 };
 const requireVeteranOffice = (req, res, next) => {
@@ -4628,6 +4674,21 @@ function renderUnsubscribePageHtml(message, isSuccess) {
 </html>`;
 }
 
+// Tell the Super Admins when someone turns automated email off or back on
+// (owner, 2026-11-10: "I need to know if someone unsubscribes"). Only a real
+// change is announced, and a failed notice never undoes the preference.
+const emailPreferenceNotice = require('./emailPreferenceNotice');
+async function announceEmailPreferenceChange(person, unsubscribed, users) {
+  const at = new Date().toISOString();
+  try {
+    await logActivity(person.id, person.name || person.email, unsubscribed ? 'email_unsubscribed' : 'email_resubscribed', 'user', person.id, {});
+    const ctaUrl = `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`;
+    for (const n of emailPreferenceNotice.noticesFor({ person, unsubscribed, users, at, ctaUrl })) {
+      await queueNotification(n.type, n.userId, n.email, n.name, n.data, n.options);
+    }
+  } catch (e) { console.error('Email preference notice failed:', e.message); }
+}
+
 // Unsubscribe from automated emails (clicked from email link — no login required)
 app.get('/api/unsubscribe', async (req, res) => {
   const { token } = req.query;
@@ -4640,8 +4701,11 @@ app.get('/api/unsubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = true;
+    if (!wasOff) users[idx].emailUnsubscribedAt = new Date().toISOString();
     await db.set('users', users);
+    if (!wasOff) await announceEmailPreferenceChange(users[idx], true, users);
 
     // Generate a resubscribe token (same token works for both directions)
     const resubToken = jwt.sign({ userId: decoded.userId, purpose: 'email_unsubscribe' }, JWT_SECRET, { expiresIn: '365d' });
@@ -4668,8 +4732,10 @@ app.get('/api/resubscribe', async (req, res) => {
     const idx = users.findIndex(u => u.id === decoded.userId);
     if (idx === -1) return res.status(404).send(renderUnsubscribePageHtml('User not found.', false));
 
+    const wasOff = !!users[idx].emailUnsubscribed;
     users[idx].emailUnsubscribed = false;
     await db.set('users', users);
+    if (wasOff) await announceEmailPreferenceChange(users[idx], false, users);
 
     res.send(renderUnsubscribePageHtml(
       'You have been resubscribed to automated emails. You will now receive task reminders, milestone updates, and other automated notifications.',
@@ -4809,7 +4875,7 @@ app.get('/api/admin/activity-log', authenticateToken, requireAdmin, async (req, 
 // ============== USER MANAGEMENT (Super Admin, Manager, and Client Portal Admin) ==============
 app.get('/api/users', authenticateToken, async (req, res) => {
   // Allow super admins, managers, and client portal admins to view users
-  if (req.user.role !== config.ROLES.ADMIN && !req.user.isManager) {
+  if (req.user.role !== config.ROLES.ADMIN && !accountTypes.hasModule(req.user, 'users')) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -4823,6 +4889,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       role: u.role,
       accountStatus: u.accountStatus || 'active',
       emailUnsubscribed: u.emailUnsubscribed || false,
+      emailUnsubscribedAt: u.emailUnsubscribed ? (u.emailUnsubscribedAt || null) : null,
       createdAt: u.createdAt,
       // Manager flag
       isManager: u.isManager || false,
@@ -4919,7 +4986,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 // Session 5.4 — read the durable audit log (admin). Session 12 builds the UI;
 // this is the verification surface for go-live acceptance: every PHI access
 // must be here. Filters: since, until (ISO), userId, patientId, limit.
-app.get('/api/admin/audit-log', authenticateToken, requireAdmin, async (req, res) => {
+app.get('/api/admin/audit-log', authenticateToken, requireAuditReader, async (req, res) => {
   try {
     const { since, until, userId, patientId } = req.query;
     const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || '200', 10) || 200));
@@ -4949,6 +5016,48 @@ app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, 
     await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
     res.json({ ok: true, revoked });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ---- The Modules grid on Edit User (owner, 2026-11-13) ---------------------
+// One row per module. A module the person's account type includes comes
+// ticked ("comes with their role") and a Super Admin can untick it; one it
+// does not include comes unticked and can be granted. Locked rows (My GFC,
+// Messages, the Admin Hub and the two lab-era screens) cannot change. The
+// Super Admin alone reads or changes the grid: whoever could change it could
+// give themselves anything, so it is never grantable, and the Admin Hub that
+// holds it is locked.
+app.get('/api/users/:userId/modules', authenticateToken, requireAdmin, async (req, res) => {
+  const u = (await getUsers()).find(x => String(x.id) === String(req.params.userId));
+  if (!u) return res.status(404).json({ error: 'User not found' });
+  res.json({ grid: accountTypes.moduleGridFor(u), editable: accountTypes.accountTypeOf(u) !== accountTypes.TYPES.ADMIN && accountTypes.moduleGridFor(u).length > 0 });
+});
+app.put('/api/users/:userId/modules', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(x => String(x.id) === String(req.params.userId));
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const target = users[idx];
+    const type = accountTypes.accountTypeOf(target);
+    if (type === accountTypes.TYPES.ADMIN) return res.status(409).json({ error: 'A Super Admin has every module.', code: 'MODULES_ADMIN_LOCKED' });
+    if (!accountTypes.moduleGridFor(target).length) return res.status(409).json({ error: 'Modules are for team accounts, not clients or family.', code: 'MODULES_NOT_TEAM' });
+    const modules = (req.body || {}).modules;
+    if (!Array.isArray(modules)) return res.status(400).json({ error: 'modules must be a list of module ids.', code: 'MODULES_INVALID' });
+    const unknown = modules.filter(id => !accountTypes.MODULE_IDS.includes(String(id)));
+    if (unknown.length) return res.status(400).json({ error: `Unknown module: ${unknown.join(', ')}`, code: 'MODULES_UNKNOWN' });
+    const before = accountTypes.moduleAccessOf(target);
+    const next = accountTypes.moduleAccessFromChecks(target, modules);
+    if (next.granted.length || next.removed.length) target.moduleAccess = next;
+    else delete target.moduleAccess;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'user_modules_changed', 'user', target.id, {
+      accountType: type, before, after: next
+    });
+    res.json({ grid: accountTypes.moduleGridFor(target), moduleAccess: next });
+  } catch (err) {
+    console.error('Module grid save failed:', err.message);
+    res.status(500).json({ error: 'The modules could not be saved.', code: 'MODULES_SAVE_FAILED' });
+  }
 });
 
 app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res) => {
@@ -7610,6 +7719,18 @@ async function seedReferralProviders() {
     await db.set('referral_providers', seeded.entries);
     console.log(`[referrals] ${seeded.added.length} outside provider${seeded.added.length === 1 ? '' : 's'} added to the list from past referrals.`);
   }
+}
+
+// SOP 1 as the app tour's material (owner, 2026-11-10). Once per module, never
+// over the office's own choice: see trainingMaterial.seedDefaults.
+async function seedDefaultTrainingMaterial() {
+  const TM = require('./onboarding/trainingMaterial');
+  const out = TM.seedDefaults(await db.get(TM.COLLECTION), new Date().toISOString());
+  if (out.seeded.length) {
+    await db.set(TM.COLLECTION, out.all);
+    console.log(`[Onboarding] Default training material added to ${out.seeded.join(', ')}.`);
+  }
+  return out;
 }
 
 async function seedRequisitionReturnFax() {
@@ -10859,10 +10980,11 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
       catalog: carePlanCatalog.catalog(),
       newPlanDefaults: carePlanCatalog.newPlanDefaults(practiceToday()),
       // Whether THIS viewer can supply the co-signature a pending plan waits
-      // on, for this client's service line (an RN can complete a home care
-      // plan, never a clinical patient's). Same question the co-sign route asks.
+      // on, for this client's service line and this plan's author (an RN
+      // completes a home care plan, and a clinical one a coordinator or LMSW
+      // wrote). Same question the co-sign route asks.
       canCoSign: !!(client.carePlan && client.carePlan.providerCoSignStatus === 'pending'
-        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine)
+        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, client.carePlan)
         && String(client.carePlan.authoredById || '') !== String(req.user.id)),
       coSign: client.carePlanCoSign || {},
       docs: client.carePlanDocs || {},
@@ -10969,6 +11091,11 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
       clientId: client.id, emrDocumented, authorClinicalRole: planSig.clinicalRole,
       signatureRole: planSig.signatureRole, providerCoSignStatus: plan.providerCoSignStatus, serviceLine: client.serviceLine || null
     });
+    // A plan a licensed author completes is active now, so the client is told it
+    // is ready to sign. One that waits on a co-signature is told then instead.
+    if (!pendingProviderCoSign) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
+    }
     res.json({
       message: pendingProviderCoSign
         ? `Care plan v${plan.version} saved as the authoring signature. ${planSig.reason}`
@@ -11003,9 +11130,15 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     // An RN cannot clear an RN-authored IHPC plan, and an LMSW cannot clear
     // their own — the co-signature exists to add a credential the authoring
     // one does not carry.
-    const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
-    if (outcome.outcome !== clinicalRoles.CARE_PLAN_OUTCOME.COMPLETE) {
-      return res.status(403).json({ error: outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.', code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    // One answer for who may co-sign, shared with the care plan screen and the
+    // inbox: an RN may co-sign a clinical plan a coordinator or LMSW wrote,
+    // never one an RN wrote (owner, 2026-11-09).
+    if (!clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine, plan)) {
+      const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
+      const rnOnRnPlan = clinicalRoles.resolveClinicalRole(req.user) === 'rn';
+      return res.status(403).json({ error: rnOnRnPlan
+        ? 'An RN wrote this clinical care plan, so it needs a provider or an LCSW to co-sign it.'
+        : (outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.'), code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
     }
     const sig = req.body && req.body.signatureImageB64;
     if (typeof sig !== 'string' || !/^data:image\/png;base64,/.test(sig)) {
@@ -11033,6 +11166,12 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
+    // The co-signature is what makes the plan active and visible in the portal,
+    // so this is the moment the client is told it is ready to sign. Not if they
+    // have already signed this version.
+    if (!(client.carePlanCoSign || {})[`v${plan.version}`]) {
+      await notify.carePlanReady({ clientId: client.id, version: plan.version, actorId: req.user.id });
+    }
     // If the client has already co-signed, the signed PDF stored and filed
     // then shows the provider line as pending. Issue it again with all three
     // signatures. Best-effort: a storage failure never voids the signature.
@@ -12785,6 +12924,58 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
 // the encounter (portalPublished false + the reason) and surfaced as a
 // warning, and the Publish button on the encounter is the retry.
 const loadPublishedVisits = async () => loadRows('patient_published_visits');
+
+// What a LEAD caregiver sees of the patient's record (owner, 2026-11-11). The
+// same published copies and filters the patient's own portal reads, at the
+// patient's level, minus everything a caregiver is never shown: the clinician's
+// note, results, problems, vitals, billing and messages. A section nothing
+// has been shared into yet says so (`source: null`), never "none".
+const sharedForLeadCaregiver = async (client) => {
+  const [chart, visitRows, apptRow, uploads] = await Promise.all([
+    loadPublishedChart(client.id), loadPublishedVisits(), loadPublishedAppointments(client.id), loadRows('client_document_uploads')
+  ]);
+  const held = patientPublish.appHeldHealth(client);
+  const section = (key, kind) => {
+    if (chart && chart[key]) return { rows: patientRead.filterRows(kind, 'full', chart[key]), source: 'published', at: chart.publishedAt || null };
+    if (held[key]) return { rows: patientRead.filterRows(kind, 'full', held[key].rows), source: held[key].source, at: held[key].at || null };
+    return { rows: [], source: null, at: null };
+  };
+  const visits = visitRows.filter(r => r && r.clientId === client.id)
+    // The patient-facing summary only; visitForAudience would add the note.
+    // Diagnoses and tests ordered stay with the patient: a caregiver needs
+    // what happened, what to watch for and any new medicine, no more.
+    .map(r => { const v = patientRead.filterRow('visit', 'full', r.visit); if (v) { delete v.diagnosesAddressed; delete v.testsOrdered; delete v.summary; } return v; })
+    .filter(Boolean)
+    .sort((a, b) => (!a.date) - (!b.date) || String(b.date || '').localeCompare(String(a.date || '')));
+  const apptOk = !!(apptRow && apptRow.sourcePuuid === client.openEmrPatientId);
+  const today = practiceToday();   // Georgia's date, not UTC's
+  const appointments = apptOk
+    ? patientRead.filterRows('appointment', 'full', apptRow.appointments || []).filter(a => !a.date || String(a.date) >= today)
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) || String(a.startTime || '').localeCompare(String(b.startTime || '')))
+    : [];
+  const documents = docRules.liveUploads(uploads)
+    .filter(u => u.clientId === client.id && docRules.patientCanSee(u))
+    .map(u => ({ id: u.id, title: u.fileName || 'Document', kind: u.kind || null, uploadedAt: u.uploadedAt || null,
+      from: u.source === 'staff' ? 'From the care team' : 'From the patient or family' }))
+    .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
+  return {
+    clientName: client.preferredName || client.name,
+    documents,
+    medications: section('medications', 'medication'),
+    allergies: section('allergies', 'allergy'),
+    visits,
+    appointments,
+    appointmentsShared: apptOk
+  };
+};
+// Opens one of those documents. The same rule as the patient's own download:
+// only what the patient can see, and a 404 rather than a 403 otherwise.
+const serveSharedDocument = async (res, client, docId, actor) => {
+  const uploads = await loadRows('client_document_uploads');
+  const row = uploads.find(u => u && u.id === docId && u.clientId === client.id);
+  if (!row || !docRules.patientCanSee(row)) return res.status(404).json({ error: 'Document not found' });
+  await serveStoredDocument(res, row, actor);
+};
 // Keyed on the CLIENT and the encounter, never the encounter alone: a published
 // row is only ever replaced by a publish for the same patient.
 const upsertPublishedVisit = async (row) => {
@@ -18315,7 +18506,8 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     // load in a page. One implementation beats a second one that drifts.
     const plot = myDay.plotStops({
       stops: day.visits.filter(v => v.state !== myDay.VISIT_STATE.CANCELLED),
-      width: 100, height: 100
+      width: 100, height: 100,
+      clients: Array.from(clientsById.values())
     });
     res.json({ ...day, plot, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
   } catch (error) {
@@ -18863,7 +19055,9 @@ app.get('/api/clinical/digest', authenticateToken, requireTaskManager, async (re
     const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
     const inbox = clinicalInbox.buildInbox({
       viewer, encounterRecords: records, attestations, orders: orderRows,
-      carePlanClients: clients.filter(c => isClinicalServiceLine(c.serviceLine)),
+      // Every client: a home care plan a coordinator or LMSW wrote waits on a
+      // clinician too, and the inbox already counts it. The digest did not.
+      carePlanClients: clients,
       visitLogs, patientNames, now: new Date().toISOString()
     });
 
@@ -21106,8 +21300,15 @@ const notify = createNotifier({
   familyRole: config.ROLES.FAMILY
 });
 const requireEnrollmentStaff = (req, res, next) => {
+  // Whoever holds the Clients module (the office by default, plus a grant),
+  // and clinicians and case managers, who read enrollment from the chart. A
+  // manager or coordinator the Clients module was taken from is refused: their
+  // role is 'user' too, so the role list alone would let them back in.
   const role = req.user.role;
-  if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager) {
+  const type = accountTypes.accountTypeOf(req.user);
+  const clinician = accountTypes.CLINICIAN_TYPES.includes(type) || role === config.ROLES.CASE_MANAGER;
+  if (role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'clients') ||
+      (clinician && ENROLLMENT_STAFF_ROLES.includes(role))) {
     return next();
   }
   return res.status(403).json({ error: 'Staff access required for the enrollment view.', code: 'ENROLLMENT_STAFF_ONLY' });
@@ -24840,7 +25041,18 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
 
     const { override, overrideReason } = req.body || {};
     const comp = computeEnrollmentCompletion(client);
-    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length;
+    // A clinical client also needs the pre-visit half of the clinical
+    // enrollment checklist (owner, 2026-11-09): payer, records release, NPA
+    // and the clinical consents. The H&P and care plan are not asked for here;
+    // they need a visit, which needs enrollment. Activate still checks all six.
+    let missingClinicalSteps = [];
+    if (isClinicalServiceLine(client.serviceLine)) {
+      const roiEvents = await roiStore.listConsentEventsByClient(client.id);
+      missingClinicalSteps = clinicalRepo.missingPreApprovalSteps(clinicalRepo.deriveClinicalChecklist({
+        client, manualState: (client.clinicalEnrollment || {}).steps, roiEvents, isConsentSatisfied
+      }));
+    }
+    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length || missingClinicalSteps.length;
 
     if (incomplete && !override) {
       return res.status(409).json({
@@ -24848,6 +25060,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
         code: 'ENROLLMENT_INCOMPLETE',
         missingConsents: comp.missingConsentLabels,
         missingFields: comp.missingFieldLabels,
+        missingClinicalSteps,
         // Named so the UI can offer the override rather than leaving an admin
         // to discover it exists by reading the API.
         overridable: true
@@ -24876,7 +25089,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
       override: overrode ? {
         reason: String(overrideReason).trim().slice(0, 1000),
         missingConsents: comp.missingConsentLabels,
-        missingFields: comp.missingFieldLabels
+        missingFields: comp.missingFieldLabels,
+        missingClinicalSteps
       } : null
     };
     users[idx] = client;
@@ -24884,7 +25098,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id,
       overrode ? { override: true, reason: client.enrollmentApproval.override.reason,
-                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
+                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels,
+                   missingClinicalSteps } : {});
     // The client was never told they were approved. That was the one event
     // that says "you are done" and it was silent.
     await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
@@ -32440,6 +32655,13 @@ app.listen(PORT, () => {
       console.error('Account-type migration failed (non-fatal):', err.message);
     }
     try {
+      // Office approvals made in onboarding reach the welcome packet (2026-11-13).
+      const r = await require('./onboarding/packetSync').repairOnce(db, { findItem: require('./onboarding/track').findItem, now: new Date().toISOString() });
+      if (!r.skipped) console.log(`[onboarding] packet sync: ${r.rekinded} file(s) refiled, ${r.accepted} accepted, ${r.officeDone} office item(s) done, ${r.unsure} file(s) left for the office to type.`);
+    } catch (err) {
+      console.error('Onboarding packet sync repair failed (non-fatal):', err.message);
+    }
+    try {
       await migrateFamilyLinks();
     } catch (err) {
       console.error('Family-link migration failed (non-fatal):', err.message);
@@ -32448,6 +32670,11 @@ app.listen(PORT, () => {
       await seedRequisitionReturnFax();
     } catch (err) {
       console.error('Return-fax seed failed (non-fatal):', err.message);
+    }
+    try {
+      await seedDefaultTrainingMaterial();
+    } catch (err) {
+      console.error('Training material seed failed (non-fatal):', err.message);
     }
     try {
       await seedReferralProviders();

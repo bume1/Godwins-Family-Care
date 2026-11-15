@@ -511,7 +511,11 @@ test('screens: the pay views carry no download, and the time boxes read Eastern'
   const pv = page.slice(page.indexOf('const PayView'), page.indexOf('// ====', page.indexOf('const PayView')));
   assert.ok(pv.length > 200, 'the read-only view exists');
   assert.ok(!/\.csv|download|clipboard|window\.print/i.test(pv), 'no download, copy or print control in the view');
-  assert.match(page, /access\.managePay && <button className="btn gold" onClick=\{exportCsv\}>/, 'the export stays the Super Admin\'s');
+  // The exports moved to the money pages (owner, 2026-11-09): Scheduling
+  // shows hours and exports none; Payroll and Billing (both Super Admin) do.
+  assert.ok(!/payroll\.csv|billing\.csv/.test(page.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")), 'scheduling exports no money file');
+  assert.match(read('public/payroll.html'), /download\(`\/api\/scheduling\/payroll\.csv\?from=/);
+  assert.match(read('public/billing.html'), /\{isAdmin && <HoursExport \/>\}/, 'the billing export stays the Super Admin\'s');
   assert.match(page, /onRequest=\{!access\.managePay && access\.manageSchedule \? requestAdjustment : null\}/);
   // The correction box used to hold the raw UTC instant, so saving it moved a visit four hours.
   const row = page.slice(page.indexOf('const TimeLogRow'), page.indexOf('const AdjustmentQueue'));
@@ -605,4 +609,29 @@ test('hub: the user page declares the pay-change state it reads (it crashed User
   assert.strictEqual((hub.match(/const \[financialPending, setFinancialPending\]/g) || []).length, 1, 'declared once');
   assert.match(page, /\{isSuperAdmin && \(\s*<button onClick=\{\(\) => \{ setShowBulkReset\(true\)/, 'bulk password reset stays the Super Admin\'s');
   assert.match(page, /\{isSuperAdmin && <button onClick=\{\(\) => setActiveTab\('resets'\)\}/);
+});
+
+// Timesheets (owner, 2026-11-13): an employee asks for their OWN hours to be
+// changed, from their timesheet. Same queue, same one writer; someone else's
+// log reads as not found; paid hours are locked.
+test('an employee requests a change to their own time; the Super Admin approves it', async () => {
+  const other = { ...LOG, id: 'tl2', caregiver_id: 'someone-else' };
+  const paid = { ...LOG, id: 'tl3', payroll_run_id: 'run1' };
+  const h = schedHarness({ time_logs: [LOG, other, paid] });
+  try {
+    let r = await h.call('POST', '/api/my/time-logs/tl2/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'x' }, 'cg1');
+    assert.strictEqual(r.status, 404, 'not their log');
+    r = await h.call('POST', '/api/my/time-logs/tl3/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'x' }, 'cg1');
+    assert.strictEqual(r.body.code, 'TIME_LOG_PAYROLL_LOCKED');
+    r = await h.call('POST', '/api/my/time-logs/tl1/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z' }, 'cg1');
+    assert.strictEqual(r.body.code, 'ADJUSTMENT_REASON_REQUIRED');
+    r = await h.call('POST', '/api/my/time-logs/tl1/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'Forgot to clock out' }, 'cg1');
+    assert.strictEqual(r.status, 200, r.text);
+    assert.strictEqual(r.body.request.requestedByRole, 'self');
+    assert.strictEqual((await h.db.get('time_logs'))[0].clock_out_at, LOG.clock_out_at, 'nothing changes until approved');
+    assert.ok(h.notices.some(n => n[0] === 'time_adjustment_requested' && n[1] === 'adm'));
+    const ok = await h.call('POST', `/api/scheduling/adjustment-requests/${r.body.request.id}/decide`, { decision: 'approved' }, 'adm');
+    assert.strictEqual(ok.status, 200, ok.text);
+    assert.strictEqual((await h.db.get('time_logs'))[0].clock_out_at, '2026-10-20T18:00:00.000Z');
+  } finally { h.close(); }
 });

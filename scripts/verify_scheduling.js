@@ -288,8 +288,10 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   const ownAvail = await call('GET', '/api/scheduling/availability', { as: 'pca-2' });
   check('a caregiver sees only their OWN availability',
     ownAvail.status === 200 && ownAvail.data.availability.length === 0);
-  const adminAvail = await call('GET', '/api/scheduling/availability', { as: 'admin-1' });
-  check('admin sees everyone\'s', adminAvail.data.availability.length === 2);
+  const adminAvail = await call('GET', '/api/scheduling/availability?scope=all', { as: 'admin-1' });
+  check('admin sees everyone\'s when asking for the office view', adminAvail.data.availability.length === 2);
+  const adminOwn = await call('GET', '/api/scheduling/availability', { as: 'admin-1' });
+  check('admin\'s own availability card shows only admin\'s rows', adminOwn.data.availability.length === 0);
 
   // ==========================================================================
   section('B. Posting shifts + open-pool eligibility');

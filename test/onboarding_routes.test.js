@@ -29,12 +29,24 @@ async function mount(t) {
     manualState: async () => ({ ok: true, currentVersion: '2.2', changeLog: VF.SEEDED_CHANGES.slice() }),
     checks: async () => ({ ok: true, sops: { 'SOP-SYS-01': [{ prompt: 'Where is the record?', answer: 'OpenEMR.', source: 'Manual 3.1' }] }, library: {}, errors: [] })
   };
+  const notices = [];
+  const notify = require('../notifications').createNotifier({
+    getUsers: async () => [OFFICE, NP],
+    queueNotification: async (type, id, email, name, data) => { notices.push({ type, email, ...data }); return { id: 'q' }; },
+    getAppBaseUrl: async () => 'https://app.test.local',
+    emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+    staffRoles: ['admin', 'user'], clientRole: 'client', familyRole: 'family'
+  });
   const app = express();
   app.use(express.json());
   app.use(require('../routes/onboarding')({
     db, config: {}, logActivity: async () => {}, getUsers: async () => [OFFICE, NP],
     authenticateToken: (req, _res, next) => { req.user = current; next(); },
-    drive, detectFileType: () => 'image/png', uuidv4: () => Math.random().toString(36).slice(2), sourceLoader
+    drive, detectFileType: () => 'image/png', uuidv4: () => Math.random().toString(36).slice(2), sourceLoader,
+    // The notifier is injected because server.js injects one (2026-11-09).
+    // Without it these tests exercise a router where nobody is ever emailed,
+    // which is a different function from the one that ships.
+    notify: () => notify, getAppBaseUrl: async () => 'https://app.test.local'
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
   t.after(() => server.close());
@@ -44,7 +56,7 @@ async function mount(t) {
     let data = null; try { data = await res.json(); } catch (_) { /* binary */ }
     return { status: res.status, data };
   };
-  return { store, uploads, call, base, as: (u) => { current = u; } };
+  return { store, uploads, call, base, notices, as: (u) => { current = u; } };
 }
 
 const startHer = async (h, inputs) => {
@@ -178,7 +190,7 @@ test('the office opens a service line only with every condition and a scope, and
   h.as(OFFICE);
   const early = await h.call('POST', `/api/onboarding/admin/people/${NP.id}/determinations/IME`, {});
   assert.strictEqual(early.data.code, 'DETERMINATION_NOT_READY');
-  for (const id of ['TRN-101', 'TRN-102', 'TRN-103', 'TRN-104', 'TRN-105']) {
+  for (const id of ['TRN-102', 'TRN-103', 'TRN-104', 'TRN-105']) {
     await h.call('POST', `/api/onboarding/admin/people/${NP.id}/modules/${id}/complete`, {});
   }
   const det = C.DETERMINATIONS.find(d => d.id === 'IME');
@@ -222,7 +234,7 @@ test('the admin team is onboarded on Chapter F: no clinical training, and a Fiel
   const p = await h.call('GET', `/api/onboarding/admin/people/${OFFICE.id}`);
   const tr = p.data.track;
   assert.strictEqual(tr.chapter.id, 'F');
-  assert.strictEqual(tr.modules.length, 0, 'the clinical Training Library is not hers');
+  assert.deepStrictEqual(tr.modules.map(m => m.id).sort(), [...require('../onboarding/libraryTrainings').SHARED_MODULE_IDS].sort(), 'only the general modules, never the clinical curriculum');
   assert.ok(!tr.items.some(i => i.id === 'F.5.06'), 'no Field Addendum unless the role enters a client residence');
   assert.ok(!tr.items.some(i => i.id === 'F.6.01'), 'no out-of-state registration for a Georgia worker');
   const ack = tr.items.find(i => i.id === 'F.5.05').acknowledgments.find(a => a.id === 'ADMIN_MANUAL');
@@ -239,7 +251,7 @@ test('a registered nurse is onboarded on Chapter B: PHC P&P 3.1, clearance befor
   const T = require('../onboarding/track');
   const b = T.buildTrack({ inputs: { chapter: 'B' }, record: {} });
   assert.strictEqual(b.chapter.id, 'B');
-  assert.strictEqual(b.modules.length, 0);
+  assert.deepStrictEqual(b.modules.map(m => m.id).sort(), [...require('../onboarding/libraryTrainings').SHARED_MODULE_IDS].sort(), 'only the general modules');
   assert.ok(!b.items.some(i => i.id === 'B.7.04') && !b.items.some(i => i.id === 'B.7.05'), 'no delegated duties unless set');
   const ack = b.items.find(i => i.id === 'B.5.03').acknowledgments.find(a => a.id === 'PHC_MANUAL');
   assert.strictEqual(ack.required, '3.1');

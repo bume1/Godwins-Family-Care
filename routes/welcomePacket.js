@@ -23,6 +23,7 @@ const express = require('express');
 const links = require('../appLinks');   // where each person actually goes
 const cg = require('../caregiverRepository');
 const accountTypes = require('../accountTypes');
+const packetSync = require('../onboarding/packetSync');
 const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
 const packetPdf = require('../welcomePacketPdf');
@@ -718,16 +719,9 @@ module.exports = function createWelcomePacketRoutes(deps) {
         const caregiver = users.find(u => u.id === req.params.caregiverId && cg.isCaregiver(u));
         if (!caregiver) return res.status(404).json({ error: 'Caregiver not found.' });
 
-        const packet = (await loadPacket(caregiver.id)) || blankPacket(caregiver.id);
-        packet.office = { ...(packet.office || {}) };
-        packet.office[kind] = {
-          status,
-          note: String(note || '').trim().slice(0, 500) || null,
-          at: nowIso(),
-          byId: req.user.id,
-          byName: req.user.name || req.user.email || null
-        };
-        await savePacket(packet);
+        // One writer for an office item, shared with the onboarding module.
+        const packet = await packetSync.setOfficeItem(db, caregiver.id, kind, status,
+          { id: req.user.id, name: req.user.name || req.user.email || null }, nowIso(), note);
 
         await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_onboarding_item_set',
           'welcome_packet', packet.id, { caregiverId: caregiver.id, kind, status });

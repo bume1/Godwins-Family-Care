@@ -343,3 +343,25 @@ test('the private home care P&P is in the policies of RNs and caregivers, not cl
   assert.ok(ids('rn').includes('PHC_MANUAL') && ids('caregiver').includes('PHC_MANUAL'));
   assert.ok(!ids('provider').includes('PHC_MANUAL') && !ids('admin').includes('PHC_MANUAL'));
 });
+
+// The official tax forms signed in Pay Setup show in Documents (owner,
+// 2026-11-14), opening the filled form. On the Staff Record only the Super
+// Admin sees them, because they carry the SSN.
+test('signed tax forms are listed in their documents, and on the Staff Record for the Super Admin only', async (t) => {
+  const h = await mount(t);
+  h.store.payroll_profiles = { [RN.id]: { w4: { filingStatus: 'single', signedName: 'R', signedAt: '2026-11-10T10:00:00Z' }, i9: { section1: { status: 'citizen', signedName: 'R', signedAt: '2026-11-11T10:00:00Z' } }, g4: null } };
+  h.as(RN);
+  let r = await h.call('GET', '/api/my/documents');
+  const forms = r.data.signed.filter(x => x.pdf === 'taxform');
+  assert.deepEqual(forms.map(x => x.form).sort(), ['i9', 'w4']);
+  assert.ok(forms.every(x => x.title && x.signedAt));
+  h.as(ADMIN);
+  r = await h.call('GET', `/api/my/admin/people/${RN.id}/documents`);
+  assert.equal(r.data.signed.filter(x => x.pdf === 'taxform').length, 2);
+  h.as(COORD);
+  r = await h.call('GET', `/api/my/admin/people/${RN.id}/documents`);
+  assert.equal(r.status, 200, 'a coordinator reads the Staff Record');
+  assert.equal(r.data.signed.filter(x => x.pdf === 'taxform').length, 0, 'but not the tax forms');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'public', 'my-gfc.js'), 'utf8'), /d\.pdf === 'taxform' \? `\/api\/my\/pay-setup\/forms\/\$\{d\.form\}\.pdf`/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8'), /\/api\/payroll\/admin\/people\/\$\{encodeURIComponent\(user\.id\)\}\/forms\/\$\{encodeURIComponent\(x\.form\)\}\.pdf/);
+});

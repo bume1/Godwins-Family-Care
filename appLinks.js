@@ -37,6 +37,8 @@ const PATHS = Object.freeze({
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
   CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
   CLINICAL_TASKS: '/clinical#queues',
+  MY_ONBOARDING: '/my#onboarding',          // a staff member's OWN onboarding (a caregiver is redirected to /caregiver#onboarding, which resolves)
+  STAFF_ONBOARDING: '/onboarding',          // the OFFICE's staff-onboarding screen. Not `/my`, which is the person's own.
   CLINICAL_VETERANS: '/clinical#veterans',
   IME_CASES: '/ime',                        // the IME record analyzer: an examiner's claim files  // a provider's IME veterans for today       // straight to Tasks → My To-Dos (`queues` is that view's key)
   SCHEDULING: '/scheduling',                // ADMIN shift board, not the caregiver's
@@ -49,6 +51,11 @@ const PATHS = Object.freeze({
   // A caregiver's My GFC is the caregiver app (2026-11-08).
   STAFF_WELCOME: '/my#welcome',            // a staff member's welcome packet; login opens it until signed
   MY_PAY: '/my#hours',
+  MY_DOCUMENTS: '/my#documents',
+  CAREGIVER_DOCUMENTS: '/caregiver#documents',
+  // Office announcements (2026-11-10): My GFC for staff, the Feed for caregivers.
+  MY_ANNOUNCEMENTS: '/my#announcements',
+  CAREGIVER_FEED: '/caregiver#feed',
   CAREGIVER_PAY: '/caregiver#hours',
   PAYROLL_ADMIN: '/payroll',                // the owner's payroll screen
   // T1 C4: the one-tap video join link's PREFIX. The token is appended per
@@ -100,8 +107,22 @@ function messagesFor(user) {
 // `messagesFor` does: the destination belongs here, not at the call site.
 const tasksFor = () => PATHS.CLINICAL_TASKS;
 
+// Where a staff member reads their OWN onboarding. `/my` redirects a caregiver
+// to `/caregiver#onboarding`, and both pages resolve that fragment and fall
+// back to their home view, so one destination serves every account type.
+const myOnboardingFor = () => PATHS.MY_ONBOARDING;
+
+// Where the OFFICE works other people's onboarding. A separate destination on
+// purpose: pointing an office notice at `/my` would send an admin to their own
+// checklist to verify somebody else's licence.
+const staffOnboardingFor = () => PATHS.STAFF_ONBOARDING;
+
 // Where THIS person reads their pay stubs and tax forms.
 const payFor = (user) => (isCaregiver(user) ? PATHS.CAREGIVER_PAY : PATHS.MY_PAY);
+// Where a person signs a document the office sent them (2026-11-13).
+const documentsFor = (user) => (isCaregiver(user) ? PATHS.CAREGIVER_DOCUMENTS : PATHS.MY_DOCUMENTS);
+// Where a person reads an announcement: a caregiver's Feed, everyone else's My GFC.
+const announcementsFor = (user) => (isCaregiver(user) ? PATHS.CAREGIVER_FEED : PATHS.MY_ANNOUNCEMENTS);
 
 // A shift concerns a caregiver, so it points at their schedule — never the
 // admin board at `/scheduling`, which they cannot open.
@@ -120,4 +141,4 @@ const routeOf = (p) => String(p || '').split('#')[0].split('?')[0];
 // excluded here and checked by its own assertion with a bogus token.
 const ALL_PATHS = Object.freeze(Object.values(PATHS).filter(p => p !== PATHS.VIDEO_JOIN_PREFIX));
 
-module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, payFor, videoJoinFor, routeOf, isCaregiver, isClinical };
+module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, tasksFor, myOnboardingFor, staffOnboardingFor, payFor, documentsFor, announcementsFor, videoJoinFor, routeOf, isCaregiver, isClinical };

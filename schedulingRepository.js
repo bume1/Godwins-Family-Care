@@ -284,11 +284,31 @@ const isOpenToAllLevels = (shift) => {
   return r.ok && !r.level;
 };
 
+// ---- Staff shifts (owner, 2026-11-09) ---------------------------------------
+// The scheduling board schedules ALL staff, not only caregivers, EXCEPT
+// providers, who are booked on the clinical calendar in the EHR. A staff
+// shift names a ROLE and is assigned to one person in that role: there is no
+// open pool for staff. RN, LMSW and LCSW shifts may be a client visit or
+// office time; the office roles never carry a client. A staff shift is never
+// visible to a caregiver and never takes a licence level.
+const STAFF_SHIFT_ROLES = Object.freeze({
+  rn: Object.freeze({ label: 'RN', clientVisits: true }),
+  lmsw: Object.freeze({ label: 'LMSW / Case Manager', clientVisits: true }),
+  lcsw: Object.freeze({ label: 'LCSW', clientVisits: true }),
+  coordinator: Object.freeze({ label: 'Care Coordinator', clientVisits: false }),
+  manager: Object.freeze({ label: 'Manager', clientVisits: false }),
+  liaison: Object.freeze({ label: 'Community Care Liaison', clientVisits: false })
+});
+const staffRoleOf = (shift) => (shift && (shift.staff_role || shift.staffRole)) || null;
+const isStaffShift = (shift) => !!staffRoleOf(shift);
+const staffRoleLabel = (role) => (STAFF_SHIFT_ROLES[role] ? STAFF_SHIFT_ROLES[role].label : null);
+
 // ---- Open-pool eligibility -------------------------------------------------
 // A caregiver sees an open shift only when their license level meets the
 // requirement AND the shift is open to them. Anything else is invisible —
 // enforced at the API, not by hiding a row in the UI.
 function isEligibleForShift(caregiver, shift, client) {
+  if (isStaffShift(shift)) return false;   // staff shifts are assigned by role, never claimed
   if (!cg.isCaregiver(caregiver)) return false;
   if (caregiver.accountStatus === 'inactive') return false;
   if (!shift) return false;
@@ -329,6 +349,7 @@ function shiftVisibility(caregiver, shift, client) {
   if (!cg.isCaregiver(caregiver)) return { visible: false, claimable: false, reason: 'not a caregiver' };
   if (caregiver.accountStatus === 'inactive') return { visible: false, claimable: false, reason: 'account inactive' };
   if (!shift) return { visible: false, claimable: false, reason: 'no shift' };
+  if (isStaffShift(shift)) return { visible: false, claimable: false, reason: 'staff shift' };
 
   const visibility = shift.pool_visibility || shift.poolVisibility || 'all_eligible';
   if (visibility === 'care_team' && !(client && cg.isAssignedToCaregiver(caregiver, client))) {
@@ -346,6 +367,7 @@ function shiftVisibility(caregiver, shift, client) {
 // Why a caregiver is not eligible — for the admin view, so "why can't Adaeze
 // see this shift" has an answer that is not guesswork.
 function eligibilityReason(caregiver, shift, client) {
+  if (isStaffShift(shift)) return `this is a ${staffRoleLabel(staffRoleOf(shift))} shift, not a caregiver shift`;
   if (!cg.isCaregiver(caregiver)) return 'not a caregiver';
   if (caregiver.accountStatus === 'inactive') return 'account inactive';
   const level = cg.normalizeLevel(caregiver.licenseLevel);
@@ -579,7 +601,11 @@ const TIME_LOG_FLAGS = Object.freeze([
 // Flags for a clock-in. A flag is a signal to admin, never a refusal.
 function clockInFlags({ shift, client, gps, at, graceMinutes = DEFAULT_GRACE_MINUTES }) {
   const flags = [];
-  const geo = evaluateGeofence(client, gps);
+  // Office time on a staff shift has no client and no place to check, so it
+  // is neither inside, outside nor "unverifiable": the check does not apply.
+  const geo = (!client && isStaffShift(shift))
+    ? { verdict: 'not_applicable', reason: 'OFFICE_SHIFT', radius: null, distance: null }
+    : evaluateGeofence(client, gps);
   if (geo.verdict === 'outside') flags.push('outside_geofence');
   if (geo.verdict === 'unverifiable') flags.push('geofence_unverifiable');
 
@@ -593,7 +619,11 @@ function clockInFlags({ shift, client, gps, at, graceMinutes = DEFAULT_GRACE_MIN
 
 function clockOutFlags({ shift, client, gps, at, graceMinutes = DEFAULT_GRACE_MINUTES }) {
   const flags = [];
-  const geo = evaluateGeofence(client, gps);
+  // Office time on a staff shift has no client and no place to check, so it
+  // is neither inside, outside nor "unverifiable": the check does not apply.
+  const geo = (!client && isStaffShift(shift))
+    ? { verdict: 'not_applicable', reason: 'OFFICE_SHIFT', radius: null, distance: null }
+    : evaluateGeofence(client, gps);
   if (geo.verdict === 'outside') flags.push('outside_geofence');
   if (geo.verdict === 'unverifiable') flags.push('geofence_unverifiable');
 
@@ -694,7 +724,13 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   // Owner, 2026-11-08: W-2 staff clock in on the same clock, so payroll says
   // which kind of worker each row is. LAST, so a payroll import mapped by
   // column position keeps working.
-  { key: 'workerType', header: 'Worker Type' }
+  { key: 'workerType', header: 'Worker Type' },
+  // Owner, 2026-11-09: the export has to match what payroll actually does.
+  // The pay period is the person's own pay schedule (caregivers weekly,
+  // everyone else every two weeks), and a row already paid names its run.
+  // Appended, so a positional import keeps every earlier column.
+  { key: 'paySchedule', header: 'Pay Schedule' },
+  { key: 'payrollRun', header: 'Paid In Payroll Run' }
 ]);
 
 // ---- Client billing CSV ----------------------------------------------------
@@ -913,17 +949,26 @@ function validateShift(input) {
     // shift longer than a day is a typo far more often than an intent.
     errors.push({ field: 'end', code: 'SHIFT_TOO_LONG', message: 'A single shift cannot run longer than 24 hours. Book consecutive shifts.' });
   }
-  if (!body.clientId) errors.push({ field: 'clientId', code: 'CLIENT_REQUIRED', message: 'Pick a client.' });
+  const staffRole = body.staffRole ? String(body.staffRole).trim().toLowerCase() : null;
+  if (staffRole && staffRole === 'provider') {
+    errors.push({ field: 'staffRole', code: 'STAFF_ROLE_PROVIDER', message: 'Providers are scheduled on the clinical calendar in the EHR, not here.' });
+  } else if (staffRole && !STAFF_SHIFT_ROLES[staffRole]) {
+    errors.push({ field: 'staffRole', code: 'STAFF_ROLE_INVALID', message: `"${body.staffRole}" is not a role that is scheduled here.` });
+  }
+  if (staffRole && STAFF_SHIFT_ROLES[staffRole] && !STAFF_SHIFT_ROLES[staffRole].clientVisits && body.clientId) {
+    errors.push({ field: 'clientId', code: 'STAFF_ROLE_NO_CLIENT', message: `A ${STAFF_SHIFT_ROLES[staffRole].label} shift is office time and has no client.` });
+  }
+  if (!staffRole && !body.clientId) errors.push({ field: 'clientId', code: 'CLIENT_REQUIRED', message: 'Pick a client.' });
 
-  const required = normalizeLicenseRequirement(body.requiredLicenseLevel);
+  const required = staffRole ? { ok: true, level: null } : normalizeLicenseRequirement(body.requiredLicenseLevel);
   if (!required.ok) {
     errors.push({
       field: 'requiredLicenseLevel', code: 'LICENSE_LEVEL_INVALID',
       message: `"${body.requiredLicenseLevel}" is not a license level. Use a level, or "any" to open the shift to every caregiver.`
     });
   }
-  const visibility = body.poolVisibility || 'all_eligible';
-  if (!['all_eligible', 'care_team'].includes(visibility)) {
+  const visibility = staffRole ? 'assigned' : (body.poolVisibility || 'all_eligible');
+  if (!staffRole && !['all_eligible', 'care_team'].includes(visibility)) {
     errors.push({ field: 'poolVisibility', code: 'VISIBILITY_INVALID', message: 'Visibility is all_eligible or care_team.' });
   }
 
@@ -931,7 +976,8 @@ function validateShift(input) {
     valid: errors.length === 0,
     errors,
     clean: {
-      clientId: body.clientId,
+      clientId: body.clientId || null,
+      staffRole: staffRole && STAFF_SHIFT_ROLES[staffRole] ? staffRole : null,
       start: isFinite(start) ? new Date(start).toISOString() : null,
       end: isFinite(end) ? new Date(end).toISOString() : null,
       // 'any' is stored as null, so eligibility has exactly one shape to read
@@ -1666,6 +1712,7 @@ function availabilityVerdict(rows, personId, start, end) {
 }
 
 module.exports = {
+  STAFF_SHIFT_ROLES, staffRoleOf, isStaffShift, staffRoleLabel,
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
   validateAvailability, availabilityCoversShift, availabilityVerdict, AVAILABILITY_CHANGE_LEAD_DAYS,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
