@@ -108,6 +108,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'contractor_invoices', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_timesheets', phi: false, owner: 'payroll timesheets 11/2026' },
   { key: 'payroll_deleted_drafts', phi: false, owner: 'payroll 11/2026', note: 'deleted draft runs: who, when, which period; the morning automation skips them' },
+  { key: 'payroll_payment_corrections', phi: false, owner: 'payroll 11/2026', note: 'how a Gusto-imported payment was actually sent (Zelle, Cash App), with receipt, reason, who and when; append-only' },
   { key: 'payroll_tax_payments', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_filing_confirmations', phi: false, owner: 'payroll 11/2026' },
   { key: 'payroll_year_end', phi: false, owner: 'payroll 11/2026', note: 'year-end W-2 / 1099-NEC figures once released' },

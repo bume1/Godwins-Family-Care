@@ -259,3 +259,57 @@ test('an earlier stub shows its receipt, Redo Pay Stubs files it again quietly, 
   assert.equal(w.store.get('staff_paystubs').length, 1, 'the same stub, replaced, not a second one');
   assert.equal(w.store.get('staff_paystubs')[0].final, true);
 });
+
+// Past Gusto pay dates recorded as a check but sent by Zelle or Cash App
+// (owner, 2026-11-14): corrected in the records and on the stubs, openly,
+// for Gusto history only. Amounts never change and nobody is emailed.
+test('a Gusto check pay date sent by Zelle or Cash App is corrected openly on the stub and in the register, Gusto history only', async () => {
+  const w = world();
+  const gustoRun = (payDate, start, end) => ({ id: `gusto:${payDate}:${start}:${end}`, status: 'paid', source: 'gusto', period: { start, end, payDate }, payments: {},
+    workers: [{ userId: 'cg1', name: 'Pat Care', workerType: 'W2', payMethod: 'check', refs: [], missing: [], imported: { from: 'Gusto', workState: 'GA' },
+      earnings: [{ code: 'regular', label: 'Regular', minutes: 600, rateCents: 1800, amountCents: 18000 }],
+      pay: { grossCents: 18000, taxes: { federal: 0, socialSecurity: 1116, medicare: 261, georgia: 500 }, taxCents: 1877, reimbursementsCents: 0, netCents: 16123, workState: 'GA', employer: { socialSecurity: 1116, medicare: 261, futa: 108, gaSuta: 486 } } }] });
+  const A = gustoRun('2026-10-30', '2026-10-19', '2026-10-25'), B = gustoRun('2026-10-23', '2026-10-12', '2026-10-18');
+  w.store.set('payroll_runs', [A, B]);
+  // The run shows the person's other Gusto paydays to tick.
+  let r = await w.call('own', 'GET', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}`);
+  assert.deepEqual(r.body.run.correctionOptions.cg1.map(o => [o.payDate, o.recordedAs]), [['2026-10-23', 'check']]);
+  // A reason and a real method are required; only the Super Admin corrects.
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}/payment-correction`, { userId: 'cg1', method: 'zelle' });
+  assert.equal(r.body.code, 'PAYMENT_CORRECTION_REASON');
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}/payment-correction`, { userId: 'cg1', method: 'venmo', reason: 'x' });
+  assert.equal(r.body.code, 'PAYMENT_CORRECTION_METHOD');
+  r = await w.call('cg1', 'POST', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}/payment-correction`, { userId: 'cg1', method: 'zelle', reason: 'x' });
+  assert.equal(r.status, 403);
+  const emailsBefore = w.emails.length;
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}/payment-correction`, { userId: 'cg1', method: 'zelle', receipt: 'ZL-889', sentOn: '2026-10-30', reason: 'Gusto check run; paid by Zelle while direct deposit was set up', alsoRunIds: [B.id] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.corrected, ['2026-10-30', '2026-10-23']);
+  assert.equal(w.emails.length, emailsBefore, 'nobody is emailed');
+  const stubs = w.store.get('staff_paystubs');
+  assert.equal(stubs.length, 2); assert.ok(stubs.every(x => x.final && /^drv-Pay stub/.test(x.driveFileId)), 'filed again in the finance folder');
+  const tA = text(await w.payroll.stubPdfForRow(stubs.find(x => x.payDate === '2026-10-30')));
+  assert.match(tA, /Payment: Zelle \(P2P\) · Receipt ZL-889 · sent Oct 30, 2026\. Payroll run in Gusto, which recorded it as a paper check; corrected by the\s+office on /);
+  assert.match(tA, /\$161\.23/, 'the amount is unchanged');
+  const tB = text(await w.payroll.stubPdfForRow(stubs.find(x => x.payDate === '2026-10-23')));
+  assert.match(tB, /Payment: Zelle \(P2P\)\. Payroll run in Gusto, which recorded it as a paper check/);
+  // Cash App reads apart from Zelle, and a later correction adds to the history.
+  await w.call('own', 'POST', `/api/payroll/admin/runs/${encodeURIComponent(B.id)}/payment-correction`, { userId: 'cg1', method: 'cashapp', receipt: 'CA-5', reason: 'It was Cash App that week' });
+  assert.match(text(await w.payroll.stubPdfForRow(w.store.get('staff_paystubs').find(x => x.payDate === '2026-10-23'))), /Payment: Cash App \(P2P\) · Receipt CA-5/);
+  const hist = w.store.get('payroll_payment_corrections');
+  assert.equal(hist.length, 3, 'nothing is erased');
+  assert.ok(hist[2].replaces === hist[1].id && hist.every(c => c.recordedAs === 'check'));
+  // The register says both: how it was sent and what Gusto recorded.
+  r = await w.call('own', 'GET', `/api/payroll/admin/runs/${encodeURIComponent(A.id)}/register.csv`);
+  const [head, row] = r.buf.toString().trim().split('\r\n');
+  const col = (name) => row.match(/("([^"]|"")*"|[^,]*)(,|$)/g).map(c => c.replace(/,$/, '').replace(/^"|"$/g, ''))[head.split('","').map(x => x.replace(/"/g, '')).indexOf(name)];
+  assert.equal(col('Pay Method'), 'Zelle'); assert.equal(col('Payment Confirmation'), 'ZL-889');
+  assert.equal(col('Recorded In Gusto As'), 'check'); assert.match(col('Payment Correction'), /paid by Zelle/);
+  // Importing the Gusto file again (fresh runs) keeps the correction.
+  w.store.set('payroll_runs', [gustoRun('2026-10-30', '2026-10-19', '2026-10-25'), gustoRun('2026-10-23', '2026-10-12', '2026-10-18')]);
+  assert.match(text(await w.payroll.stubPdfForRow(w.store.get('staff_paystubs').find(x => x.payDate === '2026-10-30'))), /Zelle \(P2P\) · Receipt ZL-889/);
+  // A pay date run in the app is never corrected this way.
+  r = await w.call('own', 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  r = await w.call('own', 'POST', `/api/payroll/admin/runs/${r.body.run.id}/payment-correction`, { userId: 'cg1', method: 'zelle', reason: 'x' });
+  assert.equal(r.body.code, 'PAYMENT_CORRECTION_GUSTO_ONLY');
+});

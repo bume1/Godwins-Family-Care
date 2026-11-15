@@ -2739,7 +2739,7 @@ async function generatePhcInvoicePDF(inv) {
 // Current and year-to-date for every line. Last four of the SSN and the
 // deposit account only. Drawn from the approved run's frozen numbers; nothing
 // is recalculated here.
-async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, p2pAccount, workState, paidThrough, payment }) {
+async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, accountLast4, payMethod, p2pAccount, workState, paidThrough, payment, correction }) {
   return new Promise((resolve, reject) => {
     try {
       const ORG = consentText.ORG;
@@ -2806,12 +2806,20 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
       y0 += 10;
-      const how = payMethod === 'direct_deposit' ? `Direct deposit to account ending ${accountLast4 || '----'}` : payMethod === 'check' ? 'Paper check' : payMethod === 'wise' ? 'Wise transfer' : payMethod === 'p2p' ? `P2P by Cash App from ${p2pAccount || '$GodwinsFamilyCare'}` : 'Payment method not set';
+      const PAID_BY = { check: 'Paper check', wise: 'Wise transfer', zelle: 'Zelle (P2P)', cashapp: 'Cash App (P2P)' };
+      const how = payMethod === 'direct_deposit' ? (accountLast4 ? `Direct deposit to account ending ${accountLast4}` : 'Direct deposit') : payMethod === 'p2p' ? `P2P by Cash App from ${p2pAccount || '$GodwinsFamilyCare'}` : PAID_BY[payMethod] || 'Payment method not set';
       // The receipt (owner, 2026-11-14): the confirmation number of the
       // transfer, for direct deposit and Cash App alike, and when it was sent.
       const sent = payment && payment.at ? new Date(payment.at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' }) : '';
-      const receipt = payment && payment.confirmation ? ` · Receipt ${payment.confirmation}${sent ? ` · sent ${sent}` : ''}` : '';
-      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(`Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}${receipt}`, L, y0, { width: R - L });
+      const receipt = payment && payment.confirmation ? ` · Receipt ${payment.confirmation}${sent ? ` · sent ${sent}` : ''}` : sent && correction ? ` · sent ${sent}` : '';
+      // A payment the office corrected after the move from Gusto (owner,
+      // 2026-11-14): said openly, with what Gusto recorded and when the office
+      // corrected it. Amounts are never changed this way.
+      const fixedOn = correction && correction.at ? new Date(correction.at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' }) : '';
+      const line = correction
+        ? `Payment: ${how}${receipt}. Payroll run in ${paidThrough || 'Gusto'}, which recorded it as ${(PAID_BY[correction.recordedAs] || (correction.recordedAs === 'direct_deposit' ? 'Direct deposit' : 'another method')).toLowerCase().replace(/^paper/, 'a paper')}; corrected by the office on ${fixedOn}.`
+        : `Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}${receipt}`;
+      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(line, L, y0, { width: R - L });
       doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
       doc.page.margins.bottom = 0;   // the footer sits below the margin
       doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor('#BBBBBB').stroke();

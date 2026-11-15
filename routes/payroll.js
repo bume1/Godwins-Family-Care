@@ -39,6 +39,11 @@ const TIMESHEETS = 'payroll_timesheets';
 // A draft deleted by the Super Admin (owner, 2026-11-14): who, when and which
 // period, so the morning automation does not draft that period again.
 const DELETED_DRAFTS = 'payroll_deleted_drafts';
+// How a payment imported from Gusto was actually sent (owner, 2026-11-14):
+// some Gusto "check" pay dates were sent by Zelle or Cash App while moving off
+// Gusto. Append-only; the latest for a run and person is the one in force.
+const CORRECTIONS = 'payroll_payment_corrections';
+const CORRECTION_METHODS = Object.freeze({ zelle: 'Zelle', cashapp: 'Cash App', direct_deposit: 'Direct deposit', check: 'Paper check' });
 const TAX_PAYMENTS = 'payroll_tax_payments';
 const FILINGS = 'payroll_filing_confirmations';
 const YEAR_END = 'payroll_year_end';          // one row per released tax year
@@ -1068,6 +1073,21 @@ module.exports = function createPayrollRoutes(deps) {
         run.unapprovedTimesheets = await unapprovedFor(run.period, run.workers, gathered);
       } catch (e) { /* keep the stored list */ }
     }
+    // A Gusto run: the payment correction in force for each person, and their
+    // other Gusto paydays, so one correction can cover several.
+    if (run.source === 'gusto') {
+      const corr = await rows(CORRECTIONS);
+      const gustoRuns = (await rows(RUNS)).filter(r => r && r.source === 'gusto');
+      run.correctionOptions = {};
+      for (const w of run.workers || []) {
+        const fix = correctionFor(corr, run.id, w.userId);
+        if (fix) w.paymentCorrection = { method: fix.method, label: CORRECTION_METHODS[fix.method], receipt: fix.receipt, sentOn: fix.sentOn, reason: fix.reason, recordedAs: fix.recordedAs, by: fix.by, at: fix.at };
+        run.correctionOptions[w.userId] = gustoRuns.filter(r => r.id !== run.id && (r.workers || []).some(x => String(x.userId) === String(w.userId) && x.pay))
+          .map(r => { const f = correctionFor(corr, r.id, w.userId); const x = r.workers.find(y => String(y.userId) === String(w.userId)); return { runId: r.id, payDate: r.period.payDate, recordedAs: x.payMethod || null, correctedTo: f ? f.method : null }; })
+          .sort((a, b) => String(b.payDate).localeCompare(String(a.payDate)));
+      }
+      run.correctionMethods = CORRECTION_METHODS;
+    }
     res.json({ run });
   });
 
@@ -1126,7 +1146,8 @@ module.exports = function createPayrollRoutes(deps) {
     const kinds = [['Regular Pay', ['regular']], ['Overtime Pay', ['overtime']], ['Salary', ['salary']], ['Visit and Exam Pay', ['per_visit', 'per_exam']], ['Bonus', ['bonus']], ['Correction', ['correction']]];
     const added = (w) => (run.adjustments || []).filter(a => String(a.userId) === String(w.userId))
       .map(a => `${engine.ADJUSTMENT_TYPES[a.type] || a.type} ${a.amountCents < 0 ? '-' : ''}$${d(Math.abs(a.amountCents))}: ${a.note || ''}`).join('; ');
-    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', ...kinds.map(k => k[0]), 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Added Lines', 'Taxes Entered By Hand', 'Missing Paperwork'];
+    const head = ['Name', 'Work State', 'Regular Hours', 'Overtime Hours', ...kinds.map(k => k[0]), 'Gross', 'Federal Income Tax', 'Social Security', 'Medicare', 'State Income Tax', 'Net Pay', 'Reimbursements', 'Employer Social Security', 'Employer Medicare', 'FUTA', 'State Unemployment', 'Pay Method', 'Payment Confirmation', 'Recorded In Gusto As', 'Payment Correction', 'Added Lines', 'Taxes Entered By Hand', 'Missing Paperwork'];
+    const corr = run.source === 'gusto' ? await rows(CORRECTIONS) : [];
     const lines = [head.map(q).join(',')];
     for (const w of run.workers || []) {
       const reg = (w.earnings || []).find(e => e.code === 'regular'), ot = (w.earnings || []).find(e => e.code === 'overtime');
@@ -1138,12 +1159,15 @@ module.exports = function createPayrollRoutes(deps) {
         p ? d((p.taxes.georgia || 0) + (p.taxes.state || 0)) : '', p ? d(p.netCents) : '', p ? d(p.reimbursementsCents) : '',
         p ? d(p.employer.socialSecurity) : '', p ? d(p.employer.medicare) : '', p ? d(p.employer.futa) : '',
         p ? d((p.employer.gaSuta || 0) + (p.employer.stateSuta || 0)) : '',
-        q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q(added(w)), q(w.manualTaxes ? `Yes: ${w.manualTaxes.reason || ''}` : ''), q((w.missing || []).join('; '))].join(','));
+        ...(() => { const fix = correctionFor(corr, run.id, w.userId); return fix
+          ? [q(CORRECTION_METHODS[fix.method] || fix.method), q(fix.receipt || ''), q(w.payMethod || ''), q(`${fix.reason} (${fix.by}, ${String(fix.at).slice(0, 10)})`)]
+          : [q(w.payMethod || ''), q(pay ? pay.confirmation : ''), q(''), q('')]; })(),
+        q(added(w)), q(w.manualTaxes ? `Yes: ${w.manualTaxes.reason || ''}` : ''), q((w.missing || []).join('; '))].join(','));
     }
     const t = run.totals || {};
     lines.push([q('TOTAL'), q(''), '', '', ...kinds.map(k => d((run.workers || []).reduce((a, w) => a + amt(w, k[1]), 0))), d(t.grossCents), d(t.federalCents), d(t.socialSecurityCents), d(t.medicareCents),
       d((t.georgiaCents || 0) + (t.stateWithholdingCents || 0)), d(t.netCents), d(t.reimbursementsCents),
-      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q(''), q(''), q('')].join(','));
+      d(t.employerSocialSecurityCents), d(t.employerMedicareCents), d(t.futaCents), d((t.gaSutaCents || 0) + (t.stateSutaCents || 0)), q(''), q(''), q(''), q(''), q(''), q(''), q('')].join(','));
     await logActivity(req.user.id, req.user.name, 'payroll_register_exported', 'payroll_run', run.id, { period: run.period && run.period.start });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', contentDisposition('attachment', `payroll_register_${(run.period && run.period.payDate) || run.id}.csv`));
@@ -1274,16 +1298,20 @@ module.exports = function createPayrollRoutes(deps) {
   // after they change their address, SSN or bank (owner, 2026-11-14). How it
   // was paid comes from the payment as marked (P2P is the Super Admin's
   // choice per run); the receipt is that payment's confirmation number.
-  const stubSnapshot = (run, w, settings, p) => {
+  // The correction in force for one person on one run: the latest.
+  const correctionFor = (corr, runId, userId) => (corr || []).filter(c => c.runId === runId && String(c.userId) === String(userId)).sort((a, b) => String(a.at).localeCompare(String(b.at))).pop() || null;
+  const stubSnapshot = (run, w, settings, p, corr) => {
     const paid = (run.payments || {})[w.userId] || null;
-    const method = w.imported ? w.payMethod : paid && paid.method ? paid.method : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null;
+    const fix = w.imported ? correctionFor(corr, run.id, w.userId) : null;
+    const method = fix ? fix.method : w.imported ? w.payMethod : paid && paid.method ? paid.method : w.channel === 'p2p' ? 'p2p' : p.payMethod ? p.payMethod.method : null;
     return {
       ssnLast4: p.ssn ? p.ssn.last4 : null,
       payMethod: method,
       accountLast4: w.imported || method !== 'direct_deposit' ? null : paid && paid.accountLast4 ? paid.accountLast4 : p.payMethod ? p.payMethod.accountLast4 : null,
       p2pAccount: method === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
       workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null,
-      payment: paid ? { confirmation: paid.confirmation, at: paid.at } : null
+      payment: fix ? { confirmation: fix.receipt || null, at: fix.sentOn ? `${fix.sentOn}T12:00:00Z` : null } : paid ? { confirmation: paid.confirmation, at: paid.at } : null,
+      correction: fix ? { recordedAs: fix.recordedAs, at: fix.at } : null
     };
   };
   const stubPdf = (run, w, ytd, settings, snap) => pdf.generatePayStubPDF({ run, worker: w, ytd: ytd.get(w.userId), employerEin: settings.employerEin || null, ...snap });
@@ -1299,7 +1327,10 @@ module.exports = function createPayrollRoutes(deps) {
     const settings = await readSettings();
     // The snapshot kept when the stub was issued; the payment is read from the
     // run, where it is final once marked.
-    const snap = row.snap ? { ...row.snap, payment: stubSnapshot(run, w, settings, {}).payment } : stubSnapshot(run, w, settings, (await readProfiles())[w.userId] || {});
+    const corr = await rows(CORRECTIONS);
+    const live = stubSnapshot(run, w, settings, {}, corr);
+    const snap = row.snap ? { ...row.snap, payment: live.payment, ...(live.correction ? { payMethod: live.payMethod, accountLast4: null, p2pAccount: null, correction: live.correction } : {}) }
+      : stubSnapshot(run, w, settings, (await readProfiles())[w.userId] || {}, corr);
     return stubPdf(run, w, ytdAsOf(allRuns, run), settings, snap);
   };
   const writeStubs = async (run, settings, opts = {}) => {
@@ -1309,10 +1340,11 @@ module.exports = function createPayrollRoutes(deps) {
     const stubs = await rows(PAYSTUBS);
     const report = { written: 0, pdfFailed: 0 };
     const only = opts.only ? new Set(opts.only.map(String)) : null;
+    const corr = await rows(CORRECTIONS);
     for (const w of run.workers.filter(x => x.pay && (!only || only.has(String(x.userId))))) {
       const user = users.find(u => String(u.id) === w.userId);
       const p = all[w.userId] || {};
-      const snap = stubSnapshot(run, w, settings, p);
+      const snap = stubSnapshot(run, w, settings, p, corr);
       let driveFileId = null;
       try {
         const buf = await stubPdf(run, w, ytd, settings, snap);
@@ -1324,7 +1356,7 @@ module.exports = function createPayrollRoutes(deps) {
       const row = { id: uuidv4(), userId: w.userId, payDate: run.period.payDate, periodStart: run.period.start, periodEnd: run.period.end,
         gross: w.pay.grossCents / 100, net: w.pay.netCents / 100, hours, reference: `run:${run.id}`, driveFileId, source: run.source === 'gusto' ? 'gusto' : 'app', runId: run.id, importedAt: nowIso(),
         // `final`: the filed copy is the stub as issued, receipt and all.
-        snap: { ...snap, payment: null }, final: true };
+        snap: { ...snap, payment: null, correction: null }, final: true };
       const at = stubs.findIndex(x => String(x.userId) === row.userId && x.payDate === row.payDate && x.reference === row.reference);
       if (at === -1) stubs.push(row); else { row.id = stubs[at].id; stubs[at] = row; }
       report.written++;
@@ -1450,6 +1482,49 @@ module.exports = function createPayrollRoutes(deps) {
     // Their stub goes out now, with the receipt (owner, 2026-11-14).
     const stub = await writeStubs(runs[i], await readSettings(), { only: [w.userId] });
     res.json({ run: { id: runs[i].id, status: runs[i].status, payments: runs[i].payments }, stub });
+  });
+
+  // How a Gusto payment was actually sent (owner, 2026-11-14). Only for
+  // Gusto-imported pay dates, while GFC moves off Gusto: some "check" pay
+  // dates were sent by Zelle or Cash App. The Super Admin's alone, with a
+  // reason. Amounts never change; the stub is filed again saying what Gusto
+  // recorded and that the office corrected it. Nobody is emailed. A pay date
+  // run in the app records how it was sent when it is marked paid, so it has
+  // no correction.
+  router.post('/api/payroll/admin/runs/:id/payment-correction', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const all = await rows(RUNS);
+      const run = all.find(r => r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.source !== 'gusto') return res.status(409).json({ error: 'Only pay dates imported from Gusto can be corrected this way. In the app, how someone was paid is recorded when you mark the payment paid.', code: 'PAYMENT_CORRECTION_GUSTO_ONLY' });
+      const b = req.body || {};
+      const userId = String(b.userId || '');
+      if (!(run.workers || []).some(w => String(w.userId) === userId && w.pay)) return res.status(404).json({ error: 'That person is not paid on this pay date.' });
+      if (!CORRECTION_METHODS[b.method]) return res.status(400).json({ error: 'Choose how it was actually sent: Zelle, Cash App, direct deposit or paper check.', code: 'PAYMENT_CORRECTION_METHOD' });
+      const reason = str(b.reason, 300);
+      if (!reason) return res.status(400).json({ error: 'Say why, for the record (for example, paid by Zelle while direct deposit was set up).', code: 'PAYMENT_CORRECTION_REASON' });
+      if (b.sentOn && !tax.isYmd(b.sentOn)) return res.status(400).json({ error: 'The date sent is not a date.', code: 'PAYMENT_CORRECTION_DATE' });
+      // This pay date, and any other Gusto pay dates ticked for the same person.
+      const targets = [run, ...all.filter(r => r && r.source === 'gusto' && r.id !== run.id && (b.alsoRunIds || []).includes(r.id) && (r.workers || []).some(w => String(w.userId) === userId && w.pay))];
+      const corr = await rows(CORRECTIONS);
+      const at = nowIso();
+      for (const r of targets) {
+        const w = r.workers.find(x => String(x.userId) === userId);
+        const prev = correctionFor(corr, r.id, userId);
+        // The receipt and date sent belong to the pay date the form was opened on.
+        corr.push({ id: uuidv4(), runId: r.id, userId, payDate: r.period.payDate, method: b.method, receipt: r === run ? (str(b.receipt, 80) || null) : null,
+          sentOn: r === run && b.sentOn ? b.sentOn : null, reason, recordedAs: w.payMethod || null, replaces: prev ? prev.id : null, by: req.user.name || req.user.email, at });
+      }
+      await db.set(CORRECTIONS, corr);
+      const settings = await readSettings();
+      const report = { written: 0, pdfFailed: 0 };
+      for (const r of targets) {
+        const x = await writeStubs(r, settings, { only: [userId], notify: false });
+        report.written += x.written; report.pdfFailed += x.pdfFailed;
+        await logActivity(req.user.id, req.user.name, 'payroll_payment_corrected', 'payroll_run', r.id, { userId, payDate: r.period.payDate, method: b.method, recordedAs: (r.workers.find(y => String(y.userId) === userId) || {}).payMethod || null });
+      }
+      res.json({ corrected: targets.map(r => r.period.payDate), stubs: report });
+    } catch (e) { console.error('Payment correction error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   // Issue a run's stubs again for everyone marked paid (owner, 2026-11-14):
