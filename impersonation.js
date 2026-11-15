@@ -57,6 +57,7 @@ const BLOCKED_WHILE_ACTING_AS = Object.freeze([
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/submit$/, what: 'signing the welcome packet' },
   { method: 'POST', pattern: /^\/api\/my\/welcome-packet\/submit$/, what: 'signing the staff welcome packet' },
   { method: 'POST', pattern: /^\/api\/my\/document-sends\/[^/]+\/sign$/, what: 'signing a document' },
+  { method: 'POST', pattern: /^\/api\/my\/policy-docs\/[^/]+\/sign$/, what: 'signing a policy' },
   { method: 'POST', pattern: /^\/api\/caregiver\/welcome-packet\/attestations\/[^/]+$/, what: 'signing a caregiver form' },
   // Their account
   { method: 'POST', pattern: /^\/api\/auth\/change-password$/, what: 'changing their password' },

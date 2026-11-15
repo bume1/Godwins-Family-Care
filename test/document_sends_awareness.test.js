@@ -57,8 +57,8 @@ test('a document sent to caregivers reaches each one and emails each one, with a
   assert.deepStrictEqual(h.sent.map(s => s.user.id).sort(), ['c1', 'c2']);
   assert.ok(h.sent.every(s => s.ctaUrl === 'https://app.test/caregiver#documents'));
   assert.ok(h.sent.every(s => s.title === 'Updated handbook' && s.action === 'acknowledge'));
-  assert.strictEqual((await h.mine(CG)).waiting.length, 1);
-  assert.strictEqual((await h.mine(MGR)).waiting.length, 0);
+  assert.strictEqual((await h.mine(CG)).waiting.filter(x => x.kind !== 'policy').length, 1);
+  assert.strictEqual((await h.mine(MGR)).waiting.filter(x => x.kind !== 'policy').length, 0);
 });
 
 test('a document sent to one manager emails only them, to My GFC', async (t) => {
@@ -66,7 +66,7 @@ test('a document sent to one manager emails only them, to My GFC', async (t) => 
   const r = await h.send({ title: 'Offer letter', action: 'sign', scope: { userId: 'm1' } });
   assert.strictEqual(r.emailed, 1);
   assert.strictEqual(h.sent[0].ctaUrl, 'https://app.test/my#documents');
-  assert.strictEqual((await h.mine(MGR)).waiting[0].title, 'Offer letter');
+  assert.strictEqual((await h.mine(MGR)).waiting.filter(x => x.kind !== 'policy')[0].title, 'Offer letter');
 });
 
 test('a missing notifier never fails the send', async (t) => {

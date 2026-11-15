@@ -75,6 +75,10 @@ async function mount(t) {
 
 const SIGN_BODY = { printedName: 'Rae Nurse', acknowledged: true, signaturePng: SIG };
 
+// The policies each person signs (owner, 2026-11-15) share this list; these
+// tests are about documents the office sent, so they read those alone.
+const sentOnly = (d) => ({ waiting: (d.waiting || []).filter(x => x.kind !== 'policy'), done: (d.done || []).filter(x => x.kind !== 'policy') });
+
 test('the office sends a PDF to one person; only that person sees it waiting', async (t) => {
   const h = await mount(t);
   const r = await h.send({ title: 'Employment Agreement', action: 'sign', scope: { userId: RN.id }, note: 'Please sign by Friday.' });
@@ -87,10 +91,10 @@ test('the office sends a PDF to one person; only that person sees it waiting', a
   assert.deepStrictEqual(r.data.send.recipients.map(x => x.userId), [RN.id]);
   h.as(RN);
   const mine = (await h.call('GET', '/api/my/document-sends')).data;
-  assert.deepStrictEqual(mine.waiting.map(x => x.title), ['Employment Agreement']);
-  assert.strictEqual(mine.waiting[0].note, 'Please sign by Friday.');
+  assert.deepStrictEqual(sentOnly(mine).waiting.map(x => x.title), ['Employment Agreement']);
+  assert.strictEqual(sentOnly(mine).waiting[0].note, 'Please sign by Friday.');
   h.as(NP);
-  assert.deepStrictEqual((await h.call('GET', '/api/my/document-sends')).data.waiting, []);
+  assert.deepStrictEqual(sentOnly((await h.call('GET', '/api/my/document-sends')).data).waiting, []);
   // A person it did not reach cannot open it either.
   assert.strictEqual((await h.call('GET', `/api/my/document-sends/${row.id}/file`)).status, 404);
 });
@@ -100,9 +104,9 @@ test('a send to a type reaches everyone of that type, and "all" reaches every st
   await h.send({ title: 'Nursing Policy', action: 'acknowledge', scope: { types: ['rn'] } });
   await h.send({ title: 'Handbook Update', action: 'acknowledge', scope: { types: ['all'] } });
   h.as(RN);
-  assert.deepStrictEqual((await h.call('GET', '/api/my/document-sends')).data.waiting.map(x => x.title).sort(), ['Handbook Update', 'Nursing Policy']);
+  assert.deepStrictEqual(sentOnly((await h.call('GET', '/api/my/document-sends')).data).waiting.map(x => x.title).sort(), ['Handbook Update', 'Nursing Policy']);
   h.as(CG);
-  assert.deepStrictEqual((await h.call('GET', '/api/my/document-sends')).data.waiting.map(x => x.title), ['Handbook Update']);
+  assert.deepStrictEqual(sentOnly((await h.call('GET', '/api/my/document-sends')).data).waiting.map(x => x.title), ['Handbook Update']);
   h.as(CLIENT);
   assert.strictEqual((await h.call('GET', '/api/my/document-sends')).status, 403, 'a client is not staff');
 });
@@ -142,8 +146,8 @@ test('signing files the original plus a signature page to Drive and to their Doc
   assert.notStrictEqual(h.uploads[1].person, 'Sent');
   // Now done, not waiting, and pointing at the copy.
   const mine = (await h.call('GET', '/api/my/document-sends')).data;
-  assert.deepStrictEqual(mine.waiting, []);
-  assert.strictEqual(mine.done[0].documentId, doc.id);
+  assert.deepStrictEqual(sentOnly(mine).waiting, []);
+  assert.strictEqual(sentOnly(mine).done[0].documentId, doc.id);
   // They open their copy; the office sees it as done on the send.
   assert.strictEqual((await h.call('GET', `/api/my/documents/${doc.id}/file`)).status, 200);
   h.as(MGR);
@@ -188,7 +192,7 @@ test('a withdrawn document leaves the waiting list, and copies already signed st
   assert.strictEqual((await h.call('DELETE', `/api/my/admin/document-sends/${id}`)).status, 200);
   assert.ok(h.store.staff_document_sends[0].removedAt, 'kept, marked withdrawn');
   h.as(NP);
-  assert.deepStrictEqual((await h.call('GET', '/api/my/document-sends')).data.waiting, []);
+  assert.deepStrictEqual(sentOnly((await h.call('GET', '/api/my/document-sends')).data).waiting, []);
   assert.strictEqual(h.store.caregiver_documents.length, 1, 'the signed copy is still on file');
 });
 
@@ -310,7 +314,7 @@ test('documents to sign open in the full-screen workspace, sharing the tax forms
   assert.match(ui, /ReactDOM\.createPortal\([\s\S]*className="ds ds-ws"[\s\S]*document\.body\s*\)/, 'drawn on the page body, over the app\'s header and menu');
   assert.match(ui, /open === x\.id && <SignWorkspace /, 'Waiting on You opens the workspace');
   assert.doesNotMatch(ui, /SignPanel/, 'no inline signing box left');
-  assert.match(ui, /\/api\/my\/document-sends\/\$\{encodeURIComponent\(doc\.id\)\}\/preview/, 'the live preview');
+  assert.match(ui, /\/api\/my\/document-sends\/\$\{encodeURIComponent\(d\.id\)\}\/preview/, 'the live preview');
   assert.match(ui, /GFCPdfPages/);
   assert.match(strip(read('public/my-pay.js')), /window\.GFCPdfPages\.pages/, 'the tax forms use the same renderer');
   for (const f of ['public/my-pay.js', 'public/document-sign-ui.js']) {

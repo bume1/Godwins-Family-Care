@@ -501,13 +501,13 @@ module.exports = function createOnboardingRoutes(deps) {
     } catch (e) { return send(res, e); }
   }
 
-  async function doAck(req, res, rec, actor, version) {
+  async function doAck(req, res, rec, actor, version, extra) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
     try {
       rec.items = rec.items || {};
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
-        T.recordAcknowledgment(item, rec.items[item.id], req.params.ackId, version, actor, nowIso()));
+        T.recordAcknowledgment(item, rec.items[item.id], req.params.ackId, version, actor, nowIso(), extra));
       await save(rec);
       await event({ userId: rec.userId, type: 'acknowledgment', itemId: item.id, ackId: req.params.ackId, version, byId: actor.id, byName: actor.name, onBehalf: actor.isOffice });
       return res.json({ ok: true });
@@ -743,7 +743,12 @@ module.exports = function createOnboardingRoutes(deps) {
     const rec = await myRecord(req, res); if (!rec) return;
     const doc = T.ALL_ACKS.find(d => d.id === req.params.ackId);
     if (!doc) return res.status(404).json({ error: 'Unknown document.', code: 'ACK_UNKNOWN' });
-    return doAck(req, res, rec, actorOf(req), doc.version);
+    // A document with a file opens on the signing screen (POST
+    // /api/my/policy-docs/:ackId/sign); a tick here would skip reading it. One
+    // with no file to open (the job description the office files) is
+    // acknowledged here, unless it must be signed.
+    const noFile = !(doc.driveFileIds || []).length;
+    return doAck(req, res, rec, actorOf(req), doc.version, noFile && T.ackAction(doc) === 'acknowledge' ? { method: 'acknowledged' } : null);
   });
   router.post('/api/onboarding/me/items/:itemId/files', authenticateToken, requireStaff, upload.single('file'), async (req, res) => {
     const rec = await myRecord(req, res); if (!rec) return;
@@ -1441,3 +1446,4 @@ module.exports = function createOnboardingRoutes(deps) {
 };
 
 module.exports.COLLECTIONS = { RECORDS, EVENTS, REVIEWS, MATERIALS };
+module.exports.defaultChapterFor = defaultChapterFor;

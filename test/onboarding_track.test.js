@@ -84,7 +84,7 @@ test('an acknowledgment counts only at the required version: Clinical P&P signed
   assert.strictEqual(row.signed, '2.0');
   assert.strictEqual(row.required, '2.2');
   assert.strictEqual(row.filedBy, 'OFFICE_ON_BEHALF');
-  st = T.recordAcknowledgment(it, st, 'CLINICAL_MANUAL', '2.2', HER, NOW);
+  st = T.recordAcknowledgment(it, st, 'CLINICAL_MANUAL', '2.2', HER, NOW, { method: 'acknowledged' });
   assert.strictEqual(T.itemStatus(it, st), T.STATUS.COMPLETE);
 });
 
