@@ -19,6 +19,11 @@ function harness(store = new Map()) {
     { id: 'cg1', role: 'vendor', licenseLevel: 'pca', name: 'Pat Care', email: 'p@x' }
   ];
   const files = new Map(); const notices = [];
+  const notifier = require('../notifications').createNotifier({
+    getUsers: async () => users, queueNotification: async (...a) => { notices.push(a); return { id: `n${notices.length}` }; },
+    getAppBaseUrl: async () => 'https://app', emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+    staffRoles: ['admin', 'user', 'caseManager', 'vendor'], clientRole: 'client', familyRole: 'family'
+  });
   const app = (as) => {
     const routes = require('../routes/payroll')({
       db, env: { PAYROLL_ENCRYPTION_KEY: 'a'.repeat(64) }, payrollKey: 'k'.repeat(40), logActivity: async () => {}, getUsers: async () => users,
@@ -30,7 +35,9 @@ function harness(store = new Map()) {
         uploadStaffDocumentFile: async (role, who, name, buf) => { const id = `f${files.size + 1}`; files.set(id, Buffer.from(buf)); return { fileId: id }; },
         downloadFileBuffer: async (id) => files.get(id)
       },
-      roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app'
+      roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app',
+      // The real notifier over the same fake queue, as server.js wires it.
+      notify: () => notifier
     });
     const a = express(); a.use(express.json({ limit: '20mb' })); a.use(routes); return a;
   };
@@ -124,7 +131,7 @@ test('invoices: upload a PDF with its total; managers review, only the Super Adm
   assert.equal(r.status, 200); assert.equal(r.body.slice(0, 5).toString(), '%PDF-');
   assert.equal((await h.call('cg1', 'GET', `/api/payroll/contractor-invoices/${id}/file`)).status, 404, 'someone else\'s invoice file is not found');
   r = await h.call('mgr', 'POST', `/api/payroll/admin/contractor-invoices/${csv.body.invoice.id}/reject`, { note: 'Add the client name' });
-  assert.equal(r.status, 200); assert.ok(h.notices.some(n => n[0] === 'contractor_invoice_sent_back' && !JSON.stringify(n).includes('client name')), 'told where to look, not the note');
+  assert.equal(r.status, 200); assert.ok(h.notices.some(n => n[0] === 'contractor_invoice_rejected' && !JSON.stringify(n).includes('client name')), 'told where to look, not the note');
   r = await h.call('mgr', 'POST', `/api/payroll/admin/contractor-invoices/${id}/approve`);
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal((await h.call('mgr', 'POST', `/api/payroll/admin/contractor-invoices/${id}/pay`, { confirmation: 'X' })).status, 403);
