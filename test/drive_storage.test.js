@@ -574,7 +574,8 @@ test('the payroll kinds exist and say they are payroll', async (t) => {
   const h = await mountCaregiver(t, { as: ADMIN });
   const { kinds } = await (await h.call('/api/caregiver/documents/kinds')).json();
   const payroll = kinds.filter(k => k.payroll).map(k => k.kind).sort();
-  assert.deepStrictEqual(payroll, ['id_document', 'paystub', 'w9']);
+  // The paper pay and tax forms joined on 2026-11-15, to be put on file.
+  assert.deepStrictEqual(payroll, ['g4', 'i9', 'id_document', 'paystub', 'state_cert', 'w4', 'w8ben', 'w9']);
   // A timesheet is not onboarding paperwork and must not be marked as such.
   assert.strictEqual(kinds.find(k => k.kind === 'timesheet').payroll, false);
 });

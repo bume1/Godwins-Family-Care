@@ -172,7 +172,24 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(by.id, by.name || by.email, 'payroll_form_filed', 'payroll_profile', String(user.id), { form: key });
     return stored;
   };
+  // A form signed on paper and put on file (2026-11-15) opens as THAT copy,
+  // the document the office uploaded, never one regenerated from the values.
+  const PDF_KEY_FORM = { w4: 'w4', g4: 'g4', state: 'state-cert', w9: 'w9', w8ben: 'w8ben', i9: 'i9' };
+  const onFileDocFor = async (user, p, key) => {
+    const of = PDF_KEY_FORM[key] ? pp.onFileOf(p, PDF_KEY_FORM[key]) : null;
+    if (!of || !of.documentId || (key === 'i9' && p.i9 && p.i9.section1)) return null;
+    return (await rows('caregiver_documents')).find(d => d && d.id === of.documentId && String(d.caregiver_id) === String(user.id) && !d.deleted_at) || null;
+  };
   const sendGovPdf = async (res, user, p, key) => {
+    const paper = await onFileDocFor(user, p, key);
+    if (paper) {
+      if (!drive || !drive.downloadFileBuffer || !paper.drive_file_id) return res.status(404).json({ error: 'The copy on file could not be found.', code: 'ON_FILE_COPY_MISSING' });
+      const bytes = await drive.downloadFileBuffer(paper.drive_file_id);
+      res.setHeader('Content-Type', paper.mime_type || 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('attachment', paper.file_name || `${gov.FILE_NAMES[key]} - ${user.name || 'employee'}.pdf`));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(bytes);
+    }
     const buf = await govPdf(user, p, key);
     if (!buf) return res.status(404).json({ error: 'That form is not signed yet.', code: 'FORM_NOT_SIGNED' });
     res.setHeader('Content-Type', 'application/pdf');
@@ -725,6 +742,92 @@ module.exports = function createPayrollRoutes(deps) {
     p.i9 = { ...(p.i9 || {}), onFile: n.value };
     const saved = await saveProfile(user.id, p, `I-9 on file from ${pp.I9_ON_FILE_SOURCES[n.value.source]}`, req.user);
     res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+  });
+
+  // A form already signed on paper, put on file against the document the
+  // office uploaded (owner, 2026-11-15). The office confirms what the form
+  // is and types what it says; the two reads of the document (staffDocMatch.js)
+  // are shown beside it and must not contradict the choice unless the office
+  // says so. Super Admin or a payroll preparer.
+  const ON_FILE_LABEL = { w4: 'W-4', g4: 'G-4', 'state-cert': 'state withholding certificate', w9: 'W-9', w8ben: 'W-8BEN', i9: 'I-9' };
+  router.put('/api/payroll/admin/people/:userId/forms/:form/on-file', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const form = req.params.form;
+      if (!ON_FILE_LABEL[form]) return res.status(404).json({ error: 'That form cannot be put on file.', code: 'ON_FILE_FORM' });
+      const user = await userFor(req.params.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const b = req.body || {};
+      const doc = (await rows('caregiver_documents')).find(d => d && d.id === String(b.documentId || '') && !d.deleted_at);
+      if (!doc || String(doc.caregiver_id) !== String(user.id)) return res.status(404).json({ error: 'Choose one of their uploaded documents.', code: 'ON_FILE_DOCUMENT' });
+      if (!pp.ON_FILE_KINDS[form].includes(doc.kind)) return res.status(409).json({ error: `That document is filed as something else. File it as a ${ON_FILE_LABEL[form]} on their Documents first.`, code: 'ON_FILE_KIND' });
+      if (doc.status !== 'accepted') return res.status(409).json({ error: 'Accept the document on their Documents first.', code: 'ON_FILE_NOT_ACCEPTED' });
+      // The reads must not say it is a different form, unless the office has
+      // looked and says they are wrong.
+      const m = doc.match || null;
+      const readsOther = m && ((m.readsAs && m.readsAs !== doc.kind) || m.verdict === 'disagree');
+      if (readsOther && b.confirmDifferent !== true) return res.status(409).json({ error: 'The checks read this document as something else. Look at it, then confirm it really is this form.', code: 'ON_FILE_READS_DIFFERENT', match: { verdict: m.verdict, readsAs: m.readsAs } });
+      const p = await profileFor(user);
+      const at = nowIso(), by = req.user.name || req.user.email;
+      const matchSnap = m ? { verdict: m.verdict, readsAs: m.readsAs || null, ai: m.ai ? m.ai.status : null, overridden: !!readsOther } : { verdict: 'not_read', readsAs: null, ai: null, overridden: false };
+      if (form === 'i9') {
+        if (pp.i9Complete(p)) return res.status(409).json({ error: 'Their I-9 is already complete.', code: 'I9_ALREADY_COMPLETE' });
+        const n = pp.normalizeI9OnFile({ ...b, source: 'paper', documentId: doc.id }, { at, by });
+        if (n.error) return res.status(400).json(n);
+        p.i9 = { ...(p.i9 || {}), onFile: { ...n.value, match: matchSnap } };
+      } else {
+        const n = pp.normalizeFormOnFile(form, b, { at, by, documentId: doc.id, state: p.workState || 'GA', match: matchSnap });
+        if (n.error) return res.status(400).json(n);
+        if (form === 'w9') {
+          // The taxpayer ID the 1099 needs, sealed exactly as the in-app W-9 seals it.
+          p.tin = { enc: pc.seal(n.tin, env), last4: pc.last4(n.tin), type: n.value.tinType };
+        }
+        p[pp.ON_FILE_FORMS[form]] = n.value;
+      }
+      const saved = await saveProfile(user.id, p, `${ON_FILE_LABEL[form]} on file (signed on paper)`, req.user);
+      await logActivity(req.user.id, req.user.name, 'payroll_form_on_file', 'payroll_profile', String(user.id), { form, documentId: doc.id, verdict: matchSnap.verdict, overridden: matchSnap.overridden });
+      res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+    } catch (e) {
+      if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
+      console.error('Form on file error:', e); res.status(500).json({ error: 'Server error' });
+    }
+  });
+  // Take a paper form off file (it was the wrong document, or a newer one
+  // replaces it). Only a form that IS on file: a form signed in the app is
+  // never removed here.
+  // What the Mark On File panel needs (2026-11-15): the choice lists the forms
+  // use (served, never restated in a page) and which forms are already done,
+  // and from which document.
+  router.get('/api/payroll/admin/people/:userId/forms/on-file', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const user = await userFor(req.params.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const p = await profileFor(user);
+      const forms = {};
+      for (const f of Object.keys(ON_FILE_LABEL)) {
+        const of = pp.onFileOf(p, f);
+        const val = f === 'i9' ? (p.i9 && (p.i9.section1 || p.i9.onFile)) : p[pp.ON_FILE_FORMS[f]];
+        forms[f] = { label: ON_FILE_LABEL[f], done: !!val, onFile: of ? { documentId: of.documentId || null, recordedBy: of.recordedBy, recordedAt: of.recordedAt } : null, signedInApp: !!(val && !of) };
+      }
+      res.json({ forms, workState: p.workState || 'GA', employee: pp.isEmployee(p), contractor: pp.isContractor(p),
+        options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, w9Class: pp.W9_CLASS } });
+    } catch (e) { console.error('On file options error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+  router.delete('/api/payroll/admin/people/:userId/forms/:form/on-file', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const form = req.params.form;
+      if (!ON_FILE_LABEL[form]) return res.status(404).json({ error: 'That form cannot be put on file.', code: 'ON_FILE_FORM' });
+      const user = await userFor(req.params.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const p = await profileFor(user);
+      if (!pp.onFileOf(p, form)) return res.status(409).json({ error: 'That form is not on file from paper.', code: 'ON_FILE_NONE' });
+      if (form === 'i9') { const { onFile, ...rest } = p.i9; p.i9 = rest; }
+      else {
+        if (form === 'w9') p.tin = null;
+        p[pp.ON_FILE_FORMS[form]] = null;
+      }
+      const saved = await saveProfile(user.id, p, `${ON_FILE_LABEL[form]} taken off file`, req.user);
+      res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+    } catch (e) { console.error('Form off file error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
   router.post('/api/payroll/admin/people/:userId/new-hire-reported', authenticateToken, requireAdmin, async (req, res) => {

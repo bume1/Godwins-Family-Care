@@ -178,10 +178,56 @@ function normalizeI9OnFile(b, { at, by }) {
   b = b || {};
   if (!isYmd(b.firstDay)) return { error: 'Give the first day of work shown on their I-9.', code: 'I9_FIRST_DAY' };
   if (b.completedOn !== undefined && b.completedOn !== null && b.completedOn !== '' && !isYmd(b.completedOn)) return { error: 'The date Section 2 was completed is not a date.', code: 'I9_COMPLETED_ON' };
-  if (b.copyFiled !== true) return { error: 'File their signed I-9 on their Staff Record (Documents → Work authorization documents) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
+  if (b.copyFiled !== true && !b.documentId) return { error: 'File their signed I-9 on their Staff Record (Documents → Work authorization documents) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
   const source = I9_ON_FILE_SOURCES[b.source] ? b.source : 'gusto';
-  return { value: { source, firstDay: b.firstDay, completedOn: isYmd(b.completedOn) ? b.completedOn : null, note: str(b.note, 300) || null, recordedAt: at, recordedBy: by } };
+  // The uploaded copy it is on (2026-11-15), when the office names one.
+  return { value: { source, firstDay: b.firstDay, completedOn: isYmd(b.completedOn) ? b.completedOn : null, note: str(b.note, 300) || null, recordedAt: at, recordedBy: by,
+    documentId: b.documentId ? String(b.documentId) : null } };
 }
+// A FORM ALREADY SIGNED ON PAPER (owner, 2026-11-15). Paperwork already in a
+// person's documents, such as a W-9 the office filed, counts: the office marks
+// it on file against that uploaded document and types what the form says,
+// because payroll and year end read those values (the W-4's filing status,
+// the W-9's taxpayer ID for the 1099). The value is stored where the in-app
+// form would be, so every check that reads it (the Pay Setup checklist,
+// missingForPay, the tax math) counts it the same, and it carries `onFile`
+// naming the document, who confirmed it, and what the two reads found.
+// The signature is the one on the paper: its printed name and date.
+const ON_FILE_FORMS = Object.freeze({ w4: 'w4', g4: 'g4', 'state-cert': 'stateCert', w9: 'w9', w8ben: 'w8ben' });
+// The document kinds a form may be put on file from (routes/caregiver.js).
+const ON_FILE_KINDS = Object.freeze({ w4: ['w4'], g4: ['g4'], 'state-cert': ['state_cert'], w9: ['w9'], w8ben: ['w8ben'], i9: ['i9', 'work_authorization'] });
+function normalizeFormOnFile(form, b, { at, by, documentId, state, match }) {
+  b = b || {};
+  if (!ON_FILE_FORMS[form]) return { error: 'That form cannot be put on file.', code: 'ON_FILE_FORM' };
+  if (!documentId) return { error: 'Choose the uploaded document this form is on.', code: 'ON_FILE_DOCUMENT' };
+  const signedName = str(b.signedName, 120);
+  if (!signedName) return { error: 'Give the name signed on the paper form.', code: 'ON_FILE_SIGNED_NAME' };
+  if (!isYmd(b.signedOn) || b.signedOn > String(at).slice(0, 10)) return { error: 'Give the date the paper form was signed.', code: 'ON_FILE_SIGNED_ON' };
+  const ctx = { at: `${b.signedOn}T12:00:00.000Z`, ipHash: null };
+  const body = { ...b, agree: true, signedName };
+  let n;
+  if (form === 'w4') n = normalizeW4(body, ctx);
+  else if (form === 'g4') n = normalizeG4(body, ctx);
+  else if (form === 'state-cert') n = normalizeStateCert(body, ctx, state);
+  else if (form === 'w9') n = normalizeW9(body, ctx);
+  else {
+    // A W-8BEN on file: the name and country of citizenship are what payroll
+    // and year end read (a foreign contractor gets no 1099). The rest stays on
+    // the paper.
+    const name = str(b.name, 160), citizenship = str(b.citizenship, 60);
+    if (!name) return { error: 'Give the name on the W-8BEN.', code: 'W8_NAME' };
+    if (!citizenship || isUS(citizenship)) return { error: 'Give the country of citizenship on the W-8BEN.', code: 'W8_CITIZENSHIP' };
+    n = { value: { name, citizenship, permanentAddress: null, mailingAddress: null, dob: null, ftinNotRequired: false, foreignTinOnFile: false, usTinOnFile: false, treaty: null, signedName, signedAt: ctx.at, ipHash: null } };
+  }
+  if (n.error) return n;
+  n.value.onFile = { documentId: String(documentId), source: 'paper', signedOn: b.signedOn, recordedAt: at, recordedBy: by, match: match || null };
+  return n;
+}
+const onFileOf = (p, key) => {
+  const v = key === 'i9' ? (p && p.i9 && p.i9.onFile) : p && p[ON_FILE_FORMS[key] || key] && p[ON_FILE_FORMS[key] || key].onFile;
+  return v || null;
+};
+
 // The I-9 is complete when both sections were done in the app, or a completed
 // form is on file from before.
 const i9Complete = (p) => !!(p && p.i9 && ((p.i9.section1 && p.i9.section2) || p.i9.onFile));
@@ -442,7 +488,14 @@ function checklist(p, opts = {}) {
   rows.push({ key: 'pay', label: 'How you are paid', done: !!p.payMethod });
   rows.push({ key: 'edelivery', label: 'Get tax forms electronically', done: !!(p.eDelivery && p.eDelivery.consented), optional: true, note: p.eDelivery && p.eDelivery.consented ? null : 'Otherwise they come by mail.' });
   const GROUP = { w4: 'tax', g4: 'tax', statecert: 'tax', i9: 'tax', ssn: 'tax', w9: 'tax', residence: 'tax', w8ben: 'tax', pay: 'paid', taxaddress: 'tax', edelivery: 'paid' };
-  return rows.map(r => ({ ...r, group: GROUP[r.key] }));
+  // A form signed on paper and put on file by the office (2026-11-15) is done,
+  // and its own copy is what opens: never a form regenerated from the values.
+  const FORM_KEY = { w4: 'w4', g4: 'g4', statecert: 'state-cert', w9: 'w9', w8ben: 'w8ben', i9: 'i9' };
+  return rows.map(r => {
+    const of = FORM_KEY[r.key] ? onFileOf(p, FORM_KEY[r.key]) : null;
+    const paper = of && (r.key !== 'i9' || !(p.i9 && p.i9.section1));
+    return { ...r, group: GROUP[r.key], ...(paper ? { onFileDocumentId: of.documentId || null, note: r.note || 'On file: signed on paper and filed by the office.' } : {}) };
+  });
 }
 
 // What a screen may see. Never a full number: the last four, and whether one
@@ -467,6 +520,6 @@ function publicProfile(p, opts = {}) {
 module.exports = {
   WORKER_TYPES, PAY_TYPES, PAY_METHODS, WAGE_ACCOUNTS, W4_FILING, G4_FILING, I9_STATUS, W9_CLASS,
   checkSsn, checkEin, checkRouting, checkAccount, signature, normalizeCashtag,
-  normalizeW4, normalizeG4, normalizeW8BEN, previewValue, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
+  normalizeW4, normalizeG4, normalizeW8BEN, previewValue, OVERSEAS_PAY_METHODS, normalizeStateCert, normalizeI9Section1, normalizeI9Section2, normalizeI9OnFile, I9_ON_FILE_SOURCES, ON_FILE_FORMS, ON_FILE_KINDS, normalizeFormOnFile, onFileOf, i9Complete, normalizeW9, normalizePayMethod, normalizePaySetup,
   defaultProfile, withEmploymentType, PAY_SCHEDULE_KEYS, scheduleFor, isEmployee, isContractor, missingForPay, missingForPerson, checklist, publicProfile
 };

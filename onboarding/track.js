@@ -250,16 +250,22 @@ function packetEvidence(item, packetRows) {
   const rows = Array.isArray(packetRows) ? packetRows : [];
   return item.packet.map(kind => {
     const r = rows.find(x => x && x.kind === kind) || null;
+    // A Pay Setup form (`payform:w9`, 2026-11-15) is ASSIST evidence: done in
+    // Pay Setup, it can satisfy her SUBMIT step, and put on file by the office
+    // it can satisfy the office's VERIFY. It never holds an item open on its
+    // own, so an item already finished does not reopen.
+    const assist = String(kind).startsWith('payform:');
     return {
       kind, item: r ? r.item : null, title: r ? r.title : kind,
       required: r ? !!r.required : true,
       status: r ? r.status : 'missing',
       hers: r ? PACKET_HERS.includes(r.source) : true,
-      office: !!(r && r.source === 'office')
+      office: !!(r && r.source === 'office'),
+      ...(assist ? { assist: true } : {})
     };
   });
 }
-const packetSatisfied = (rows) => !rows || rows.every(r => !r.required || r.status === 'complete');
+const packetSatisfied = (rows) => !rows || rows.every(r => r.assist || !r.required || r.status === 'complete');
 
 function itemStatus(item, state, today, packetRows) {
   const st = state || {};
@@ -272,7 +278,14 @@ function itemStatus(item, state, today, packetRows) {
   // never recorded on its own, so it cannot read done over a stale version.
   const acks = ackStatus(item, st);
   const acksComplete = acks ? acks.every(a => a.current) : true;
-  const done = item.steps.map((s, i) => !!steps[i] || !!(acks && s.action === ACTIONS.ACKNOWLEDGE && acksComplete));
+  // Pay Setup forms named by the item (assist evidence): all done fulfils her
+  // SUBMIT; all put on file by the office also fulfils the office's VERIFY.
+  const pay = pkt ? pkt.filter(r => r.assist) : [];
+  const payDone = pay.length > 0 && pay.every(r => r.status === 'complete');
+  const payVerified = payDone && pay.every(r => r.office);
+  const done = item.steps.map((s, i) => !!steps[i] || !!(acks && s.action === ACTIONS.ACKNOWLEDGE && acksComplete)
+    || (payDone && s.actor === ACTORS.NEW_HIRE && s.action === ACTIONS.SUBMIT)
+    || (payVerified && s.action === ACTIONS.VERIFY));
 
   const allDone = done.every(Boolean) && acksComplete && pktDone;
   if (allDone) {
@@ -285,13 +298,13 @@ function itemStatus(item, state, today, packetRows) {
   }
   if (st.returned) return STATUS.RETURNED;
   const anyDone = done.some(Boolean) || (acks && acks.some(a => a.signed))
-    || !!(pkt && pkt.some(r => r.status === 'complete' || r.status === 'in_review'));
+    || !!(pkt && pkt.some(r => !r.assist && (r.status === 'complete' || r.status === 'in_review')));
   if (!anyDone) return STATUS.NOT_STARTED;
   const herStepsDone = item.steps.every((s, i) => s.actor !== ACTORS.NEW_HIRE || done[i])
     && (acks ? acksComplete : true)
-    && (pkt ? pkt.every(r => !r.hers || !r.required || ['complete', 'in_review'].includes(r.status)) : true);
+    && (pkt ? pkt.every(r => r.assist || !r.hers || !r.required || ['complete', 'in_review'].includes(r.status)) : true);
   const officeLeft = item.steps.some((s, i) => s.actor !== ACTORS.NEW_HIRE && !done[i])
-    || !!(pkt && pkt.some(r => r.required && r.status !== 'complete' && (!r.hers || r.status === 'in_review')));
+    || !!(pkt && pkt.some(r => !r.assist && r.required && r.status !== 'complete' && (!r.hers || r.status === 'in_review')));
   if (herStepsDone && officeLeft) return STATUS.SUBMITTED;
   return STATUS.IN_PROGRESS;
 }
@@ -592,7 +605,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     if (courseProgress && !courseProgress.complete && status === STATUS.NOT_STARTED && courseProgress.coursesDone) status = STATUS.IN_PROGRESS;
     const packet = packetEvidence(it, packetRows);
     // Waiting on her when her packet entry is still missing or sent back.
-    const packetWaitsOnHer = !!(packet && packet.some(r => r.hers && r.required && ['missing', 'rejected'].includes(r.status)));
+    const packetWaitsOnHer = !!(packet && packet.some(r => !r.assist && r.hers && r.required && ['missing', 'rejected'].includes(r.status)));
     if (expiry && expiry.status === 'EXPIRED' && status === STATUS.COMPLETE) status = STATUS.EXPIRED;
     return {
       id: it.id, phase: it.phase, title: it.title, ref: it.ref,

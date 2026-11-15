@@ -146,6 +146,7 @@ const ITEMS = Object.freeze([
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, STATED)],
     classifications: [], classificationNote: NO_C2_ROW },
   { id: 'C.5.03', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'C.5', title: 'Employment and tax documentation', ref: P('C.5'),
+    packet: ['payform:w4', 'payform:i9', 'payform:pay'],
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9', 'Form W-4', 'Direct deposit authorization', 'Personal details'],
     classifications: [], classificationNote: NO_C2_ROW },

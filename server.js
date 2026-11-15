@@ -3121,6 +3121,13 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
   // this mount, so naming it here reads it in its temporal dead zone. A
   // missing notifier is LOUD at the call site and never throws (2026-11-09).
   notify: () => notify, getAppBaseUrl,
+  // Reading a staff document's kind (staffDocMatch.js, 2026-11-15). A closure:
+  // gfcModelEngine is declared far below this mount and is read at call time.
+  // The engine refuses unless the Vertex boundary is satisfied, and the
+  // refusal is reported as "AI check not run", never as a match.
+  staffDocAiRead: ({ input, schema, actor }) => gfcModelEngine.invoke({
+    purpose: modelEngine.PURPOSES.DOCUMENT_CLASSIFICATION, input, schema, actor, feature: 'staff_document_kind'
+  }),
   drive: googledrive,
   // Wrapped, not passed by reference: `detectFileType` is a `const` declared
   // ~7000 lines below this mount, so naming it here reads it in its temporal

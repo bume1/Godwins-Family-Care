@@ -110,7 +110,12 @@
     '.gfcs label{display:block;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut);font-weight:600;margin-bottom:5px}',
     '.gfcs input,.gfcs select,.gfcs textarea{width:100%;border:1px solid #ddd3c0;border-radius:9px;padding:11px;font-size:16px;font-family:inherit;background:#fff;color:var(--ink)}',
     '.gfcs .gfield{margin-bottom:11px}',
-    '.gfcs .g3{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px}',
+    // minmax(0, …) lets the time boxes shrink on a phone: with plain fr
+    // columns their built-in minimum width pushed this row, and with it the
+    // whole My GFC page, past the screen edge (owner report, 2026-11-15).
+    '.gfcs .g3{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end;margin-bottom:8px}',
+    '.gfcs .g3 > *{min-width:0;max-width:100%;box-sizing:border-box}',
+    '@media(max-width:430px){.gfcs .g3{grid-template-columns:repeat(3,minmax(0,1fr))}.gfcs .g3 .gbtn{grid-column:1/-1}}',
     '.gfcs .gtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}',
     '.gfcs .gtab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 14px;font-size:15px;color:var(--navy);cursor:pointer;font-family:inherit}',
     '.gfcs .gtab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}'

@@ -17,7 +17,9 @@ const build = (rows, inputs) => T.buildTrack({ inputs: Object.assign({ chapter: 
 
 test('every welcome packet entry is mapped to a Playbook item, and every mapped kind exists', () => {
   const kinds = new Set(blank().map(r => r.kind));
-  const used = new Set([].concat(...A.ITEMS.map(i => i.packet || [])));
+  // `payform:` entries are Pay Setup forms (2026-11-15), read from payroll,
+  // not from the welcome packet.
+  const used = new Set([].concat(...A.ITEMS.map(i => (i.packet || []).filter(k => !String(k).startsWith('payform:')))));
   used.forEach(k => assert.ok(kinds.has(k), `${k} is not a welcome packet entry`));
   kinds.forEach(k => assert.ok(used.has(k), `packet entry ${k} is not read by any Chapter A item`));
 });
