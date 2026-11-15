@@ -12,6 +12,7 @@
   - It carries no date and no network hash.
   - It comes from the new `POST /api/my/document-sends/:id/preview`, which uses the same gate and the same `buildSignedCopy` as the real signing. It writes nothing.
 - **On a phone** the document sits above the fields, with Show or Hide Document.
+- **Zoom (owner, 2026-11-15).** Both signing screens have − / + / Fit over the document, from 100% to 300%. A trackpad pinch or Ctrl/Cmd+scroll over the document zooms only the document, never the fields beside it. Phones and tablets keep their own pinch-zoom (no page blocks it, and a test keeps it that way). Pages are drawn sharp enough to stay crisp zoomed in.
 - **One renderer.** `public/pdf-pages.js` turns a PDF into page images for both this screen and the tax form workspace, so pdf.js is loaded in one place and the two screens cannot drift.
 
 ## The standard for every signing surface
@@ -19,7 +20,7 @@
 2. **Arrangement:** the document on the left and the fields on the right; on a phone, stacked with the document on top.
 3. **Preview:** a live preview of exactly what will be filed, marked not signed. It is built by the same server code that builds the signed copy, so the two cannot differ.
 4. **Recording:** nothing is recorded until they press Sign or Acknowledge.
-5. **Page images:** come from `pdf-pages.js` only.
+5. **Page images and zoom:** come from `pdf-pages.js` only (`pages`, `useZoom`).
 
 **Still to move onto this standard:**
 - the staff and caregiver welcome packets;

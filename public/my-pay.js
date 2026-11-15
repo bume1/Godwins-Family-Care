@@ -301,6 +301,8 @@ function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) 
   const abort = React.useRef(null);
   const prev = React.useRef(form);
   const hl = React.useRef(null);
+  const paneRef = React.useRef(null);
+  const zoomer = window.GFCPdfPages.useZoom(paneRef);
   useEffect(() => {
     const was = document.body.style.overflow; document.body.style.overflow = 'hidden';
     call(`/api/my/pay-setup/preview/${route}/fields`).then(setBoxes).catch(() => setBoxes({ pages: [], fields: {} }));
@@ -345,14 +347,15 @@ function FormWorkspace({ which, data, form, set, onSave, onCancel, busy, err }) 
         </div>
       </div>
       <div className="mp-ws-body">
-        <div className={`mp-ws-pdf${showForm ? '' : ' mp-hide'}`}>
+        <div ref={paneRef} className={`mp-ws-pdf${showForm ? '' : ' mp-hide'}`}>
+          {!problem && !fallback && pages && zoomer.bar}
           {problem && <p className="mp-ws-msg">{problem}</p>}
           {!problem && fallback && <iframe title="Form preview" src={fallback} style={{ width: '100%', height: '100%', minHeight: 600, border: 0 }} />}
           {!problem && !fallback && !pages && <p className="mp-ws-msg">Drawing the form…</p>}
           {!problem && !fallback && pages && pages.map((src, i) => {
             const size = boxes && boxes.pages[i];
             return (
-              <div className="mp-ws-page" key={i}>
+              <div className="mp-ws-page" key={i} style={zoomer.pageStyle || undefined}>
                 <img src={src} alt={`${FORM_TITLE[which]}, page ${i + 1}`} />
                 {size && marks.filter(m => m.page === i).map((m, j) => (
                   <div key={j} ref={m === firstMark ? hl : null} className="mp-ws-hl" style={{ left: `${(m.x - 2) / size.width * 100}%`, top: `${(size.height - m.y - m.h - 2) / size.height * 100}%`, width: `${(m.w + 4) / size.width * 100}%`, height: `${(m.h + 4) / size.height * 100}%` }} />

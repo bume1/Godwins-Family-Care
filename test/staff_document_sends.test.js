@@ -316,6 +316,19 @@ test('documents to sign open in the full-screen workspace, sharing the tax forms
   for (const f of ['public/my-pay.js', 'public/document-sign-ui.js']) {
     assert.doesNotMatch(strip(read(f)), /pdf\.min\.js|cdnjs/, `${f} loads no pdf.js of its own`);
   }
+  // Zoom (owner, 2026-11-15): both signing screens zoom the document the same way.
+  const pages = strip(read('public/pdf-pages.js'));
+  assert.match(pages, /useZoom/);
+  assert.match(pages, /addEventListener\('wheel', onWheel, \{ passive: false \}\)/, 'a trackpad pinch zooms the document, not the page');
+  for (const f of ['public/my-pay.js', 'public/document-sign-ui.js']) {
+    const src = strip(read(f));
+    assert.match(src, /useZoom\(paneRef\)/, `${f} uses the shared zoom`);
+    assert.match(src, /ref=\{paneRef\}/, `${f} hands it the document pane`);
+    assert.match(src, /zoomer\.bar/, `${f} shows the zoom buttons`);
+  }
+  for (const f of ['public/my.html', 'public/caregiver.html', 'public/admin-hub.html', 'public/onboarding.html']) {
+    assert.doesNotMatch(read(f), /user-scalable\s*=\s*no|maximum-scale\s*=\s*1(\.0)?\b/, `${f} lets phones pinch-zoom`);
+  }
   for (const f of ['public/my.html', 'public/caregiver.html', 'public/admin-hub.html', 'public/onboarding.html']) {
     const src = read(f);
     const at = src.indexOf('src="/pdf-pages.js"');

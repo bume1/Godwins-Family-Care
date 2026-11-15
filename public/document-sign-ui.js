@@ -112,8 +112,10 @@ function SignWorkspace({ doc, onDone, onCancel }) {
   const [showDoc, setShowDoc] = useState(true);
   const abort = React.useRef(null);
   const addedRef = React.useRef(null);
+  const paneRef = React.useRef(null);
   const Pad = window.GFCWelcomePacketUI && window.GFCWelcomePacketUI.SignaturePad;
   const Pdf = window.GFCPdfPages;
+  const zoomer = Pdf && Pdf.useZoom ? Pdf.useZoom(paneRef) : { bar: null, pageStyle: null };
   const signing = doc.action === 'sign';
   useEffect(() => {
     const was = document.body.style.overflow; document.body.style.overflow = 'hidden';
@@ -164,16 +166,17 @@ function SignWorkspace({ doc, onDone, onCancel }) {
         </div>
       </div>
       <div className="ds-ws-body">
-        <div className={`ds-ws-doc${showDoc ? '' : ' ds-hide'}`}>
+        <div ref={paneRef} className={`ds-ws-doc${showDoc ? '' : ' ds-hide'}`}>
+          {!problem && pages && zoomer.bar}
           {problem && <div className="ds-ws-msg">{problem}<div className="ds-acts" style={{ justifyContent: 'center' }}><button className="ds-btn ds-ghost" onClick={fallback}><i className="ti ti-file-text" />Open Document</button></div></div>}
           {!problem && !pages && <p className="ds-ws-msg">Drawing the document…</p>}
           {!problem && pages && pages.map((p, i) => (
-            <div className="ds-ws-page" key={i}><img src={p.src} alt={`${doc.title}, page ${i + 1}`} /></div>
+            <div className="ds-ws-page" key={i} style={zoomer.pageStyle || undefined}><img src={p.src} alt={`${doc.title}, page ${i + 1}`} /></div>
           ))}
           {!problem && pages && added && (
             <div ref={addedRef}>
               <div className="ds-ws-added">This page is added when you {signing ? 'sign' : 'acknowledge'}. Preview, not signed.</div>
-              <div className="ds-ws-page"><img src={added.src} alt={`The page your ${signing ? 'signature' : 'acknowledgment'} adds, preview`} /></div>
+              <div className="ds-ws-page" style={zoomer.pageStyle || undefined}><img src={added.src} alt={`The page your ${signing ? 'signature' : 'acknowledgment'} adds, preview`} /></div>
             </div>
           )}
         </div>
