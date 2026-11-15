@@ -158,8 +158,25 @@ module.exports = function createOnboardingRoutes(deps) {
   const isChapterA = (rec) => !!(rec && rec.inputs && rec.inputs.chapter === 'A');
 
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
+  // The Pay Setup forms as evidence rows (owner, 2026-11-15): an onboarding
+  // item that names `payform:w9` reads whether the W-9 is done in Pay Setup,
+  // signed there or put on file from paper by the office ('office').
+  const PAYFORM_TITLES = { w4: 'Form W-4', i9: 'Form I-9', w9: 'Form W-9', pay: 'How they are paid' };
+  async function payFormRows(userId) {
+    const p = (((await db.get('payroll_profiles')) || {})[String(userId)]) || {};
+    const i9Done = !!(p.i9 && (p.i9.section1 || p.i9.onFile));
+    const state = { w4: [!!p.w4, !!(p.w4 && p.w4.onFile)], i9: [i9Done, !!(p.i9 && p.i9.onFile && !p.i9.section1)],
+      w9: [!!(p.w9 || p.w8ben), !!((p.w9 && p.w9.onFile) || (p.w8ben && p.w8ben.onFile))], pay: [!!p.payMethod, false] };
+    return Object.entries(state).map(([k, [done, office]]) => ({ kind: `payform:${k}`, item: 'PAY', title: PAYFORM_TITLES[k], required: true,
+      source: office ? 'office' : 'caregiver', status: done ? 'complete' : 'missing' }));
+  }
   async function packetFor(rec) {
     if (!rec) return { rows: undefined, certified: false, licenseLevel: null };
+    const pk = await packetForBase(rec);
+    if (Array.isArray(pk.rows)) pk.rows = [...pk.rows, ...await payFormRows(rec.userId)];
+    return pk;
+  }
+  async function packetForBase(rec) {
     // Every other chapter opens with the staff welcome packet (owner,
     // 2026-11-09): one row, read from the packet My GFC writes. Signed is
     // complete; anything else is still hers to do.

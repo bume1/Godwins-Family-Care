@@ -39,7 +39,12 @@ const { useState, useEffect } = React;
 .mp-ws-fields{overflow:auto;padding:16px 20px 28px;background:#fff;border-left:1px solid var(--edge)}
 .mp-ws-msg{color:var(--mut);text-align:center;padding:40px 10px}
 .mp-ws-toggle{display:none}
-@media(max-width:899px){.mp-ws-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.mp-ws-pdf{max-height:45vh}.mp-ws-pdf.mp-hide{display:none}.mp-ws-fields{border-left:0;border-top:1px solid var(--edge)}.mp-ws-toggle{display:inline-flex}}`;
+.mp-ws-fields label{display:block;font-size:14px;font-weight:600;color:var(--mut);margin:14px 0 6px}
+.mp-ws-fields .mp-check{font-size:15px;font-weight:500}
+.mp-ws-fields input[type=text],.mp-ws-fields input[type=tel],.mp-ws-fields input[type=date],.mp-ws-fields input[type=number],.mp-ws-fields input[type=password],.mp-ws-fields input[type=email],.mp-ws-fields select{display:block;width:100%;box-sizing:border-box;min-height:46px;background:#fff;border:1px solid var(--edge2);border-radius:11px;padding:11px 13px;font:inherit;font-size:16px;color:var(--ink);-webkit-appearance:none;appearance:none}
+.mp-ws-fields select{background-image:linear-gradient(45deg,transparent 50%,#5b6b73 50%),linear-gradient(135deg,#5b6b73 50%,transparent 50%);background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:34px}
+.mp-ws-fields .mp-check input{width:20px;height:20px;flex:0 0 auto}
+@media(max-width:899px){.mp-ws-head{flex-wrap:wrap}.mp-ws-body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.mp-ws-fields{min-width:0;padding:14px 16px 28px}.mp-ws-pdf{max-height:45vh}.mp-ws-pdf.mp-hide{display:none}.mp-ws-fields{border-left:0;border-top:1px solid var(--edge)}.mp-ws-toggle{display:inline-flex}}`;
   document.head.appendChild(el);
 })();
 
@@ -275,8 +280,11 @@ const downloadForm = async (key, setErr) => {
   try {
     const res = await fetch(`/api/my/pay-setup/forms/${FORM_PDF[key]}.pdf`, { headers: { Authorization: `Bearer ${getToken()}` } });
     if (!res.ok) { let m = 'That form could not be opened.'; try { m = (await res.json()).error || m; } catch (e) { /* not json */ } throw new Error(m); }
-    const url = URL.createObjectURL(await res.blob());
-    const a = document.createElement('a'); a.href = url; a.download = `${key.toUpperCase()}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+    const blob = await res.blob();
+    // A copy filed from paper may be a photo, not a PDF.
+    const ext = /png/.test(blob.type) ? 'png' : /jpe?g/.test(blob.type) ? 'jpg' : 'pdf';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `${key.toUpperCase()}.${ext}`; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   } catch (e) { setErr(e.message); }
 };
@@ -413,7 +421,9 @@ function PaySetup() {
             <div><b>{c.label}</b><small>{c.done ? (detail(c.key) || 'Done') : c.optional ? 'Optional' : 'Not done yet'}{c.note ? ` · ${c.note}` : ''}</small></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <span className={`mg-pill ${c.done ? 'mg-ok' : c.optional ? 'mg-wait' : 'mg-bad'}`}>{c.done ? 'Done' : 'To do'}</span>
-              {c.done && FORM_PDF[c.key] && !(c.key === 'i9' && p.i9 && p.i9.onFile && !p.i9.section1) && <button className="mg-btn mg-ghost mg-sm" onClick={() => { setErr(''); downloadForm(c.key, setErr); }}>Download PDF</button>}
+              {/* A form signed on paper and put on file by the office (2026-11-15)
+                  opens as that uploaded copy. */}
+              {c.done && FORM_PDF[c.key] && (c.onFileDocumentId || !(c.key === 'i9' && p.i9 && p.i9.onFile && !p.i9.section1)) && <button className="mg-btn mg-ghost mg-sm" onClick={() => { setErr(''); downloadForm(c.key, setErr); }}>{c.onFileDocumentId ? 'Open Copy' : 'Download PDF'}</button>}
               {!c.locked && <button className="mg-btn mg-ghost mg-sm" disabled={!data.secretsStorable && (c.key === 'ssn' || c.key === 'w9')} onClick={() => { setOpen(open === c.key ? null : c.key); setForm(c.key === 'residence' ? { residence: p.taxResidence || '' } : c.key === 'edelivery' ? { consented: !!(p.eDelivery && p.eDelivery.consented), disclosureVersion: data.options && data.options.eDelivery && data.options.eDelivery.version } : c.key === 'taxaddress' && p.taxAddress ? { ...p.taxAddress, zip: `${p.taxAddress.zip || ''}${p.taxAddress.zip4 || ''}` } : {}); setErr(''); }}>{c.done ? 'Update' : 'Start'}</button>}
             </div>
           </div>

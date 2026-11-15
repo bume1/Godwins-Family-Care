@@ -340,9 +340,12 @@ module.exports = function createStaffPortalRoutes(deps) {
   const taxFormsFor = async (me) => {
     const p = (((await db.get('payroll_profiles')) || {})[me]) || null;
     if (!p) return [];
-    const at = { w4: p.w4, g4: p.g4, state: p.stateCert, i9: p.i9 && p.i9.section1, w9: p.w9, w8ben: p.w8ben };
+    // A form signed on paper and put on file by the office (2026-11-15) is
+    // listed too, and opens as the copy the office uploaded.
+    const i9Paper = p.i9 && !p.i9.section1 && p.i9.onFile && p.i9.onFile.documentId ? { signedAt: p.i9.onFile.completedOn || p.i9.onFile.recordedAt, onFile: p.i9.onFile } : null;
+    const at = { w4: p.w4, g4: p.g4, state: p.stateCert, i9: (p.i9 && p.i9.section1) || i9Paper, w9: p.w9, w8ben: p.w8ben };
     return Object.entries(at).filter(([, v]) => v && v.signedAt)
-      .map(([k, v]) => ({ id: `taxform:${k}`, title: TAX_FORM_TITLES[k], signedAt: v.signedAt, pdf: 'taxform', form: k }));
+      .map(([k, v]) => ({ id: `taxform:${k}`, title: v.onFile ? `${TAX_FORM_TITLES[k]}, signed on paper (on file)` : TAX_FORM_TITLES[k], signedAt: v.signedAt, pdf: 'taxform', form: k, onFile: !!v.onFile }));
   };
   const documentsFor = async (person, { taxForms = true } = {}) => {
     const me = String(person.id);

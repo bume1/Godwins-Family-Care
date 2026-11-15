@@ -1931,6 +1931,122 @@
       );
     };
 
+    // ---- A paper form put on file (owner, 2026-11-15) -------------------------
+    // The office confirms what an uploaded form is and types what it says, with
+    // the document beside the fields. The two reads (the printed title and the
+    // AI check) are shown above; Payroll refuses if they say it is another form
+    // unless the office confirms it looked. The choice lists come from the
+    // server, never restated here.
+    const MATCH_CHIP = { agree: 'bg-green-50 text-green-800 border-green-200', one_read: 'bg-sky-50 text-sky-800 border-sky-200', disagree: 'bg-red-50 text-red-700 border-red-200', unknown: 'bg-gray-100 text-gray-600 border-gray-200' };
+    const OnFilePanel = ({ token, caregiverId, doc, form, info, onClose, onDone }) => {
+      const [f, setF] = React.useState({ signedName: '', signedOn: '', tinType: 'ssn' });
+      const [pages, setPages] = React.useState(null);
+      const [imgUrl, setImgUrl] = React.useState(null);
+      const [err, setErr] = React.useState('');
+      const [busy, setBusy] = React.useState(false);
+      const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+      React.useEffect(() => {
+        let url = null;
+        (async () => {
+          try {
+            const res = await fetch(`${API_URL}/api/caregiver/documents/${doc.id}/file`, { headers: { Authorization: `Bearer ${token}` } });
+            if (!res.ok) throw new Error('The document could not be opened.');
+            const blob = await res.blob();
+            if (/pdf/.test(blob.type) && window.GFCPdfPages) setPages(await window.GFCPdfPages.pages(await blob.arrayBuffer()));
+            else { url = URL.createObjectURL(blob); setImgUrl(url); }
+          } catch (e) { setErr(e.message); }
+        })();
+        return () => { if (url) URL.revokeObjectURL(url); };
+      }, [doc.id]);
+      const o = (info && info.options) || {};
+      const label = (info && info.forms && info.forms[form] && info.forms[form].label) || form;
+      const save = async (confirmDifferent) => {
+        setBusy(true); setErr('');
+        try {
+          await srFetch(token, `/api/payroll/admin/people/${encodeURIComponent(caregiverId)}/forms/${form}/on-file`, {
+            method: 'PUT', body: JSON.stringify({ ...f, documentId: doc.id, confirmDifferent: !!confirmDifferent })
+          });
+          onDone(`${label} is on file. It now counts in Pay Setup, onboarding and payroll.`);
+        } catch (e) {
+          if (/read this document as something else/i.test(e.message) && window.confirm(`${e.message}\n\nYou have looked at it and it is a ${label}?`)) { setBusy(false); return save(true); }
+          setErr(e.message);
+        }
+        setBusy(false);
+      };
+      const inp = 'w-full px-3 py-2 border border-gray-200 rounded-lg text-sm';
+      const F = (lbl, el) => <label className="block text-xs font-medium text-gray-600 mt-2">{lbl}{el}</label>;
+      const sel = (k, opts) => <select className={inp} value={f[k] || ''} onChange={set(k)}><option value="">Choose…</option>{Object.entries(opts || {}).map(([k2, v]) => <option key={k2} value={k2}>{v}</option>)}</select>;
+      const txt = (k, extra) => <input className={inp} value={f[k] || ''} onChange={set(k)} {...(extra || {})} />;
+      const chk = (k, lbl) => <label className="flex items-center gap-2 text-sm mt-2"><input type="checkbox" checked={!!f[k]} onChange={set(k)} />{lbl}</label>;
+      return ReactDOM.createPortal(
+        <div className="fixed inset-0 z-[100000] bg-black/40 flex items-stretch justify-center p-0 md:p-6" role="dialog" aria-modal="true" aria-label={`Put ${label} on file`}>
+          <div className="bg-white w-full max-w-6xl md:rounded-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b">
+              <div><b className="text-gray-900">Put {label} on file</b><div className="text-xs text-gray-500">{doc.fileName}. Type what the paper form says. Nothing counts until you press Mark On File.</div></div>
+              <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm" onClick={onClose}>Close</button>
+            </div>
+            <div className="flex-1 min-h-0 grid md:grid-cols-[3fr_2fr]">
+              <div className="overflow-auto bg-gray-100 p-3 max-h-[40vh] md:max-h-none">
+                {!pages && !imgUrl && !err && <p className="text-sm text-gray-500 text-center py-10">Opening the document…</p>}
+                {pages && pages.map((pg, i) => <img key={i} src={pg.src} alt={`${doc.fileName}, page ${i + 1}`} className="block w-full max-w-[820px] mx-auto mb-3 bg-white shadow" />)}
+                {imgUrl && <img src={imgUrl} alt={doc.fileName} className="block w-full max-w-[820px] mx-auto bg-white shadow" />}
+              </div>
+              <div className="overflow-auto p-4 border-t md:border-t-0 md:border-l">
+                {doc.match && <div className={`text-xs border rounded-lg p-2 mb-2 ${MATCH_CHIP[doc.match.verdict] || ''}`}>{doc.match.summary}</div>}
+                {form === 'w9' && <>
+                  {F('Name on line 1', txt('name'))}
+                  {F('Business name, if any', txt('businessName'))}
+                  {F('Tax classification', sel('taxClass', o.w9Class))}
+                  {F('Taxpayer ID type', <select className={inp} value={f.tinType} onChange={set('tinType')}><option value="ssn">SSN</option><option value="ein">EIN</option></select>)}
+                  {F('Taxpayer ID number, as written on the form', txt('tin', { type: 'password', autoComplete: 'off' }))}
+                  {F('Address', txt('address'))}
+                </>}
+                {form === 'w4' && <>
+                  {F('Step 1(c): filing status', sel('filingStatus', o.w4Filing))}
+                  {chk('multipleJobs', 'Step 2(c) is checked')}
+                  {F('Step 3: dependents ($ a year)', txt('dependentsAmount', { inputMode: 'decimal' }))}
+                  {F('Step 4(a): other income ($ a year)', txt('otherIncome', { inputMode: 'decimal' }))}
+                  {F('Step 4(b): deductions ($ a year)', txt('deductions', { inputMode: 'decimal' }))}
+                  {F('Step 4(c): extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {chk('exempt', 'Exempt is written on the form')}
+                </>}
+                {form === 'g4' && <>
+                  {F('Line 3: marital status', sel('filingStatus', Object.fromEntries(Object.entries(o.g4Filing || {}).map(([k, v]) => [k, `${k}. ${v}`]))))}
+                  {F('Line 4: dependent allowances', txt('dependentAllowances', { inputMode: 'numeric' }))}
+                  {F('Line 5: additional allowances', txt('additionalAllowances', { inputMode: 'numeric' }))}
+                  {F('Line 6: extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {chk('exempt', 'Line 8 exempt is claimed')}
+                </>}
+                {form === 'state-cert' && <>
+                  {F('Filing status', <select className={inp} value={f.filingStatus || ''} onChange={set('filingStatus')}><option value="">Choose…</option><option value="single">Single</option><option value="married">Married</option></select>)}
+                  {F('Allowances', txt('allowances', { inputMode: 'numeric' }))}
+                  {F('Extra withholding ($ each paycheck)', txt('extraWithholding', { inputMode: 'decimal' }))}
+                  {chk('exempt', 'Exempt is claimed')}
+                </>}
+                {form === 'w8ben' && <>
+                  {F('Name on line 1', txt('name'))}
+                  {F('Country of citizenship', txt('citizenship'))}
+                </>}
+                {form === 'i9' && <>
+                  {F('First day of work, as on the form', txt('firstDay', { type: 'date' }))}
+                  {F('Date Section 2 was completed (if shown)', txt('completedOn', { type: 'date' }))}
+                  {F('Note (optional)', txt('note'))}
+                </>}
+                {form !== 'i9' && <>
+                  {F('Name signed on the form', txt('signedName'))}
+                  {F('Date signed on the form', txt('signedOn', { type: 'date' }))}
+                </>}
+                {err && <p className="text-xs text-red-600 mt-2">{err}</p>}
+                <div className="flex gap-2 mt-4">
+                  <button type="button" disabled={busy} onClick={() => save(false)} className="px-4 py-2 rounded-lg text-sm text-white disabled:opacity-50" style={{ backgroundColor: '#033D50' }}>{busy ? 'Saving…' : 'Mark On File'}</button>
+                  <button type="button" className="px-4 py-2 border border-gray-300 rounded-lg text-sm" onClick={onClose}>Cancel</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>, document.body);
+    };
+
     const CaregiverDocsSection = ({ token, caregiverId, caregiverName, inRecord }) => {
       const [docs, setDocs] = React.useState([]);
       const [kinds, setKinds] = React.useState([]);
@@ -1939,6 +2055,10 @@
       const [busy, setBusy] = React.useState(false);
       const [msg, setMsg] = React.useState(null);
       const fileRef = React.useRef(null);
+      // Paper forms put on file (2026-11-15): which forms are done, and from which document.
+      const [onFileInfo, setOnFileInfo] = React.useState(null);
+      const [panel, setPanel] = React.useState(null);   // { doc, form }
+      const [checking, setChecking] = React.useState(false);
 
       const load = React.useCallback(async () => {
         // OWNER REPORT, 2026-09-14: documents uploaded for one caregiver were
@@ -1960,6 +2080,9 @@
         ]);
         if (d && Array.isArray(d.documents)) setDocs(d.documents);
         else if (d && d.error) setMsg({ ok: false, text: `Could not load this caregiver's documents: ${d.error}` });
+        // Payroll's view of the paper forms. Refused for someone without payroll
+        // access, and then the on-file buttons are simply not offered.
+        srFetch(token, `/api/payroll/admin/people/${encodeURIComponent(caregiverId)}/forms/on-file`).then(setOnFileInfo).catch(() => setOnFileInfo(null));
         if (k && Array.isArray(k.kinds)) {
           setKinds(k.kinds);
           // No default type (owner, 2026-11-13): a file left on the first type
@@ -2050,6 +2173,24 @@
         else { setMsg({ ok: true, text: 'Removed.' }); await load(); window.dispatchEvent(new Event('gfc-staff-docs-changed')); }
       };
 
+      // Read every document on file two ways (printed title + AI check).
+      const checkAll = async () => {
+        setChecking(true); setMsg(null);
+        try {
+          const r = await srFetch(token, `/api/caregiver/admin/caregivers/${encodeURIComponent(caregiverId)}/documents/match`, { method: 'POST', body: JSON.stringify({ all: true }) });
+          setMsg({ ok: true, text: `Checked ${r.checked} document${r.checked === 1 ? '' : 's'}.` });
+          await load();
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+        setChecking(false);
+      };
+      const offFile = async (form) => {
+        if (!window.confirm('Take this form off file? Pay Setup will ask for it again.')) return;
+        try {
+          await srFetch(token, `/api/payroll/admin/people/${encodeURIComponent(caregiverId)}/forms/${form}/on-file`, { method: 'DELETE' });
+          setMsg({ ok: true, text: 'Taken off file.' }); await load();
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+      };
+
       if (!caregiverId) {
         return (
           <div className="mt-5 border-t pt-4">
@@ -2063,10 +2204,13 @@
         <div className={inRecord ? '' : 'mt-5 border-t pt-4'}>
           {!inRecord && <h4 className="font-medium text-gray-800 mb-1">Documents</h4>}
           <p className="text-xs text-gray-500 mb-3">
-            Photo ID, paystub and W-9 for onboarding, plus anything {caregiverName || 'this caregiver'} has
-            sent in. These are the office's copies. <span className="font-medium">The W-4, G-4, I-9 and direct deposit are filled in by the
-            caregiver in My GFC, under Hours &amp; Pay</span>, not uploaded here.
+            Onboarding and payroll paperwork, plus anything {caregiverName || 'this person'} has sent in. These are the office's copies.
+            <span className="font-medium"> A W-4, G-4, I-9 or W-9 is either signed by them in My GFC (Hours &amp; Pay), or, if it was signed on paper,
+            uploaded here and marked on file</span>: then it counts in Pay Setup, onboarding and payroll. Each upload is read two ways
+            (the printed title and an AI check) to confirm what it is; you confirm before it counts.
           </p>
+          <button type="button" onClick={checkAll} disabled={checking}
+            className="mb-3 px-3 py-1.5 border border-gray-300 rounded-lg text-xs disabled:opacity-50">{checking ? 'Checking…' : 'Check Documents'}</button>
 
           <div className="flex flex-wrap items-end gap-2 mb-3">
             <div className="flex-1 min-w-[180px]">
@@ -2121,6 +2265,32 @@
                     <button type="button" onClick={() => remove(d)}
                       className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs">Remove</button>
                     </div>
+                    {d.match && (
+                      <div className={`text-[11px] border rounded-md px-2 py-1 mt-1.5 ${MATCH_CHIP[d.match.verdict] || ''}`}>{d.match.summary}
+                        {d.match.filedAsDiffers && d.match.readsAs && kinds.some(k => k.kind === d.match.readsAs) && (
+                          <button type="button" className="ml-2 underline font-semibold" onClick={async () => {
+                            try { await srFetch(token, `/api/caregiver/documents/${encodeURIComponent(d.id)}/kind`, { method: 'PUT', body: JSON.stringify({ kind: d.match.readsAs }) }); setMsg({ ok: true, text: `Filed as ${d.match.readsAsLabel}.` }); await load(); }
+                            catch (e) { setMsg({ ok: false, text: e.message }); }
+                          }}>Change Type to {d.match.readsAsLabel}</button>
+                        )}
+                      </div>
+                    )}
+                    {onFileInfo && d.onFileForm && d.status === 'accepted' && (() => {
+                      const fm = onFileInfo.forms[d.onFileForm];
+                      if (!fm) return null;
+                      if (fm.onFile && fm.onFile.documentId === d.id) return (
+                        <div className="flex flex-wrap items-center gap-2 mt-1.5 text-xs">
+                          <span className="font-semibold text-green-800">On file for {fm.label}</span>
+                          <button type="button" onClick={() => offFile(d.onFileForm)} className="px-2 py-1 border border-gray-300 rounded-md text-xs">Take Off File</button>
+                        </div>
+                      );
+                      if (fm.signedInApp) return <div className="text-xs text-gray-500 mt-1.5">{fm.label} already signed in My GFC.</div>;
+                      if (fm.done) return <div className="text-xs text-gray-500 mt-1.5">{fm.label} is already on file from another document.</div>;
+                      return (
+                        <button type="button" onClick={() => setPanel({ doc: d, form: d.onFileForm })}
+                          className="mt-1.5 px-3 py-1.5 rounded-lg text-xs text-white" style={{ backgroundColor: '#033D50' }}>Use For {fm.label}</button>
+                      );
+                    })()}
                     {d.status === 'received' && (
                       <div className="flex flex-wrap items-center gap-2 mt-2">
                         <span className="text-xs font-semibold text-amber-800">Waiting on review</span>
@@ -2134,6 +2304,8 @@
                 ))}
               </div>
             )}
+          {panel && <OnFilePanel token={token} caregiverId={caregiverId} doc={panel.doc} form={panel.form} info={onFileInfo}
+            onClose={() => setPanel(null)} onDone={(text) => { setPanel(null); setMsg({ ok: true, text }); load(); window.dispatchEvent(new Event('gfc-staff-docs-changed')); }} />}
         </div>
       );
     };

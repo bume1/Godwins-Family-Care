@@ -54,8 +54,15 @@ module.exports = function createCaregiverRoutes(deps) {
     getAppBaseUrl,
     // What a lead caregiver sees of the patient's shared record (2026-11-11).
     // Built in server.js from the same published copies the patient's portal reads.
-    sharedForLeadCaregiver, serveSharedDocument
+    sharedForLeadCaregiver, serveSharedDocument,
+    // The AI half of reading a staff document (staffDocMatch.js, 2026-11-15):
+    // the model engine's invoke, handed in. Absent, the AI check says "not run".
+    staffDocAiRead
   } = deps;
+  const staffDocMatch = require('../staffDocMatch');
+  // Which Pay Setup form a filed document can be put on file for (payroll).
+  const FORM_FOR_KIND = Object.entries(require('../payrollProfiles').ON_FILE_KINDS)
+    .reduce((m, [form, kinds]) => { kinds.forEach(k => { if (!m[k]) m[k] = form; }); return m; }, {});
   // A getter: the notifier is built far below this router's mount in
   // server.js. A missing one is LOUD and never throws, because a notice must
   // not undo a review or a closure that has already been recorded.
@@ -1347,6 +1354,15 @@ module.exports = function createCaregiverRoutes(deps) {
     { kind: 'id_document',   label: 'Photo ID',                  needsPeriod: false, payroll: true },
     { kind: 'paystub',       label: 'Paystub',                   needsPeriod: true,  payroll: true },
     { kind: 'w9',            label: 'W-9',                       needsPeriod: false, payroll: true },
+    // The paper pay and tax forms (owner, 2026-11-15): a form already signed on
+    // paper is filed here, read (staffDocMatch.js), and the office marks it on
+    // file in Payroll so it fulfils the Pay Setup item instead of being asked
+    // for again.
+    { kind: 'w4',            label: 'W-4',                       needsPeriod: false, payroll: true },
+    { kind: 'g4',            label: 'G-4 (Georgia)',             needsPeriod: false, payroll: true },
+    { kind: 'state_cert',    label: 'State withholding certificate', needsPeriod: false, payroll: true },
+    { kind: 'i9',            label: 'I-9',                       needsPeriod: false, payroll: true },
+    { kind: 'w8ben',         label: 'W-8BEN',                    needsPeriod: false, payroll: true },
     { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false },
     // A clinician's onboarding proof, filed from the credentialing wizard
     // (/onboarding) rather than from this form. It joins THIS store on purpose:
@@ -1505,6 +1521,9 @@ module.exports = function createCaregiverRoutes(deps) {
       };
       rows.push(row);
       await db.set('caregiver_documents', rows);
+      // Read it (two ways) after answering, so the upload never waits on OCR or
+      // the model. What it found is kept on the row for the office.
+      if (shouldMatch(kind)) setImmediate(() => matchAndKeep(row.id, buffer, sniffedType, kind, req.user).catch(e => console.error('Staff document read (non-fatal):', e.message)));
 
       // The activity log records THAT a document arrived, never its contents.
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_uploaded', 'caregiver_document', row.id,
@@ -1684,6 +1703,74 @@ module.exports = function createCaregiverRoutes(deps) {
 
   // The Drive id and stored name never reach a client of this API — they are
   // storage plumbing, and the file is read back through the route above.
+  // ---- What a staff document reads as (owner, 2026-11-15) ---------------------
+  // Two independent reads, kept on the row: the printed title (smart match) and
+  // the AI scan. Neither fulfils anything; the office confirms in Payroll.
+  const MATCH_KINDS = new Set([...staffDocMatch.KIND_KEYS, 'other']);
+  const shouldMatch = (kind) => MATCH_KINDS.has(kind);
+  const matchAndKeep = async (rowId, bytes, mimeType, kind, actor) => {
+    const m = await staffDocMatch.matchDocument({
+      bytes, mimeType, filedAs: kind, textOf: staffDocMatch.textOf, at: new Date().toISOString(),
+      aiRead: typeof staffDocAiRead === 'function' ? (a) => staffDocAiRead({ ...a, actor }) : null
+    });
+    const rows = (await db.get('caregiver_documents')) || [];
+    const i = rows.findIndex(r => r && r.id === rowId);
+    if (i === -1) return null;
+    rows[i] = { ...rows[i], match: m };
+    await db.set('caregiver_documents', rows);
+    return rows[i];
+  };
+  const publicMatch = (r) => {
+    if (!r.match) return null;
+    const m = r.match;
+    return {
+      verdict: m.verdict, readsAs: m.readsAs, readsAsLabel: m.readsAs ? ((staffDocMatch.KINDS[m.readsAs] || {}).label || m.readsAs) : null,
+      filedAsDiffers: !!m.filedAsDiffers, smart: m.smart ? { kind: m.smart.kind, evidence: m.smart.evidence } : null,
+      ai: m.ai ? { status: m.ai.status, kind: m.ai.kind || null, confidence: m.ai.confidence ?? null, reason: m.ai.reason || null } : null,
+      summary: staffDocMatch.summary(m, r.kind), at: m.at,
+      // The Pay Setup form this document can be put on file for, if any.
+      form: m.readsAs && !m.filedAsDiffers ? ((staffDocMatch.KINDS[m.readsAs] || {}).form || null) : null
+    };
+  };
+  // Read every document already on someone's record (the ones filed before
+  // reading existed, like a W-9 uploaded last month). The office only.
+  router.post('/api/caregiver/admin/caregivers/:userId/documents/match', authenticateToken, requireCaregiverOrOffice, async (req, res) => {
+    try {
+      if (!isCaregiverOffice(req.user)) return res.status(403).json({ error: 'Only the office can check documents.', code: 'OFFICE_ONLY' });
+      const mine = ((await db.get('caregiver_documents')) || []).filter(r => r && r.caregiver_id === req.params.userId && !r.deleted_at && shouldMatch(r.kind) && r.drive_file_id && (req.body && req.body.all ? true : !r.match));
+      const out = [];
+      for (const r of mine) {
+        let bytes;
+        try { bytes = await drive.downloadFileBuffer(r.drive_file_id); } catch (e) { out.push({ id: r.id, read: false, reason: 'The file could not be read back from storage.' }); continue; }
+        const saved = await matchAndKeep(r.id, bytes, r.mime_type, r.kind, req.user);
+        out.push({ id: r.id, read: true, match: saved ? publicMatch(saved) : null });
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'staff_documents_checked', 'user', req.params.userId, { documents: out.length });
+      res.json({ checked: out.length, results: out });
+    } catch (e) { console.error('Staff document check error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // File a document under the type it actually reads as (2026-11-15): when
+  // the checks say a file uploaded as "Something else" is a W-9, the office
+  // changes its type here rather than deleting and uploading it again. The
+  // office only, and only to a known type.
+  router.put('/api/caregiver/documents/:id/kind', authenticateToken, requireCaregiverOrOffice, async (req, res) => {
+    try {
+      if (!isCaregiverOffice(req.user)) return res.status(403).json({ error: 'Only the office can change a document\'s type.', code: 'OFFICE_ONLY' });
+      const kind = String((req.body || {}).kind || '');
+      if (!CAREGIVER_DOC_KINDS.some(k => k.kind === kind)) return res.status(400).json({ error: 'Unknown document type', code: 'DOC_KIND_UNKNOWN' });
+      const rows = (await db.get('caregiver_documents')) || [];
+      const i = rows.findIndex(r => r && r.id === req.params.id && !r.deleted_at);
+      if (i === -1) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
+      const was = rows[i].kind;
+      const m = rows[i].match ? { ...rows[i].match, ...staffDocMatch.verdict(rows[i].match.smart, rows[i].match.ai, kind) } : null;
+      rows[i] = { ...rows[i], kind, match: m, kind_history: [...(rows[i].kind_history || []), { from: was, to: kind, at: new Date().toISOString(), by: req.user.name || req.user.email }] };
+      await db.set('caregiver_documents', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_type_changed', 'caregiver_document', rows[i].id, { from: was, to: kind });
+      res.json({ document: publicCaregiverDoc(rows[i]) });
+    } catch (e) { console.error('Document type change error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
   const publicCaregiverDoc = (r) => ({
     id: r.id,
     caregiverId: r.caregiver_id,
@@ -1704,7 +1791,9 @@ module.exports = function createCaregiverRoutes(deps) {
     onboarding: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).onboarding
       || !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
     payroll: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
-    reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note
+    reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note,
+    match: publicMatch(r),
+    onFileForm: FORM_FOR_KIND[r.kind] || null
   });
 
   return router;

@@ -97,7 +97,7 @@ const ITEMS = Object.freeze([
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED)],
     classifications: [], classificationNote: NO_A2_ROW },
   { id: 'A.5.02', guide: PAY_GUIDE, link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
-    packet: ['id_document', 'ssn_card', 'work_authorization', 'direct_deposit', 'emergency_contact'],
+    packet: ['id_document', 'ssn_card', 'work_authorization', 'direct_deposit', 'emergency_contact', 'payform:w4', 'payform:i9'],
     // Form I-9 within three business days, and the W-4, which the packet does
     // not collect.
     elements: ['Form I-9 completed within three business days of the start date', 'Form W-4'],

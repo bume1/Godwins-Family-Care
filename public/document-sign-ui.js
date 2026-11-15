@@ -56,7 +56,7 @@ const { useState, useEffect, useCallback } = React;
 .ds-ws-side{overflow:auto;padding:16px 20px 28px;background:#fff;border-left:1px solid var(--e)}
 .ds-ws-msg{color:var(--m);text-align:center;padding:40px 10px}
 .ds-ws-toggle{display:none}
-@media(max-width:899px){.ds-ws-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.ds-ws-doc{max-height:45vh}.ds-ws-doc.ds-hide{display:none}.ds-ws-side{border-left:0;border-top:1px solid var(--e)}.ds-ws-toggle{display:inline-flex}}
+@media(max-width:899px){.ds-ws-head{flex-wrap:wrap}.ds-ws-body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.ds-ws-side{min-width:0}.ds-ws-doc{max-height:45vh}.ds-ws-doc.ds-hide{display:none}.ds-ws-side{border-left:0;border-top:1px solid var(--e)}.ds-ws-toggle{display:inline-flex}}
 .ds button.btn{display:inline-flex;align-items:center;border-radius:10px;padding:7px 12px;font:600 13.5px/1.3 inherit;font-family:inherit;cursor:pointer;background:#fff;color:var(--n);border:1.5px solid var(--e);width:auto}`;
   document.head.appendChild(el);
 })();

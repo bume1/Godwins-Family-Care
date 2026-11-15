@@ -131,7 +131,7 @@ const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-US', { mont
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: TZ }) : '');
 
 const KIND_LABELS = { timesheet: 'Timesheet', visit_note: 'Signed visit note', mileage: 'Mileage or expense', certification: 'Certification',
-  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', clinician_onboarding: 'Onboarding document', signed_document: 'Signed document', other: 'Other' };
+  id_document: 'Photo ID', paystub: 'Paystub', w9: 'W-9', w4: 'W-4', g4: 'G-4', state_cert: 'State withholding certificate', i9: 'I-9', w8ben: 'W-8BEN', clinician_onboarding: 'Onboarding document', signed_document: 'Signed document', other: 'Other' };
 const STATUS_PILL = { accepted: ['mg-ok', 'Accepted'], received: ['mg-wait', 'With the office'], rejected: ['mg-bad', 'Sent back'] };
 
 function Section({ title, sub, children, right, id }) {
