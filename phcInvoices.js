@@ -45,6 +45,10 @@ const DEFAULT_SERVICE = { service: 'Private home care services', line: 'Home car
 const serviceFor = (level) => SERVICE_BY_LEVEL[String(level || '').toLowerCase()] || DEFAULT_SERVICE;
 
 const FORMATS = Object.freeze(['carrier', 'family']);
+// How a carrier wants its invoices (owner, 2026-11-15): some LTC carriers pay
+// against a DAILY maximum, so each date of service is its own invoice; others
+// take one invoice for the whole period. Set once on the carrier.
+const INVOICE_MODES = Object.freeze(['daily', 'period']);
 const MAX_ROWS = 5000;
 
 const str = (v) => (v === null || v === undefined ? '' : String(v)).trim();
@@ -98,7 +102,8 @@ function normalizePayer(body) {
       addressLines: (Array.isArray(b.addressLines) ? b.addressLines : String(b.addressLines || '').split(/\r?\n/))
         .map(str).filter(Boolean).slice(0, 4).map(l => l.slice(0, 160)),
       claimsEmail: email,
-      phone: str(b.phone).slice(0, 40)
+      phone: str(b.phone).slice(0, 40),
+      invoiceMode: b.invoiceMode === 'period' ? 'period' : 'daily'
     }
   };
 }
@@ -130,6 +135,7 @@ function billToSnapshot(billTo, payers) {
     if (!p) return null;
     return {
       type: 'carrier', name: p.name, attn: p.attn || '', addressLines: p.addressLines || [], email: p.claimsEmail || '',
+      invoiceMode: p.invoiceMode === 'period' ? 'period' : 'daily',
       insuredName: billTo.insuredName, policyNumber: billTo.policyNumber, claimNumber: billTo.claimNumber || ''
     };
   }
@@ -191,29 +197,55 @@ const unguard = (v) => (/^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v);
 
 // The payroll export's headers, plus the billing export's names for the same
 // columns, so either file the app exports can come back in.
+// A spreadsheet kept by hand (owner, 2026-11-15) usually says Date, Start,
+// End and Hours, so those names are read too.
 const HEADER_ALIASES = Object.freeze({
-  caregiver: ['caregiver'],
-  level: ['license level'],
-  client: ['client'],
-  date: ['shift date', 'service date'],
-  clockIn: ['clock in', 'actual in'],
-  clockOut: ['clock out', 'actual out'],
-  hours: ['hours', 'billable hours']
+  caregiver: ['caregiver', 'caregiver name', 'employee'],
+  level: ['license level', 'level'],
+  client: ['client', 'client name', 'patient'],
+  date: ['shift date', 'service date', 'date', 'date of service'],
+  clockIn: ['clock in', 'actual in', 'start', 'start time', 'time in'],
+  clockOut: ['clock out', 'actual out', 'end', 'end time', 'time out'],
+  hours: ['hours', 'billable hours', 'total hours', 'hours worked']
 });
 const REQUIRED_COLUMNS = ['caregiver', 'client', 'date', 'clockIn', 'clockOut', 'hours'];
 
-// "10/3/2026" -> "2026-10-03"
+// An Excel date read raw is a day count from 1899-12-30 (a time is the
+// fraction of a day). The Billing page sends a workbook's cells that way, so
+// no time zone ever touches them.
+const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
+const isSerial = (s) => /^\d+(\.\d+)?$/.test(str(s));
+const ymdFromSerial = (n) => new Date(EXCEL_EPOCH + Math.floor(Number(n)) * 86400000).toISOString().slice(0, 10);
+// "10/3/2026", "10/3/26", "2026-10-03" or an Excel day number -> "2026-10-03"
 function ymdFromUsDate(s) {
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(str(s));
-  if (!m) return isYmd(str(s)) ? str(s) : null;
+  const v = str(s);
+  if (isSerial(v) && Number(v) >= 20000 && Number(v) < 80000) return ymdFromSerial(v);
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/.exec(v);
+  if (!m) return isYmd(v) ? v : null;
   const mo = Number(m[1]), d = Number(m[2]);
   if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  return `${m[3]}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 // "9:00 AM" on the row's date, or "10/4 6:00 AM" when it crossed midnight
 // (csvTime writes it that way). Returns [ymd, "HH:MM"] or null.
 function wallClock(s, rowYmd) {
-  const m = /^(?:(\d{1,2})\/(\d{1,2})\s+)?(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/.exec(str(s));
+  const v = str(s);
+  // An Excel time (0.375 is 9:00 AM), or a date and time (46299.375).
+  if (isSerial(v) && v.includes('.')) {
+    const n = Number(v);
+    const mins = Math.round((n - Math.floor(n)) * 1440) % 1440;
+    const ymd = n >= 20000 ? ymdFromSerial(n) : rowYmd;
+    return [ymd, `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`];
+  }
+  // 24-hour "13:52" or "13:52:00".
+  const h24 = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(v);
+  if (h24) {
+    const hh = Number(h24[1]), mm = Number(h24[2]);
+    if (hh > 23 || mm > 59) return null;
+    return [rowYmd, `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`];
+  }
+  const m = /^(?:(\d{1,2})\/(\d{1,2})\s+)?(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)$/.exec(v);
   if (!m) return null;
   let h = Number(m[3]);
   const min = Number(m[4]);
@@ -319,39 +351,52 @@ function rowsFromImport(text, { caregivers, clients, instantFromZoned, localDate
  *   payers:    the office's payers list
  *   invoiced:  Set of sourceKeys already on a live (non-void) invoice
  *   taken:     Set of every invoice number ever issued
- *   period:    { from, to } — the family invoice's period
+ *   period:    { from, to } — the period an invoice covers when it is not per day
+ *   extras:    lines added by hand in an invoice run (invoiceRuns.js):
+ *              [{ id, clientId, date, description, minutes | amountCents }]
  *   levelLabel(level): "PCA"
  *   fmtDate(iso | ymd), fmtTime(iso): Georgia's clock
+ * Rows may carry `editedFrom` (the clocked minutes before an office edit); the
+ * billed minutes are `minutes`.
  * Returns { invoices, skipped: [{ clientName, reason, ... }], alreadyInvoiced }.
+ *
+ * ONE INVOICE PER DAY OR PER PERIOD. A family is billed once for the period.
+ * A carrier follows its own setting (INVOICE_MODES): per date of service when
+ * it pays against a daily maximum, otherwise once for the period.
  */
-function draftInvoices(rows, { clients, payers, invoiced, taken, period, levelLabel, fmtDate, fmtTime }) {
+function draftInvoices(rows, { clients, payers, invoiced, taken, period, extras, levelLabel, fmtDate, fmtTime }) {
   const used = new Set(taken || []);
   const skipped = [];
   let alreadyInvoiced = 0;
   const byClient = new Map();
+  const bucket = (id) => { if (!byClient.has(id)) byClient.set(id, { rows: [], extras: [] }); return byClient.get(id); };
   for (const r of rows || []) {
     if (invoiced && (invoiced.has(r.sourceKey) || invoiced.has(r.shiftKey))) { alreadyInvoiced++; continue; }
-    if (!byClient.has(r.clientId)) byClient.set(r.clientId, []);
-    byClient.get(r.clientId).push(r);
+    bucket(r.clientId).rows.push(r);
   }
+  for (const x of extras || []) if (x && x.clientId) bucket(x.clientId).extras.push(x);
   const invoices = [];
   const clientById = new Map((clients || []).map(c => [c.id, c]));
-  for (const [clientId, list] of byClient) {
+  for (const [clientId, { rows: list, extras: added }] of byClient) {
     const client = clientById.get(clientId);
-    const clientName = (client && client.name) || list[0].clientName;
-    if (!client) { skipped.push({ clientId, clientName, reason: 'Not a client in the app.', shifts: list.length }); continue; }
+    const clientName = (client && client.name) || (list[0] && list[0].clientName) || '';
+    const count = { shifts: list.length, lines: added.length };
+    if (!client) { skipped.push({ clientId, clientName, reason: 'Not a client in the app.', ...count }); continue; }
     const ra = client.rateAgreement || {};
     const rateCents = Math.round(Number(String(ra.hourlyRate || '').replace(/[$,\s]/g, '')) * 100);
-    if (!(rateCents > 0)) { skipped.push({ clientId, clientName, reason: 'No agreed hourly rate. Set it on their Rate card.', shifts: list.length }); continue; }
+    if (!(rateCents > 0)) { skipped.push({ clientId, clientName, reason: 'No agreed hourly rate. Set it on their Rate card.', ...count }); continue; }
     const billTo = billToSnapshot(client.billing && client.billing.billTo, payers);
-    if (!billTo) { skipped.push({ clientId, clientName, reason: 'No Bill To. Say who is billed for this client.', shifts: list.length }); continue; }
+    if (!billTo) { skipped.push({ clientId, clientName, reason: 'No Bill To. Say who is billed for this client.', ...count }); continue; }
     const minMinutes = Number(ra.dailyMinimumHours) > 0 ? Math.round(Number(ra.dailyMinimumHours) * 60) : 0;
     const format = billTo.type === 'carrier' ? 'carrier' : 'family';
+    const perDay = format === 'carrier' && billTo.invoiceMode !== 'period';
     const sorted = list.slice().sort((a, b) => String(a.clockInAt).localeCompare(String(b.clockInAt)));
-    const groups = format === 'carrier'
-      ? [...sorted.reduce((m, r) => m.set(r.serviceDate, [...(m.get(r.serviceDate) || []), r]), new Map()).entries()]
-      : [[null, sorted]];
-    for (const [serviceDate, shifts] of groups) {
+    const groups = new Map();
+    const groupOf = (day) => { const k = perDay ? day : '*'; if (!groups.has(k)) groups.set(k, { shifts: [], extras: [] }); return groups.get(k); };
+    for (const r of sorted) groupOf(r.serviceDate).shifts.push(r);
+    for (const x of added) groupOf(x.date).extras.push(x);
+    for (const [key, { shifts, extras: groupExtras }] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const serviceDate = perDay ? key : null;
       const lines = [];
       const byDay = new Map();
       for (const s of shifts) {
@@ -362,7 +407,8 @@ function draftInvoices(rows, { clients, payers, invoiced, taken, period, levelLa
           description: `${svc.line} · ${s.caregiverName}${lbl ? ` (${lbl})` : ''} · ${fmtDate(s.serviceDate)}`,
           minutes: s.minutes, hours: hoursOf(s.minutes), rateCents,
           amountCents: amountFromMinutes(s.minutes, rateCents),
-          sourceKey: s.sourceKey, shiftKey: s.shiftKey, timeLogId: s.timeLogId || null
+          sourceKey: s.sourceKey, shiftKey: s.shiftKey, timeLogId: s.timeLogId || null,
+          ...(s.editedFrom !== undefined && s.editedFrom !== null ? { editedFrom: s.editedFrom } : {})
         });
         byDay.set(s.serviceDate, (byDay.get(s.serviceDate) || 0) + s.minutes);
       }
@@ -378,16 +424,29 @@ function draftInvoices(rows, { clients, payers, invoiced, taken, period, levelLa
             minutes: extra, hours: hoursOf(extra), rateCents, amountCents: amountFromMinutes(extra, rateCents)
           });
         }
-        lines.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'minimum') - (b.kind === 'minimum'));
       }
-      const numberDate = serviceDate || (period && period.to) || shifts[shifts.length - 1].serviceDate;
+      // Lines the office added in the run: hours at the client's rate, or a
+      // fixed amount (a credit is negative). Never folded into a shift line.
+      for (const x of groupExtras) {
+        const mins = Number(x.minutes) > 0 ? Math.round(Number(x.minutes)) : 0;
+        lines.push({
+          kind: 'adjustment', date: x.date, adjustmentId: x.id,
+          description: `${str(x.description)} · ${fmtDate(x.date)}`,
+          minutes: mins, hours: mins ? hoursOf(mins) : null, rateCents: mins ? rateCents : null,
+          amountCents: mins ? amountFromMinutes(mins, rateCents) : Math.round(Number(x.amountCents) || 0)
+        });
+      }
+      const order = { shift: 0, minimum: 1, adjustment: 2 };
+      lines.sort((a, b) => a.date.localeCompare(b.date) || order[a.kind] - order[b.kind]);
+      const lastDay = lines.length ? lines[lines.length - 1].date : null;
+      const numberDate = serviceDate || (period && period.to) || lastDay;
       const number = displayNumber(clientName, numberDate, used);
       used.add(number);
-      const billedMinutes = lines.reduce((a, l) => a + l.minutes, 0);
+      const billedMinutes = lines.reduce((a, l) => a + (l.minutes || 0), 0);
       invoices.push({
         clientId, clientName, format, displayNumber: number,
         serviceDate: serviceDate || null,
-        period: format === 'family' ? { from: period && period.from, to: period && period.to } : null,
+        period: serviceDate ? null : { from: period && period.from, to: period && period.to },
         billTo,
         shifts: shifts.map(s => {
           const lbl = levelLabel(s.licenseLevel) || '';
@@ -426,7 +485,7 @@ function coveredByOldStatement(row, invoices) {
 }
 
 module.exports = {
-  FORMATS, SERVICE_BY_LEVEL, serviceFor, shiftKeyOf,
+  FORMATS, INVOICE_MODES, SERVICE_BY_LEVEL, serviceFor, shiftKeyOf,
   amountFromMinutes, hoursOf, durationLabel, initialsOf, displayNumber,
   normalizePayer, normalizeBillTo, billToSnapshot,
   rowsFromTimeLogs, parseCsv, rowsFromImport, ymdFromUsDate, wallClock,

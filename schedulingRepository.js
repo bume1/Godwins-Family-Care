@@ -758,7 +758,15 @@ const BILLING_CSV_COLUMNS = Object.freeze([
   { key: 'adjustmentReason', header: 'Adjustment Reason' },
   { key: 'scheduleCorrected', header: 'Schedule Corrected' },
   { key: 'verification', header: 'Visit Verification' },
-  { key: 'documented', header: 'Visit Documented' }
+  { key: 'documented', header: 'Visit Documented' },
+  // Owner, 2026-11-15: billing reads the export too. The client's agreed
+  // hourly rate, what this visit bills at it (figured from minutes), whether
+  // the caregiver's timesheet is approved, and the invoice it is on. Appended
+  // so an import mapped by column position keeps every earlier column.
+  { key: 'clientRate', header: 'Client Rate' },
+  { key: 'billedAmount', header: 'Billed Amount' },
+  { key: 'timesheet', header: 'Timesheet' },
+  { key: 'invoice', header: 'Invoice' }
 ]);
 
 // ---- A caregiver's own hours ----------------------------------------------

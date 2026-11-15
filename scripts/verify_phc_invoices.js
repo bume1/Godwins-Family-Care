@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Private Home Care invoices from approved hours, through the REAL server and
- * routes (owner, 2026-11-08). Payers, Bill To, Generate Invoices from the
+ * routes (owner, 2026-11-08; invoice runs since 2026-11-15). Payers, Bill To, invoice runs from the
  * app's hours and from an imported payroll export, the invoice PDF, and the
  * carrier invoice kept off the patient's portal. Stored values are read back.
  *   node scripts/verify_phc_invoices.js
@@ -65,13 +65,19 @@ const log = (id, client, ymd, a, b) => ({ id, caregiver_id: CG.id, caregiver_nam
     log('t5', CLINICAL, '2026-10-07', '09:00', '13:00'),
     { id: 't6', caregiver_id: CG.id, client_id: FAMILY.id, clock_in_at: at('2026-10-09', '09:00'), clock_out_at: null, total_minutes: null }
   ]);
+  // Tara's timesheet for these weeks is approved (an approval made before
+  // 2026-11-15 covers the period). Invoice runs bill approved hours only.
+  STORE.set('payroll_timesheets', [{ id: 'ts1', userId: CG.id, periodStart: '2026-09-28', periodEnd: '2026-10-11', office: { status: 'approved' } }]);
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 2500));
   const a = tok(ADMIN), cm = tok(CM), ct = tok(CARRIER);
   const period = { from: '2026-09-28', to: '2026-10-11' };
 
   console.log('\n── Who may ──');
-  let r = await call('POST', '/api/gfc/admin/billing-invoices/preview', cm, { source: 'app', ...period });
+  // Since 2026-11-15 invoices are made by an invoice run (draft, approve, send).
+  const draftRun = (token, body) => call('POST', '/api/gfc/admin/billing-runs', token, body);
+  const dropRun = (id) => call('DELETE', `/api/gfc/admin/billing-runs/${id}`, a);
+  let r = await draftRun(cm, { source: 'app', ...period });
   check('a case manager cannot generate invoices', r.status === 403);
 
   console.log('\n── Payers and Bill To ──');
@@ -82,28 +88,30 @@ const log = (id, client, ymd, a, b) => ({ id, caregiver_id: CG.id, caregiver_nam
   check('the same carrier is not added twice', r.status === 409);
   r = await call('GET', `/api/gfc/admin/billing/${CARRIER.id}`, a);
   check('the client\'s enrollment LTC policy is offered, not filled in', r.body.ltcOnFile && r.body.ltcOnFile.policyNumber === 'G-77' && r.body.billTo === null);
-  r = await call('POST', '/api/gfc/admin/billing-invoices/preview', a, { source: 'app', ...period });
+  r = await draftRun(a, { source: 'app', ...period });
   check('with no Bill To, each client is named and not invoiced', r.status === 200 && r.body.invoices.length === 0 && r.body.skipped.map(s => s.clientName).sort().join() === 'Nora Patel,Ray Ochoa');
+  await dropRun(r.body.run.id);
   r = await call('PUT', `/api/gfc/admin/billing/${CARRIER.id}/bill-to`, a, { type: 'carrier', payerId: payer.id, insuredName: 'Nora Patel', policyNumber: 'G-77', claimNumber: 'A1' });
   check('a carrier Bill To is saved', r.status === 200 && STORE.get('users').find(u => u.id === CARRIER.id).billing.billTo.payerId === payer.id);
   r = await call('PUT', `/api/gfc/admin/billing/${FAMILY.id}/bill-to`, a, { type: 'family', name: 'Lena Ochoa', addressLines: '1 Main St\nAtlanta, GA 30301' });
   check('a family Bill To is saved', r.status === 200);
 
   console.log('\n── Generate from the app\'s hours ──');
-  r = await call('POST', '/api/gfc/admin/billing-invoices/preview', a, { source: 'app', ...period });
+  r = await draftRun(a, { source: 'app', ...period });
   const pv = r.body;
   check('three invoices: two carrier (one per date), one family; the clinical client and the open shift left out',
     pv.invoices.map(i => i.displayNumber).join() === 'GFC-NP-261006,GFC-NP-261008,GFC-RO-261011', JSON.stringify(pv.invoices.map(i => i.displayNumber)));
   check('billed as worked from minutes: $146.00 and $128.00', pv.invoices[0].total === '$146.00' && pv.invoices[1].total === '$128.00');
-  check('the family\'s 2-hour day gets its daily minimum as its own line', pv.invoices[2].lines.some(l => l.minimum) && pv.invoices[2].total === '$292.50');
-  r = await call('POST', '/api/gfc/admin/billing-invoices', a, { source: 'app', ...period });
-  check('drafts are made', r.status === 200 && r.body.created.length === 3);
+  check('the family\'s 2-hour day gets its daily minimum as its own line', pv.invoices[2].lines.some(l => l.kind === 'minimum') && pv.invoices[2].total === '$292.50');
+  r = await call('POST', `/api/gfc/admin/billing-runs/${pv.run.id}/approve`, a);
+  check('approving the run makes the drafts', r.status === 200 && r.body.invoices.length === 3 && r.body.invoices.every(i => i.status === 'draft'));
   const stored = STORE.get('patient_invoices');
   const carrierInv = stored.find(i => i.displayNumber === 'GFC-NP-261006');
   check('a stored carrier invoice keeps its own Stripe reference and a frozen Bill To',
     /^GFC-INV-/.test(carrierInv.number) && carrierInv.billTo.policyNumber === 'G-77' && carrierInv.status === 'draft' && carrierInv.lines[0].sourceKey === 'log:t1');
-  r = await call('POST', '/api/gfc/admin/billing-invoices/preview', a, { source: 'app', ...period });
+  r = await draftRun(a, { source: 'app', ...period });
   check('running it again bills nothing twice', r.body.invoices.length === 0 && r.body.alreadyInvoiced === 4);
+  await dropRun(r.body.run.id);
 
   console.log('\n── The PDF ──');
   r = await call('GET', `/api/gfc/admin/billing/invoices/${carrierInv.id}/pdf`, a);
@@ -131,13 +139,15 @@ const log = (id, client, ymd, a, b) => ({ id, caregiver_id: CG.id, caregiver_nam
   const row = (cl, ymd, a1, b1) => ({ caregiverName: CG.name, licenseLevel: 'PCA', clientName: cl.name, shiftDate: sched.csvDate(at(ymd, a1)),
     clockInAt: sched.csvTime(at(ymd, a1), ymd), clockOutAt: sched.csvTime(at(ymd, b1), ymd), hours: sched.minutesToHours(Math.round((Date.parse(at(ymd, b1)) - Date.parse(at(ymd, a1))) / 60000)) });
   const bad = sched.toPayrollCsv([row(CARRIER, '2026-10-08', '09:00', '13:16'), { ...row(CARRIER, '2026-10-09', '09:00', '13:00'), caregiverName: 'Nobody' }]);
-  r = await call('POST', '/api/gfc/admin/billing-invoices/preview', a, { source: 'import', csv: bad, ...period });
+  r = await draftRun(a, { source: 'import', csv: bad, ...period });
   check('a file with a bad row imports nothing and names the row', r.status === 400 && r.body.code === 'IMPORT_ROWS_INVALID' && r.body.rowErrors[0].line === 3);
   const good = sched.toPayrollCsv([row(CARRIER, '2026-10-06', '09:00', '13:52'), row(CARRIER, '2026-10-08', '09:00', '13:16')]);
-  r = await call('POST', '/api/gfc/admin/billing-invoices', a, { source: 'import', csv: good, fileName: 'payroll.csv', ...period });
+  r = await draftRun(a, { source: 'import', csv: good, fileName: 'payroll.csv', ...period });
+  const leftOff = r.body.alreadyInvoiced;
+  r = await call('POST', `/api/gfc/admin/billing-runs/${r.body.run.id}/approve`, a);
   const reissued = STORE.get('patient_invoices').filter(i => i.source === 'import');
   check('only the voided date is invoiced again; the 9/2 shift already on a live invoice is left off',
-    r.status === 200 && r.body.created.length === 1 && r.body.alreadyInvoiced === 1 && reissued.length === 1);
+    r.status === 200 && r.body.invoices.length === 1 && leftOff === 1 && reissued.length === 1);
   check('the re-issued invoice takes the next number, never the voided one', reissued[0].displayNumber === 'GFC-NP-261008-2');
   const imp = STORE.get('invoice_hour_imports');
   check('the approved file is kept with the invoice made from it', imp.length === 1 && imp[0].invoiceIds[0] === reissued[0].id && imp[0].fileName === 'payroll.csv');

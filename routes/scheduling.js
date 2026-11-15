@@ -29,6 +29,8 @@ const onboardingGate = require('../caregiverOnboardingGate');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
 const accountTypes = require('../accountTypes');
+const invoiceRuns = require('../invoiceRuns');   // which hours are approved for billing (owner, 2026-11-15)
+const phcInvoices = require('../phcInvoices');
 const ptax = require('../payrollTax');
 const pprof = require('../payrollProfiles');
 // The office number. ORG in public/consent-text.js is the single source — it is
@@ -3483,6 +3485,21 @@ module.exports = function createSchedulingRoutes(deps) {
       const s = shiftsById.get(l.shift_id);
       return !!(s && s.status === 'completed');
     };
+    // What billing needs beside the hours (owner, 2026-11-15): the client's
+    // agreed rate, what the hours bill at, whether the caregiver's timesheet
+    // is approved, and the invoice the shift is on.
+    const approval = invoiceRuns.approvalIndex(await readRows('payroll_timesheets'), await readRows('payroll_runs'));
+    const invoiceOf = new Map();
+    for (const inv of await readRows('patient_invoices')) {
+      if (!inv || inv.status === 'void') continue;
+      for (const ln of inv.lines || []) if (ln && ln.timeLogId) invoiceOf.set(String(ln.timeLogId), inv.displayNumber || inv.number);
+    }
+    const rateCentsOf = (clientId) => {
+      const ra = (usersById.get(clientId) || {}).rateAgreement || {};
+      const c = Math.round(Number(String(ra.hourlyRate || '').replace(/[$,\s]/g, '')) * 100);
+      return c > 0 ? c : null;
+    };
+    const APPROVAL_LABEL = { paid: 'Paid in payroll', approved: 'Approved', changed: 'Changed since approved', waiting: 'Not approved yet' };
 
     const logs = allLogs
       .filter(l => l && (l.clock_out_at || concluded(l)))
@@ -3518,7 +3535,18 @@ module.exports = function createSchedulingRoutes(deps) {
         // unverifiable clock-in is not the same claim as a verified one, and
         // an invoice should not blur them.
         verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
-        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
+        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no',
+        ...(() => {
+          const rate = rateCentsOf(l.client_id);
+          const mins = Number(l.total_minutes) || 0;
+          const state = l.id && l.clock_out_at ? invoiceRuns.approvalOf({ timeLogId: l.id, caregiverId: l.caregiver_id, minutes: mins, serviceDate: rowDate }, approval) : 'waiting';
+          return {
+            clientRate: rate ? (rate / 100).toFixed(2) : '',
+            billedAmount: rate && mins ? (phcInvoices.amountFromMinutes(mins, rate) / 100).toFixed(2) : '',
+            timesheet: APPROVAL_LABEL[state] || '',
+            invoice: (l.id && invoiceOf.get(String(l.id))) || ''
+          };
+        })()
       };
     });
   };

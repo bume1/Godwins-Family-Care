@@ -69,7 +69,9 @@ test('invoice numbers keep the carrier style, and a number is never reused', () 
 });
 
 test('the server counts voided invoices as taken numbers, and Stripe never sees the display number', () => {
-  assert.match(SERVER, /const taken = new Set\(invoices\.map\(i => i\.displayNumber\)\.filter\(Boolean\)\);/, 'every invoice, voids included');
+  // REPOINTED 2026-11-15: the drafting moved into phcDraftFrom (shared with
+  // invoice runs); the rule is the same, every invoice ever made counts.
+  assert.match(SERVER, /taken: new Set\(h\.invoices\.map\(i => i\.displayNumber\)\.filter\(Boolean\)\)/, 'every invoice, voids included');
   assert.match(SERVER, /number: await newInvoiceNumber\(\), clientId: i\.clientId, kind: 'home_care'/, 'each invoice still gets its own GFC-INV reference');
   // stripeSafe only accepts the GFC-INV reference as the product name.
   const inv = { id: '0f7a2b1c-1111-2222-3333-444455556666', number: 'GFC-INV-AAAAAA', displayNumber: 'GFC-NP-261006', totalCents: 14600 };
@@ -209,7 +211,9 @@ test('a shared name is refused, never guessed', () => {
 });
 
 test('a file that is not the export says which columns are missing', () => {
-  const r = P.rowsFromImport('Name,Date,Hours\nx,10/6/2026,4\n', people);
+  // "Date" alone is read now (a hand-kept spreadsheet, 2026-11-15), so the
+  // file here names no date column at all.
+  const r = P.rowsFromImport('Name,When,Hours\nx,10/6/2026,4\n', people);
   assert.match(r.errors[0].message, /Missing columns: Caregiver, Client, Shift Date, Clock In, Clock Out\./);
 });
 
@@ -253,7 +257,8 @@ test('clinical-only clients are never invoiced here', () => {
 
 test('every invoice route is billing\'s, and the PDF is opened with the token in the header', () => {
   for (const r of ["app.post('/api/gfc/admin/billing-payers'", "app.put('/api/gfc/admin/billing-payers/:id'", "app.put('/api/gfc/admin/billing/:clientId/bill-to'",
-    "app.post('/api/gfc/admin/billing-invoices/preview'", "app.post('/api/gfc/admin/billing-invoices'", "app.get('/api/gfc/admin/billing/invoices/:id/pdf'"]) {
+    "app.post('/api/gfc/admin/billing-runs'", "app.post('/api/gfc/admin/billing-runs/:id/approve'", "app.post('/api/gfc/admin/billing-runs/:id/send'",
+    "app.get('/api/gfc/admin/billing-runs/:id/clients/:clientId/pdf'", "app.get('/api/gfc/admin/billing/invoices/:id/pdf'"]) {
     assert.ok(SERVER.includes(`${r}, authenticateToken, requireBilling,`), r);
   }
   assert.match(PAGE, /headers: \{ Authorization: `Bearer \$\{getToken\(\)\}` \}/);
