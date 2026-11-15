@@ -289,3 +289,29 @@ test('the office saves or revises the SSN: payroll preparers only, their own acc
   assert.match(r, /const shareSsnTin = \(p\) =>/);
   assert.match(r, /b\.useSsnOnFile === true && p\.ssn/);
 });
+
+// ── a W-4 uploaded as "W-9" (owner report, 2026-11-15) ─────────────────────────
+test('a filled W-4 filed as a W-9 reads as a W-4 and is flagged', async () => {
+  const g = require('../govForms');
+  const buf = await g.fillW4({ person: { firstName: 'Pat', lastName: 'Test', line: '1 Main St', city: 'Ellijay', state: 'GA', zip: '30536' }, ssnLast4: '1234',
+    w4: { filingStatus: 'mfj', signedName: 'Pat Test', signedAt: '2026-10-01T12:00:00Z' }, employer: {}, preview: true });
+  const r = await M.matchDocument({ bytes: Buffer.from(buf), mimeType: 'application/pdf', filedAs: 'w9', textOf: M.textOf, at: 'T' });
+  assert.deepEqual([r.match.readsAs, r.match.filedAsDiffers], ['w4', true]);
+});
+
+test('Use For is never offered on an unchecked or mis-typed document, and Change Type is on every row', () => {
+  const r = src('routes/payroll.js');
+  const on = r.slice(r.indexOf("'/api/payroll/admin/people/:userId/forms/:form/on-file', authenticateToken, requirePayrollPreparer"));
+  assert.match(on.slice(0, 3000), /if \(!doc\.match\) return res\.status\(409\)\.json\(\{[^}]*code: 'ON_FILE_NOT_READ'/, 'an unchecked document is refused');
+  const c = src('routes/caregiver.js');
+  const kindRoute = c.slice(c.indexOf("'/api/caregiver/documents/:id/kind'"), c.indexOf('const publicCaregiverDoc'));
+  assert.match(kindRoute, /code: 'DOC_ON_FILE'/, 'a document on file cannot change type');
+  assert.match(kindRoute, /prof\.i9 && prof\.i9\.onFile && prof\.i9\.onFile\.documentId === rows\[i\]\.id/);
+  assert.match(kindRoute, /matchAndKeep\(row\.id, bytes, row\.mime_type, kind, req\.user\)/, 'an unread or SS-card document is read after a type change');
+  assert.doesNotMatch(kindRoute, /status !== 'received'|status === 'accepted'/, 'type changes before and after acceptance');
+  const hub = src('public/admin-hub.html');
+  assert.match(hub, /data-change-type=\{d\.id\}/, 'a Change Type button on every row');
+  assert.match(hub, /if \(!d\.match\) return <div[^>]*>Not checked yet/);
+  assert.match(hub, /if \(d\.match\.filedAsDiffers\) return <div[^>]*>This reads as/);
+  assert.match(hub, /autoChecked\.current === caregiverId/, 'unchecked files are checked when the section opens, once');
+});
