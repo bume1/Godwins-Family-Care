@@ -89,8 +89,19 @@ const build = (opts = {}) => {
   const notices = [];
   const notify = {
     visitSummaryReady: async (a) => { notices.push({ type: 'visit_summary_ready', ...a }); return { notified: 1 }; },
-    resultReviewed: async (a) => { notices.push({ type: 'result_reviewed', ...a }); return { notified: 1 }; }
+    resultReviewed: async (a) => { notices.push({ type: 'result_reviewed', ...a }); return { notified: 1 }; },
+    // Added 2026-11-09: an ABNORMAL result now pages the ordering clinician at
+    // filing, which it did not before (only a critical one did). It is a
+    // CLINICIAN notice, so it must not be counted by the assertions below that
+    // protect the P1 rule "a result is visible on filing and announced to the
+    // PATIENT once, on review".
+    abnormalResultWaiting: async (a) => { notices.push({ type: 'abnormal_result_waiting', ...a }); return { notified: 1 }; }
   };
+  // The patient-facing notices, named explicitly rather than by exclusion, so
+  // a clinician notice added later cannot slip into a patient assertion and a
+  // patient notice added later cannot slip out of one.
+  const PATIENT_NOTICE_TYPES = ['visit_summary_ready', 'result_reviewed'];
+  const patientNotices = () => notices.filter(n => PATIENT_NOTICE_TYPES.includes(n.type));
   const activity = [];
   const logActivity = async (...a) => { activity.push(a); };
   // A patient route must NEVER touch OpenEMR: any access throws.
@@ -150,7 +161,7 @@ const build = (opts = {}) => {
     async () => (await db.get('appointment_video_links')) || [],
     (rows, eid) => (rows || []).find(r => r && String(r.eid) === String(eid)) || null);
   const clinician = (fn) => async (...args) => { mode.clinician = true; try { return await fn(...args); } finally { mode.clinician = false; } };
-  return { store, db, arm, loadRows, notices, activity, openemr, openemrTouched, handlers, drive, ...fns,
+  return { store, db, arm, loadRows, notices, patientNotices, activity, openemr, openemrTouched, handlers, drive, ...fns,
     receiveClinicalResult: clinician(fns.receiveClinicalResult) };
 };
 const CLIENT_LIVE = (opts, u) => ({ ...CLIENT, ...(opts.client || {}), id: u.id === 'c-1' || u.familyOfClientId ? 'c-1' : u.id });
@@ -463,7 +474,17 @@ test('9. a filed result is on the portal at once, with ZERO notices, and says it
   const h = build();
   const res = await fileResult(h);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(h.notices, [], 'nothing is sent at filing');
+  // Repointed, not patched to pass. The P1 rule this protects is that a result
+  // is visible on filing and announced to the PATIENT once, on review. An
+  // ABNORMAL result now pages the ordering CLINICIAN at filing, which is a
+  // different audience and a different rule.
+  assert.deepEqual(h.patientNotices(), [], 'nothing is sent TO THE PATIENT at filing');
+  const paged = h.notices.filter(n => n.type === 'abnormal_result_waiting');
+  assert.equal(paged.length, 1, 'an abnormal result pages the ordering clinician at filing');
+  assert.equal(paged[0].user.id, PROVIDER.id, 'the ordering clinician, nobody else');
+  // The notice is handed no patient, no value and no interpretation, which is
+  // the strongest guarantee available: it cannot leak what it never received.
+  assert.deepEqual(Object.keys(paged[0]).sort(), ['actorId', 'ctaPath', 'resultId', 'type', 'user']);
   const row = (await h.loadRows('clinical_results'))[0];
   assert.ok(row.releasedToPatientAt, 'released at filing');
   assert.equal(row.patientNotifiedAt, null);
@@ -482,12 +503,14 @@ test('9b. acknowledging sends exactly ONE notice; re-acknowledging sends none', 
   const res = mkRes();
   await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'Repeat A1c in 3 months.', patientNote: 'Your sugar is a little high; we will adjust your plan.' }), res);
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.deepEqual(h.notices.map(n => n.type), ['result_reviewed']);
-  assert.equal(h.notices[0].clientId, 'c-1');
+  // Patient-facing only: filing already paged the clinician about the abnormal
+  // result, and that is not the notice this test is about.
+  assert.deepEqual(h.patientNotices().map(n => n.type), ['result_reviewed']);
+  assert.equal(h.patientNotices()[0].clientId, 'c-1');
   const again = mkRes();
   await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'again' }), again);
   assert.equal(again.statusCode, 409);
-  assert.equal(h.notices.length, 1, 'still exactly one');
+  assert.equal(h.patientNotices().length, 1, 'still exactly one to the patient');
   const row = (await h.loadRows('clinical_results'))[0];
   assert.ok(row.patientNotifiedAt);
   const s = await readSummary(h, CLIENT_USER);
