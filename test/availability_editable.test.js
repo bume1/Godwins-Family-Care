@@ -84,7 +84,11 @@ test('the Super Admin, a manager and a care coordinator record for somebody else
   // Owner decision, 2026-11-03, superseding 2026-10-27: managers record it too.
   // It reads the ACCOUNT TYPE: the old `role === caseManager` check refused
   // every coordinator (stored as role user + isManager) and admitted LMSWs.
-  assert.match(pred, /accountTypes\.isHomeCareOffice/);
+  // Since the Modules grid (owner, 2026-11-13) it is Staff Scheduling, whose
+  // default is the same three office types; a grant or removal moves it.
+  assert.match(pred, /accountTypes\.hasModule\(u, 'caregiverScheduling'\)/);
+  for (const t of ['admin', 'manager', 'coordinator']) assert.strictEqual(require('../accountTypes').hasModule(require('../accountTypes').fieldsFor(t), 'caregiverScheduling'), true, t);
+  assert.strictEqual(require('../accountTypes').hasModule(require('../accountTypes').fieldsFor('lmsw'), 'caregiverScheduling'), false, 'an LMSW is not the scheduling office');
   assert.ok(!/CASE_MANAGER/.test(pred), 'an LMSW (the caseManager role) is not the scheduling office');
   const at = require('../accountTypes');
   assert.deepStrictEqual([...at.HOME_CARE_OFFICE_TYPES].sort(), ['admin', 'coordinator', 'manager']);

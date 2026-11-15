@@ -610,3 +610,28 @@ test('hub: the user page declares the pay-change state it reads (it crashed User
   assert.match(page, /\{isSuperAdmin && \(\s*<button onClick=\{\(\) => \{ setShowBulkReset\(true\)/, 'bulk password reset stays the Super Admin\'s');
   assert.match(page, /\{isSuperAdmin && <button onClick=\{\(\) => setActiveTab\('resets'\)\}/);
 });
+
+// Timesheets (owner, 2026-11-13): an employee asks for their OWN hours to be
+// changed, from their timesheet. Same queue, same one writer; someone else's
+// log reads as not found; paid hours are locked.
+test('an employee requests a change to their own time; the Super Admin approves it', async () => {
+  const other = { ...LOG, id: 'tl2', caregiver_id: 'someone-else' };
+  const paid = { ...LOG, id: 'tl3', payroll_run_id: 'run1' };
+  const h = schedHarness({ time_logs: [LOG, other, paid] });
+  try {
+    let r = await h.call('POST', '/api/my/time-logs/tl2/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'x' }, 'cg1');
+    assert.strictEqual(r.status, 404, 'not their log');
+    r = await h.call('POST', '/api/my/time-logs/tl3/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'x' }, 'cg1');
+    assert.strictEqual(r.body.code, 'TIME_LOG_PAYROLL_LOCKED');
+    r = await h.call('POST', '/api/my/time-logs/tl1/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z' }, 'cg1');
+    assert.strictEqual(r.body.code, 'ADJUSTMENT_REASON_REQUIRED');
+    r = await h.call('POST', '/api/my/time-logs/tl1/adjustment-requests', { clockOutAt: '2026-10-20T18:00:00Z', reason: 'Forgot to clock out' }, 'cg1');
+    assert.strictEqual(r.status, 200, r.text);
+    assert.strictEqual(r.body.request.requestedByRole, 'self');
+    assert.strictEqual((await h.db.get('time_logs'))[0].clock_out_at, LOG.clock_out_at, 'nothing changes until approved');
+    assert.ok(h.notices.some(n => n[0] === 'time_adjustment_requested' && n[1] === 'adm'));
+    const ok = await h.call('POST', `/api/scheduling/adjustment-requests/${r.body.request.id}/decide`, { decision: 'approved' }, 'adm');
+    assert.strictEqual(ok.status, 200, ok.text);
+    assert.strictEqual((await h.db.get('time_logs'))[0].clock_out_at, '2026-10-20T18:00:00.000Z');
+  } finally { h.close(); }
+});

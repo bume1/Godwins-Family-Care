@@ -30,6 +30,13 @@ const DEFAULT_SETTINGS = Object.freeze({
   federalDepositSchedule: 'monthly',
   gaWithholdingFrequency: 'monthly',
   gaSutaRatePct: null,           // GFC's assigned rate, from the GA DOL notice
+  p2pAccount: '$GodwinsFamilyCare', // GFC's Cash App, for a payroll sent P2P (owner, 2026-11-13)
+  // The Drive folder pay stubs are filed in (owner, 2026-11-14: the finance
+  // folder, never the person's role documents). Null: 07 Finance → Payroll.
+  payStubFolderId: null,
+  // Contractors living outside the U.S. (owner, 2026-11-13): off until the
+  // owner turns it on, and which ways they may be paid.
+  overseas: { enabled: false, payMethods: ['wise'] },
   reminderLeadBusinessDays: 5
 });
 
@@ -112,6 +119,23 @@ function normalizeSettings(b, current) {
     // The top-level fields mirror "staff", which older readers still use.
     s.frequency = next.staff.frequency; s.anchor = next.staff.anchor; s.payDateOffsetDays = next.staff.payDateOffsetDays;
   }
+  if (b.overseas !== undefined) {
+    const o = b.overseas || {};
+    const methods = (Array.isArray(o.payMethods) ? o.payMethods : []).filter(m => ['wise', 'intl_wire'].includes(m));
+    if (o.enabled === true && !methods.length) return { error: 'Choose at least one way to pay contractors abroad.', code: 'OVERSEAS_METHODS' };
+    s.overseas = { enabled: o.enabled === true, payMethods: methods.length ? [...new Set(methods)] : ['wise'] };
+  }
+  if (b.p2pAccount !== undefined) {
+    const t = String(b.p2pAccount || '').trim().replace(/^\$/, '');
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,19}$/.test(t)) return { error: 'GFC\'s Cash App is a $Cashtag, for example $GodwinsFamilyCare.', code: 'P2P_ACCOUNT' };
+    s.p2pAccount = `$${t}`;
+  }
+  if (b.payStubFolder !== undefined) {
+    const raw = String(b.payStubFolder || '').trim();
+    const m = raw.match(/\/folders\/([A-Za-z0-9_-]{10,})/) || raw.match(/^([A-Za-z0-9_-]{10,})$/);
+    if (raw && !m) return { error: 'Paste the Drive folder link, for example https://drive.google.com/drive/folders/…', code: 'PAY_STUB_FOLDER' };
+    s.payStubFolderId = raw ? m[1] : null;
+  }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);
     if (!Number.isInteger(n) || n < 1 || n > 20) return { error: 'Reminder lead time is 1 to 20 business days.', code: 'REMINDER_LEAD' };
@@ -133,6 +157,29 @@ function periodFor(ymd, settings, schedule) {
   const out = { start, end, payDate: addDays(end, s.payDateOffsetDays), frequency: s.frequency, perYear: FREQUENCIES[s.frequency].perYear };
   if (schedule) out.schedule = schedule;
   return out;
+}
+// The standard pay periods around a date, newest first (owner, 2026-11-14:
+// pick a real pay period, not "a date in it").
+function periodsAround(ymd, settings, schedule, { back = 8, ahead = 2 } = {}) {
+  const cur = periodFor(ymd, settings, schedule);
+  const len = FREQUENCIES[cur.frequency].days;
+  const out = [];
+  for (let k = ahead; k >= -back; k--) out.push(periodFor(addDays(cur.start, k * len), settings, schedule));
+  return out;
+}
+// A custom pay period (owner, 2026-11-14): for a catch-up or an odd-length
+// payroll. Any start and end up to 31 days, a payday on or after the end, and
+// the frequency withholding is figured for (weekly or every two weeks).
+function customPeriod(b, schedule) {
+  b = b || {};
+  if (!isYmd(b.start) || !isYmd(b.end) || b.end < b.start) return { error: 'Give the first and last day of the custom period.', code: 'CUSTOM_PERIOD_DATES' };
+  const days = Math.round((ymdMs(b.end) - ymdMs(b.start)) / DAY) + 1;
+  if (days > 31) return { error: 'A custom period is at most 31 days.', code: 'CUSTOM_PERIOD_LENGTH' };
+  if (!isYmd(b.payDate) || b.payDate < b.end || ymdMs(b.payDate) - ymdMs(b.end) > 30 * DAY) return { error: 'Payday is on or after the last day, within 30 days.', code: 'CUSTOM_PERIOD_PAYDAY' };
+  const frequency = FREQUENCIES[b.frequency] ? b.frequency : days <= 10 ? 'weekly' : 'biweekly';
+  const out = { start: b.start, end: b.end, payDate: b.payDate, frequency, perYear: FREQUENCIES[frequency].perYear, custom: true };
+  if (schedule) out.schedule = schedule;
+  return { value: out };
 }
 // The Monday that starts the overtime workweek a date falls in.
 function workweekStart(ymd) {
@@ -309,5 +356,6 @@ function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perY
 
 module.exports = {
   FREQUENCIES, DEFAULT_SETTINGS, PAY_SCHEDULES, scheduleSettings, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
-  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck
+  bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck,
+  periodsAround, customPeriod
 };

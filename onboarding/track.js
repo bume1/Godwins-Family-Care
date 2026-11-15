@@ -254,7 +254,8 @@ function packetEvidence(item, packetRows) {
       kind, item: r ? r.item : null, title: r ? r.title : kind,
       required: r ? !!r.required : true,
       status: r ? r.status : 'missing',
-      hers: r ? PACKET_HERS.includes(r.source) : true
+      hers: r ? PACKET_HERS.includes(r.source) : true,
+      office: !!(r && r.source === 'office')
     };
   });
 }
@@ -620,6 +621,9 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
       returned: st && st.returned ? st.returned : null,
       acknowledgments: ackStatus(it, st),
       link: it.link || null,
+      // Extra help for the step (the Staff Pay Guide). It goes away once the
+      // step is done: the guide itself stays in the Training Library.
+      guide: it.guide && status !== STATUS.COMPLETE && status !== STATUS.NOT_APPLICABLE ? it.guide : null,
       elements: it.elements
         ? it.elements.filter(e => typeof e === 'string' || matchesWhen(e.when, i)).map(e => (typeof e === 'string' ? { row: e } : { row: e.row, ref: e.ref }))
         : null,

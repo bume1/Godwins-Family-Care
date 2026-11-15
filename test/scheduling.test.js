@@ -544,7 +544,7 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
     // carries one — the set of guards did.
     // `requireW2Staff` joined 2026-11-08: W-2 staff without shifts clock in on
     // the same clock (staff-clock), and only they may.
-    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable|requireShiftWorker|requireAvailabilityWriter|requireAvailabilityOffice|requireW2Staff/.test(middleware);
+    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable|requireShiftWorker|requireAvailabilityWriter|requireAvailabilityOffice|requireW2Staff|requireHoursExport/.test(middleware);
     // Three reads serve two audiences (admin sees all, a caregiver sees their
     // own) and branch inline. They must still branch, never return everything.
     const inlineGuarded = [
@@ -576,8 +576,13 @@ test('the money and the client record stay ADMIN-only', () => {
   // Named by METHOD as well as path: GET /time-logs is a manager-readable list
   // and POST /time-logs types in hours that were never clocked. Matching the
   // path alone finds the read and proves nothing about the write.
+  // The hours file (payroll.csv) is the Super Admin's or a payroll preparer's
+  // (the Payroll module granted in the Modules grid, owner 2026-11-13): never
+  // the schedule managers'. Pinned below.
+  const hx = routeSrc.indexOf("router.get('/api/scheduling/payroll.csv'");
+  assert.ok(routeSrc.slice(hx, hx + 200).includes('requireHoursExport') && !routeSrc.slice(hx, hx + 200).includes('requireScheduleManager'));
+  assert.match(routeSrc, /const requireHoursExport = \(req, res, next\) => \(req\.user && \(req\.user\.role === ROLES\.ADMIN \|\| accountTypes\.hasModule\(req\.user, 'payroll'\)\) \? next\(\) : requireAdmin\(req, res, next\)\);/);
   for (const [method, route] of [
-    ['get', '/api/scheduling/payroll.csv'],
     ['get', '/api/scheduling/billing.csv'],
     ['post', '/api/scheduling/time-logs'],
     ['put', '/api/scheduling/time-logs/:id'],
@@ -640,8 +645,10 @@ test('running the board is admin OR manager, and never wider', () => {
     assert.ok(found > 0, `${route} should exist`);
   }
   // The gate itself is what makes those two lines mean anything.
-  assert.ok(/const isScheduleManager = \(u\) => !!u && \(u\.role === ROLES\.ADMIN \|\| !!u\.isManager\)/.test(routeSrc),
-    'the manager gate must be admin OR the manager flag, and nothing else');
+  // Since the Modules grid (owner, 2026-11-13): admin, or whoever holds Staff
+  // Scheduling (the office by default, plus a grant, minus a removal).
+  assert.ok(/const isScheduleManager = \(u\) => !!u && \(u\.role === ROLES\.ADMIN \|\| accountTypes\.hasModule\(u, 'caregiverScheduling'\)\)/.test(routeSrc),
+    'the manager gate must be admin OR the Staff Scheduling module, and nothing else');
   // An override is a compliance decision, not a scheduling one.
   assert.ok(/gate\.checkSchedulingAllowed\(client, req\.body \|\| \{\}, req\.user, isAdmin\(req\.user\)\)/.test(routeSrc),
     'the enrollment override stays ADMIN-only — isAdmin, never isScheduleManager');

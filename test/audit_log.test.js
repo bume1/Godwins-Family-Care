@@ -60,7 +60,9 @@ test('the audit middleware is registered before every route, logActivity writes 
   assert.ok(la.indexOf('await audit.record(') < la.indexOf("db.get('activity_log')"), 'durable row before the capped blob');
   assert.match(serverSrc, /audit\.bindUser\(req\.user, req\.session\)/);
   assert.equal(serverSrc.indexOf("require('./logScrubber').install(console)"), serverSrc.indexOf('require('), 'the scrubber is the first require in server.js');
-  assert.match(serverSrc, /app\.get\('\/api\/admin\/audit-log', authenticateToken, requireAdmin/);
+  // The Super Admin, or a reader granted the Audit module (owner, 2026-11-13).
+  assert.match(serverSrc, /app\.get\('\/api\/admin\/audit-log', authenticateToken, requireAuditReader/);
+  assert.match(serverSrc, /const requireAuditReader = [^\n]*\n\s*if \(req\.user && \(req\.user\.role === config\.ROLES\.ADMIN \|\| accountTypes\.hasModule\(req\.user, 'audit'\)\)\) return next\(\);/);
   assert.match(serverSrc, /app\.get\('\/healthz'/);
 });
 test('the capped activity_log blob is no longer the record: PHI-access rows go to the audit store, not a 500-entry array', () => {

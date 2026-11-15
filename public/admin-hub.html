@@ -151,7 +151,11 @@
     // User Management and nothing else. Everything else here stays the Super
     // Admin's; the server still refuses what they may not do.
     const HUB_OFFICE_TYPES = ['manager', 'coordinator'];
-    const isHubOffice = (u) => !!u && u.role !== 'admin' && HUB_OFFICE_TYPES.includes(u.accountType);
+    // Since the Modules grid (owner, 2026-11-13) it is whoever holds User
+    // Management: the record's `modules` when the server sent it, otherwise
+    // the account type as before. The server still refuses the rest.
+    const isHubOffice = (u) => !!u && u.role !== 'admin' &&
+      (Array.isArray(u.modules) ? u.modules.includes('users') : HUB_OFFICE_TYPES.includes(u.accountType));
     // USER MANAGEMENT IS INTERNAL STAFF ONLY (owner, 2026-11-09). Client and
     // family accounts live in the Clients area (/clients) and never appear
     // here. The full user list is still loaded, because the caregiver and
@@ -1474,6 +1478,77 @@
     // The headshot and website bio each staff member keeps in My GFC → My
     // Profile. Shown read-only on their User Management form for the admin
     // team (owner, 2026-11-09), in place of a separate Team Bios page.
+    // The Modules grid (owner, 2026-11-13). One row per module: what this
+    // person's account type includes comes ticked and can be unticked; what it
+    // does not include comes unticked and can be granted. Locked rows say why.
+    // The server decides every row (GET/PUT /api/users/:id/modules); this page
+    // restates no rule of its own.
+    const MODULE_STATE_LABEL = { role: 'Comes with their role', removed: 'Taken away', granted: 'Added', off: '' };
+    const ModulesSection = ({ token, userId, userName }) => {
+      const [grid, setGrid] = React.useState(null);
+      const [editable, setEditable] = React.useState(false);
+      const [checked, setChecked] = React.useState({});
+      const [err, setErr] = React.useState('');
+      const [msg, setMsg] = React.useState('');
+      const [busy, setBusy] = React.useState(false);
+      const take = (d) => { setGrid(d.grid); setChecked(Object.fromEntries(d.grid.map(r => [r.id, r.has]))); };
+      React.useEffect(() => {
+        let live = true;
+        setGrid(null); setErr(''); setMsg('');
+        fetch(`/api/users/${encodeURIComponent(userId)}/modules`, { headers: { Authorization: `Bearer ${token}` } })
+          .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || 'Could not load the modules.'); return d; }))
+          .then(d => { if (live) { take(d); setEditable(!!d.editable); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [token, userId]);
+      const dirty = !!grid && grid.some(r => !!checked[r.id] !== r.has);
+      const save = () => {
+        setBusy(true); setErr(''); setMsg('');
+        fetch(`/api/users/${encodeURIComponent(userId)}/modules`, {
+          method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ modules: grid.filter(r => checked[r.id]).map(r => r.id) })
+        }).then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || 'Could not save the modules.'); return d; }))
+          .then(d => { take(d); setMsg('Saved. It applies on their next click.'); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      const areas = grid ? [...new Set(grid.map(r => r.area))] : [];
+      return (
+        <div className="border-t pt-4">
+          <h3 className="font-medium text-gray-800 mb-1">Modules</h3>
+          <p className="text-sm text-gray-500 mb-3">What {userName || 'this person'} can open. Ticked modules come with their role; untick one to take it away. Tick any other module to give them access.</p>
+          {err && <p className="text-sm text-red-600 mb-2">{err}</p>}
+          {!err && !grid && <p className="text-sm text-gray-500">Loading…</p>}
+          {grid && areas.map(area => (
+            <div key={area} className="mb-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">{area}</div>
+              {grid.filter(r => r.area === area).map(r => {
+                const on = !!checked[r.id];
+                const state = r.byRole ? (on ? 'role' : 'removed') : (on ? 'granted' : 'off');
+                return (
+                  <label key={r.id} className={`flex items-start gap-3 py-1.5 px-2 rounded ${r.locked || !editable ? 'opacity-70' : 'hover:bg-gray-50 cursor-pointer'}`}>
+                    <input type="checkbox" className="mt-1" checked={on} disabled={!!r.locked || !editable || busy}
+                      onChange={e => setChecked({ ...checked, [r.id]: e.target.checked })} />
+                    <span className="flex-1">
+                      <span className="font-medium text-gray-800">{r.name}</span>
+                      {MODULE_STATE_LABEL[state] && <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${state === 'role' ? 'bg-gray-100 text-gray-600' : state === 'granted' ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-800'}`}>{MODULE_STATE_LABEL[state]}</span>}
+                      <span className="block text-xs text-gray-500">{r.locked || r.description}</span>
+                      {r.note && on && <span className="block text-xs text-amber-800">{r.note}</span>}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ))}
+          {grid && editable && (
+            <div className="flex items-center gap-3">
+              <button type="button" className="px-3 py-1.5 rounded bg-primary text-white text-sm disabled:opacity-50" disabled={!dirty || busy} onClick={save}>{busy ? 'Saving…' : 'Save Modules'}</button>
+              {msg && <span className="text-sm text-green-700">{msg}</span>}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const StaffBioSection = ({ token, userId, userName }) => {
       const [bio, setBio] = React.useState(null);
       const [photo, setPhoto] = React.useState('');
@@ -1603,6 +1678,8 @@
     // tests read this one list.
     const staffRecordSections = (u, isSuperAdmin) => [
       { id: 'sr-account', label: 'Account & Role' },
+      // What this person can open (owner, 2026-11-13). Super Admin only.
+      isSuperAdmin && { id: 'sr-modules', label: 'Modules' },
       (srIsCaregiver(u) || srIsClinical(u) || (u && u.role === 'user')) && { id: 'sr-credentials', label: 'Credentials' },
       // Bio sits right before Pay (owner, 2026-11-09).
       { id: 'sr-bio', label: 'Bio & Headshot' },
@@ -1703,6 +1780,8 @@
                     onClick={() => openPdf(`/api/caregiver/welcome-packet/signed.pdf?caregiverId=${encodeURIComponent(user.id)}`, 'welcome-packet.pdf')}>Open</button>}
                   {x.pdf === 'attestation' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
                     onClick={() => openPdf(`/api/caregiver/welcome-packet/attestations/${encodeURIComponent(x.kind)}.pdf?caregiverId=${encodeURIComponent(user.id)}`, `${x.kind}.pdf`)}>Open</button>}
+                  {x.pdf === 'taxform' && <button type="button" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onClick={() => openPdf(`/api/payroll/admin/people/${encodeURIComponent(user.id)}/forms/${encodeURIComponent(x.form)}.pdf`, `${x.title}.pdf`)}>Open</button>}
                   {(x.links || []).slice(0, 1).map(href => <a key={href} href={href} target="_blank" rel="noopener noreferrer" className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">View policy</a>)}
                 </div>
               ))}
@@ -1726,6 +1805,11 @@
         if (srIsCaregiver(user)) srFetch(token, `/api/caregiver/admin/welcome-packets/${encodeURIComponent(user.id)}`).then(setWp).catch(e => { setWp(null); setWpErr(e.message); });
       }, [token, user.id]);
       React.useEffect(() => { setOb(null); setWp(null); load(); }, [load]);
+      // A document reviewed or filed further down the record changes this list.
+      React.useEffect(() => {
+        window.addEventListener('gfc-staff-docs-changed', load);
+        return () => window.removeEventListener('gfc-staff-docs-changed', load);
+      }, [load]);
       const setItem = async (kind, status) => {
         setBusy(kind); setWpErr('');
         try {
@@ -1877,8 +1961,8 @@
         else if (d && d.error) setMsg({ ok: false, text: `Could not load this caregiver's documents: ${d.error}` });
         if (k && Array.isArray(k.kinds)) {
           setKinds(k.kinds);
-          // The catalog decides the default, so no kind is named in this page.
-          setKind(cur => cur || (k.kinds.find(x => x.payroll) || k.kinds[0] || {}).kind || '');
+          // No default type (owner, 2026-11-13): a file left on the first type
+          // lands on the wrong checklist item.
         }
       }, [token, caregiverId]);
 
@@ -1906,6 +1990,7 @@
             setFile(null);
             if (fileRef.current) fileRef.current.value = '';
             await load();
+            window.dispatchEvent(new Event('gfc-staff-docs-changed'));
           }
         } catch (e) {
           setMsg({ ok: false, text: e.message || 'That did not upload.' });
@@ -1953,6 +2038,7 @@
           });
           setMsg({ ok: true, text: decision === 'accepted' ? 'Accepted.' : 'Sent back with your reason.' });
           await load();
+          window.dispatchEvent(new Event('gfc-staff-docs-changed'));
         } catch (e) { setMsg({ ok: false, text: e.message }); }
       };
 
@@ -1960,7 +2046,7 @@
         if (!window.confirm(`Remove ${d.kindLabel} "${d.fileName}"? This deletes the stored file.`)) return;
         const res = await api.deleteCaregiverDoc(token, d.id);
         if (res && res.error) setMsg({ ok: false, text: res.error });
-        else { setMsg({ ok: true, text: 'Removed.' }); await load(); }
+        else { setMsg({ ok: true, text: 'Removed.' }); await load(); window.dispatchEvent(new Event('gfc-staff-docs-changed')); }
       };
 
       if (!caregiverId) {
@@ -1986,6 +2072,7 @@
               <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
               <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
                 value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="">Choose a type</option>
                 {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
               </select>
             </div>
@@ -3210,6 +3297,9 @@
                     </div>
                   )}
 
+                  {editingUser && isSuperAdmin && !['client', 'family'].includes(formData.role) && (
+                    <div id="sr-modules"><ModulesSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
+                  )}
                   {editingUser && !['client', 'family'].includes(formData.role) && (
                     <div id="sr-welcome"><WelcomePacketSection token={token} userId={editingUser.id} userName={editingUser.name} /></div>
                   )}
@@ -3736,19 +3826,25 @@
                             </div>
                           </td>
                           <td className="px-4 py-4 text-center">
-                            <span className={`inline-block px-3 py-1 text-xs rounded-full font-medium text-center ${
-                              user.role === 'admin' ? 'bg-purple-100 text-purple-700' :
-                              user.isManager ? 'bg-indigo-100 text-indigo-700' :
-                              user.role === 'client' ? 'bg-blue-100 text-blue-700' :
-                              user.role === 'vendor' ? 'bg-green-100 text-green-700' :
-                              user.role === 'caseManager' ? 'bg-teal-100 text-teal-700' :
-                              user.role === 'family' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
+                            <span className={`inline-block px-3 py-1 text-xs rounded-full font-medium text-center whitespace-nowrap ${
+                              user.accountType === 'admin' ? 'bg-purple-100 text-purple-700' :
+                              (user.accountType === 'manager' || user.accountType === 'coordinator') ? 'bg-indigo-100 text-indigo-700' :
+                              ['provider', 'rn', 'lcsw', 'lmsw'].includes(user.accountType) ? 'bg-teal-100 text-teal-700' :
+                              user.accountType === 'caregiver' ? 'bg-green-100 text-green-700' :
+                              user.accountType === 'client' ? 'bg-blue-100 text-blue-700' :
+                              user.accountType === 'family' ? 'bg-yellow-100 text-yellow-700' :
+                              user.accountType ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-800'
                             }`}>{accountTypeLabel(user)}</span>
                           </td>
                           <td className="px-4 py-4">
                             <div className="flex flex-wrap gap-1 justify-center">
-                              {/* "Impl" badge hidden with the dormant tracker (strip-list §7) */}
-                              <span className={`px-2 py-0.5 text-xs rounded ${user.role === 'client' || user.role === 'admin' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}`} title="Client Portal">Client</span>
+                              {/* What this person can open, from the server (accountTypes.accessSummaryFor):
+                                  the same landing and hub areas they actually get. It used to be a lab-era
+                                  "Client" badge on every row (owner, 2026-11-09). */}
+                              {(user.accessSummary || []).length
+                                ? user.accessSummary.map(a => (
+                                  <span key={a} className="px-2 py-0.5 text-xs rounded bg-blue-50 text-blue-700 whitespace-nowrap">{a}</span>))
+                                : <span className="px-2 py-0.5 text-xs rounded bg-gray-100 text-gray-500 whitespace-nowrap">No access yet</span>}
                             </div>
                           </td>
                           <td className="px-4 py-4 text-xs text-gray-500">

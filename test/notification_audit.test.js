@@ -197,16 +197,16 @@ test('A4 on an uncovered transport it names neither the document nor the reason'
 // A5. A contractor invoice was answered
 // ===========================================================================
 
-test('A5 a rejected invoice carries the note the route demanded', async () => {
+test('A5 a rejected invoice says where to read the note, and never carries it', async () => {
   const h = harness();
   await h.notifier.contractorInvoiceDecided({
     user: CAREGIVER, decision: 'rejected', invoiceId: 'ci1', periodLabel: 'IME-2026-10',
-    note: 'Two exams are on last month\'s invoice already.', decidedByName: 'GFC Admin', ctaUrl: 'https://x.test/my#hours'
+    note: 'Add the client name for exam two.', decidedByName: 'GFC Admin', ctaUrl: 'https://x.test/my#hours'
   });
   const q = h.to('mo@example.com')[0];
   assert.strictEqual(q.type, 'contractor_invoice_rejected');
-  assert.match(q.body, /already/, 'the note is the point');
-  assert.match(q.body, /What needs changing/i);
+  assert.ok(!/client name/.test(bothHalves(q)), 'the note is free text and can name a client: it stays in the app');
+  assert.match(q.body, /Contractor Invoices/, 'told where to look');
   assert.match(q.subject, /IME-2026-10/);
 });
 
@@ -733,7 +733,9 @@ test('a removal notice goes only to a client who could see the document', () => 
 test('the three routers that gained the notifier take it as a getter', () => {
   const s = src('server.js');
   for (const router of ['caregiverRoutes', 'welcomePacketRoutes', 'payrollRoutes']) {
-    const at = s.indexOf(`app.use(${router}(`);
+    // payroll is built first and mounted after (its router also serves pay stubs to staffPortal).
+    let at = s.indexOf(`app.use(${router}(`);
+    if (at === -1) at = s.indexOf(`= ${router}(`);
     assert.ok(at !== -1, `${router} is mounted`);
     const block = s.slice(at, at + 1400);
     assert.match(block, /notify: \(\) => notify/,

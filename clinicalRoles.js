@@ -180,6 +180,13 @@ const isValidClinicalRole = (v) => ALL_CLINICAL_ROLES.includes(String(v || ''));
 const resolveClinicalRole = (user) => {
   if (!user) return null;
   if (user.role === 'admin') return CLINICAL_ROLES.PROVIDER;
+  // The Modules grid (owner, 2026-11-13): a Super Admin can take the Clinical
+  // Workspace away from someone whose role includes it, or give it to someone
+  // whose role does not. A grant is VIEW ONLY: writing follows the licence,
+  // which a tick box does not confer. Read from the record, like the role.
+  const ma = (user.moduleAccess && typeof user.moduleAccess === 'object') ? user.moduleAccess : {};
+  if (Array.isArray(ma.removed) && ma.removed.includes('clinical')) return null;
+  const granted = Array.isArray(ma.granted) && ma.granted.includes('clinical');
   if (isValidClinicalRole(user.clinicalRole)) return String(user.clinicalRole);
   // Derived fallback — today's model, preserved.
   // GFC's case managers ARE LMSW (owner, 2026-10-12), so a case manager with
@@ -187,6 +194,7 @@ const resolveClinicalRole = (user) => {
   // deliberately, and that stored value wins above.
   if (user.role === 'caseManager') return CLINICAL_ROLES.LMSW;
   if (user.hasClinicalAccess) return CLINICAL_ROLES.PROVIDER;
+  if (granted) return CLINICAL_ROLES.READ_ONLY;
   return null;
 };
 
@@ -354,8 +362,11 @@ const canCoSignNote = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinical
 // is an admin or a manager. This is deliberately NOT a clinical role: it is the
 // only thing that may see or change a place of service, and a clinician never
 // can. One predicate, read by every billing route and served to the page.
+// Since the Modules grid (owner, 2026-11-13) it is whoever holds the Billing
+// module: the office by default, plus anyone the Super Admin granted it, minus
+// anyone it was taken from.
 const canSubmitBilling = (user) => !!user && user.accountStatus !== 'inactive' &&
-  (user.role === 'admin' || user.isManager === true);
+  (user.role === 'admin' || require('./accountTypes').hasModule(user, 'billing'));
 
 // WHERE AN ORDER GOES (owner, 2026-09-29): the receiving agency, practice or
 // supplier is usually confirmed AFTER the clinician places the order, by

@@ -144,7 +144,7 @@ function canSee(folder, u) {
 }
 
 module.exports = function createStaffPortalRoutes(deps) {
-  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType, enrollmentSummary } = deps;
+  const { db, logActivity, authenticateToken, drive, uuidv4, getUsers, detectFileType, enrollmentSummary, regeneratePayStub } = deps;
   const payrollKey = () => deps.payrollIngestKey !== undefined ? deps.payrollIngestKey : process.env.PAYROLL_INGEST_KEY;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
   const router = express.Router();
@@ -333,7 +333,18 @@ module.exports = function createStaffPortalRoutes(deps) {
   // every policy, packet and attestation they signed. ONE function, read by
   // the person's own My GFC and by the office's view of their staff record
   // (owner, 2026-11-09), so the two can never show different files.
-  const documentsFor = async (person) => {
+  // The official tax forms they signed in Pay Setup (owner, 2026-11-14). Each
+  // opens as the filled government form, built from what they entered. On the
+  // Staff Record they are listed for the Super Admin only: they carry the SSN.
+  const TAX_FORM_TITLES = { w4: 'Form W-4 (federal withholding)', g4: 'Georgia Form G-4', state: 'State withholding certificate', i9: 'Form I-9', w9: 'Form W-9', w8ben: 'Form W-8BEN' };
+  const taxFormsFor = async (me) => {
+    const p = (((await db.get('payroll_profiles')) || {})[me]) || null;
+    if (!p) return [];
+    const at = { w4: p.w4, g4: p.g4, state: p.stateCert, i9: p.i9 && p.i9.section1, w9: p.w9, w8ben: p.w8ben };
+    return Object.entries(at).filter(([, v]) => v && v.signedAt)
+      .map(([k, v]) => ({ id: `taxform:${k}`, title: TAX_FORM_TITLES[k], signedAt: v.signedAt, pdf: 'taxform', form: k }));
+  };
+  const documentsFor = async (person, { taxForms = true } = {}) => {
     const me = String(person.id);
     const files = ((await db.get('caregiver_documents')) || [])
       .filter(r => String(r.caregiver_id) === me && !r.deleted_at)
@@ -365,6 +376,7 @@ module.exports = function createStaffPortalRoutes(deps) {
         signed.push({ id: `attestation:${a.kind}`, title: attestations.titleFor(a.kind) || String(a.kind).replace(/_/g, ' '), version: attestations.versionLabel(a.version), signedAt: a.signed_at, pdf: 'attestation', kind: a.kind });
       }
     }
+    if (taxForms) signed.push(...await taxFormsFor(me));
     signed.sort((x, y) => String(y.signedAt).localeCompare(String(x.signedAt)));
     return { documents: files, signed };
   };
@@ -381,7 +393,7 @@ module.exports = function createStaffPortalRoutes(deps) {
     const person = (await getUsers()).find(u => String(u.id) === String(req.params.userId) && audienceOf(u));
     if (!person) return res.status(404).json({ error: 'No such staff member.', code: 'STAFF_UNKNOWN' });
     await logActivity(req.user.id, req.user.name || req.user.email, 'staff_record_documents_read', 'user', person.id, {});
-    return res.json(await documentsFor(person));
+    return res.json(await documentsFor(person, { taxForms: req.user.role === 'admin' }));
   });
   router.get('/api/my/documents/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const row = ((await db.get('caregiver_documents')) || []).find(r => r.id === req.params.id);
@@ -536,14 +548,22 @@ module.exports = function createStaffPortalRoutes(deps) {
     const mine = ((await db.get(PAYSTUBS)) || []).filter(x => String(x.userId) === String(req.user.id))
       .sort((a, b) => String(b.payDate).localeCompare(String(a.payDate)))
       .map(x => ({ id: x.id, payDate: x.payDate, periodStart: x.periodStart, periodEnd: x.periodEnd,
-        gross: x.gross, net: x.net, hours: x.hours, hasPdf: !!x.driveFileId }));
+        gross: x.gross, net: x.net, hours: x.hours, hasPdf: !!x.driveFileId || (!!x.runId && !!regeneratePayStub) }));
     return res.json({ paystubs: mine });
   });
   router.get('/api/my/paystubs/:id/file', authenticateToken, requireStaff, async (req, res) => {
     const x = ((await db.get(PAYSTUBS)) || []).find(r => r.id === req.params.id);
-    if (!x || String(x.userId) !== String(req.user.id) || !x.driveFileId) return res.status(404).json({ error: 'No such pay stub.', code: 'PAYSTUB_UNKNOWN' });
+    if (!x || String(x.userId) !== String(req.user.id) || (!x.driveFileId && !x.runId)) return res.status(404).json({ error: 'No such pay stub.', code: 'PAYSTUB_UNKNOWN' });
     try {
-      const buf = await drive.downloadFileBuffer(x.driveFileId);
+      // The filed copy first; a stub from an app payroll is drawn again from
+      // its run when that copy is missing or cannot be read.
+      let buf = null;
+      // A stub filed before stubs carried the payment receipt (no `final`)
+      // is drawn from its run, which now holds the receipt.
+      if (!x.final && x.runId && regeneratePayStub) { try { buf = await regeneratePayStub(x); } catch (e) { buf = null; } }
+      if (!buf && x.driveFileId) { try { buf = await drive.downloadFileBuffer(x.driveFileId); } catch (e) { buf = null; } }
+      if (!buf && x.runId && regeneratePayStub) buf = await regeneratePayStub(x);
+      if (!buf) throw new Error('unreadable');
       await logActivity(req.user.id, req.user.name, 'paystub_read', 'staff_paystubs', x.id, {});
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', contentDisposition('inline', `Pay stub ${x.payDate}.pdf`));
@@ -685,6 +705,23 @@ module.exports = function createStaffPortalRoutes(deps) {
     createdAt: s.createdAt, createdByName: s.createdByName, recipients: DS.recipients(s, people, rows)
   });
 
+  const notifier = () => (typeof deps.notify === 'function' ? deps.notify() : deps.notify) || null;
+  async function emailRecipients(send, recipients, users, actor) {
+    const n = notifier();
+    if (!n || !n.staffDocumentSent) { console.error('[DOCS] no notifier injected: staff were NOT emailed'); return 0; }
+    const links = require('../appLinks');
+    const base = deps.getAppBaseUrl ? await deps.getAppBaseUrl() : '';
+    let count = 0;
+    for (const r of recipients) {
+      const u = users.find(x => String(x.id) === String(r.userId));
+      if (!u || !u.email || r.done) continue;
+      const out = await n.staffDocumentSent({ user: u, title: send.title, action: send.action, sendId: send.id,
+        ctaUrl: `${base}${links.documentsFor(u)}`, actorId: actor.id });
+      count += (out && out.notified) || 0;
+    }
+    return count;
+  }
+
   // The office: send, list (with who has and hasn't), withdraw.
   router.post('/api/my/admin/document-sends', authenticateToken, requireAdmin, docUpload.single('file'), async (req, res) => {
     const b = req.body || {};
@@ -716,7 +753,12 @@ module.exports = function createStaffPortalRoutes(deps) {
       createdAt: nowIso(), removedAt: null };
     const all = await sends(); all.push(row); await db.set(SENDS, all);
     await logActivity(req.user.id, req.user.name || req.user.email, 'document_sent', 'staff_document', row.id, { scope, action: row.action });
-    return res.json({ ok: true, send: sendView(row, await staffPeople(), await signings()) });
+    const people = await staffPeople();
+    const view = sendView(row, people, await signings());
+    // Each person it reaches today is emailed (owner, 2026-11-13); someone
+    // added to a type later sees it on their Home.
+    const emailed = await emailRecipients(row, view.recipients, users, req.user);
+    return res.json({ ok: true, send: view, emailed });
   });
   router.get('/api/my/admin/document-sends', authenticateToken, requireAdmin, async (req, res) => {
     const people = await staffPeople(); const rows = await signings();

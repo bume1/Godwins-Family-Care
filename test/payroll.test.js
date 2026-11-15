@@ -103,7 +103,7 @@ test('a form is a signature: typed name and agreement, or nothing saves', () => 
 
 test('who is missing what: a run refuses anyone without W-4, G-4, SSN, I-9 or pay method', () => {
   const p = pp.defaultProfile({ id: 'u', role: 'user' });
-  assert.deepEqual(pp.missingForPay(p).slice(0, 5), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9']);
+  assert.deepEqual(pp.missingForPay(p).slice(0, 6), ['How they are paid (bank details, check or Wise)', 'SSN', 'W-4', 'G-4', 'I-9 Section 1 (theirs)', 'I-9 Section 2 (the office)'], 'both halves of the I-9 are named');
   const ready = { ...p, payMethod: { method: 'check' }, ssn: { last4: '6789' }, w4: {}, g4: {}, i9: { section1: {}, section2: {} }, hourlyRateCents: 3000 };
   assert.deepEqual(pp.missingForPay(ready), []);
   assert.deepEqual(pp.missingForPay({ ...ready, i9: { section1: {} } }), ['I-9 Section 2 (the office)']);
@@ -247,19 +247,19 @@ test('pay setup lives in My GFC\'s Hours & Pay, and stubs land in the store My G
 });
 
 // ── the routes, through a real router ──────────────────────────────────────────
-function harness(user, store = new Map()) {
+function harness(user, store = new Map(), extraUsers = []) {
   const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); } };
   const acts = [];
   const users = [{ id: 'own', role: 'admin', name: 'Owner', email: 'o@x' }, { id: 'cg1', role: 'vendor', licenseLevel: 'pca', name: 'Pat Care', email: 'p@x', payRate: 18 },
     { id: 'cg2', role: 'vendor', licenseLevel: 'pca', name: 'Sam Aide', email: 's@x', payRate: 20 },
-    { id: 'st1', role: 'user', name: 'Dee Examiner', email: 'd@x', employmentType: '1099' }];
+    { id: 'st1', role: 'user', name: 'Dee Examiner', email: 'd@x', employmentType: '1099' }, ...extraUsers];
   const routes = require('../routes/payroll')({
     db, env: ENV, payrollKey: 'k'.repeat(40), logActivity: async (...a) => acts.push(a), getUsers: async () => users,
     authenticateToken: (req, res, next) => { req.user = users.find(u => u.id === user); next(); },
     requireAdmin: (req, res, next) => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'no' })),
     uuidv4: (() => { let n = 0; return () => `id${++n}`; })(), accountTypeOf: (u) => (u.role === 'admin' ? 'admin' : 'caregiver'), localDate: ld,
     resolvePayRate: (u) => ({ rate: u && u.payRate, source: 'base' }), queueNotification: async () => {}, hashIp: () => 'h',
-    pdf: require('../pdf-generator'), drive: { uploadStaffDocumentFile: async () => ({ fileId: 'drv1' }) }, roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app'
+    pdf: require('../pdf-generator'), drive: { uploadStaffDocumentFile: async () => ({ fileId: 'drv1' }), uploadPayStubFile: async () => ({ fileId: 'drv1' }) }, roleFolderFor: () => 'F', personFolderName: (n) => n, getAppBaseUrl: async () => 'https://app'
   });
   const app = express(); app.use(express.json()); app.use(routes);
   return { app, store, acts };
@@ -296,7 +296,7 @@ test('only the owner reveals a number, and every reveal is logged without the va
   assert.ok(!JSON.stringify(acts).includes('123456789'));
 });
 
-test('a draft needs approved tables; approval refuses missing paperwork, then locks hours and writes the stub into My GFC\'s store', async () => {
+test('a draft needs approved tables; approval refuses missing paperwork, then locks hours; each stub is written into My GFC\'s store when its payment is marked paid', async () => {
   const store = new Map();
   const { app } = harness('own', store);
   store.set('time_logs', [log('a', '2026-11-02', 480), { ...log('z', '2026-11-03', 240), caregiver_id: 'cg2' }]);
@@ -311,11 +311,16 @@ test('a draft needs approved tables; approval refuses missing paperwork, then lo
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/approve`);
   assert.equal(r.body.code, 'RUN_BLOCKED');
   store.set('payroll_profiles', { cg1: cgProfile, cg2: { ...cgProfile, userId: 'cg2' } });
+  // Unapproved timesheets warn, and the Super Admin gives a reason to go ahead
+  // (owner, 2026-11-13): hours worked are still paid on payday.
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/approve`);
+  assert.equal(r.body.code, 'RUN_TIMESHEETS_UNAPPROVED');
+  assert.ok(r.body.unapproved.length >= 1);
+  r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/approve`, { timesheetReason: 'Paying as clocked; reviewed by phone.' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.timesheetOverride.reason, 'Paying as clocked; reviewed by phone.');
   assert.equal(store.get('time_logs')[0].payroll_run_id, runId, 'the paid hours lock');
-  const stub = store.get('staff_paystubs')[0];
-  assert.deepEqual([stub.userId, stub.reference, stub.driveFileId, stub.source], ['cg1', `run:${runId}`, 'drv1', 'app']);
+  assert.equal((store.get('staff_paystubs') || []).length, 0, 'approval issues no stub: it waits for the payment and its receipt');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '50', note: 'x' });
   assert.equal(r.body.code, 'RUN_LOCKED');
   // Paid only when every worker has a confirmation.
@@ -323,6 +328,9 @@ test('a draft needs approved tables; approval refuses missing paperwork, then lo
   assert.equal(r.body.code, 'PAYMENT_CONFIRMATION');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/payments/cg1`, { confirmation: 'PNC-1' });
   assert.equal(r.body.run.status, 'approved', 'one of two confirmed is not paid');
+  const stub = store.get('staff_paystubs')[0];
+  assert.deepEqual([stub.userId, stub.reference, stub.driveFileId, stub.source, stub.final], ['cg1', `run:${runId}`, 'drv1', 'app', true], 'marking paid issues that person\'s stub');
+  assert.equal(store.get('staff_paystubs').length, 1, 'only the person marked paid');
   r = await req(app, 'POST', `/api/payroll/admin/runs/${runId}/payments/cg2`, { confirmation: 'PNC-2' });
   assert.equal(r.body.run.status, 'paid');
 });
@@ -450,7 +458,7 @@ test('period close drafts each schedule on its own and skips one with nobody to 
 
 test('Pay Setup lists pay and tax paperwork only, grouped, and hiring paperwork is not repeated there', async () => {
   const rows = pp.checklist({ ...pp.defaultProfile(cgUser) });
-  assert.deepEqual(rows.map(r => r.key), ['w4', 'g4', 'i9', 'ssn', 'pay', 'taxaddress', 'edelivery']);
+  assert.deepEqual(rows.map(r => r.key), ['taxaddress', 'ssn', 'w4', 'g4', 'i9', 'pay', 'edelivery'], 'name, address and SSN first: every form is filled from them');
   assert.ok(rows.every(r => r.group === 'tax' || r.group === 'paid'));
   assert.ok(!rows.some(r => /offer|handbook/i.test(r.key + r.label)), 'the offer letter and handbook belong to onboarding');
   const { app } = harness('cg1');
@@ -486,4 +494,298 @@ test('the run register CSV is the run: each line from the run, and its TOTAL row
   const pat = body.find(r => r[0] === 'Pat Care');
   assert.equal(pat[col('Regular Hours')], '8.00');
   assert.ok(!/\b\d{9}\b/.test(text), 'no SSN or account number');
+});
+
+test('the owner sets each schedule\'s first Monday on Settings, and a non-Monday is refused', async () => {
+  const store = new Map();
+  const { app } = harness('own', store);
+  store.set('payroll_settings', { frequency: 'biweekly', anchor: '2026-01-05', payDateOffsetDays: 5 });
+  let r = await req(app, 'PUT', '/api/payroll/admin/settings', { schedules: { staff: { anchor: '2026-01-14' } } });
+  assert.equal(r.body.code, 'PAY_ANCHOR');
+  r = await req(app, 'PUT', '/api/payroll/admin/settings', { schedules: { staff: { frequency: 'biweekly', anchor: '2026-01-12' } } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(tax.periodFor('2026-11-04', r.body.settings, 'staff').start, '2026-11-02', 'the biweekly weeks moved by one');
+  assert.equal(tax.scheduleSettings(r.body.settings, 'caregivers').anchor, '2026-01-05', 'the other schedule is untouched');
+  const page = read('public/payroll.html');
+  assert.match(page, /First Monday of a pay period<input type="date"/);
+  assert.match(page, /v\.anchor && v\.anchor !== was\.anchor \? \{ anchor: v\.anchor \}/, 'an unchanged date is not sent, so a frequency change still starts at the next period');
+});
+
+// An I-9 already on file from Gusto or paper (owner, 2026-11-13): the
+// employee does not fill it in again, and the copy must be on their record.
+test('an I-9 on file from before counts as complete; the copy must be filed first', () => {
+  const pp = require('../payrollProfiles');
+  const base = { ...pp.defaultProfile({ id: 'x', role: 'user' }), w4: {}, g4: {}, ssn: { last4: '1' }, payMethod: { method: 'check' } };
+  assert.ok(pp.missingForPay(base).includes('I-9 Section 1 (theirs)'));
+  assert.equal(pp.normalizeI9OnFile({ firstDay: '2025-03-03' }, { at: 'now', by: 'A' }).code, 'I9_COPY_NOT_FILED');
+  assert.equal(pp.normalizeI9OnFile({ copyFiled: true }, { at: 'now', by: 'A' }).code, 'I9_FIRST_DAY');
+  const n = pp.normalizeI9OnFile({ firstDay: '2025-03-03', copyFiled: true, source: 'gusto' }, { at: 'now', by: 'A' });
+  const p = { ...base, i9: { onFile: n.value } };
+  assert.ok(!pp.missingForPay(p).some(m => /I-9/.test(m)), 'no I-9 left to do');
+  const row = pp.checklist(p).find(r => r.key === 'i9');
+  assert.equal(row.done, true); assert.equal(row.locked, true);
+  assert.match(row.note, /Already on file/);
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'payroll.js'), 'utf8');
+  assert.match(src, /router\.put\('\/api\/payroll\/admin\/people\/:userId\/i9-on-file', authenticateToken, requireAdmin,/);
+});
+
+// Timesheets before payroll (owner, 2026-11-13): the employee confirms or
+// flags, the Super Admin approves or sends back, an approval is tied to the
+// hours as they were, and approving payroll with unapproved ones needs a reason.
+test('timesheets: confirm or flag, approve or send back, and an approval goes stale when hours change', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  const me = harness('cg1', store); const own = harness('own', store);
+  let r = await req(me.app, 'GET', '/api/my/timesheets');
+  assert.equal(r.status, 200); assert.equal(r.body.employee, true);
+  const nov2 = r.body.timesheets.find(t => t.period.start === '2026-11-02');
+  assert.ok(nov2, 'the week of Nov 2 is listed');
+  assert.equal(nov2.totals.minutes, 780); assert.equal(nov2.lines.length, 2);
+  assert.equal(nov2.status.office, 'waiting');
+  r = await req(me.app, 'POST', '/api/my/timesheets/caregivers/2026-11-02', { status: 'flagged' });
+  assert.equal(r.body.code, 'TIMESHEET_NOTE_REQUIRED', 'a flag says what is wrong');
+  r = await req(me.app, 'POST', '/api/my/timesheets/caregivers/2026-11-02', { status: 'confirmed' });
+  assert.equal(r.status, 200); assert.equal(r.body.timesheet.status.employee, 'confirmed');
+  r = await req(me.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 403, 'a caregiver does not decide timesheets');
+  r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'send_back' });
+  assert.equal(r.body.code, 'TIMESHEET_NOTE_REQUIRED', 'a send-back says what to correct');
+  r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200); assert.equal(r.body.timesheet.status.office, 'approved');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&date=2026-11-04');
+  assert.equal(r.body.timesheets.find(t => t.userId === 'cg1').status.approved, true);
+  // A corrected log after approval: the approval no longer matches.
+  const logs = store.get('time_logs'); logs[1].total_minutes = 360; store.set('time_logs', logs);
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&date=2026-11-04');
+  assert.equal(r.body.timesheets.find(t => t.userId === 'cg1').status.office, 'changed');
+  // The draft names it; approving then needs a reason.
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.deepEqual(r.body.run.unapprovedTimesheets.map(x => x.userId), ['cg1']);
+  // Re-approve the corrected hours: no reason needed.
+  await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.timesheetOverride, null);
+  r = await req(me.app, 'POST', '/api/my/timesheets/caregivers/2026-11-02', { status: 'confirmed' });
+  assert.equal(r.body.code, 'TIMESHEET_PAID', 'a paid period is closed');
+});
+
+// P2P (owner, 2026-11-13): the Super Admin picks how a payroll is sent, direct
+// deposit or P2P from GFC's Cash App. Employees never pick Cash App.
+test('P2P: the Super Admin chooses it per run, it needs no bank details, and the stub says so', async () => {
+  assert.ok(!pp.PAY_METHODS.includes('cashapp'), 'an employee cannot choose Cash App');
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  const noBank = { ...cgProfile }; delete noBank.payMethod;
+  store.set('payroll_profiles', { cg1: noBank });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const me = harness('cg1', store); const own = harness('own', store);
+  let r = await req(me.app, 'PUT', '/api/my/pay-setup/pay-method', { method: 'cashapp', cashtag: 'PatCare' });
+  assert.equal(r.body.code, 'PAY_METHOD');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  assert.ok(r.body.run.workers[0].missing.some(m => /How they are paid/.test(m)), "direct deposit needs a pay method");
+  r = await req(me.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  assert.equal(r.status, 403, 'only the Super Admin chooses');
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'zelle' });
+  assert.equal(r.status, 400);
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const w = r.body.run.workers[0];
+  assert.equal(w.channel, 'p2p');
+  assert.ok(!w.missing.some(m => /How they are paid/.test(m)), 'P2P needs no bank details');
+  r = await req(own.app, 'PUT', '/api/payroll/admin/settings', { p2pAccount: 'bad tag' });
+  assert.equal(r.body.code, 'P2P_ACCOUNT');
+  const stub = await require('../pdf-generator').generatePayStubPDF({
+    run: { period: { start: '2026-11-02', end: '2026-11-08', payDate: '2026-11-13' }, id: 'r1' },
+    worker: { userId: 'cg1', name: 'Pat Care', earnings: [{ code: 'regular', label: 'Regular', minutes: 480, rateCents: 1800, amountCents: 14400 }], pay: { grossCents: 14400, netCents: 13000, taxes: { federal: 0, socialSecurity: 893, medicare: 209, georgia: 298 }, deductions: [] } },
+    ytd: { grossCents: 14400, netCents: 13000, taxes: {} }, payMethod: 'p2p', p2pAccount: '$GodwinsFamilyCare', workState: 'GA'
+  });
+  const { execFileSync } = require('child_process');
+  const f = require('path').join(require('os').tmpdir(), `stub-${process.pid}.pdf`); require('fs').writeFileSync(f, stub);
+  let text = ''; try { text = execFileSync('pdftotext', [f, '-']).toString(); } catch (e) { text = stub.toString('latin1'); }
+  assert.match(text, /P2P by Cash App from \$GodwinsFamilyCare/);
+});
+
+// Timesheets show each shift's clock times and any change waiting on the Super
+// Admin (owner, 2026-11-13). A manager or care coordinator sees Timesheets
+// only, edits by request, and reaches no other payroll figure.
+test('timesheets: each line carries its times and pending change; managers see timesheets only', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), { ...log('b', '2026-11-03', 300), payroll_run_id: null, edited: true, edit_reason: 'Forgot to clock out', edited_by_name: 'Owner' }]);
+  store.set('time_log_adjustment_requests', [{ id: 'q1', time_log_id: 'a', status: 'pending', requested_clock_in: '2026-11-02T14:00:00Z', requested_clock_out: '2026-11-02T21:00:00Z', reason: 'Left at 4', requested_by_name: 'Pat Care', requested_by_role: 'self', requested_at: 'x' }]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  const MGR = { id: 'mgr', role: 'user', isManager: true, accountType: 'manager', name: 'Mary Manager', email: 'm@x' };
+  const own = harness('own', store, [MGR]); const mgr = harness('mgr', store, [MGR]); const me = harness('cg1', store, [MGR]);
+  let r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&date=2026-11-04');
+  assert.equal(r.body.editHours, 'direct');
+  const lines = r.body.timesheets.find(t => t.userId === 'cg1').lines;
+  const a = lines.find(l => l.ref === 'log:a'), b = lines.find(l => l.ref === 'log:b');
+  assert.equal(a.timeLogId, 'a'); assert.equal(a.clockIn, '2026-11-02T14:00:00Z'); assert.equal(a.editable, true);
+  assert.deepEqual([a.pendingChange.id, a.pendingChange.self], ['q1', true]);
+  assert.deepEqual([b.edited, b.editReason, b.pendingChange], [true, 'Forgot to clock out', null]);
+  r = await req(mgr.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&date=2026-11-04');
+  assert.equal(r.status, 200); assert.equal(r.body.editHours, 'request');
+  assert.equal(r.body.canDecide, true, 'a manager approves or sends back timesheets');
+  r = await req(mgr.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(r.body.timesheet.office.by, 'Mary Manager');
+  r = await req(mgr.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.timesheetsOnly, true); assert.equal(r.body.people, undefined, 'no pay figures');
+  assert.equal((await req(mgr.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' })).status, 403);
+  assert.equal((await req(me.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers')).status, 403, 'a caregiver reads their own only');
+  r = await req(me.app, 'GET', '/api/my/timesheets');
+  assert.ok(r.body.timesheets.find(t => t.period.start === '2026-11-02').lines.find(l => l.ref === 'log:a').pendingChange, 'they see the same request');
+  const page = read('public/payroll.html');
+  assert.match(page, /if \(mode === 'direct'\) await put\(`\/api\/scheduling\/time-logs\/\$\{enc\(l\.timeLogId\)\}`/);
+  assert.match(page, /await post\(`\/api\/scheduling\/time-logs\/\$\{enc\(l\.timeLogId\)\}\/adjustment-requests`/);
+  assert.match(read('public/my-pay.js'), /\/api\/my\/time-logs\/\$\{encodeURIComponent\(l\.timeLogId\)\}\/adjustment-requests/);
+});
+
+// Taxes entered by hand (owner, 2026-11-14): pay someone whose W-4 is not in
+// yet, P2P, with the office's withholding and a reason. Other missing
+// paperwork is listed as still owed, not holding pay. The timesheet warning
+// is read live, and adding a line keeps the run's P2P choice.
+test('taxes entered by hand: paid without a W-4, owed paperwork listed, banner live, P2P kept', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: { ...pp.defaultProfile(cgUser) } });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store), me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/channel`, { default: 'p2p' });
+  let w = r.body.run.workers[0];
+  assert.equal(w.pay, undefined, 'not figured without a W-4');
+  assert.ok(w.missing.includes('W-4') && w.missing.includes('SSN'));
+  assert.equal((await req(me.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10', reason: 'x' })).status, 403, 'the Super Admin only');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '10' })).body.code, 'MANUAL_TAX_REASON');
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '9999', reason: 'x' })).body.code, 'MANUAL_TAX_TOO_HIGH');
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '12.50', socialSecurity: '14.51', medicare: '3.39', stateTax: '6.00', reason: 'W-4 not in yet' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  w = r.body.run.workers[0];
+  assert.deepEqual([w.pay.taxes.federal, w.pay.taxes.socialSecurity, w.pay.taxes.medicare, w.pay.taxes.georgia], [1250, 1451, 339, 600]);
+  assert.equal(w.pay.netCents, w.pay.grossCents - 1250 - 1451 - 339 - 600);
+  assert.ok(w.pay.employer.socialSecurity > 0, 'employer taxes still figured');
+  assert.deepEqual(w.missing, [], 'nothing holds pay');
+  assert.ok(w.paperworkOwed.includes('SSN') && w.paperworkOwed.some(m => /I-9/.test(m)), 'still owed, listed');
+  assert.ok(!w.paperworkOwed.includes('W-4'), 'the W-4 is what the hand entry stands in for');
+  assert.equal(w.manualTaxes.reason, 'W-4 not in yet');
+  // Adding a line keeps P2P and the hand-entered taxes.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/adjustments`, { userId: 'cg1', type: 'bonus', amount: '20', note: 'Holiday' });
+  assert.equal(r.body.run.workers[0].channel, 'p2p'); assert.ok(r.body.run.workers[0].manualTaxes);
+  // The timesheet banner reads live: approve it, and the draft stops listing it.
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 1);
+  await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', userId: 'cg1', decision: 'approve' });
+  assert.equal((await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`)).body.run.unapprovedTimesheets.length, 0);
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.workers[0].pay.taxes.federal, 1250, 'the approved run keeps the office\'s withholding');
+  // Clearing is refused once approved.
+  assert.equal((await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { clear: true })).body.code, 'RUN_LOCKED');
+});
+
+// Pay periods (owner, 2026-11-14): pick a real pay period or set a custom one,
+// and a timesheet approved for a week is what that week's payroll pays. The
+// screen says whether payroll exists; a payday is not a payment.
+test('pay periods: approved hours flow into that period\'s payroll, the screen says it is not paid yet, and custom periods work', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480), log('b', '2026-11-03', 300)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/timesheets/decide', { schedule: 'caregivers', periodStart: '2026-11-02', periodEnd: '2026-11-08', userId: 'cg1', decision: 'approve' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.run, null, 'approving a timesheet is not a payroll, and nothing reads as paid');
+  assert.equal(r.body.timesheets.find(t => t.userId === 'cg1').paid, false);
+  // The period list: real Monday-to-Sunday weeks, with the payday.
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  const cg = r.body.schedules.find(x => x.key === 'caregivers');
+  const nov2 = cg.periods.find(p => p.start === '2026-11-02');
+  assert.ok(nov2, 'the week of Nov 2 is offered');
+  assert.equal(nov2.end, '2026-11-08'); assert.equal(nov2.payDate, '2026-11-13'); assert.equal(nov2.status, null);
+  assert.ok(cg.periods.every(p => p.custom || tax.periodFor(p.start, store.get('payroll_settings'), 'caregivers').start === p.start), 'every standard period starts on the schedule');
+  // Drafting that week pays the approved hours, with no unapproved warning.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.equal(w.earnings.reduce((a, e) => a + (e.minutes || 0), 0), 780, 'the 13 approved hours are on the payroll');
+  assert.deepEqual(r.body.run.unapprovedTimesheets, []);
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-11-02&end=2026-11-08');
+  assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-11-02').status, 'draft');
+  // A custom period: checked, then listed with its run.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-28' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_PAYDAY');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-01', end: '2026-11-05', payDate: '2026-11-06' } });
+  assert.equal(r.body.code, 'CUSTOM_PERIOD_LENGTH');
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { schedule: 'caregivers', custom: { start: '2026-10-20', end: '2026-10-29', payDate: '2026-10-31' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.run.period.custom, true); assert.equal(r.body.run.period.frequency, 'weekly');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-20&end=2026-10-29');
+  assert.equal(r.status, 200); assert.equal(r.body.period.custom, true); assert.equal(r.body.run.status, 'draft');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-21&end=2026-10-29');
+  assert.equal(r.status, 404, 'a made-up period is refused');
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.ok(r.body.schedules.find(x => x.key === 'caregivers').periods.some(p => p.custom && p.start === '2026-10-20'));
+  // The screen never reads a payday as a payment.
+  const page = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
+  assert.doesNotMatch(page, /A date in the pay period/);
+  assert.doesNotMatch(page, /· paid \{day\(/);
+  assert.match(page, /no payroll yet/);
+  // A week paid in Gusto before the app reads as paid there.
+  store.set('payroll_runs', [...store.get('payroll_runs'), { id: 'gusto:2026-10-23:2026-10-12:2026-10-18', status: 'paid', source: 'gusto', period: { start: '2026-10-12', end: '2026-10-18', payDate: '2026-10-23' }, workers: [] }]);
+  r = await req(own.app, 'GET', '/api/payroll/admin/overview');
+  assert.equal(r.body.schedules.find(x => x.key === 'caregivers').periods.find(p => p.start === '2026-10-12').status, 'gusto');
+  r = await req(own.app, 'GET', '/api/payroll/admin/timesheets?schedule=caregivers&start=2026-10-12&end=2026-10-18');
+  assert.equal(r.body.run.status, 'gusto');
+});
+
+// Deleting a draft (owner, 2026-11-14): the Super Admin's alone, drafts only,
+// and the morning automation does not draft that period again until someone
+// drafts it by hand.
+test('a draft can be deleted by the Super Admin; an approved run cannot; the automation does not bring it back', async () => {
+  const store = new Map();
+  const settings = { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } };
+  // The last ended caregiver week, whatever today is: the period the morning
+  // automation drafts.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const last = tax.periodFor(tax.addDays(tax.periodFor(today, settings, 'caregivers').start, -1), settings, 'caregivers');
+  store.set('time_logs', [log('a', last.start, 480)]);
+  store.set('payroll_settings', settings);
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(me.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 403, 'only the Super Admin deletes a draft');
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${id}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(store.get('payroll_runs').length, 0, 'the draft is gone');
+  assert.ok(own.acts.some(a => a[2] === 'payroll_run_draft_deleted'));
+  // The morning automation skips the deleted period.
+  r = await req(own.app, 'POST', '/api/payroll/automation/period-close', {}, { 'X-GFC-Payroll-Key': 'k'.repeat(40) });
+  assert.equal(r.status, 200);
+  assert.match(r.body.summary, /caregivers: draft deleted/);
+  assert.equal(store.get('payroll_runs').length, 0, 'not drafted again');
+  // Drafting it by hand brings it back, for the automation too.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: last.start, schedule: 'caregivers' });
+  assert.equal(r.status, 200);
+  assert.equal((store.get('payroll_deleted_drafts') || []).length, 0);
+  // An approved run is never deleted.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${r.body.run.id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'DELETE', `/api/payroll/admin/runs/${r.body.run.id}`);
+  assert.equal(r.body.code, 'RUN_LOCKED');
+  assert.equal(store.get('payroll_runs').length, 1);
 });

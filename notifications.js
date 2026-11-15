@@ -1261,6 +1261,29 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- A document the office sent to sign or acknowledge (owner, 2026-11-13)
+  // The title only: never the file. One email per send per person.
+  async function staffDocumentSent({ user, title, action, sendId, ctaUrl, actorId }) {
+    try {
+      const verb = action === 'sign' ? 'sign' : 'acknowledge';
+      return { notified: await send({
+        type: 'staff_document_sent', user,
+        subject: `A document is waiting for you to ${verb}`,
+        headline: `A document to ${verb}`,
+        paragraphs: [
+          `The office sent you "${title}" to read and ${verb}.`,
+          'Open My Documents to read it. It takes a minute, and your copy files there once you are done.'
+        ],
+        ctaUrl, ctaLabel: 'Open My Documents',
+        relatedEntityId: `docsend:${sendId}:${user.id}`, relatedEntityType: 'staff_document',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[DOCS] document notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 2. The office sent an item back -------------------------------------
   // THE REASON IS THE WHOLE POINT OF THIS NOTICE. The route requires one and
   // was storing it where only a screen could show it.
@@ -1578,10 +1601,11 @@ function createNotifier(deps) {
   }
 
   // ---- A5. A contractor invoice was answered ------------------------------
-  // One builder, two types, the way documentReviewed does it: a rejection
-  // carries the note the route already REQUIRES "so they can resubmit", and
-  // being paid is the other thing a contractor is waiting to hear.
-  async function contractorInvoiceDecided({ user, decision, invoiceId, periodLabel, note, decidedByName, ctaUrl, actorId }) {
+  // One builder, two types, the way documentReviewed does it. Being sent back
+  // and being paid are what a contractor waits to hear. The office's note is
+  // NOT carried: it is free text and can name a client (an exam invoice lists
+  // them), so the email says where to read it and the note stays in the app.
+  async function contractorInvoiceDecided({ user, decision, invoiceId, periodLabel, decidedByName, ctaUrl, actorId }) {
     try {
       if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
       const paid = decision === 'paid';
@@ -1597,9 +1621,7 @@ function createNotifier(deps) {
              // Never an amount or a bank reference in email. The portal holds both.
              'The payment details are on your pay screen.']
           : [`${decidedByName || 'The office'} sent your invoice${forPeriod} back so it can be corrected.`,
-             'Put it right and submit it again.'],
-        callout: note || null,
-        calloutLabel: note ? (paid ? 'Note from the office' : 'What needs changing') : null,
+             'Open My GFC, then Contractor Invoices, to read what needs changing and submit it again.'],
         ctaUrl, ctaLabel: 'Open my pay',
         relatedEntityId: `cinv:${invoiceId}:${decision}`, relatedEntityType: 'contractor_invoice',
         actorId, phi: false
@@ -2163,7 +2185,7 @@ function createNotifier(deps) {
     // clinical to-dos
     taskAssigned, taskDueToday, taskOverdue, taskCompleted,
     // staff onboarding and credentialing (2026-11-09)
-    staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
+    staffDocumentSent, staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
     staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly,
     // gaps closed by the 2026-11-09 notification audit
     caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,

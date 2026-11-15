@@ -143,9 +143,9 @@ function loadCanEdit() {
   const m = SERVER.indexOf('const canManageEnrollment = ');
   const manage = SERVER.slice(m, SERVER.indexOf(';', m) + 1);
   // eslint-disable-next-line no-new-func
-  return new Function('config', 'patientRead',
+  return new Function('config', 'patientRead', 'accountTypes',
     `${manage}\n${SERVER.slice(start, end)}; return canEditEnrollment;`
-  )({ ROLES: { ADMIN: 'admin' } }, { canClinicalWrite: clinicalRoles.canClinicalWrite });
+  )({ ROLES: { ADMIN: 'admin' } }, { canClinicalWrite: clinicalRoles.canClinicalWrite }, require('../accountTypes'));
 }
 
 test('an admin and a licensed clinician may edit; a case manager still may not', () => {

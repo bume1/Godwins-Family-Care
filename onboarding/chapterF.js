@@ -25,7 +25,7 @@
 
 'use strict';
 
-const { ref } = require('./sources');
+const { ref, PAY_GUIDE } = require('./sources');
 const V = require('./vocabulary');
 const { ACTORS: A, ACTIONS: X, classification: cls } = V;
 const { ACKNOWLEDGMENTS: C_ACKS } = require('./chapterC');
@@ -93,7 +93,7 @@ const ITEMS = Object.freeze([
   { id: 'F.5.02', phase: 'F.5', title: 'Wage and hour classification', ref: P('F.2'),
     steps: [step(A.EXECUTIVE_DIRECTOR, X.RECORD, STATED)],
     classifications: [cls('Statutory', 'Wage and hour classification', F2)] },
-  { id: 'F.5.03', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
+  { id: 'F.5.03', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'F.5', title: 'Employment and tax documentation', ref: P('F.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
     elements: ['Form I-9 within three business days of the start date', 'Form W-4', 'Direct deposit authorization', 'Emergency contact information'],
     classifications: [cls('Statutory and regulatory', 'Work authorization', F2)] },

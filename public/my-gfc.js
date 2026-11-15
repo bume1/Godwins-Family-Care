@@ -180,6 +180,7 @@ function OnboardingSummary({ onboarding, compact }) {
 
 // ---- Documents --------------------------------------------------------------
 const signedFileUrl = (d) => (d.pdf === 'packet' ? '/api/caregiver/welcome-packet/signed.pdf'
+  : d.pdf === 'taxform' ? `/api/my/pay-setup/forms/${d.form}.pdf`
   : `/api/caregiver/welcome-packet/attestations/${d.kind}.pdf`);
 
 function Signed({ signed, onError }) {
@@ -386,6 +387,8 @@ const usd = (n) => (n == null ? '' : Number(n).toLocaleString('en-US', { style: 
 // A bare pay date read at midday UTC, so it is the same calendar day in Georgia.
 const fmtDay = (ymd) => (ymd ? fmtDate(`${ymd}T12:00:00Z`) : '');
 
+// Today in Georgia, so a stub for a payday still ahead never reads as paid.
+const todayYmd = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 function PayStubs({ stubs, onError }) {
   if (!stubs) return <p className="mg-note">Loading…</p>;
   if (!stubs.length) return <p className="mg-note">No pay stubs yet. Each one shows here after payroll runs.</p>;
@@ -393,7 +396,7 @@ function PayStubs({ stubs, onError }) {
     <div className="mg-row" key={p.id}>
       <i className="ti ti-receipt mg-big" />
       <div className="mg-grow">
-        <b>Paid {fmtDay(p.payDate)} · {usd(p.net)} net</b>
+        <b>{p.payDate > todayYmd() ? 'Payday' : 'Paid'} {fmtDay(p.payDate)} · {usd(p.net)} net</b>
         <small>{fmtDay(p.periodStart)} – {fmtDay(p.periodEnd)} · {usd(p.gross)} gross{p.hours != null ? ` · ${p.hours} hours` : ''}</small>
       </div>
       {p.hasPdf && <button className="mg-btn mg-ghost mg-sm" onClick={() => openFile(`/api/my/paystubs/${p.id}/file`, `Pay stub ${p.payDate}.pdf`).catch(e => onError(e.message))}>Open</button>}
@@ -576,7 +579,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
           <div className="mg-tag">{tag}</div>
           <nav>
             {sections.map(s => (
-              <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}</button>
+              <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}{s.count > 0 && <span className="mg-pill mg-wait" style={{ marginLeft: 'auto' }}>{s.count}</span>}</button>
             ))}
             <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           </nav>
@@ -601,11 +604,25 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
         </main>
         <nav className="mg-tabs">
           {phoneTabs.map(s => (
-            <button key={s.id} className={(s.match ? s.match.includes(view) : view === s.id) ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.short || s.label}</button>
+            <button key={s.id} className={(s.match ? s.match.includes(view) : view === s.id) ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.short || s.label}{s.count > 0 ? ` (${s.count})` : ''}</button>
           ))}
         </nav>
       </div>
     </div>
+  );
+}
+
+// ---- Documents waiting on you (owner, 2026-11-13) ------------------------------
+// One banner on Home, straight to My Documents, like the announcement banner.
+function DocsWaitingBanner({ docs, onOpen }) {
+  if (!docs || !docs.length) return null;
+  const one = docs[0];
+  return (
+    <button onClick={onOpen} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', margin: '0 0 14px', padding: '12px 14px', borderRadius: 14, border: 'none', background: '#033D50', color: '#fff', fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
+      <i className="ti ti-signature" style={{ fontSize: 20, color: '#F5CD85' }} />
+      <span style={{ flex: 1 }}>{docs.length === 1 ? `Document to ${one.action === 'sign' ? 'sign' : 'acknowledge'}: ${one.title}` : `${docs.length} documents waiting on you`}</span>
+      <i className="ti ti-chevron-right" />
+    </button>
   );
 }
 
@@ -750,9 +767,13 @@ function useStaffData() {
   const [folders, setFolders] = useState(null);
   const [hours, setHours] = useState(null);
   const [news, setNews] = useState(null);
+  const [sends, setSends] = useState(null);
   const [err, setErr] = useState('');
   const loadFolders = useCallback(() => call('/api/my/folders').then(d => setFolders(d.folders)).catch(e => setErr(e.message)), []);
   const loadNews = useCallback(() => call('/api/my/announcements').then(d => setNews(d.announcements)).catch(e => setErr(e.message)), []);
+  // Documents the office sent to sign or acknowledge (owner, 2026-11-13): read
+  // once here so Home and the menu can say something is waiting.
+  const loadSends = useCallback(() => call('/api/my/document-sends').then(d => setSends(d.waiting || [])).catch(() => setSends([])), []);
   useEffect(() => {
     if (!getToken()) { window.location.href = '/login'; return; }
     call('/api/my/profile').then(p => {
@@ -763,16 +784,17 @@ function useStaffData() {
       call('/api/my/paystubs').then(d => setStubs(d.paystubs)).catch(e => setErr(e.message));
       loadFolders();
       loadNews();
+      loadSends();
       if (p.isCaregiver) {
         const from = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
         call(`/api/scheduling/time-logs?from=${from}`).then(setHours).catch(() => setHours({ timeLogs: [], totalHours: 0 }));
       }
     }).catch(e => setFatal(e.code === 'STAFF_PORTAL_STAFF_ONLY' ? 'My GFC is for GFC staff.' : e.message));
-  }, [loadFolders, loadNews]);
+  }, [loadFolders, loadNews, loadSends]);
   const reloadProfile = useCallback(() => call('/api/my/profile').then(setProfile).catch(() => {}), []);
   // A document signed here files a copy; the list below shows it at once.
-  const reloadDocs = useCallback(() => call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)), []);
-  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, news, loadNews, err, setErr, loadFolders, reloadProfile, reloadDocs };
+  const reloadDocs = useCallback(() => { loadSends(); return call('/api/my/documents').then(d => { setDocs(d.documents); setSigned(d.signed); }).catch(e => setErr(e.message)); }, [loadSends]);
+  return { profile, fatal, onboarding, docs, signed, policies, stubs, folders, hours, news, loadNews, waitingDocs: sends || [], err, setErr, loadFolders, reloadProfile, reloadDocs };
 }
 
 // The tiles on Home that lead to the staff sections.
@@ -831,11 +853,12 @@ function StaffView({ view, data }) {
         {!profile.isCaregiver && profile.employmentType === 'HYBRID' && <Section id="mg-clock" title="Time Clock" sub="For your employed clinical work only. Exam cases are paid by case and are not clocked here."><StaffClockMount /></Section>}
         {!profile.isCaregiver && profile.employmentType === '1099' && <Section id="mg-clock" title="Time Clock"><p className="mg-note">As a contractor, your hours are recorded on your own platform.</p></Section>}
         {!profile.isCaregiver && <Section id="mg-availability" title="My Availability" sub="The days and hours you are available. Update it any time."><StaffAvailabilityMount /></Section>}
+        {window.MyPay && window.MyPay.Timesheets && profile.employmentType !== '1099' && <Section id="mg-timesheets" title="My Timesheets" sub="Check your hours after each pay period ends. Tell the office if something is wrong, before payroll runs."><window.MyPay.Timesheets /></Section>}
         <Section title="Pay Stubs" sub="Your pay stubs from payroll. Tax and pay questions go to the office."><PayStubs stubs={stubs} onError={setErr} /></Section>
         {profile.isCaregiver && <Section title="My Hours"><Hours hours={hours} /></Section>}
         {profile.isAdmin && <Section title="Staff Hours"><p className="mg-note">Everyone's clocked hours, caregivers and W-2 staff alike, are corrected in Staff Scheduling → Time Logs. Payroll is run, and the hours file exported, in Payroll.</p><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="mg-btn mg-ghost" href="/scheduling">Open Staff Scheduling</a><a className="mg-btn mg-ghost" href="/payroll">Open Payroll</a></div></Section>}
         {/* Payroll (2026-11-08): public/my-pay.js, loaded before this file. */}
-        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms, how you are paid, and your hire paperwork. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
+        {window.MyPay && <Section id="mg-pay" title="Pay Setup" sub="Your tax forms and how you are paid. Payroll needs these before it can pay you."><window.MyPay.PaySetup /></Section>}
         {window.MyPay && <window.MyPay.ContractorInvoices Section={Section} />}
         {window.MyPay && <Section title="Tax Forms" sub="Your W-2 or 1099."><window.MyPay.TaxForms /></Section>}
       </div>
@@ -856,6 +879,6 @@ function StaffView({ view, data }) {
   return null;
 }
 
-window.MyGFC = { Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor, AnnouncementList,
+window.MyGFC = { DocsWaitingBanner, Shell, Section, Tile, Signed, StaffTiles, StaffView, useStaffData, STAFF_SECTIONS, staffSectionsFor, AnnouncementList,
   OnboardingSummary, LiaisonClients, call, getToken, openFile };
 })();

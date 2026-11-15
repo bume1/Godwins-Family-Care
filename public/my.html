@@ -61,7 +61,8 @@ function App() {
   // 2026-11-08).
   const sections = [{ id: 'home', label: 'Home', icon: 'ti-home' }]
     .concat(profile.isLiaison ? [{ id: 'clients', label: 'My Clients', icon: 'ti-users', subtitle: 'Where each of your clients is in enrollment.' }] : [])
-    .concat(staffSectionsFor(profile));
+    .concat(staffSectionsFor(profile))
+    .map(s => (s.id === 'documents' ? { ...s, count: data.waitingDocs.length } : s));
   const current = sections.find(s => s.id === view);
   if (!current) { setView('home'); return null; }
   // A liaison's home IS this page, so there is nowhere to go back to.
@@ -77,6 +78,7 @@ function App() {
       {err && <div className="mg-err">{err}</div>}
       {view === 'home'
         ? <div>
+            <window.MyGFC.DocsWaitingBanner docs={data.waitingDocs} onOpen={() => go('documents')} />
             {!profile.welcomeDone && (
               <Section title="Finish your welcome packet" sub="How to reach you, your emergency contact, your availability, and how you like to learn. About five minutes.">
                 <button className="mg-btn" onClick={() => go('welcome')}><i className="ti ti-confetti" />Open Welcome Packet</button>

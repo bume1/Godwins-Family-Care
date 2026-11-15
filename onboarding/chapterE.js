@@ -28,7 +28,7 @@
 
 'use strict';
 
-const { ref } = require('./sources');
+const { ref, PAY_GUIDE } = require('./sources');
 const V = require('./vocabulary');
 const { ACTORS: A, ACTIONS: X } = V;
 const C = require('./chapterC');
@@ -67,7 +67,7 @@ const CONTRACT_ITEMS = Object.freeze([
     counselReview: true,
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, INFERRED), step(A.NEW_HIRE, X.SIGN, INFERRED)],
     classifications: [], classificationNote: NO_CLASS },
-  { id: 'E.2.02', link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'E.2', title: 'Form W-9 and vendor payment setup', ref: P('E.2'),
+  { id: 'E.2.02', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'E.2', title: 'Form W-9 and vendor payment setup', ref: P('E.2'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, INFERRED)],
     elements: ['Form W-9', 'Vendor payment setup, separate from payroll'],
     classifications: [], classificationNote: NO_CLASS },
