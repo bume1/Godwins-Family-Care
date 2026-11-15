@@ -612,12 +612,31 @@ const Runs = ({ data, reload }) => {
 const payLine = (m) => !m ? null : m.method === 'direct_deposit' ? `Direct deposit, ${m.bankName || 'bank'} ••••${m.accountLast4 || ''}`
   : m.method === 'check' ? 'Paper check' : m.method === 'wise' ? `Wise${m.wiseEmail ? `, ${m.wiseEmail}` : ''}`
   : m.method === 'intl_wire' ? `International wire, ${m.bankName || ''} ••••${m.accountLast4 || ''}` : m.method;
-const Paperwork = ({ p, openPdf }) => {
+// The SSN and a W-9's taxpayer ID, revised by the office (2026-11-15). A new
+// full number is typed and saved sealed; the full number is never shown here.
+const NumberEdit = ({ userId, which, onDone, onCancel }) => {
+  const [v, setV] = useState(''); const [t, setT] = useState('ssn'); const [busy, setBusy] = useState(false); const [e, setE] = useState('');
+  const save = () => { setBusy(true); setE('');
+    put(`/api/payroll/admin/people/${enc(userId)}/${which}`, which === 'ssn' ? { ssn: v } : { tin: v, tinType: t })
+      .then(() => onDone()).catch(x => setE(x.message)).finally(() => setBusy(false)); };
+  return (
+    <span className="inline-flex flex-wrap gap-1 items-center">
+      {which === 'tin' && <select className="border rounded px-1 py-0.5 text-[12px]" value={t} onChange={x => setT(x.target.value)}><option value="ssn">SSN</option><option value="ein">EIN</option></select>}
+      <input data-num-edit={which} type="password" autoComplete="off" inputMode="numeric" placeholder="9 digits" className="border rounded px-1.5 py-0.5 text-[12px] w-28" value={v} onChange={x => setV(x.target.value)} />
+      <button className="underline text-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+      <button className="underline text-stone-500" onClick={onCancel}>Cancel</button>
+      {e && <span className="text-red-700">{e}</span>}
+    </span>
+  );
+};
+const Paperwork = ({ p, openPdf, reload }) => {
+  const [editing, setEditing] = useState(null);
   const pr = p.profile;
   const emp = pr.workerType !== '1099', con = pr.workerType === '1099' || pr.workerType === 'HYBRID';
   const i9 = pr.i9 || {};
   const items = [['Name and address', !!pr.taxAddress]];
-  if (emp) items.push(['SSN', !!pr.ssnLast4, null, pr.ssnLast4 ? `••${pr.ssnLast4}` : null]);
+  const by = (src) => src === 'office' ? ' (office)' : '';
+  if (emp) items.push(['SSN', !!pr.ssnLast4, null, pr.ssnLast4 ? `••${pr.ssnLast4}${by(pr.ssnSource)}` : null, 'ssn']);
   items.push(['Paid by', !!pr.payMethod, null, payLine(pr.payMethod)]);
   if (emp) {
     items.push(['W-4', !!pr.w4, pr.w4 && 'w4']);
@@ -631,13 +650,17 @@ const Paperwork = ({ p, openPdf }) => {
     }
   }
   if (con) items.push(pr.taxResidence === 'foreign' ? ['W-8BEN', !!pr.w8ben, pr.w8ben && 'w8ben'] : ['W-9', !!pr.w9, pr.w9 && 'w9']);
+  if (con && pr.taxResidence !== 'foreign' && pr.w9) items.push(['Taxpayer ID', !!pr.tinLast4, null, pr.tinLast4 ? `${pr.tinType === 'ein' ? 'EIN' : 'SSN'} ••${pr.tinLast4}${by(pr.tinSource)}` : 'they add it in Pay Setup, or you can', 'tin']);
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] items-center">
-      {items.map(([label, done, pdf, note]) => (
+      {items.map(([label, done, pdf, note, num]) => (
         <span key={label} className="inline-flex gap-1 items-center">
           <span className={done ? 'text-emerald-700' : 'text-red-700'}>{done ? '✓' : '○'}</span>
-          <b className="text-primary">{label}</b>{note ? <span className="text-stone-500">{note}</span> : null}
+          <b className="text-primary">{label}</b>{note && editing !== num ? <span className="text-stone-500">{note}</span> : null}
           {SUPER && pdf && <button className="underline text-primary" onClick={() => openPdf(pdf, label)}>Open</button>}
+          {num && reload && (editing === num
+            ? <NumberEdit userId={p.userId} which={num} onCancel={() => setEditing(null)} onDone={() => { setEditing(null); reload(); }} />
+            : <button className="underline text-primary" onClick={() => setEditing(num)}>{done ? 'Edit' : 'Add'}</button>)}
         </span>
       ))}
     </div>
@@ -656,7 +679,7 @@ const Person = ({ p, data, reload }) => {
   return (
     <div className="border border-stone-200 rounded-xl p-3 mt-2 grid gap-3">
       <Err e={err} /><Ok m={msg} />
-      <Paperwork p={p} openPdf={(k, l) => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }} />
+      <Paperwork p={p} reload={reload} openPdf={(k, l) => { setErr(''); download(`/api/payroll/admin/people/${enc(p.userId)}/forms/${k}.pdf`, `${l} - ${p.name}.pdf`, setErr); }} />
       <div className="grid sm:grid-cols-3 gap-2">
         {p.employmentTypeOnUser
           ? <label>W-2 or 1099<div className="inp bg-stone-50">{pr.workerType === 'HYBRID' ? 'Both' : pr.workerType}</div><span className="text-[12px] text-stone-500">{pr.isCaregiver ? 'Caregivers are W-2.' : <>Set in <a className="underline" href="/admin?view=users">User Management</a>.</>}</span></label>

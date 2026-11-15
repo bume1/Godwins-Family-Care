@@ -536,6 +536,9 @@ function publicProfile(p, opts = {}) {
     paySchedule: scheduleFor(p), paySchedulePinned: PAY_SCHEDULE_KEYS.includes(p.paySchedule),
     ssnLast4: ssn ? ssn.last4 : null,
     tinLast4: tin ? tin.last4 : null, tinType: tin ? tin.type : null,
+    // Who entered it (2026-11-15): the person, or the office (typed, or read
+    // off their Social Security card). Never the number itself.
+    ssnSource: ssn ? (ssn.source || 'self') : null, tinSource: tin ? (tin.source || 'self') : null,
     payMethod: payMethod ? {
       method: payMethod.method, bankName: payMethod.bankName || null, accountType: payMethod.accountType || null,
       routingLast4: payMethod.routingLast4 || null, accountLast4: payMethod.accountLast4 || null, wiseEmail: payMethod.wiseEmail || null,

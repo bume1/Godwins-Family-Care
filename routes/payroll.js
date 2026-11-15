@@ -289,7 +289,10 @@ module.exports = function createPayrollRoutes(deps) {
         case 'ssn': {
           const bad = pp.checkSsn(b.ssn); if (bad) return res.status(400).json({ error: bad, code: 'SSN_INVALID' });
           const d = String(b.ssn).replace(/\D/g, '');
-          p.ssn = { enc: pc.seal(d, env), last4: pc.last4(d), at: ctx.at }; change = 'SSN saved'; break;
+          p.ssn = { enc: pc.seal(d, env), last4: pc.last4(d), at: ctx.at, source: 'self' };
+          // A revised SSN also revises an SSN-type W-9 number (entered once).
+          if (p.tin && p.tin.type === 'ssn') p.tin = { enc: p.ssn.enc, last4: p.ssn.last4, type: 'ssn', source: 'self', at: ctx.at };
+          shareSsnTin(p); change = 'SSN saved'; break;
         }
         case 'tin': {
           // Their full taxpayer ID, for a W-9 the office put on file from paper
@@ -298,11 +301,19 @@ module.exports = function createPayrollRoutes(deps) {
           const n = pp.normalizeTin(b); if (n.error) return res.status(400).json(n);
           p.tin = { enc: pc.seal(n.value.digits, env), last4: pc.last4(n.value.digits), type: n.value.type, source: 'self', at: ctx.at };
           p.w9 = { ...p.w9, tinType: n.value.type };
-          change = 'Taxpayer ID saved'; break;
+          if (n.value.type === 'ssn' && p.ssn) p.ssn = { enc: p.tin.enc, last4: p.tin.last4, at: ctx.at, source: 'self' };
+          shareSsnTin(p); change = 'Taxpayer ID saved'; break;
         }
         case 'w9': {
+          // Their SSN already on file answers the W-9's number (entered once).
+          if (b.useSsnOnFile === true && p.ssn && b.tinType !== 'ein') {
+            const n = pp.normalizeW9({ ...b, tinType: 'ssn' }, ctx, { withoutTin: true }); if (n.error) return res.status(400).json(n);
+            p.w9 = n.value; p.tin = { enc: p.ssn.enc, last4: p.ssn.last4, type: 'ssn', source: p.ssn.source || 'self', at: ctx.at };
+            change = 'W-9 signed'; break;
+          }
           const n = pp.normalizeW9(b, ctx); if (n.error) return res.status(400).json(n);
-          p.w9 = n.value; p.tin = { enc: pc.seal(n.tin, env), last4: pc.last4(n.tin), type: n.value.tinType }; change = 'W-9 signed'; break;
+          p.w9 = n.value; p.tin = { enc: pc.seal(n.tin, env), last4: pc.last4(n.tin), type: n.value.tinType, source: 'self', at: ctx.at };
+          shareSsnTin(p); change = 'W-9 signed'; break;
         }
         case 'pay-method': {
           const n = pp.normalizePayMethod(b); if (n.error) return res.status(400).json(n);
@@ -759,6 +770,85 @@ module.exports = function createPayrollRoutes(deps) {
   // are shown beside it and must not contradict the choice unless the office
   // says so. Super Admin or a payroll preparer.
   const ON_FILE_LABEL = { w4: 'W-4', g4: 'G-4', 'state-cert': 'state withholding certificate', w9: 'W-9', w8ben: 'W-8BEN', i9: 'I-9' };
+
+  // ── The SSN, entered once (owner, 2026-11-15) ──────────────────────────────
+  // "Why can't the number just be entered once?" One number fills both the SSN
+  // and an SSN-type W-9 taxpayer ID. It comes from the office (typed, or read
+  // off their Social Security card) or from the person in Pay Setup, and either
+  // can revise it. It is always sealed; only the last four are ever shown, and
+  // the full number is seen only through the Super Admin's logged reveal.
+  // Their accepted Social Security card with a number read off it.
+  const ssnCardsFor = async (userId) => (await rows('caregiver_documents'))
+    .filter(d => d && String(d.caregiver_id) === String(userId) && !d.deleted_at && d.kind === 'ssn_card' && d.status === 'accepted' && d.ssnRead && d.ssnRead.enc);
+  // A sealed SSN from what the office gave: a typed number, or a card.
+  const officeSsn = async (user, b) => {
+    if (b.ssnCardDocumentId) {
+      const card = (await ssnCardsFor(user.id)).find(d => d.id === String(b.ssnCardDocumentId));
+      if (!card) return { error: 'Choose their accepted Social Security card with a number read off it.', code: 'SSN_CARD' };
+      return { sealed: { enc: card.ssnRead.enc, last4: card.ssnRead.last4 }, documentId: card.id };
+    }
+    const bad = pp.checkSsn(b.ssn);
+    if (bad) return { error: bad, code: 'SSN_INVALID' };
+    const d = String(b.ssn).replace(/\D/g, '');
+    return { sealed: { enc: pc.seal(d, env), last4: pc.last4(d) }, documentId: null };
+  };
+  // An SSN on file also answers an SSN-type W-9 still waiting on its number,
+  // and the other way round, so nobody is asked twice.
+  const shareSsnTin = (p) => {
+    if (p.ssn && p.w9 && p.w9.tinType !== 'ein' && !p.tin) p.tin = { enc: p.ssn.enc, last4: p.ssn.last4, type: 'ssn', source: p.ssn.source || 'self', at: p.ssn.at || nowIso() };
+    if (!p.ssn && p.tin && p.tin.type === 'ssn' && pp.isEmployee(p)) p.ssn = { enc: p.tin.enc, last4: p.tin.last4, at: p.tin.at || nowIso(), source: p.tin.source || 'self' };
+  };
+  router.put('/api/payroll/admin/people/:userId/ssn', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const user = await userFor(req.params.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const b = req.body || {};
+      const got = await officeSsn(user, b);
+      if (got.error) return res.status(400).json(got);
+      const p = await profileFor(user);
+      const at = nowIso(), by = req.user.name || req.user.email;
+      const was = p.ssn ? p.ssn.last4 : null;
+      p.ssn = { ...got.sealed, at, source: 'office', by, documentId: got.documentId };
+      // A revised SSN also revises an SSN-type W-9 number that came from it.
+      if (p.tin && p.tin.type === 'ssn' && (!p.w9 || p.w9.tinType !== 'ein')) p.tin = { ...got.sealed, type: 'ssn', source: 'office', at };
+      shareSsnTin(p);
+      const saved = await saveProfile(user.id, p, was ? 'SSN updated by the office' : 'SSN saved by the office', req.user);
+      await logActivity(req.user.id, req.user.name, 'payroll_ssn_saved_by_office', 'payroll_profile', String(user.id), { fromCard: !!got.documentId, revised: !!was });
+      res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+    } catch (e) {
+      if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
+      console.error('Office SSN error:', e); res.status(500).json({ error: 'Server error' });
+    }
+  });
+  // The office can revise a W-9's taxpayer ID too (an EIN, or a corrected SSN).
+  router.put('/api/payroll/admin/people/:userId/tin', authenticateToken, requirePayrollPreparer, async (req, res) => {
+    try {
+      const user = await userFor(req.params.userId);
+      if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
+      const p = await profileFor(user);
+      if (!p.w9) return res.status(409).json({ error: 'Their W-9 is not on file yet.', code: 'TIN_NO_W9' });
+      const b = req.body || {};
+      let sealed, type;
+      if (b.tinType === 'ein') {
+        const n = pp.normalizeTin({ tinType: 'ein', tin: b.tin }); if (n.error) return res.status(400).json(n);
+        sealed = { enc: pc.seal(n.value.digits, env), last4: pc.last4(n.value.digits) }; type = 'ein';
+      } else {
+        const got = await officeSsn(user, { ssn: b.tin, ssnCardDocumentId: b.ssnCardDocumentId });
+        if (got.error) return res.status(400).json(got);
+        sealed = got.sealed; type = 'ssn';
+      }
+      const at = nowIso();
+      p.tin = { ...sealed, type, source: 'office', at };
+      p.w9 = { ...p.w9, tinType: type };
+      shareSsnTin(p);
+      const saved = await saveProfile(user.id, p, 'Taxpayer ID saved by the office', req.user);
+      await logActivity(req.user.id, req.user.name, 'payroll_tin_saved_by_office', 'payroll_profile', String(user.id), { type });
+      res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
+    } catch (e) {
+      if (e.code === 'PAYROLL_KEY_MISSING') return res.status(503).json({ error: e.message, code: e.code });
+      console.error('Office TIN error:', e); res.status(500).json({ error: 'Server error' });
+    }
+  });
   router.put('/api/payroll/admin/people/:userId/forms/:form/on-file', authenticateToken, requirePayrollPreparer, async (req, res) => {
     try {
       const form = req.params.form;
@@ -786,10 +876,22 @@ module.exports = function createPayrollRoutes(deps) {
       } else {
         const n = pp.normalizeFormOnFile(form, b, { at, by, documentId: doc.id, state: p.workState || 'GA', match: matchSnap });
         if (n.error) return res.status(400).json(n);
-        // A W-9 goes on file WITHOUT its taxpayer ID (owner, 2026-11-15): the
-        // office never types a full number. Any TIN already on their record
-        // stays; if there is none, Pay Setup asks them for it.
         p[pp.ON_FILE_FORMS[form]] = n.value;
+        // The W-9's taxpayer ID is entered ONCE, right here (owner, 2026-11-15):
+        // typed by the office, read off their Social Security card, or the SSN
+        // already on their record. Left blank, the person enters it in Pay
+        // Setup (the to-do the checklist shows).
+        if (form === 'w9') {
+          if (n.value.tinType === 'ein' && b.tin) {
+            const t = pp.normalizeTin({ tinType: 'ein', tin: b.tin }); if (t.error) return res.status(400).json(t);
+            p.tin = { enc: pc.seal(t.value.digits, env), last4: pc.last4(t.value.digits), type: 'ein', source: 'office', at };
+          } else if (n.value.tinType !== 'ein' && (b.tin || b.ssnCardDocumentId)) {
+            const got = await officeSsn(user, { ssn: b.tin, ssnCardDocumentId: b.ssnCardDocumentId });
+            if (got.error) return res.status(400).json({ ...got, code: got.code === 'SSN_INVALID' ? 'W9_TIN' : got.code });
+            p.tin = { ...got.sealed, type: 'ssn', source: 'office', at };
+          }
+          shareSsnTin(p);
+        }
       }
       const saved = await saveProfile(user.id, p, `${ON_FILE_LABEL[form]} on file (signed on paper)`, req.user);
       await logActivity(req.user.id, req.user.name, 'payroll_form_on_file', 'payroll_profile', String(user.id), { form, documentId: doc.id, verdict: matchSnap.verdict, overridden: matchSnap.overridden });
@@ -816,7 +918,12 @@ module.exports = function createPayrollRoutes(deps) {
         const val = f === 'i9' ? (p.i9 && (p.i9.section1 || p.i9.onFile)) : p[pp.ON_FILE_FORMS[f]];
         forms[f] = { label: ON_FILE_LABEL[f], done: !!val, onFile: of ? { documentId: of.documentId || null, recordedBy: of.recordedBy, recordedAt: of.recordedAt } : null, signedInApp: !!(val && !of) };
       }
+      // The number, entered once (2026-11-15): what is already on file and
+      // what was read off a Social Security card. Last four only.
+      const cards = (await ssnCardsFor(user.id)).map(d => ({ documentId: d.id, fileName: d.file_name, last4: d.ssnRead.last4, reads: d.ssnRead.reads, agree: !!d.ssnRead.agree, disagree: !!d.ssnRead.disagree }));
       res.json({ forms, workState: p.workState || 'GA', employee: pp.isEmployee(p), contractor: pp.isContractor(p),
+        ssn: { last4: p.ssn ? p.ssn.last4 : null, source: p.ssn ? (p.ssn.source || 'self') : null, cards },
+        tin: { last4: p.tin ? p.tin.last4 : null, type: p.tin ? p.tin.type : null, source: p.tin ? (p.tin.source || 'self') : null },
         options: { w4Filing: pp.W4_FILING, g4Filing: pp.G4_FILING, w9Class: pp.W9_CLASS } });
     } catch (e) { console.error('On file options error:', e); res.status(500).json({ error: 'Server error' }); }
   });

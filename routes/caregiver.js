@@ -60,6 +60,10 @@ module.exports = function createCaregiverRoutes(deps) {
     staffDocAiRead
   } = deps;
   const staffDocMatch = require('../staffDocMatch');
+  // An SS card's number is sealed the moment it is read (2026-11-15), with the
+  // payroll key, exactly as an SSN typed into Pay Setup is.
+  const payrollCrypto = require('../payrollCrypto');
+  const cryptoEnv = deps.env || process.env;
   // Which Pay Setup form a filed document can be put on file for (payroll).
   const FORM_FOR_KIND = Object.entries(require('../payrollProfiles').ON_FILE_KINDS)
     .reduce((m, [form, kinds]) => { kinds.forEach(k => { if (!m[k]) m[k] = form; }); return m; }, {});
@@ -1713,14 +1717,25 @@ module.exports = function createCaregiverRoutes(deps) {
   const MATCH_KINDS = new Set([...staffDocMatch.KIND_KEYS, 'other']);
   const shouldMatch = (kind) => MATCH_KINDS.has(kind);
   const matchAndKeep = async (rowId, bytes, mimeType, kind, actor) => {
-    const m = await staffDocMatch.matchDocument({
-      bytes, mimeType, filedAs: kind, textOf: staffDocMatch.textOf, at: new Date().toISOString(),
+    const at = new Date().toISOString();
+    const { match: m, ssn } = await staffDocMatch.matchDocument({
+      bytes, mimeType, filedAs: kind, textOf: staffDocMatch.textOf, at,
       aiRead: typeof staffDocAiRead === 'function' ? (a) => staffDocAiRead({ ...a, actor }) : null
     });
+    // SEALED here, before it is stored anywhere. Without the payroll key it is
+    // not kept at all (the office types it instead), never kept plain.
+    let ssnRead = null;
+    if (ssn) {
+      try {
+        ssnRead = { enc: payrollCrypto.seal(ssn.digits, cryptoEnv), last4: payrollCrypto.last4(ssn.digits),
+          reads: ssn.text && ssn.ai ? 'both' : ssn.text ? 'text' : 'ai', agree: ssn.agree, disagree: ssn.disagree, at };
+      } catch (e) { ssnRead = { enc: null, last4: null, notKept: 'The payroll encryption key is not set, so the number was not kept.', at }; }
+    }
     const rows = (await db.get('caregiver_documents')) || [];
     const i = rows.findIndex(r => r && r.id === rowId);
     if (i === -1) return null;
-    rows[i] = { ...rows[i], match: m };
+    const { ssnRead: _old, ...rest } = rows[i];
+    rows[i] = { ...rest, match: m, ...(ssnRead ? { ssnRead } : {}) };
     await db.set('caregiver_documents', rows);
     return rows[i];
   };
@@ -1800,7 +1815,9 @@ module.exports = function createCaregiverRoutes(deps) {
     payroll: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
     reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note,
     match: publicMatch(r),
-    onFileForm: FORM_FOR_KIND[r.kind] || null
+    onFileForm: FORM_FOR_KIND[r.kind] || null,
+    // An SS card's number (2026-11-15): the last four only, never the sealed value.
+    ssnRead: r.ssnRead ? { last4: r.ssnRead.last4 || null, reads: r.ssnRead.reads || null, agree: !!r.ssnRead.agree, disagree: !!r.ssnRead.disagree, notKept: r.ssnRead.notKept || null } : null
   });
 
   return router;

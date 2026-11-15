@@ -70,10 +70,12 @@ test('the verdict: agree, disagree, one read, unknown; "not run" never counts as
 });
 
 test('matchDocument reads, scans and keeps both, without throwing on a bad file', async () => {
-  const m = await M.matchDocument({ bytes: blank('fw9-2024-03.pdf'), mimeType: 'application/pdf', filedAs: 'w9', textOf: M.textOf, at: 'T' });
+  const r = await M.matchDocument({ bytes: blank('fw9-2024-03.pdf'), mimeType: 'application/pdf', filedAs: 'w9', textOf: M.textOf, at: 'T' });
+  const m = r.match;
   assert.deepEqual([m.verdict, m.readsAs, m.text, m.ai.status], ['one_read', 'w9', 'text', 'not_run']);
+  assert.equal(r.ssn, null, 'a W-9 never has its number read');
   const bad = await M.matchDocument({ bytes: Buffer.from('nope'), mimeType: 'application/pdf', filedAs: 'w9', textOf: async () => { throw new Error('boom'); } });
-  assert.equal(bad.verdict, 'unknown');
+  assert.equal(bad.match.verdict, 'unknown');
 });
 
 // ── on file in Pay Setup ──────────────────────────────────────────────────────
@@ -163,7 +165,11 @@ test('SAFETY: on-file checks whose document it is, its type, that it was accepte
   assert.match(body, /ON_FILE_KIND/, 'only a document filed as that form');
   assert.match(body, /doc\.status !== 'accepted'/, 'only an accepted document');
   assert.match(body, /readsOther && b\.confirmDifferent !== true/, 'the reads must not contradict it unless the office confirms');
-  assert.doesNotMatch(body, /p\.tin\s*=/, 'the office never sets the taxpayer ID');
+  // Owner, 2026-11-15 (follow-up): the W-9's number is entered ONCE, at Mark
+  // On File, and only ever sealed (a typed number, or a card's sealed read).
+  assert.match(body, /p\.tin = \{ \.\.\.got\.sealed, type: 'ssn', source: 'office', at \}/);
+  assert.match(body, /pc\.seal\(t\.value\.digits, env\)/);
+  assert.match(body, /shareSsnTin\(p\)/, 'an SSN already on file answers the W-9');
   // The copy that opens is the uploaded one.
   assert.match(r, /const paper = await onFileDocFor\(user, p, key\);\s*if \(paper\)/);
 });
@@ -229,7 +235,57 @@ test('the AI scan pre-fills printed boxes only, and never a secret number', asyn
   const hub = src('public/admin-hub.html');
   assert.match(hub, /From the scan, check it/);
   assert.match(hub, /AI check not run: type what the paper says\./);
-  assert.match(hub, /Their SSN or taxpayer ID is never typed here/);
-  assert.doesNotMatch(hub.slice(hub.indexOf('const OnFilePanel'), hub.indexOf('const CaregiverDocsSection')), /txt\('tin'/, 'the office panel has no taxpayer ID box');
+  const panel = hub.slice(hub.indexOf('const OnFilePanel'), hub.indexOf('const CaregiverDocsSection'));
+  assert.match(panel, /txt\('tin', \{ type: 'password'/, 'the W-9 number box is masked');
+  assert.match(panel, /const \{ tin, ssn, \.\.\.fields \} = f;/, 'the number never rides in with the form fields');
   assert.match(hub, /Their name as signed on the paper/);
+});
+
+// ── the SSN, entered once (owner follow-up, 2026-11-15) ─────────────────────────
+test('the number on a Social Security card: a valid SSN is read, an invalid one never', () => {
+  assert.equal(M.ssnFromText('SOCIAL SECURITY 123-45-6789 THIS NUMBER HAS BEEN ESTABLISHED FOR'), '123456789');
+  assert.equal(M.ssnFromText('123 45 6789'), '123456789');
+  for (const bad of ['000-12-3456', '666-12-3456', '912-34-5678', '123-00-4567', '123-45-0000', '12-345-6789', '1234-56-7890']) assert.equal(M.ssnFromText(bad), null, bad);
+  assert.equal(M.ssnFromText('Card no. 000-12-3456 then 234-56-7890'), '234567890', 'the first VALID one');
+  assert.equal(M.ssnFromText(''), null);
+});
+
+test('an SS card is read two ways; the digits leave apart from the match, which never carries them', async () => {
+  const cardText = 'SOCIAL SECURITY 123-45-6789 THIS NUMBER HAS BEEN ESTABLISHED FOR PAT TEST';
+  const textOf = async () => ({ text: cardText, source: 'ocr' });
+  const ai = (d) => async ({ schema }) => schema === M.SSN_AI_SCHEMA ? { proposal: { ssnDigits: d } } : { proposal: { kind: 'ssn_card', confidence: 0.9 } };
+  const both = await M.matchDocument({ bytes: Buffer.from('x'), mimeType: 'image/jpeg', filedAs: 'ssn_card', textOf, aiRead: ai('123-45-6789') });
+  assert.deepEqual(both.ssn, { digits: '123456789', text: true, ai: true, agree: true, disagree: false });
+  assert.ok(!JSON.stringify(both.match).includes('6789'), 'the match record never carries the number');
+  const differ = await M.matchDocument({ bytes: Buffer.from('x'), mimeType: 'image/jpeg', filedAs: 'ssn_card', textOf, aiRead: ai('123-45-6780') });
+  assert.equal(differ.ssn.disagree, true, 'a disagreement is shown, never hidden');
+  // Filed as "other" but it reads as a card: still read.
+  const other = await M.matchDocument({ bytes: Buffer.from('x'), mimeType: 'image/jpeg', filedAs: 'other', textOf, aiRead: null });
+  assert.equal(other.ssn.digits, '123456789');
+  // The W-9/W-4 boxes stay secret-free: the SSN question is its own schema.
+  assert.ok(!Object.keys(M.PREFILL_FIELDS).includes('ssnDigits'));
+  assert.ok(!JSON.stringify(M.AI_SCHEMA).includes('ssnDigits'));
+});
+
+test('the card number is SEALED before it is stored, and a screen sees the last 4 only', () => {
+  const r = src('routes/caregiver.js');
+  assert.match(r, /enc: payrollCrypto\.seal\(ssn\.digits, cryptoEnv\)/);
+  const keep = r.slice(r.indexOf('const matchAndKeep'), r.indexOf('const publicMatch'));
+  assert.doesNotMatch(keep, /digits: ssn\.digits|\.\.\.ssn\b/, 'the plain digits are never put on the row');
+  assert.match(r, /ssnRead: r\.ssnRead \? \{ last4: r\.ssnRead\.last4/, 'publicDoc carries the last 4, never enc');
+  assert.doesNotMatch(r.slice(r.indexOf('ssnRead: r.ssnRead ?')).split('\n')[0], /enc/);
+});
+
+test('the office saves or revises the SSN: payroll preparers only, their own accepted card, never logged', () => {
+  const r = src('routes/payroll.js');
+  assert.match(r, /'\/api\/payroll\/admin\/people\/:userId\/ssn', authenticateToken, requirePayrollPreparer/);
+  assert.match(r, /'\/api\/payroll\/admin\/people\/:userId\/tin', authenticateToken, requirePayrollPreparer/);
+  const cards = r.slice(r.indexOf('const ssnCardsFor'), r.indexOf('const officeSsn'));
+  assert.match(cards, /String\(d\.caregiver_id\) === String\(userId\)/, 'their own card only');
+  assert.match(cards, /d\.kind === 'ssn_card' && d\.status === 'accepted'/, 'an accepted SS card only');
+  const route = r.slice(r.indexOf("'/api/payroll/admin/people/:userId/ssn'"), r.indexOf("'/api/payroll/admin/people/:userId/tin'"));
+  assert.match(route, /'payroll_ssn_saved_by_office'[^\n]*\{ fromCard: !!got\.documentId, revised: !!was \}\);/, 'the log says what happened, never the number');
+  // Entered once both ways in Pay Setup.
+  assert.match(r, /const shareSsnTin = \(p\) =>/);
+  assert.match(r, /b\.useSsnOnFile === true && p\.ssn/);
 });
