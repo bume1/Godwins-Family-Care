@@ -4917,7 +4917,15 @@
     // The editor and the read-only renderer are shared with My GFC and the
     // client portal (/components/formatted-field.jsx) — announcements offer the
     // same six shapes, so there is one editor rather than three.
-    const { FormattedField } = window.GFC_FORMATTED;
+    //
+    // The shared file is deliberately free of clinical vocabulary, so the
+    // workspace's own "required to sign" wording is supplied HERE, once, rather
+    // than being the default everybody inherits. A call site that passes its
+    // own still wins.
+    const SharedFormattedField = window.GFC_FORMATTED.FormattedField;
+    const FormattedField = (props) => (
+      <SharedFormattedField {...props} requiredNote={props.requiredNote || '· required to sign'} />
+    );
 
     // Choose an earlier note to start from. The server says which notes exist
     // and returns the content with vitals and the date already left out.

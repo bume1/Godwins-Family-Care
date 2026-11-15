@@ -59,9 +59,12 @@ const FormattedView = ({ markup, className }) => (
 
 // A text field with a formatting toolbar.
 //
-// `requiredNote` keeps the clinical wording as the default so the nine call
-// sites in the clinical workspace are unchanged by the extraction; a screen
-// where "required to sign" makes no sense passes its own.
+// This file is GENERAL PURPOSE: the same toolbar serves a clinical note, a
+// staff announcement and a client announcement, and nothing clinical belongs
+// in it. `requiredNote` therefore defaults to the neutral "· required"; the
+// clinical workspace supplies its own "· required to sign" in one place, and
+// a screen where signing means nothing is not handed clinical vocabulary by
+// accident (owner, 2026-11-15: "not all announcements are clinical").
 const FormattedField = ({ label, value, onChange, readOnly, placeholder, minRows, carried, onConfirmCarried, required, requiredNote }) => {
   const ref = useRef(null);
   const emitted = useRef(null);
@@ -103,7 +106,7 @@ const FormattedField = ({ label, value, onChange, readOnly, placeholder, minRows
   };
   return (
     <div>
-      {label && <span className="lblu fmt-label block mb-1">{label}{required && <span className="text-amber-700"> {requiredNote || '· required to sign'}</span>}</span>}
+      {label && <span className="lblu fmt-label block mb-1">{label}{required && <span className="text-amber-700"> {requiredNote || '· required'}</span>}</span>}
       <div className={`rounded-lg ${carried ? 'carried' : 'border border-[#e5ddcb]'} bg-white`}>
         {!readOnly && (
           <div className="flex flex-wrap gap-1 px-2 pt-2" role="toolbar" aria-label={`Format ${label || 'text'}`}>

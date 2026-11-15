@@ -186,10 +186,15 @@ test('the route stores the format, through the one allow-list', () => {
 test('there is ONE formatted editor, and the clinical workspace uses it too', () => {
   const comp = read('public/components/formatted-field.jsx');
   assert.match(comp, /window\.GFC_FORMATTED = \{/);
-  assert.match(read('public/clinical.html'), /const \{ FormattedField \} = window\.GFC_FORMATTED;/,
+  // Repointed 2026-11-15: clinical.html now wraps the shared one to supply its
+  // own "required to sign" wording, so the exact destructuring line is gone.
+  // The RULE is what matters — it reads the shared editor and implements none
+  // of its own — so that is what is asserted, not the spelling.
+  const clinical = read('public/clinical.html');
+  assert.match(clinical, /window\.GFC_FORMATTED\.FormattedField/,
     'clinical.html reads the shared one rather than declaring its own');
-  assert.ok(!/const FormattedField = \(\{/.test(read('public/clinical.html')),
-    'and no second declaration survives there');
+  assert.ok(!/contentEditable/.test(clinical),
+    'and implements no editor of its own — the shared file owns the editable surface');
   // The six shapes, named once.
   for (const cmd of ['bold', 'italic', 'underline', 'insertUnorderedList', 'insertOrderedList', 'heading']) {
     assert.ok(comp.includes(`'${cmd}'`), `the toolbar offers ${cmd}`);
@@ -215,4 +220,27 @@ test('the round trip holds for the shapes an announcement uses', () => {
     const back = NF.domToMarkup(frag(toDom(NF.renderTree(markup))), { newlines: true });
     assert.strictEqual(back, markup, `${JSON.stringify(markup)} survives the round trip`);
   }
+});
+
+test('the shared editor carries NO clinical vocabulary of its own', () => {
+  // Owner, 2026-11-15: "not all announcements are clinical". The toolbar is
+  // general purpose, so the words it renders must be too — the clinical
+  // workspace supplies "required to sign" itself. Comments may discuss the
+  // clinical origin; the rendered STRINGS may not carry it.
+  const comp = read('public/components/formatted-field.jsx');
+  const code = comp.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  for (const word of ['required to sign', 'clinician', 'chart', 'patient', 'OpenEMR', 'encounter']) {
+    assert.ok(!new RegExp(word, 'i').test(code), `"${word}" is clinical vocabulary and must not be in the shared editor`);
+  }
+  assert.match(code, /requiredNote \|\| '· required'/, 'its default is neutral');
+});
+
+test('the clinical workspace still says "required to sign", supplied in ONE place', () => {
+  const page = read('public/clinical.html');
+  assert.match(page, /requiredNote=\{props\.requiredNote \|\| '· required to sign'\}/,
+    'the workspace supplies its own wording');
+  // One wrapper, not nine edited call sites — fewer places to get wrong.
+  assert.strictEqual((page.match(/· required to sign/g) || []).length, 1,
+    'the wording appears exactly once, so it cannot drift between call sites');
+  assert.match(page, /const SharedFormattedField = window\.GFC_FORMATTED\.FormattedField;/);
 });
