@@ -34,9 +34,16 @@ const PAGES = [
   // 2026-11-04: the billing page's claims workspace, and the claim view it
   // shares with the clinical workspace. Both are written flush left.
   { page: 'billing.html',          nestedAt: 2 },
-  { page: 'components/claim-shared.jsx', nestedAt: 2 }
+  { page: 'components/claim-shared.jsx', nestedAt: 2 },
+  // 2026-11-15: the formatted editor, extracted so announcements can offer the
+  // same six shapes as a clinical note. It matters more here than anywhere: a
+  // remount re-runs the load effect and re-writes innerHTML mid-typing.
+  { page: 'components/formatted-field.jsx', nestedAt: 2 }
 ];
-const FORM_CONTROL = /<(input|textarea|select)\b/;
+// contentEditable counts: the formatted editor holds a caret and its own
+// loaded value, so remounting it loses the caret exactly as an <input> does,
+// and the old pattern could not see it.
+const FORM_CONTROL = /<(input|textarea|select)\b|contentEditable/;
 
 test('no component that renders a form control is defined inside another component', () => {
   const offenders = [];
