@@ -128,3 +128,60 @@ test('the Portal Hub banner is the brand graphic, shown whole', () => {
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'banners', 'banner-hub.webp')));
   assert.ok(!/banner-admin\.webp/.test(stripComments(login)), 'the old photo banner is gone from the hub');
 });
+
+// Owner, 2026-11-09: "make sure roles on the portal hub match their actual
+// roles". The hub used to work the badge out from lab-era fields, so every
+// clinician read "Team Member" and every caregiver "Vendor".
+test('the hub names each account by its real account type', () => {
+  const want = {
+    admin: 'Super Admin', manager: 'Manager', coordinator: 'Care Coordinator',
+    provider: 'Provider (FNP / MD / PA)', rn: 'RN', lcsw: 'LCSW', lmsw: 'LMSW / Case Manager',
+    liaison: 'Community Care Liaison', client: 'Client', family: 'Family / Authorized Contact'
+  };
+  for (const [type, label] of Object.entries(want)) {
+    assert.equal(at.accountTypeLabel(Object.assign({}, at.fieldsFor(type), { accountType: type })), label, type);
+    // A record written before account types existed reads the same.
+    if (type !== 'liaison') assert.equal(at.accountTypeLabel(at.fieldsFor(type)), label, `${type} (derived)`);
+  }
+  assert.equal(at.accountTypeLabel({ role: 'vendor', licenseLevel: 'cna' }), 'Caregiver (CNA)');
+  assert.equal(at.accountTypeLabel({ role: 'vendor' }), 'Caregiver');
+  assert.equal(at.accountTypeLabel({ role: 'user' }), 'Account type not set');
+});
+
+test('the hub page shows the server\'s role name and works none out itself', () => {
+  const src = stripComments(read('public/login.html'));
+  const hub = src.slice(src.indexOf('const PortalHub'), src.indexOf('<footer'));
+  assert.ok(hub.length > 1000, 'could not find the hub component');
+  assert.ok(!/'Team Member'|'Vendor'|External Vendor/.test(hub), 'no lab-era role names');
+  assert.match(hub, /user\.accountTypeLabel/);
+  assert.match(hub, /d\.accountTypeLabel/);
+  const server = read('server.js');
+  assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(user\)/);
+  assert.match(server, /accountTypeLabel: accountTypes\.accountTypeLabel\(me\)/);
+});
+
+// Owner, 2026-11-09 (User Management screenshot): every staff row read
+// "Client" under Portal Access, and the Super Admin was asked to confirm a
+// guessed "provider" clinical role.
+test('User Management shows what each person can actually open', () => {
+  assert.deepEqual(at.accessSummaryFor({ ...at.fieldsFor('provider'), accountType: 'provider' }), ['Portal Hub', 'Clinical']);
+  assert.deepEqual(at.accessSummaryFor({ ...at.fieldsFor('client'), accountType: 'client', slug: 'jane' }), ['Patient portal']);
+  assert.deepEqual(at.accessSummaryFor({ role: 'vendor', licenseLevel: 'pca' }), ['Caregiver app']);
+  assert.deepEqual(at.accessSummaryFor({ role: 'vendor' }), [], 'a caregiver with no licence level opens nothing yet');
+  const admin = at.accessSummaryFor({ ...at.fieldsFor('admin'), accountType: 'admin' });
+  assert.ok(admin.includes('Admin & Compliance') && !admin.includes('Patient portal'));
+  const page = stripComments(read('public/admin-hub.html'));
+  assert.ok(!/title="Client Portal">Client</.test(page), 'the lab-era Client badge is gone');
+  assert.match(page, /user\.accessSummary/);
+  assert.match(read('server.js'), /accessSummary: accountTypes\.accessSummaryFor\(u\)/);
+});
+
+test('only a clinician whose type nobody chose is asked to confirm a guessed clinical role', () => {
+  const guessed = { clinicalRole: 'provider', clinicalRoleAutoAssigned: true };
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'admin' }), false, 'a Super Admin');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', isManager: true }), false, 'a manager');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', hasClinicalAccess: true }), true, 'an untyped clinician');
+  assert.equal(at.clinicalRoleNeedsConfirming({ ...guessed, role: 'user', accountType: 'provider' }), false, 'type chosen');
+  assert.equal(at.clinicalRoleNeedsConfirming({ role: 'user', clinicalRole: 'provider' }), false, 'never guessed');
+  assert.match(read('server.js'), /clinicalRoleAutoAssigned: accountTypes\.clinicalRoleNeedsConfirming\(u\)/);
+});
