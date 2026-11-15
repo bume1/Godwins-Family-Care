@@ -959,7 +959,7 @@ module.exports = function createCaregiverRoutes(deps) {
         // Caregiver posts and all-staff announcements (2026-11-10), through the
         // same audience rule My GFC → Announcements reads.
         .filter(b => announcements.visibleTo(b, 'caregiver', req.user.id))
-        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
+        .map(b => ({ id: b.id, kind: 'broadcast', title: b.title, body: b.body, format: announcements.bodyFormatOf(b), link: b.link || null, at: b.posted_at, byName: b.posted_by_name }))
         .concat(mine.map(e => ({
           id: e.id, kind: 'escalation', title: `${e.concern_type.replace(/_/g, ' ')} concern — ${e.client_name}`,
           body: `Status: ${String(e.status).replace(/_/g, ' ')}. ${cg.describeRecipients(e.notified) === 'no one — this concern could not be routed' ? '' : `Sent to ${cg.describeRecipients(e.notified)}.`}`.trim(),
@@ -992,6 +992,10 @@ module.exports = function createCaregiverRoutes(deps) {
         title: String(title).trim().slice(0, announcements.TITLE_MAX),
         // No length limit on the message (owner, 2026-11-10: it cut one off).
         body: String(body || '').trim(),
+        // How it was written (2026-11-15). Only an exact 'markup' opts into the
+        // formatter; everything else is plain text and is read literally, so an
+        // older announcement containing `_` or `- ` is never reinterpreted.
+        body_format: announcements.bodyFormatOf({ body_format: (req.body || {}).format }),
         audience: aud.audience,
         user_ids: aud.userIds,
         link: lnk.link,

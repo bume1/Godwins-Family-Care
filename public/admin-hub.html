@@ -5672,7 +5672,16 @@
 
                       {editingTemplate.category === 'announcement' && (
                         <div className="bg-white rounded-xl shadow-sm p-5">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">HTML Body <span className="text-gray-400 font-normal">(optional — overrides base wrapper)</span></label>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">HTML Body <span className="text-gray-400 font-normal">(no longer used for announcements)</span></label>
+                          {/* Since 2026-11-15 an announcement is rendered in the
+                              house style by the mail queue, so anything stored
+                              here is ignored rather than silently winning. Said
+                              plainly, because losing a customisation without
+                              being told is worse than losing it. */}
+                          <p className="text-xs text-amber-700 mb-2">
+                            Announcements now always send in the Godwins house style, so this box is not used.
+                            Write the announcement with formatting in <a href="/my#announcements" className="underline">My GFC → Announcements</a> instead.
+                          </p>
                           <textarea value={editForm.htmlBody} onChange={e => setEditForm(prev => ({ ...prev, htmlBody: e.target.value }))}
                             rows={10} className="w-full input-modern px-3 py-2 text-sm font-mono resize-y" placeholder="Custom HTML email body..." />
                         </div>

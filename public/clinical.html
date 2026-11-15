@@ -120,18 +120,9 @@
     .cw-table tr:last-child td { border-bottom:0; }
     .care-chip { display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:24px; border-radius:7px; font-size:11.5px; font-weight:700; padding:0 7px; }
     ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
-    /* Formatted note fields. Tailwind's reset strips list markers and heading
-       sizes, so the six shapes get their own, in the editor and when read. */
-    .fmt { font-size:13px; line-height:1.5; color:#1f2937; }
-    .fmt ul { list-style:disc; padding-left:1.25rem; margin:2px 0; }
-    .fmt ol { list-style:decimal; padding-left:1.4rem; margin:2px 0; }
-    .fmt h3 { font-size:14px; font-weight:700; color:#033D50; margin:4px 0 2px; }
-    .fmt strong { font-weight:700; } .fmt em { font-style:italic; } .fmt u { text-decoration:underline; }
-    .fmt-editor { min-height:3.2em; outline:none; white-space:pre-wrap; }
-    .fmt-editor:empty::before { content:attr(data-placeholder); color:#a8a29e; }
-    .fmt-tool { border:1px solid #e5ddcb; background:#fff; border-radius:6px; min-width:28px; height:26px; padding:0 6px; font-size:12px; color:#033D50; }
-    .fmt-tool:hover { background:#FAF7F2; }
-    .carried { background:#FDF6E7; border:1px dashed #C9A44A; }
+    /* The formatted-field styles live with the component that owns them
+       (/components/formatted-field.jsx), so the six shapes cannot look like a
+       list on one screen and a paragraph on another. */
     .sigblock { border:2px solid #033D50; border-radius:10px; padding:10px 12px; background:#fff; }
   </style>
   <script src="/session-guard.js"></script>
@@ -140,6 +131,7 @@
 </head>
 <body>
   <div id="root"></div>
+  <script type="text/babel" src="/components/formatted-field.jsx"></script>
   <script type="text/babel" src="/components/claim-shared.jsx"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback, useContext , useMemo } = React;
@@ -4922,81 +4914,18 @@
     // scope — see the note above VitalInput about remounting inputs.
     const NF = window.GFC_NOTE_FORMAT;
 
-    const FMT_TOOLS = [
-      { cmd: 'bold', label: <b>B</b>, title: 'Bold (Ctrl/⌘+B)' },
-      { cmd: 'italic', label: <i>I</i>, title: 'Italic (Ctrl/⌘+I)' },
-      { cmd: 'underline', label: <u>U</u>, title: 'Underline (Ctrl/⌘+U)' },
-      { cmd: 'insertUnorderedList', label: <i className="ti ti-list" />, title: 'Bulleted list' },
-      { cmd: 'insertOrderedList', label: <i className="ti ti-list-numbers" />, title: 'Numbered list' },
-      { cmd: 'heading', label: <i className="ti ti-heading" />, title: 'Section heading' }
-    ];
-    // A note field with a formatting toolbar. What it stores is the six-shape
-    // markup, never HTML: every change walks the editor's DOM back through
-    // domToMarkup, so a paste or an odd browser element cannot reach a record.
-    const FormattedField = ({ label, value, onChange, readOnly, placeholder, minRows, carried, onConfirmCarried, required }) => {
-      const ref = useRef(null);
-      const emitted = useRef(null);
-      // Load the value when it changes from OUTSIDE — a load, a carry-forward,
-      // the other clinician's version. Never on this editor's own keystrokes, or
-      // the caret would jump to the start on every letter.
-      useEffect(() => {
-        const el = ref.current;
-        if (!el || value === emitted.current) return;
-        el.innerHTML = NF.renderHtml(value || '');
-        emitted.current = value;
-      }, [value]);
-      const emit = () => {
-        if (!ref.current) return;
-        // newlines: Shift+Enter in this pre-wrap box is a real line break, not a space.
-        const markup = NF.domToMarkup(ref.current, { newlines: true });
-        if (markup === emitted.current) return;
-        emitted.current = markup;
-        onChange && onChange(markup);
-      };
-      const run = (cmd) => {
-        if (readOnly || !ref.current) return;
-        ref.current.focus();
-        if (cmd === 'heading') {
-          const inHeading = /^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''));
-          document.execCommand('formatBlock', false, inHeading ? 'div' : 'h3');
-        } else {
-          document.execCommand(cmd, false, null);
-        }
-        emit();
-      };
-      // A paste arrives as TEXT: formatting from Word or a web page is not
-      // carried over, and the clinician applies what they mean with the toolbar.
-      const onPaste = (e) => {
-        e.preventDefault();
-        const text = (e.clipboardData || window.clipboardData).getData('text/plain');
-        document.execCommand('insertText', false, text);
-        emit();
-      };
-      return (
-        <div>
-          {label && <span className="lblu block mb-1">{label}{required && <span className="text-amber-700"> · required to sign</span>}</span>}
-          <div className={`rounded-lg ${carried ? 'carried' : 'border border-[#e5ddcb]'} bg-white`}>
-            {!readOnly && (
-              <div className="flex flex-wrap gap-1 px-2 pt-2" role="toolbar" aria-label={`Format ${label || 'text'}`}>
-                {FMT_TOOLS.map(t => (
-                  <button type="button" key={t.cmd} className="fmt-tool" title={t.title} aria-label={t.title}
-                    onMouseDown={e => { e.preventDefault(); run(t.cmd); }}>{t.label}</button>
-                ))}
-              </div>
-            )}
-            <div ref={ref} className="fmt fmt-editor px-3 py-2" role="textbox" aria-multiline="true" aria-label={label || 'Note text'}
-              contentEditable={!readOnly} suppressContentEditableWarning data-placeholder={placeholder || ''}
-              style={{ minHeight: `${(minRows || 2) * 1.5}em` }}
-              onInput={emit} onBlur={emit} onPaste={onPaste} />
-          </div>
-          {carried && (
-            <button type="button" className="prefill-badge mt-1 flex items-center gap-1" onClick={onConfirmCarried}>
-              <i className="ti ti-alert-circle" /> CARRIED FORWARD — EDIT IT, OR TAP TO CONFIRM IT STILL APPLIES
-            </button>
-          )}
-        </div>
-      );
-    };
+    // The editor and the read-only renderer are shared with My GFC and the
+    // client portal (/components/formatted-field.jsx) — announcements offer the
+    // same six shapes, so there is one editor rather than three.
+    //
+    // The shared file is deliberately free of clinical vocabulary, so the
+    // workspace's own "required to sign" wording is supplied HERE, once, rather
+    // than being the default everybody inherits. A call site that passes its
+    // own still wins.
+    const SharedFormattedField = window.GFC_FORMATTED.FormattedField;
+    const FormattedField = (props) => (
+      <SharedFormattedField {...props} requiredNote={props.requiredNote || '· required to sign'} />
+    );
 
     // Choose an earlier note to start from. The server says which notes exist
     // and returns the content with vitals and the date already left out.

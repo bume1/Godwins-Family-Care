@@ -68,6 +68,49 @@ const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+// ── Formatted bodies (announcements, 2026-11-15) ───────────────────────────
+// An announcement is written in the same editor as a clinical note, so its
+// body is the six-shape markup of public/note-format.js. That module gives a
+// NEUTRAL tree; the HTML is produced here, because this file is the only one
+// allowed to contain email markup — the same split the signed-note PDF uses
+// when it draws the same tree with pdfkit.
+//
+// Email needs inline styles: a bare <ul> or <h3> inherits nothing from a
+// stylesheet no mail client loads, and Outlook in particular mangles a list
+// with no explicit margin and padding.
+//
+// The escaping guarantee is UNCHANGED. Text lives only in text nodes and each
+// one goes through `esc` before any tag is wrapped around it, so nothing a
+// person typed can become live markup. A tag this function does not know is
+// rendered as its children alone, never emitted.
+const noteFormat = require('./public/note-format.js');
+
+const MARKUP_TAG_STYLE = Object.freeze({
+  h3: `font-family:Georgia,serif;font-size:16px;font-weight:700;color:${PALETTE.navy};margin:22px 0 8px 0;`,
+  ul: 'margin:0 0 16px 0;padding-left:22px;',
+  ol: 'margin:0 0 16px 0;padding-left:22px;',
+  li: 'margin:0 0 6px 0;',
+  div: 'margin:0 0 12px 0;'
+});
+
+function treeToEmailHtml(nodes) {
+  return (nodes || []).map((n) => {
+    if (n.text !== undefined) return esc(n.text);
+    if (n.tag === 'br') return '<br>';
+    if (n.tag === 'a') {
+      const href = safeUrl(n.href);
+      const inner = treeToEmailHtml(n.children || []);
+      return href ? `<a href="${esc(href)}" style="color:${PALETTE.navy};">${inner}</a>` : inner;
+    }
+    const inner = treeToEmailHtml(n.children || []);
+    if (MARKUP_TAG_STYLE[n.tag]) return `<${n.tag} style="${MARKUP_TAG_STYLE[n.tag]}">${inner}</${n.tag}>`;
+    // The inline shapes need no styling of their own; anything else is not a
+    // tag this renderer emits, so only its text survives.
+    if (['strong', 'em', 'u', 's', 'span'].includes(n.tag)) return `<${n.tag}>${inner}</${n.tag}>`;
+    return inner;
+  }).join('');
+}
+
 // A URL that will be placed in an href. Anything that is not plainly http(s)
 // is dropped rather than rendered, so a stored value cannot become a
 // javascript: link in someone's inbox.
@@ -176,10 +219,18 @@ function renderGfcEmail(opts) {
   // line written in capitals ("WHAT'S COMING") as a heading. Escaped first,
   // always: a line break becomes <br> only after the text is safe.
   const isHeading = (p) => o.capsHeadings && !/\n/.test(p) && p.length <= 60 && /[A-Z]/.test(p) && p === p.toUpperCase();
+  // `markup`: the body was written in the formatted editor, so it carries the
+  // six shapes and brings its own structure — headings, lists and line breaks
+  // are IN the markup, which is why it needs neither of the two flags above.
+  // Opt-in and nothing else changes: a body without it renders exactly as it
+  // did, because a plain announcement may contain `_` or `- ` that must stay
+  // literal.
   const bodyHtml = paragraphs
-    .map(p => (isHeading(p)
-      ? `<h2 style="font-family:Georgia,serif;font-size:17px;color:${PALETTE.navy};margin:28px 0 10px 0;letter-spacing:.02em;">${esc(p)}</h2>`
-      : `<p style="margin:0 0 20px 0;">${o.lineBreaks ? esc(p).replace(/\n/g, '<br>') : esc(p)}</p>`))
+    .map(p => (o.markup
+      ? treeToEmailHtml(noteFormat.renderTree(p))
+      : (isHeading(p)
+        ? `<h2 style="font-family:Georgia,serif;font-size:17px;color:${PALETTE.navy};margin:28px 0 10px 0;letter-spacing:.02em;">${esc(p)}</h2>`
+        : `<p style="margin:0 0 20px 0;">${o.lineBreaks ? esc(p).replace(/\n/g, '<br>') : esc(p)}</p>`)))
     .join('\n');
 
   const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:${PALETTE.cream};font-family:Arial,Helvetica,sans-serif;">
@@ -201,7 +252,11 @@ ${footerBlock(o.unsubscribeUrl)}
 </body></html>`;
 
   const textParts = [greeting.replace(/&#39;/g, "'"), ''];
-  paragraphs.forEach(p => { textParts.push(p, ''); });
+  // The text half of a formatted body goes through the same converter that
+  // writes a note into OpenEMR: a heading in capitals, `• ` for a bullet,
+  // `1. ` for a numbered item, and the emphasis markers dropped. A notice
+  // that arrives as raw `**asterisks**` is a notice nobody reads.
+  paragraphs.forEach(p => { textParts.push(o.markup ? noteFormat.toPlainText(p) : p, ''); });
   const fieldRows = (Array.isArray(o.fields) ? o.fields : []).filter(f => f && f.label && f.value);
   if (fieldRows.length) {
     fieldRows.forEach(f => textParts.push(`${f.label}: ${f.value}`));

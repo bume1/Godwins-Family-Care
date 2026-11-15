@@ -226,15 +226,44 @@ test('the migration leaves HTML an admin wrote themselves alone', () => {
   assert.ok(!/splice|delete |= \[\]/.test(fn), 'the migration clears one field; it never removes a template');
 });
 
-test('an announcement renders through the house template, with its structure intact', () => {
+test('an announcement is handed to the queue as PIECES, and no longer renders its own HTML', () => {
+  // ⚠️ REPOINTED 2026-11-15, and the reason is the point. This test used to
+  // slice from the send site to `if (result) queued++`. That line became
+  // `if (result && !result.skipped) queued++` on 2026-11-10, so indexOf
+  // returned -1, the slice ran to the end of the file — 1.4 MILLION characters
+  // instead of about 1,500 — and every assertion below passed on strings found
+  // somewhere else in server.js. It stayed green and guarded nothing.
+  //
+  // So: both anchors must exist, and the slice is SIZE-CHECKED. A bounded scan
+  // is a guard that works on the code it was written against.
   const src = read('server.js');
-  const site = src.slice(src.indexOf("const annTpl = getTemplateById"), src.indexOf('if (result) queued++'));
-  assert.ok(site.includes('emailTemplates.renderGfcEmail'), 'the fallback must be the house template');
-  // The pieces that make an announcement more than prose.
-  assert.ok(site.includes('newAnnouncement.priority'), 'priority must reach the template');
-  assert.ok(site.includes('newAnnouncement.attachmentUrl'), 'the attachment must reach the template');
-  assert.ok(site.includes('annHtml\n            ? renderTemplate') || /annHtml\s*\n?\s*\?/.test(site),
-    "an admin's own HTML still wins — the migration decides what is stored, not the send site");
+  const from = src.indexOf('const annTpl = getTemplateById');
+  const to = src.indexOf("relatedEntityType: 'announcement'", from);
+  assert.ok(from > -1, 'the send site moved — repoint this test, do not delete it');
+  assert.ok(to > from, 'the end anchor moved — repoint this test');
+  const site = src.slice(from, to);
+  assert.ok(site.length < 4000, `the slice is ${site.length} chars, so it is no longer the send site alone`);
+  // Comments are stripped before the scan. My first version of the assertion
+  // below matched the word `htmlBody` inside the comment that EXPLAINS why no
+  // htmlBody is sent — a search that cannot tell live code from prose about
+  // that code proves nothing, and this repo has paid for it five times.
+  const code = site.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+  // The structure an announcement has, handed over as pieces.
+  assert.ok(code.includes('newAnnouncement.attachmentUrl'), 'the attachment must reach the template');
+  assert.ok(code.includes("format:"), 'and how it was written, so the drain knows which reading to use');
+
+  // The send site no longer renders anything itself. `buildQueuedEmail`
+  // short-circuits on `if (t.htmlBody) return`, so a pre-rendered body here
+  // skipped the house template AND the format — which is why a client
+  // announcement could never carry formatting, and why an admin's stored HTML
+  // silently won over the house style.
+  assert.ok(!code.includes('emailTemplates.renderGfcEmail'),
+    'the drain renders it now, not the send site');
+  assert.ok(!/annHtml\s*\n?\s*\?/.test(code),
+    "a stored htmlBody no longer overrides the house template for announcements");
+  assert.ok(!/htmlBody/.test(code),
+    'no htmlBody is handed to the queue, or the drain would short-circuit on it');
 });
 
 test('the migration, RUN for real, clears the shipped chrome and keeps custom HTML', async () => {

@@ -20,12 +20,11 @@ const NF = window.GFC_NOTE_FORMAT;
 const deps = { codeSearch: null };
 const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
 
-// Read-only formatted text. renderHtml ESCAPES every character before it
-// applies a shape, so nothing a person typed can become live markup — the
-// only raw-HTML render either page has.
-const FormattedView = ({ markup, className }) => (
-  <div className={`fmt ${className || ''}`} dangerouslySetInnerHTML={{ __html: NF.renderHtml(markup || '') }} />
-);
+// Read-only formatted text, from the one component that owns it
+// (/components/formatted-field.jsx, loaded before this file). renderHtml
+// ESCAPES every character before it applies a shape, so nothing a person
+// typed can become live markup — and there is one such render, not two.
+const { FormattedView } = window.GFC_FORMATTED;
 
 // The signature, bold and set apart at the bottom of the note — the one
 // thing on the screen that has to be unmistakable.

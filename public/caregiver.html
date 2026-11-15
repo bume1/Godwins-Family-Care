@@ -1044,7 +1044,11 @@ const FeedTab = ({ items, reviewed, onReviewed }) => (
       : items.map(i => (
         <div className="card" key={`${i.kind}-${i.id}`}>
           <h3>{i.title}</h3>
-          <p style={{ fontSize: 15, color: 'var(--mut)', whiteSpace: 'pre-wrap' }}>{i.body}</p>
+          {/* An announcement written in the formatted editor renders its six
+              shapes; a plain one, and every concern alert, keeps pre-wrap. */}
+          {i.format === 'markup'
+            ? <div style={{ fontSize: 15, color: 'var(--mut)' }} dangerouslySetInnerHTML={{ __html: window.GFC_NOTE_FORMAT.renderHtml(i.body || '') }} />
+            : <p style={{ fontSize: 15, color: 'var(--mut)', whiteSpace: 'pre-wrap' }}>{i.body}</p>}
           {i.link && <p style={{ marginTop: 6 }}><a href={i.link} target="_blank" rel="noopener noreferrer">Open the guide</a></p>}
           <p className="mu" style={{ fontSize: 13, marginTop: 6, color: '#9a9388' }}>{fmtDate(i.at)}</p>
           {i.kind === 'broadcast' && (reviewed[i.id]
