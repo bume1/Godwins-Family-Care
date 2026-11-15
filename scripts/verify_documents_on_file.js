@@ -54,10 +54,12 @@ const ADMIN = { id: 'admin_dof', role: 'admin', email: 'dofadmin@example.test', 
 // A 1099 contractor on staff whose W-9 was signed on paper. (A caregiver is
 // always W-2, so their paper forms are the W-4 and I-9; the W-9 is a contractor's.)
 const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 'dofperson@example.test', name: 'Probe Person (TEST DATA)', employmentType: '1099' };
+// A second 1099 contractor whose Social Security card is on file (2026-11-15).
+const P2U = { id: 'cg_dof3', role: 'user', accountType: 'coordinator', email: 'dofp2@example.test', name: 'Probe Contractor (TEST DATA)', employmentType: '1099' };
 
 (async () => {
   const CG = { id: 'cg_dof2', role: 'vendor', accountType: 'caregiver', email: 'dofcg@example.test', name: 'Probe Caregiver (TEST DATA)', licenseLevel: 'pca' };
-  STORE.set('users', [ADMIN, PERSON, CG]);
+  STORE.set('users', [ADMIN, PERSON, CG, P2U]);
   require(path.join(__dirname, '..', 'server.js'));
   await sleep(2500);
   const a = tok(ADMIN), me = tok(PERSON);
@@ -83,12 +85,15 @@ const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 
   const base = { documentId: w9Id, name: 'Probe Person', taxClass: 'individual', signedName: 'Probe Person', signedOn: '2026-10-01' };
   r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w4/on-file`, a, { ...base, filingStatus: 'single' });
   check('a W-9 cannot be put on file as a W-4', r.status === 409 && r.body.code === 'ON_FILE_KIND', r.body);
-  // A number the office sends anyway is ignored: the office never sets it.
+  // A number typed on the W-9 is checked like any SSN.
   r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a, { ...base, tin: '987-65-4321' });
-  check('it goes on file with no taxpayer ID (paper showing only the last 4 is fine)', r.status === 200 && !(r.body.missing || []).includes('W-9'), r.body);
-  check('…and pay still waits on the full number, which is theirs to enter', (r.body.missing || []).includes('Taxpayer ID (they add it in Pay Setup)'), r.body.missing);
+  check('a typed number that is not a valid SSN is refused', r.status === 400 && r.body.code === 'W9_TIN', r.body);
+  // Left blank (the office does not have it): on file, and they enter it.
+  r = await call('PUT', `/api/payroll/admin/people/${PERSON.id}/forms/w9/on-file`, a, base);
+  check('it goes on file with the number left blank (paper showing only the last 4 is fine)', r.status === 200 && !(r.body.missing || []).includes('W-9'), r.body);
+  check('…and pay waits on the full number, which they enter in Pay Setup', (r.body.missing || []).includes('Taxpayer ID (they add it in Pay Setup)'), r.body.missing);
   let stored = STORE.get('payroll_profiles')[PERSON.id];
-  check('the office\'s number was not stored', !stored.tin && !JSON.stringify(stored).includes('987654321'));
+  check('no number was stored', !stored.tin);
   check('the W-9 names its document and what the reads found', stored.w9.onFile.documentId === w9Id && stored.w9.onFile.match.readsAs === 'w9');
 
   console.log('\n── The person enters their own taxpayer ID ──');
@@ -127,6 +132,46 @@ const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 
   r = await call('PUT', `/api/caregiver/documents/${otherId}/kind`, tok(CG), { kind: 'w9' });
   check('a caregiver cannot change a type (the office only)', r.status === 403, r.body);
 
+  console.log('\n── The SSN, entered once: read off the card, used by the W-9, revised by the office ──');
+  const P2 = 'cg_dof3';
+  const cardPdf = async () => { const { PDFDocument, StandardFonts } = require('pdf-lib'); const d = await PDFDocument.create(); const pg = d.addPage([350, 220]); const f = await d.embedFont(StandardFonts.Helvetica);
+    pg.drawText('SOCIAL SECURITY', { x: 20, y: 180, size: 16, font: f }); pg.drawText('123-45-6789', { x: 20, y: 140, size: 18, font: f });
+    pg.drawText('THIS NUMBER HAS BEEN ESTABLISHED FOR', { x: 20, y: 100, size: 9, font: f }); pg.drawText('PROBE CONTRACTOR (TEST DATA)', { x: 20, y: 80, size: 11, font: f }); return Buffer.from(await d.save()); };
+  r = await call('POST', '/api/caregiver/documents', a, { caregiverId: P2, kind: 'ssn_card', fileName: 'SS card.pdf', fileDataB64: b64(await cardPdf()) });
+  const cardId = r.body.document && r.body.document.id;
+  check('the office files a Social Security card', r.status === 200 && r.body.document.status === 'accepted', r.body);
+  r = await call('POST', `/api/caregiver/admin/caregivers/${P2}/documents/match`, a, { all: true });
+  r = await call('GET', `/api/caregiver/documents?caregiverId=${P2}`, a);
+  const card = (r.body.documents || []).find(d => d.id === cardId);
+  check('the number is read off the card: ending 6789, printed digits', card && card.ssnRead && card.ssnRead.last4 === '6789' && card.ssnRead.reads === 'text', card && card.ssnRead);
+  const raw = (STORE.get('caregiver_documents') || []).find(d => d.id === cardId);
+  check('it is stored SEALED on the document, never plain', raw.ssnRead.enc && !JSON.stringify(raw).includes('123456789') && !JSON.stringify(raw).includes('123-45-6789'));
+  check('the document list never carries the sealed value', !JSON.stringify(card).includes(raw.ssnRead.enc.slice(0, 20)));
+  r = await call('GET', `/api/payroll/admin/people/${P2}/forms/on-file`, a);
+  check('Mark On File knows the card read (last 4 only)', r.body.ssn && r.body.ssn.cards.length === 1 && r.body.ssn.cards[0].last4 === '6789' && !r.body.ssn.last4, r.body.ssn);
+  r = await call('PUT', `/api/payroll/admin/people/${P2}/ssn`, a, { ssnCardDocumentId: w9Id });
+  check('another person\'s document cannot give the number', r.status === 400 && r.body.code === 'SSN_CARD', r.body);
+  r = await call('PUT', `/api/payroll/admin/people/${P2}/ssn`, a, { ssnCardDocumentId: cardId });
+  let s2 = STORE.get('payroll_profiles')[P2];
+  check('Use For SSN saves it from the card: ending 6789, by the office', r.status === 200 && r.body.profile.ssnLast4 === '6789' && r.body.profile.ssnSource === 'office' && s2.ssn.documentId === cardId, r.body.profile);
+  // Their paper W-9, put on file with NO number typed: the SSN answers it.
+  r = await call('POST', '/api/caregiver/documents', a, { caregiverId: P2, kind: 'w9', fileName: 'W9.pdf', fileDataB64: b64(blank('fw9-2024-03.pdf')) });
+  const w9b = r.body.document.id;
+  await call('POST', `/api/caregiver/admin/caregivers/${P2}/documents/match`, a, { all: true });
+  r = await call('PUT', `/api/payroll/admin/people/${P2}/forms/w9/on-file`, a, { documentId: w9b, name: 'Probe Contractor', taxClass: 'individual', signedName: 'Probe Contractor', signedOn: '2026-10-01' });
+  s2 = STORE.get('payroll_profiles')[P2];
+  check('the W-9 takes the SSN already on file: entered once, nothing missing', r.status === 200 && s2.tin && s2.tin.last4 === '6789' && !(r.body.missing || []).some(m => /Taxpayer/.test(m)), r.body.missing);
+  r = await call('GET', '/api/my/pay-setup', tok(P2U));
+  check('their Pay Setup shows no taxpayer ID to-do: it reads done, added by the office', ((r.body.profile.checklist || []).find(c => c.key === 'tin') || {}).done === true && r.body.profile.tinSource === 'office', r.body.profile.checklist);
+  // The office revises it; the W-9 number follows.
+  r = await call('PUT', `/api/payroll/admin/people/${P2}/ssn`, a, { ssn: '234-56-7890' });
+  s2 = STORE.get('payroll_profiles')[P2];
+  check('the office revises it: both the SSN and the W-9 number now end 7890', r.status === 200 && s2.ssn.last4 === '7890' && s2.tin.last4 === '7890', { ssn: s2.ssn.last4, tin: s2.tin.last4 });
+  r = await call('PUT', `/api/payroll/admin/people/${P2}/ssn`, tok(CG), { ssn: '234-56-7890' });
+  check('a caregiver cannot set someone\'s SSN', r.status === 403 || r.status === 401, r.status);
+  const logs = JSON.stringify(STORE.get('activity_log') || []) + JSON.stringify(s2.history || []);
+  check('logs and history never carry either number', !/123456789|123-45-6789|234567890|234-56-7890/.test(logs));
+
   // KEEP=<file>: stop here with the server up, for screenshots of this state.
   if (process.env.KEEP) {
     // For screenshots only: a stand-in AI answer on the W-4 (Vertex is off
@@ -135,8 +180,10 @@ const PERSON = { id: 'cg_dof', role: 'user', accountType: 'coordinator', email: 
     const w4 = docs.find(d => d.id === otherId);
     w4.match = { ...w4.match, verdict: 'agree', ai: { status: 'ok', kind: 'w4', confidence: 0.96, fields: { filingStatus: 'single', extraWithholding: '20', signedName: 'Probe Person', signedOn: '2026-09-15' } } };
     STORE.set('caregiver_documents', docs);
-    const all = STORE.get('payroll_profiles'); all[PERSON.id].tin = null; STORE.set('payroll_profiles', all);
-    fs.writeFileSync(process.env.KEEP, JSON.stringify({ admin: a, person: me, personId: PERSON.id, base: BASE })); await new Promise(() => {});
+    const all = STORE.get('payroll_profiles'); all[PERSON.id].tin = null;
+    // …and the second contractor's W-9 back off file, so its number choices show.
+    all[P2].w9 = null; all[P2].tin = null; STORE.set('payroll_profiles', all);
+    fs.writeFileSync(process.env.KEEP, JSON.stringify({ admin: a, person: me, personId: PERSON.id, p2: P2, base: BASE })); await new Promise(() => {});
   }
 
   console.log('\n── Take Off File ──');

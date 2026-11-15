@@ -184,7 +184,7 @@ test('I-9 Section 2: the note and the remote-review box reach the form', async (
   assert.match(textOf(buf), /X\s+Check here if you used an alternative procedure/);
   // The People card links to the signed forms rather than restating them.
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
-  assert.match(page, /const Paperwork = \(\{ p, openPdf \}\)/);
+  assert.match(page, /const Paperwork = \(\{ p, openPdf(, reload)? \}\)/);
   assert.ok(!/What they submitted/.test(page), 'no second copy of their documents');
   assert.match(page, /altProcedure: !!i9\.altProcedure/);
 });

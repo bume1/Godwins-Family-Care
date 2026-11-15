@@ -172,10 +172,14 @@ function FormBody({ which, data, form, set }) {
       <label>Business name (if different)</label><input name="businessName" type="text" value={form.businessName || ''} onChange={e => set({ ...form, businessName: e.target.value })} />
       <label>Tax classification</label>
       <select name="taxClass" value={form.taxClass || ''} onChange={e => set({ ...form, taxClass: e.target.value })}><option value="">Choose…</option>{Object.entries(o.w9Class).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
-      <div className="mp-grid">
+      {/* Entered once (2026-11-15): their SSN already on file answers this. */}
+      {data.profile && data.profile.ssnLast4 && (
+        <label className="mp-check"><input name="useSsnOnFile" type="checkbox" checked={!!form.useSsnOnFile} onChange={e => set({ ...form, useSsnOnFile: e.target.checked, ...(e.target.checked ? { tinType: 'ssn', tin: '' } : {}) })} /><span>Use my Social Security number already on file (ending {data.profile.ssnLast4})</span></label>
+      )}
+      {!form.useSsnOnFile && <div className="mp-grid">
         <div><label>Taxpayer ID type</label><select name="tinType" value={form.tinType || 'ssn'} onChange={e => set({ ...form, tinType: e.target.value })}><option value="ssn">SSN</option><option value="ein">EIN</option></select></div>
         <div><label>Taxpayer ID</label><input name="tin" type="password" autoComplete="off" value={form.tin || ''} onChange={e => set({ ...form, tin: e.target.value })} /></div>
-      </div>
+      </div>}
       <label>Address</label><input name="address" type="text" value={form.address || ''} onChange={e => set({ ...form, address: e.target.value })} />
       <Sign statement="Under penalties of perjury, I certify that the number shown is my correct taxpayer identification number and that I am a U.S. person." form={form} set={set} />
     </div>
@@ -418,7 +422,9 @@ function PaySetup() {
     setBusy(false);
   };
   const p = data.profile;
-  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : (k === 'w9' || k === 'tin') && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}` : null;
+  // Who entered the number (2026-11-15): theirs to update either way.
+  const byOffice = (src) => src === 'office' ? ', added by the office' : '';
+  const detail = (k) => k === 'ssn' && p.ssnLast4 ? `On file, ending ${p.ssnLast4}${byOffice(p.ssnSource)}` : k === 'pay' && p.payMethod ? (p.payMethod.method === 'direct_deposit' ? `${p.payMethod.bankName || 'Bank'} ••••${p.payMethod.accountLast4}` : p.payMethod.method === 'check' ? 'Paper check' : 'Wise') : (k === 'w9' || k === 'tin') && p.tinLast4 ? `Taxpayer ID ending ${p.tinLast4}${byOffice(p.tinSource)}` : null;
   return (
     <div className="mp-form">
       <p className="mg-note" style={{ marginTop: 0 }}>What payroll needs to pay you and send your W-2 or 1099. Your other hiring paperwork is in onboarding.</p>

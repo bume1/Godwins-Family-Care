@@ -178,10 +178,42 @@ function summary(m, filedAs) {
   return `Could not tell what this document is.${aiNote}`;
 }
 
+// ── The number on a Social Security card (owner, 2026-11-15) ─────────────────
+// "Social security card should be recognized and then the number extracted."
+// Read ONLY from a document that is, or reads as, an SS card: never from a W-9
+// or W-4, whose boxes stay secret-free (PREFILL_FIELDS). Two reads again: the
+// printed digits (PDF text or in-container OCR), and the AI check asked one
+// separate question. The digits leave this module to be SEALED at once
+// (routes/caregiver.js); nothing here logs or keeps them.
+const SSN_RE = /(?<!\d)(\d{3})[- ]?(\d{2})[- ]?(\d{4})(?!\d)/g;
+const validSsn = (d) => d.length === 9 && !['000', '666'].includes(d.slice(0, 3)) && d[0] !== '9' && d.slice(3, 5) !== '00' && d.slice(5) !== '0000';
+/** The first valid 9-digit SSN in the text, digits only, or null. */
+function ssnFromText(text) {
+  for (const m of String(text || '').matchAll(SSN_RE)) {
+    const d = m[1] + m[2] + m[3];
+    if (validSsn(d)) return d;
+  }
+  return null;
+}
+const SSN_AI_SCHEMA = Object.freeze({
+  fields: { ssnDigits: { type: 'string', description: 'The 9-digit number printed on this Social Security card, digits only. Leave it out if it is not fully readable.' } }
+});
+async function aiSsn({ bytes, mimeType, aiRead }) {
+  if (typeof aiRead !== 'function') return null;
+  try {
+    const r = await aiRead({ input: { mimeType, bytes }, schema: SSN_AI_SCHEMA });
+    const out = (r && (r.proposal || r.output || r)) || {};
+    const d = String(out.ssnDigits || '').replace(/\D/g, '');
+    return validSsn(d) ? d : null;
+  } catch (e) { return null; }
+}
+
 /**
  * Read one stored document. `textOf` and `aiRead` are handed in so tests run
- * without a PDF library, OCR or a model. Returns the record kept on the row:
- * { smart, ai, verdict, readsAs, filedAsDiffers, text: 'text'|'ocr'|'none', at }.
+ * without a PDF library, OCR or a model. Returns { match, ssn }: `match` is the
+ * record kept on the row ({ smart, ai, verdict, readsAs, filedAsDiffers,
+ * text: 'text'|'ocr'|'none', at }); `ssn` is an SS card's number, for the
+ * caller to seal, or null.
  */
 async function matchDocument({ bytes, mimeType, filedAs, textOf, aiRead, at }) {
   let read = { text: '', source: 'none' };
@@ -189,7 +221,16 @@ async function matchDocument({ bytes, mimeType, filedAs, textOf, aiRead, at }) {
   const smart = smartMatch(read.text);
   const ai = await aiScan({ bytes, mimeType, aiRead });
   const v = verdict(smart, ai, filedAs);
-  return { smart, ai, ...v, text: read.source || 'none', at };
+  const out = { smart, ai, ...v, text: read.source || 'none', at };
+  // An SS card: its number, read two ways. Returned apart from the match so
+  // the caller seals it and the match record never carries it.
+  if (filedAs === 'ssn_card' || v.readsAs === 'ssn_card' || (smart && smart.kind === 'ssn_card') || (ai && ai.kind === 'ssn_card')) {
+    const fromText = ssnFromText(read.text);
+    const fromAi = await aiSsn({ bytes, mimeType, aiRead });
+    const digits = fromText || fromAi;
+    if (digits) return { match: out, ssn: { digits, text: !!fromText, ai: !!fromAi, agree: !!(fromText && fromAi && fromText === fromAi), disagree: !!(fromText && fromAi && fromText !== fromAi) } };
+  }
+  return { match: out, ssn: null };
 }
 
 /**
@@ -222,4 +263,4 @@ async function textOf({ bytes, mimeType, createWorker }) {
   }
 }
 
-module.exports = { KINDS, KIND_KEYS, MARKERS, AI_SCHEMA, PREFILL_FIELDS, cleanFields, smartMatch, aiScan, verdict, summary, matchDocument, textOf };
+module.exports = { KINDS, KIND_KEYS, MARKERS, AI_SCHEMA, PREFILL_FIELDS, cleanFields, ssnFromText, SSN_AI_SCHEMA, smartMatch, aiScan, verdict, summary, matchDocument, textOf };
