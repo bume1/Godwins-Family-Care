@@ -103,13 +103,41 @@ const json = (res, body, status = 200) => { res.writeHead(status, { 'Content-Typ
   await page.click("text=I've Reviewed This");
   await page.waitForTimeout(500);
   ok('reviewing records it and shows Reviewed', state.reviewed && /Reviewed/.test(await page.innerText('body')));
+  // The formatted editor is MOUNTED, not merely defined (2026-11-15). The
+  // reachability check: this repo has twice improved a component nothing
+  // rendered, so the toolbar is looked for on the real page.
+  const tools = await page.$$('.fmt-tool');
+  const editable = await page.$$('.fmt-editor[contenteditable="true"]');
+  ok('the message is written in the formatted editor, mounted on the real page',
+    tools.length === 6 && editable.length === 1, `tools=${tools.length} editors=${editable.length}`);
+  const styled = await page.evaluate(() => {
+    const el = document.querySelector('.fmt-editor');
+    return el ? getComputedStyle(el).whiteSpace : null;
+  });
+  ok('and its stylesheet came with it, now that the CSS left clinical.html', styled === 'pre-wrap', String(styled));
+
   await page.fill('input[placeholder^="App update"]', 'Holiday hours');
+  // Type into the real editor and apply bold with the real toolbar button.
+  await page.click('.fmt-editor');
+  await page.keyboard.type('Shifts change');
+  await page.evaluate(() => {
+    const el = document.querySelector('.fmt-editor');
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.empty();
+    sel.addRange(range);
+  });
+  await page.click('.fmt-tool[title^="Bold"]');
+  await page.waitForTimeout(200);
   await page.click('text=Everyone on the team');
   await page.click('text=Registered Nurse');
   await page.click('text=Post Announcement');
   await page.waitForTimeout(500);
   const p = state.posted[0] || {};
   ok('posting sends the chosen roles', p.title === 'Holiday hours' && Array.isArray(p.audience) && p.audience.join() === 'rn', JSON.stringify(p));
+  ok('what the browser posts is MARKUP, declared as markup',
+    p.format === 'markup' && p.body === '**Shifts change**', JSON.stringify({ format: p.format, body: p.body }));
   if (process.env.GFC_PROBE_SHOT) await page.screenshot({ path: process.env.GFC_PROBE_SHOT, fullPage: true });
   await ctx.close();
 

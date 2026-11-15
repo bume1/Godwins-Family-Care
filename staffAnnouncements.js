@@ -31,6 +31,14 @@ const STAFF_TYPES = Object.freeze(['admin', 'manager', 'coordinator', 'provider'
 const LEGACY_AUDIENCE = Object.freeze(['caregiver']);
 const TITLE_MAX = 200;
 
+// How the message was written. `markup` is the six-shape formatting of
+// public/note-format.js — the same editor a clinical note uses. Anything else
+// is PLAIN TEXT and is never run through the formatter: an announcement
+// written before the editor existed may contain `_` or `- `, and turning
+// those into underlines and bullets would rewrite what somebody posted. The
+// strict equality is the enforcement, exactly as messagingRepository does it.
+const bodyFormatOf = (row) => (row && row.body_format === 'markup' ? 'markup' : 'plain');
+
 const userIdsOf = (row) => (row && Array.isArray(row.user_ids) ? row.user_ids.map(String) : []);
 
 const audienceOf = (row) => {
@@ -94,7 +102,7 @@ const forViewer = (rows, reads, user, type) => {
   return (rows || [])
     .filter(r => visibleTo(r, type, user.id))
     .map(r => ({
-      id: r.id, title: r.title, body: r.body, link: r.link || null,
+      id: r.id, title: r.title, body: r.body, format: bodyFormatOf(r), link: r.link || null,
       at: r.posted_at, byName: r.posted_by_name,
       reviewedAt: mine.has(r.id) ? mine.get(r.id).reviewed_at : null
     }))
@@ -131,10 +139,13 @@ const emailFor = (row, ctaUrl) => ({
   body: [row.body || '', row.link ? `Guide: ${row.link}` : ''].filter(Boolean).join('\n\n') || row.title,
   ctaUrl,
   ctaLabel: 'Open in the app',
-  format: 'announcement'
+  // 'announcement' keeps the plain reading that has shipped since 2026-11-10
+  // (line breaks, ALL CAPS headings). A formatted body brings its own
+  // structure and asks for the markup renderer instead.
+  format: bodyFormatOf(row) === 'markup' ? 'announcement-markup' : 'announcement'
 });
 
 module.exports = {
   ALL_STAFF, STAFF_TYPES, LEGACY_AUDIENCE, TITLE_MAX,
-  audienceOf, userIdsOf, visibleTo, emailFor, parseAudience, parseLink, forViewer, report
+  audienceOf, userIdsOf, visibleTo, emailFor, parseAudience, parseLink, forViewer, report, bodyFormatOf
 };

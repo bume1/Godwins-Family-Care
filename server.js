@@ -1025,6 +1025,9 @@ function buildQueuedEmail(templateData, baseUrl) {
   // An office announcement keeps its line breaks and its ALL CAPS headings
   // (owner, 2026-11-10). Other notices are unchanged.
   if (t.format === 'announcement') { pieces.lineBreaks = true; pieces.capsHeadings = true; }
+  // One written in the formatted editor carries the six shapes instead, and so
+  // needs neither flag — headings, lists and breaks are in the markup (2026-11-15).
+  if (t.format === 'announcement-markup') { pieces.markup = true; }
   const rendered = emailTemplates.renderGfcEmail(pieces);
   return { html: rendered.html, text: rendered.text };
 }

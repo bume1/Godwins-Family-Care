@@ -8,7 +8,24 @@
 // .card or .btn can never restyle it, and it can never restyle theirs.
 // ============================================================================
 (function () {
+// The formatted editor and reader, shared with the clinical workspace
+// (/components/formatted-field.jsx). If the page did not load it, the editor
+// falls back to a plain box rather than failing to render at all.
+const FMT = (typeof window !== 'undefined' && window.GFC_FORMATTED) || null;
 const { useState, useEffect, useCallback } = React;
+
+// If the component did not load, the screen degrades to a plain box rather
+// than failing to render — the same fallback the messaging composer has. And
+// `WRITES_MARKUP` is what the composer declares, so a fallback box's plain
+// text is never stored as markup and then read through the formatter.
+const WRITES_MARKUP = !!FMT;
+const FormattedView = FMT ? FMT.FormattedView
+  : (({ markup }) => <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{markup}</p>);
+const FormattedField = FMT ? FMT.FormattedField
+  : (({ value, onChange, minRows, placeholder }) => (
+      <textarea rows={minRows || 5} value={value} placeholder={placeholder}
+        onChange={e => onChange && onChange(e.target.value)} />
+    ));
 
 (function injectStyles() {
   if (document.getElementById('mygfc-styles')) return;
@@ -640,7 +657,9 @@ function AnnouncementList({ items, onReviewed, onError }) {
       <div className="mg-grow">
         <b>{a.title}</b>
         <small>{fmtDate(a.at)}{a.byName ? ` · ${a.byName}` : ''}</small>
-        {a.body && <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.body}</p>}
+        {a.body && (a.format === 'markup'
+          ? <div style={{ margin: '6px 0' }}><FormattedView markup={a.body} /></div>
+          : <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.body}</p>)}
         {a.link && <a className="mg-btn mg-ghost mg-sm" href={a.link} target="_blank" rel="noopener noreferrer">Open the guide</a>}
       </div>
       {a.reviewedAt
@@ -662,7 +681,7 @@ function ManageAnnouncements({ onChanged }) {
     setBusy(true); setErr('');
     try {
       await call('/api/caregiver/broadcasts', { method: 'POST', body: {
-        title: form.title, body: form.body, link: form.link,
+        title: form.title, body: form.body, format: WRITES_MARKUP ? 'markup' : 'plain', link: form.link,
         audience: form.everyone ? 'all_staff' : form.roles,
         userIds: form.everyone ? [] : form.userIds
       } });
@@ -687,7 +706,12 @@ function ManageAnnouncements({ onChanged }) {
       <label>Title</label>
       <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="App update: what's new this week" />
       <label>Message</label>
-      <textarea rows={5} value={form.body} onChange={e => setForm({ ...form, body: e.target.value })} />
+      {/* The same editor a clinical note uses — bold, italic, underline,
+          bulleted and numbered lists, and a section heading. What is stored is
+          the six-shape markup, never HTML, and the email renders the same
+          shapes so what arrives matches what was typed. */}
+      <FormattedField value={form.body} onChange={v => setForm(f => ({ ...f, body: v }))} minRows={5}
+        placeholder="What the team needs to know" />
       <label>Link to a guide (optional)</label>
       <input type="text" value={form.link} onChange={e => setForm({ ...form, link: e.target.value })} placeholder="https://docs.google.com/…" />
       <label>Who sees it</label>
