@@ -223,7 +223,8 @@ const RunDetail = ({ id, onBack, reload }) => {
   const [fixFor, setFixFor] = useState(null);
   const load = useCallback(() => call(`/api/payroll/admin/runs/${enc(id)}`).then(r => {
     setRun(r.run);
-    if (r.run.status !== 'draft') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
+    // A Gusto pay date was paid through Gusto: there is nothing to send or mark paid here.
+    if (r.run.status !== 'draft' && r.run.source !== 'gusto') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
   }).catch(e => setErr(e.message)), [id]);
   useEffect(() => { load(); }, [load]);
   const act = async (fn, ok) => { setBusy(true); setErr(''); setMsg(''); try { await fn(); setMsg(ok); await load(); reload(); } catch (e) { setErr(e.message + (e.data && e.data.blocked ? ` ${e.data.blocked.map(b => `${b.name}: ${b.missing.join(', ')}`).join('; ')}` : '')); } setBusy(false); };
@@ -234,7 +235,7 @@ const RunDetail = ({ id, onBack, reload }) => {
       <button className="btn ghost mb-3" onClick={onBack}>Back to Runs</button>
       <Card title={`Pay period ${day(run.period.start)} to ${day(run.period.end)}`} right={<span className={`chip ${STATUS_CHIP[run.status]}`}>{run.status.toUpperCase()}</span>}>
         <Err e={err} /><Ok m={msg} />
-        <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : `Approved by ${run.approvedBy}.`}</p>
+        <p className="mb-3">Pay date <b>{day(run.period.payDate)}</b>. {run.status === 'draft' ? 'This is a draft: it is rebuilt from the hours each time, and nothing is paid until you approve it.' : run.source === 'gusto' ? 'Paid through Gusto and imported from its payroll journal.' : `Approved by ${run.approvedBy}.`}</p>
         {run.blocked && run.blocked.length > 0 && <Warn><b>Missing paperwork, so these people cannot be paid yet:</b><ul className="list-disc pl-5">{run.blocked.map(b => <li key={b.userId}>{b.name}: {b.missing.join(', ')}</li>)}</ul></Warn>}
         {run.sutaRateMissing && <Warn>Set GFC's Georgia unemployment rate under Settings before approving.</Warn>}
         {run.status === 'draft' && SUPER && <ChannelPicker run={run} onSaved={() => { load(); reload(); }} />}

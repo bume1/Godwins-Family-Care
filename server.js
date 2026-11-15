@@ -71,6 +71,7 @@ const signups = require('./signupRequests');
 const googleCalendar = require('./googleCalendar');
 const billing = require('./patientBilling');
 const phcInvoices = require('./phcInvoices');   // PHC invoices from approved hours (owner, 2026-11-08)
+const invoiceRuns = require('./invoiceRuns');   // invoice runs, the billing side of payroll (owner, 2026-11-15)
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -17892,7 +17893,7 @@ const newInvoiceNumber = async () => {
   throw new Error('could not make a unique invoice number');
 };
 // "You have a statement" — no amount, no service, no date. The portal says the rest.
-const notifyStatement = async (clientId) => {
+const notifyStatement = async (clientId, { skipEmails } = {}) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u && u.id === clientId);
@@ -17903,7 +17904,7 @@ const notifyStatement = async (clientId) => {
     const to = [{ email: client.email, url: `${base}/portal` },
       ...familyLinks.familyFor(users, clientId, { poaOnly: true }).map(f => ({ email: f.user.email, url: `${base}/portal?for=${encodeURIComponent(clientId)}` }))]
       .filter(r => r.email && !familyLinks.isPlaceholderEmail(r.email));
-    const seen = new Set();
+    const seen = new Set((skipEmails || []).map(e => String(e).toLowerCase()));
     for (const r of to) {
       if (seen.has(r.email.toLowerCase())) continue;
       seen.add(r.email.toLowerCase());
@@ -18172,12 +18173,13 @@ app.put('/api/gfc/admin/billing/:clientId/bill-to', authenticateToken, requireBi
 });
 
 // Hours in -> draft invoices out. `source` is 'app' (completed time logs in
-// the dates) or 'import' (a file in the payroll export's format).
-const phcDraftsFor = async (body) => {
-  const b = body || {};
+// the dates) or 'import' (a file in the payroll export's format, or a
+// spreadsheet the Billing page turned into one).
+// The hour rows for a date range, before anything is billed: shared by the
+// one-step route below and by invoice runs.
+const phcHourRows = async (b, users) => {
   const from = String(b.from || ''), to = String(b.to || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return { error: 'Give a from and to date.', code: 'DATE_RANGE_REQUIRED' };
-  const users = await getUsers();
   const clients = users.filter(u => u && u.role === config.ROLES.CLIENT);
   let rows;
   if (b.source === 'import') {
@@ -18198,63 +18200,360 @@ const phcDraftsFor = async (body) => {
   const invoices = await readInvoices();
   const coveredOld = rows.filter(r => phcInvoices.coveredByOldStatement(r, invoices)).length;
   rows = rows.filter(r => !clinicalOnly.has(r.clientId) && !phcInvoices.coveredByOldStatement(r, invoices));
-  const taken = new Set(invoices.map(i => i.displayNumber).filter(Boolean));
-  const d = phcInvoices.draftInvoices(rows, {
-    clients, payers: await readPayers(), invoiced: phcInvoices.invoicedKeys(invoices), taken,
-    period: { from, to }, levelLabel: (l) => caregiverRepo.LICENSE_LABELS[l] || '', fmtDate: phcFmtDate, fmtTime: practiceTime.fmtTime
-  });
-  return { ...d, alreadyInvoiced: d.alreadyInvoiced + coveredOld, from, to, source: b.source };
+  return { rows, clients, invoices, coveredOld, from, to };
 };
-const phcPreviewOf = (d) => ({
-  invoices: d.invoices.map(i => ({
-    clientId: i.clientId, clientName: i.clientName, format: i.format, displayNumber: i.displayNumber,
-    serviceDate: i.serviceDate, billTo: i.billTo && i.billTo.name, shifts: i.shifts.length,
-    duration: phcInvoices.durationLabel(i.billedMinutes), totalCents: i.totalCents, total: billing.fmtUsd(i.totalCents),
-    lines: i.lines.map(l => ({ description: l.description, hours: l.hours, amount: billing.fmtUsd(l.amountCents), minimum: !!l.minimumApplied }))
-  })),
-  skipped: d.skipped, alreadyInvoiced: d.alreadyInvoiced,
-  totalCents: d.invoices.reduce((a, i) => a + i.totalCents, 0)
+const phcDraftFrom = async (rows, h, extras) => {
+  const d = phcInvoices.draftInvoices(rows, {
+    clients: h.clients, payers: await readPayers(), invoiced: phcInvoices.invoicedKeys(h.invoices),
+    taken: new Set(h.invoices.map(i => i.displayNumber).filter(Boolean)),
+    period: { from: h.from, to: h.to }, extras: extras || [],
+    levelLabel: (l) => caregiverRepo.LICENSE_LABELS[l] || '', fmtDate: phcFmtDate, fmtTime: practiceTime.fmtTime
+  });
+  return { ...d, alreadyInvoiced: d.alreadyInvoiced + h.coveredOld, from: h.from, to: h.to };
+};
+// The one-step "Generate Invoices" route (2026-11-08) is retired: it billed
+// every completed shift whether or not its timesheet was approved. Invoices
+// are made by an invoice run now (below), one writer.
+
+// One invoice as its PDF, the layout the carrier or family receives.
+const phcInvoicePdf = async (inv, users) => {
+  const client = (users || []).find(u => u && u.id === inv.clientId);
+  return pdfGenerator.generatePhcInvoicePDF({
+    ...inv,
+    clientName: (client && client.name) || inv.clientName || '',
+    invoiceDate: practiceTime.fmtDate(inv.sentAt || inv.createdAt),
+    serviceDateLabel: inv.serviceDate ? phcFmtDate(inv.serviceDate) : null,
+    periodLabel: inv.period && inv.period.from ? `${phcFmtDate(inv.period.from)} to ${phcFmtDate(inv.period.to)}` : null,
+    billedDuration: phcInvoices.durationLabel(inv.billedMinutes || 0)
+  });
+};
+// A client's invoices for one period as ONE PDF, in invoice-number order:
+// what is emailed, and what the office downloads to send by hand.
+const phcCombinedPdf = async (invs, users) => {
+  const { PDFDocument } = require('pdf-lib');
+  const out = await PDFDocument.create();
+  const sorted = invs.slice().sort((a, b) => String(a.serviceDate || '').localeCompare(String(b.serviceDate || '')) || String(a.displayNumber).localeCompare(String(b.displayNumber)));
+  for (const inv of sorted) {
+    const src = await PDFDocument.load(await phcInvoicePdf(inv, users));
+    for (const pg of await out.copyPages(src, src.getPageIndices())) out.addPage(pg);
+  }
+  return Buffer.from(await out.save());
+};
+
+// ---- Invoice runs (owner, 2026-11-15) ------------------------------------------
+// The billing side of a payroll run: a period's approved hours become that
+// period's invoices. Draft first, where the office changes a shift's billed
+// hours (with a reason), leaves one off, or adds a line; then Approve makes the
+// invoices, and Send emails each client's invoices as one PDF. Rules:
+// invoiceRuns.js. The invoices themselves are the ones Statements lists.
+const BILLING_RUNS = 'billing_runs';
+const readBillingRuns = async () => ((await db.get(BILLING_RUNS)) || []).filter(Boolean);
+const saveBillingRun = async (run) => {
+  const all = await readBillingRuns();
+  const i = all.findIndex(r => r.id === run.id);
+  if (i === -1) all.push(run); else all[i] = run;
+  await db.set(BILLING_RUNS, all);
+  return run;
+};
+const runWho = (u) => ({ id: u.id, name: u.name || u.email });
+const usdPlain = (c) => billing.fmtUsd(c);
+// A draft is worked out again from the hours every time it is read, so a time
+// log corrected or a timesheet approved meanwhile shows up at once.
+const computeBillingRun = async (run) => {
+  const users = await getUsers();
+  const csv = run.source === 'import' ? (((await db.get(HOUR_IMPORTS)) || []).find(x => x.id === run.importId) || {}).csv : null;
+  const h = await phcHourRows({ source: run.source, from: run.from, to: run.to, csv }, users);
+  if (h.error) return { error: h.error, code: h.code, rowErrors: h.rowErrors };
+  const index = invoiceRuns.approvalIndex((await db.get('payroll_timesheets')) || [], (await db.get('payroll_runs')) || []);
+  const invoiced = phcInvoices.invoicedKeys(h.invoices);
+  const edits = new Map((run.edits || []).map(e => [e.sourceKey, e]));
+  const shifts = h.rows.map(r => ({ ...r, approval: invoiceRuns.approvalOf(r, index), invoiced: invoiced.has(r.sourceKey) || invoiced.has(r.shiftKey) }));
+  const billable = shifts.filter(r => !r.invoiced && (invoiceRuns.isBillable(r.approval) || run.includeWaiting));
+  const d = await phcDraftFrom(invoiceRuns.applyEdits(billable, run.edits), h, run.adjustments);
+  const clientName = new Map(h.clients.map(c => [c.id, c.name]));
+  return {
+    // Shifts already on a live invoice are listed (and never billed again).
+    invoices: d.invoices, skipped: d.skipped, alreadyInvoiced: d.alreadyInvoiced + shifts.filter(r => r.invoiced).length,
+    totalCents: d.invoices.reduce((a, i) => a + i.totalCents, 0),
+    shifts: shifts.map(r => {
+      const e = edits.get(r.sourceKey);
+      return {
+        sourceKey: r.sourceKey, caregiverName: r.caregiverName, clientId: r.clientId, clientName: clientName.get(r.clientId) || r.clientName,
+        date: r.serviceDate, start: practiceTime.fmtTime(r.clockInAt), end: practiceTime.fmtTime(r.clockOutAt),
+        clockedMinutes: r.minutes, billedMinutes: e && e.remove ? 0 : (e && e.minutes) || r.minutes,
+        approval: r.approval, invoiced: r.invoiced, waiting: !r.invoiced && !invoiceRuns.isBillable(r.approval) && !run.includeWaiting,
+        edit: e ? { minutes: e.minutes || null, remove: !!e.remove, reason: e.reason, by: e.by, at: e.at } : null
+      };
+    }).sort((a, b) => String(a.clientName).localeCompare(String(b.clientName)) || a.date.localeCompare(b.date) || String(a.start).localeCompare(String(b.start)))
+  };
+};
+const runSummary = (run) => ({
+  id: run.id, status: run.status, source: run.source, from: run.from, to: run.to, fileName: run.fileName || null,
+  createdAt: run.createdAt, createdBy: run.createdBy, approvedAt: run.approvedAt || null, approvedBy: run.approvedBy || null,
+  invoiceCount: (run.invoiceIds || []).length || (run.lastCount || 0), totalCents: run.totalCents || run.lastTotalCents || 0,
+  sentCount: run.sentCount || 0, clientCount: run.clientCount || 0
 });
-app.post('/api/gfc/admin/billing-invoices/preview', authenticateToken, requireBilling, async (req, res) => {
+const billingRunView = async (run) => {
+  const base = { run: { ...runSummary(run), edits: run.edits || [], adjustments: run.adjustments || [], includeWaiting: run.includeWaiting || null, sends: run.sends || [] } };
+  if (run.status === 'draft') {
+    const c = await computeBillingRun(run);
+    if (c.error) return { ...base, error: c.error, code: c.code, rowErrors: c.rowErrors };
+    return {
+      ...base, shifts: c.shifts, skipped: c.skipped, alreadyInvoiced: c.alreadyInvoiced, totalCents: c.totalCents,
+      invoices: c.invoices.map(i => ({
+        clientId: i.clientId, clientName: i.clientName, format: i.format, displayNumber: i.displayNumber, serviceDate: i.serviceDate,
+        billTo: i.billTo && i.billTo.name, invoiceMode: i.billTo && i.billTo.invoiceMode, toEmail: (i.billTo && i.billTo.email) || '',
+        duration: phcInvoices.durationLabel(i.billedMinutes), totalCents: i.totalCents, total: usdPlain(i.totalCents),
+        lines: i.lines.map(l => ({ kind: l.kind, description: l.description, hours: l.hours, amount: usdPlain(l.amountCents), sourceKey: l.sourceKey || null, adjustmentId: l.adjustmentId || null, edited: l.editedFrom !== undefined }))
+      }))
+    };
+  }
+  const users = await getUsers();
+  const nameOf = new Map(users.map(u => [u.id, u.name]));
+  const invs = (await readInvoices()).filter(i => (run.invoiceIds || []).includes(i.id)).map(i => ({ ...i, clientName: nameOf.get(i.clientId) || '' }));
+  const byClient = new Map();
+  for (const i of invs) byClient.set(i.clientId, [...(byClient.get(i.clientId) || []), i]);
+  return {
+    ...base,
+    invoices: invs.map(i => ({ id: i.id, clientId: i.clientId, clientName: i.clientName, format: i.format, displayNumber: i.displayNumber, serviceDate: i.serviceDate,
+      billTo: i.billTo && i.billTo.name, status: i.status, totalCents: i.totalCents, total: usdPlain(i.totalCents), sentAt: i.sentAt || null })),
+    totalCents: invs.filter(i => i.status !== 'void').reduce((a, i) => a + i.totalCents, 0),
+    send: invoiceRuns.sendPlan(byClient)
+  };
+};
+const loadRun = async (id) => (await readBillingRuns()).find(r => r.id === id && r.status !== 'deleted');
+const draftOnly = (res, run) => {
+  if (!run) { res.status(404).json({ error: 'Invoice run not found.', code: 'RUN_NOT_FOUND' }); return false; }
+  if (run.status !== 'draft') { res.status(409).json({ error: 'This run is approved. Its invoices are changed or voided one at a time under Statements.', code: 'RUN_NOT_DRAFT' }); return false; }
+  return true;
+};
+const runReply = async (res, run) => res.json(await billingRunView(run));
+
+app.get('/api/gfc/admin/billing-runs', authenticateToken, requireBilling, async (req, res) => {
   try {
-    const d = await phcDraftsFor(req.body);
-    if (d.error) return res.status(400).json(d);
-    res.json(phcPreviewOf(d));
-  } catch (error) { console.error('Invoice preview error:', error); res.status(500).json({ error: 'Server error' }); }
+    const runs = (await readBillingRuns()).filter(r => r.status !== 'deleted').sort((a, b) => String(b.from).localeCompare(String(a.from)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.json({ runs: runs.map(runSummary) });
+  } catch (e) { console.error('Invoice runs read error:', e); res.status(500).json({ error: 'Server error' }); }
 });
-app.post('/api/gfc/admin/billing-invoices', authenticateToken, requireBilling, async (req, res) => {
+app.post('/api/gfc/admin/billing-runs', authenticateToken, requireBilling, async (req, res) => {
   try {
-    const d = await phcDraftsFor(req.body);
-    if (d.error) return res.status(400).json(d);
-    if (!d.invoices.length) return res.status(409).json({ error: 'Nothing new to invoice in those dates.', code: 'BILLING_NOTHING_TO_INVOICE', ...phcPreviewOf(d) });
+    const b = req.body || {};
+    const from = String(b.from || ''), to = String(b.to || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return res.status(400).json({ error: 'Give a from and to date.', code: 'DATE_RANGE_REQUIRED' });
+    if (b.source !== 'app' && b.source !== 'import') return res.status(400).json({ error: 'Say where the hours come from: the app or a file.', code: 'HOURS_SOURCE_REQUIRED' });
+    // Two drafts over the same days would each bill the same shifts.
+    const clash = (await readBillingRuns()).find(r => r.status === 'draft' && r.from <= to && r.to >= from);
+    if (clash) return res.status(409).json({ error: `There is already a draft run for ${clash.from} to ${clash.to}. Open it, or delete it first.`, code: 'RUN_DRAFT_OVERLAPS', runId: clash.id });
     const at = new Date().toISOString();
     let importId = null;
-    if (d.source === 'import') {
+    if (b.source === 'import') {
+      const h = await phcHourRows(b, await getUsers());
+      if (h.error) return res.status(400).json(h);
       importId = uuidv4();
       const imports = (await db.get(HOUR_IMPORTS)) || [];
-      imports.push({ id: importId, at, by: { id: req.user.id, name: req.user.name || req.user.email },
-        fileName: String((req.body || {}).fileName || 'hours.csv').slice(0, 200), csv: String(req.body.csv), from: d.from, to: d.to });
+      imports.push({ id: importId, at, by: runWho(req.user), fileName: String(b.fileName || 'hours.csv').slice(0, 200), csv: String(b.csv), from, to });
       await db.set(HOUR_IMPORTS, imports);
     }
+    const run = { id: uuidv4(), status: 'draft', source: b.source, from, to, importId, fileName: b.source === 'import' ? String(b.fileName || 'hours.csv').slice(0, 200) : null,
+      edits: [], adjustments: [], includeWaiting: null, createdAt: at, createdBy: runWho(req.user) };
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_drafted', 'billing_run', run.id, { from, to, source: run.source });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run create error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+app.get('/api/gfc/admin/billing-runs/:id', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!run) return res.status(404).json({ error: 'Invoice run not found.', code: 'RUN_NOT_FOUND' });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run read error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+// Change one shift's billed hours, leave it off, or put it back.
+app.post('/api/gfc/admin/billing-runs/:id/edits', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    const c = await computeBillingRun(run);
+    if (c.error) return res.status(400).json(c);
+    const n = invoiceRuns.normalizeEdit(req.body, new Set(c.shifts.filter(s => !s.invoiced).map(s => s.sourceKey)));
+    if (n.error) return res.status(400).json(n);
+    run.edits = invoiceRuns.withEdit(run.edits, n.value, { by: runWho(req.user), at: new Date().toISOString() });
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_shift_edited', 'billing_run', run.id,
+      { sourceKey: n.value.sourceKey, minutes: n.value.minutes || null, removed: !!n.value.remove, cleared: !!n.value.clear });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run edit error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/gfc/admin/billing-runs/:id/lines', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    const clients = (await getUsers()).filter(u => u && u.role === config.ROLES.CLIENT);
+    const n = invoiceRuns.normalizeAdjustment(req.body, { clientIds: new Set(clients.map(c => c.id)), from: run.from, to: run.to });
+    if (n.error) return res.status(400).json(n);
+    run.adjustments = [...(run.adjustments || []), { id: uuidv4(), ...n.value, by: runWho(req.user), at: new Date().toISOString() }];
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_line_added', 'billing_run', run.id, { clientId: n.value.clientId, date: n.value.date });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run line error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+app.delete('/api/gfc/admin/billing-runs/:id/lines/:lineId', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    const before = (run.adjustments || []).length;
+    run.adjustments = (run.adjustments || []).filter(a => a.id !== req.params.lineId);
+    if (run.adjustments.length === before) return res.status(404).json({ error: 'That line is not in this run.', code: 'RUN_LINE_UNKNOWN' });
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_line_removed', 'billing_run', run.id, { lineId: req.params.lineId });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run line remove error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+// Bill hours whose timesheet is not approved yet. A choice, with a reason.
+app.post('/api/gfc/admin/billing-runs/:id/include-waiting', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    if ((req.body || {}).include === false) run.includeWaiting = null;
+    else {
+      const reason = String((req.body || {}).reason || '').trim().slice(0, invoiceRuns.NOTE_MAX);
+      if (!reason) return res.status(400).json({ error: 'Say why these hours are billed before their timesheet is approved.', code: 'RUN_REASON_REQUIRED' });
+      run.includeWaiting = { reason, by: runWho(req.user), at: new Date().toISOString() };
+    }
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_include_waiting', 'billing_run', run.id, { include: !!run.includeWaiting });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run include error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+app.delete('/api/gfc/admin/billing-runs/:id', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    Object.assign(run, { status: 'deleted', deletedAt: new Date().toISOString(), deletedBy: runWho(req.user) });
+    await saveBillingRun(run);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_deleted', 'billing_run', run.id, { from: run.from, to: run.to });
+    res.json({ deleted: true });
+  } catch (e) { console.error('Invoice run delete error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+// Approve: the draft's invoices are made. They are drafts on Statements until sent.
+app.post('/api/gfc/admin/billing-runs/:id/approve', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!draftOnly(res, run)) return;
+    const c = await computeBillingRun(run);
+    if (c.error) return res.status(400).json(c);
+    if (!c.invoices.length) return res.status(409).json({ error: 'There is nothing to invoice in this run.', code: 'BILLING_NOTHING_TO_INVOICE' });
+    const empty = c.invoices.filter(i => !(i.totalCents > 0));
+    if (empty.length) return res.status(409).json({ error: `${empty.map(i => i.displayNumber).join(', ')} would be $0.00 or less. Change the lines first.`, code: 'RUN_INVOICE_EMPTY' });
+    const at = new Date().toISOString();
     const made = [];
-    for (const i of d.invoices) {
+    for (const i of c.invoices) {
       const inv = billing.buildInvoice({ id: uuidv4(), number: await newInvoiceNumber(), clientId: i.clientId, kind: 'home_care', lines: i.lines, at, by: req.user, status: 'draft' });
       Object.assign(inv, {
         format: i.format, displayNumber: i.displayNumber, serviceDate: i.serviceDate, period: i.period,
-        billTo: i.billTo, shifts: i.shifts, billedMinutes: i.billedMinutes, source: d.source, importId
+        billTo: i.billTo, shifts: i.shifts, billedMinutes: i.billedMinutes, source: run.source, importId: run.importId || null, runId: run.id
       });
       await saveInvoice(inv);
       made.push(inv);
     }
-    if (importId) {
+    Object.assign(run, { status: 'approved', approvedAt: at, approvedBy: runWho(req.user), invoiceIds: made.map(m => m.id),
+      totalCents: made.reduce((a, m) => a + m.totalCents, 0), clientCount: new Set(made.map(m => m.clientId)).size, skippedAtApproval: c.skipped,
+      waitingAtApproval: c.shifts.filter(s => s.waiting).length });
+    await saveBillingRun(run);
+    // The approved file is kept with the invoices made from it.
+    if (run.importId) {
       const imports = (await db.get(HOUR_IMPORTS)) || [];
-      const k = imports.findIndex(x => x.id === importId);
+      const k = imports.findIndex(x => x.id === run.importId);
       if (k !== -1) { imports[k].invoiceIds = made.map(m => m.id); await db.set(HOUR_IMPORTS, imports); }
     }
-    await logActivity(req.user.id, req.user.name || req.user.email, 'phc_invoices_drafted', 'invoice', null,
-      { count: made.length, source: d.source, from: d.from, to: d.to, importId, totalCents: made.reduce((a, m) => a + m.totalCents, 0) });
-    res.json({ created: made.map(m => ({ id: m.id, displayNumber: m.displayNumber, clientId: m.clientId, totalCents: m.totalCents })), skipped: d.skipped, alreadyInvoiced: d.alreadyInvoiced });
-  } catch (error) { console.error('Invoice create error:', error); res.status(500).json({ error: 'Server error' }); }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_approved', 'billing_run', run.id,
+      { from: run.from, to: run.to, invoices: made.length, totalCents: run.totalCents, edits: (run.edits || []).length, lines: (run.adjustments || []).length });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run approve error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+// One client's invoices in this run, as one PDF.
+app.get('/api/gfc/admin/billing-runs/:id/clients/:clientId/pdf', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!run || run.status !== 'approved') return res.status(404).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+    const invs = (await readInvoices()).filter(i => (run.invoiceIds || []).includes(i.id) && i.clientId === req.params.clientId && i.status !== 'void');
+    if (!invs.length) return res.status(404).json({ error: 'No invoices for that client in this run.', code: 'RUN_CLIENT_NONE' });
+    const users = await getUsers();
+    const name = (users.find(u => u.id === req.params.clientId) || {}).name || '';
+    const buf = await phcCombinedPdf(invs, users);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'invoice_pdf_opened', 'client', req.params.clientId, { runId: run.id, invoices: invs.length });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', invoiceRuns.combinedFileName(name, run.from, run.to)));
+    res.send(buf);
+  } catch (e) { console.error('Invoice run PDF error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+// Send each client's draft invoices: a carrier by email to its claims address,
+// a family to the Bill To email, with the client and POA told a statement is
+// ready. From the practice's own mailbox, with the office copied.
+// `manual: true` marks them sent without an email (mailed or faxed by hand).
+app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    if (!run || run.status !== 'approved') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+    const b = req.body || {};
+    const users = await getUsers();
+    const all = await readInvoices();
+    const mine = all.filter(i => (run.invoiceIds || []).includes(i.id)).map(i => ({ ...i, clientName: (users.find(u => u.id === i.clientId) || {}).name || '' }));
+    const byClient = new Map();
+    for (const i of mine) byClient.set(i.clientId, [...(byClient.get(i.clientId) || []), i]);
+    const plan = invoiceRuns.sendPlan(byClient).filter(p => !p.sent && (!b.clientId || p.clientId === b.clientId));
+    if (!plan.length) return res.status(409).json({ error: 'Nothing left to send in this run.', code: 'RUN_NOTHING_TO_SEND' });
+    const at = new Date().toISOString();
+    const results = [];
+    for (const p of plan) {
+      const client = users.find(u => u.id === p.clientId);
+      const qmb = insurance.qmbBlocksPatientBilling(client, 'home_care');
+      if (qmb.blocked) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: qmb.message }); continue; }
+      const invs = mine.filter(i => p.draftIds.includes(i.id));
+      let emailedTo = [];
+      if (!b.manual) {
+        if (p.blocked) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: p.blocked }); continue; }
+        const bt = invs[0].billTo || {};
+        const pdf = await phcCombinedPdf(invs.map(i => ({ ...i, sentAt: at })), users);
+        const periodLabel = `${phcFmtDate(run.from)} to ${phcFmtDate(run.to)}`;
+        const list = invs.map(i => `${i.displayNumber}: ${usdPlain(i.totalCents)}`);
+        const total = usdPlain(invs.reduce((a, i) => a + i.totalCents, 0));
+        if (bt.email) {
+          const carrier = p.format === 'carrier';
+          const ref = carrier ? [bt.insuredName ? `Insured: ${bt.insuredName}` : null, bt.policyNumber ? `Policy #: ${bt.policyNumber}` : null, bt.claimNumber ? `Claim #: ${bt.claimNumber}` : null].filter(Boolean).join(' · ') : null;
+          const paragraphs = [
+            `Attached ${invs.length === 1 ? 'is our invoice' : `are our ${invs.length} invoices`} for home care services from ${periodLabel}, in one PDF.`,
+            ...(ref ? [ref] : []),
+            `${list.join('; ')}. Total ${total}.`,
+            `Questions about these invoices: reply to this email or call ${consentText.ORG.phone || 'our office'}.`
+          ];
+          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs }).html;
+          const subject = carrier ? `Godwins Family Care invoices${bt.policyNumber ? `, policy ${bt.policyNumber}` : ''}, ${periodLabel}` : `Your Godwins Family Care invoice, ${periodLabel}`;
+          const to = [bt.email, config.ROI_ADMIN_EMAIL].filter((v, k, a) => v && a.findIndex(x => x.toLowerCase() === v.toLowerCase()) === k);
+          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true,
+            attachments: [{ filename: invoiceRuns.combinedFileName(p.clientName, run.from, run.to), content: pdf, contentType: 'application/pdf' }] });
+          if (!r || !r.success) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: `The email did not go: ${(r && (r.error || r.reason)) || 'unknown error'}. Nothing was marked sent.` }); continue; }
+          emailedTo = to;
+        }
+      }
+      for (const inv of invs) {
+        const t = billing.transition(all.find(x => x.id === inv.id), 'open', { at, by: req.user });
+        if (t.error) continue;
+        await saveInvoice(t.inv);
+        qbo.invoiceSent(t.inv).catch(e => console.error('QuickBooks invoice sync (non-fatal):', e.message));
+      }
+      // A family's client and POA are told a statement is waiting (no amount);
+      // anyone the PDF already went to is not told twice.
+      if (p.format !== 'carrier') notifyStatement(p.clientId, { skipEmails: emailedTo });
+      const send = { clientId: p.clientId, at, by: runWho(req.user), channel: b.manual ? 'manual' : (emailedTo.length ? 'email' : 'portal'), to: emailedTo, invoiceIds: invs.map(i => i.id) };
+      run.sends = [...(run.sends || []), send];
+      results.push({ clientId: p.clientId, clientName: p.clientName, sent: true, channel: send.channel, to: emailedTo });
+      await logActivity(req.user.id, req.user.name || req.user.email, 'billing_run_sent', 'client', p.clientId, { runId: run.id, invoices: invs.length, channel: send.channel });
+    }
+    run.sentCount = new Set((run.sends || []).map(s => s.clientId)).size;
+    await saveBillingRun(run);
+    res.json({ ...(await billingRunView(run)), results });
+  } catch (e) { console.error('Invoice run send error:', e); res.status(500).json({ error: 'Server error' }); }
 });
 
 // The invoice itself, as the PDF the carrier or family receives.
@@ -18263,15 +18562,7 @@ app.get('/api/gfc/admin/billing/invoices/:id/pdf', authenticateToken, requireBil
     const inv = (await readInvoices()).find(r => r.id === req.params.id);
     if (!inv) return res.status(404).json({ error: 'Invoice not found', code: 'INVOICE_NOT_FOUND' });
     if (!inv.format) return res.status(409).json({ error: 'This older statement has no invoice layout. Make it again from the hours to get a PDF.', code: 'INVOICE_NO_LAYOUT' });
-    const client = (await getUsers()).find(u => u && u.id === inv.clientId);
-    const buf = await pdfGenerator.generatePhcInvoicePDF({
-      ...inv,
-      clientName: (client && client.name) || '',
-      invoiceDate: practiceTime.fmtDate(inv.sentAt || inv.createdAt),
-      serviceDateLabel: inv.serviceDate ? phcFmtDate(inv.serviceDate) : null,
-      periodLabel: inv.period && inv.period.from ? `${phcFmtDate(inv.period.from)} to ${phcFmtDate(inv.period.to)}` : null,
-      billedDuration: phcInvoices.durationLabel(inv.billedMinutes || 0)
-    });
+    const buf = await phcInvoicePdf(inv, await getUsers());
     await logActivity(req.user.id, req.user.name || req.user.email, 'invoice_pdf_opened', 'client', inv.clientId, { invoiceId: inv.id });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', contentDisposition('inline', `${inv.displayNumber}.pdf`));

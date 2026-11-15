@@ -37,7 +37,8 @@ const toCents = (dollars) => {
   const c = Math.round(n * 100);
   return c <= MAX_CENTS ? c : null;
 };
-const fmtUsd = (cents) => `$${(Number(cents || 0) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+// A credit line is negative: "-$20.00", never "$-20.00".
+const fmtUsd = (cents) => `${Number(cents) < 0 ? '-' : ''}$${(Math.abs(Number(cents || 0)) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
 
 function invoiceNumber(rand = crypto.randomBytes(8)) {
   let s = '';
