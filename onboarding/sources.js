@@ -114,7 +114,7 @@ const SOURCES = Object.freeze({
     driveFileId: '1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
-    transcribedFromVersion: '1.0'
+    transcribedFromVersion: '1.2'
   }),
   ADMIN_SOPS_SET2: Object.freeze({
     key: 'ADMIN_SOPS_SET2',
@@ -123,7 +123,7 @@ const SOURCES = Object.freeze({
     driveFileId: '1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
-    transcribedFromVersion: '1.0'
+    transcribedFromVersion: '1.2'
   }),
   ADMIN_SOPS_SET3: Object.freeze({
     key: 'ADMIN_SOPS_SET3',
@@ -132,7 +132,7 @@ const SOURCES = Object.freeze({
     driveFileId: '15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
-    transcribedFromVersion: '1.0'
+    transcribedFromVersion: '1.2'
   }),
   STAFF_PAY_GUIDE: Object.freeze({
     key: 'STAFF_PAY_GUIDE',
