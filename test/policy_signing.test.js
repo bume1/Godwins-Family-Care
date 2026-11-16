@@ -114,6 +114,7 @@ test('a Word policy is drawn as a PDF, and its hash is of the source file', asyn
 // ---- through the router ----------------------------------------------------------
 const RN = { id: 'r1', name: 'Rae Nurse', email: 'rae@gfc.test', role: 'user', accountType: 'rn', clinicalRole: 'rn', hasClinicalAccess: true };
 const CG = { id: 'c1', name: 'Cara Giver', email: 'cara@gfc.test', role: 'vendor', accountType: 'caregiver', licenseLevel: 'PCA' };
+const ADMIN = { id: 'a1', name: 'Office Admin', email: 'admin@gfc.test', role: 'admin', accountType: 'admin' };
 
 async function mount(t, store0) {
   const store = JSON.parse(JSON.stringify(store0 || {}));
@@ -131,7 +132,7 @@ async function mount(t, store0) {
   app.use(express.json({ limit: '2mb' }));
   app.use(portal({
     db, uuidv4: () => Math.random().toString(36).slice(2), drive, payrollIngestKey: 'k',
-    detectFileType: () => 'application/pdf', logActivity: async () => {}, getUsers: async () => [RN, CG],
+    detectFileType: () => 'application/pdf', logActivity: async () => {}, getUsers: async () => [RN, CG, ADMIN],
     enrollmentSummary: () => ({}), authenticateToken: (req, _res, next) => { req.user = current; next(); }
   }));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -210,4 +211,23 @@ test('the onboarding drawer opens policies on the signing screen and shows sign 
   assert.match(page, /signs \? 'Open and Sign' : 'Open and Acknowledge'/);
   assert.match(page, /signs \? 'File Paper Signature' : 'File For Her'/);
   assert.match(read('public/document-sign-ui.js'), /`\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign`/);
+});
+
+test('the office sees, per policy, who has signed it, and one person\'s policies on their record', async (t) => {
+  const h = await mount(t);
+  await h.call('POST', '/api/my/policy-docs/CODE_OF_CONDUCT/sign', { printedName: 'Rae Nurse', acknowledged: true, signaturePng: SIG });
+  h.as(RN);
+  assert.strictEqual((await h.call('GET', '/api/my/admin/policy-signatures')).status, 403, 'office only');
+  h.as(ADMIN);
+  const all = (await h.call('GET', '/api/my/admin/policy-signatures')).data.policies;
+  const coc = all.find(p => p.policyId === 'CODE_OF_CONDUCT');
+  assert.strictEqual(coc.action, 'sign');
+  const rae = coc.people.find(r => r.userId === RN.id);
+  assert.strictEqual(rae.done, true);
+  assert.ok(rae.documentId);
+  assert.ok(coc.people.some(r => r.userId === ADMIN.id && !r.done), 'the admin team owes it too');
+  assert.ok(!coc.people.some(r => r.userId === CG.id), 'a caregiver signs it in the welcome packet instead');
+  const one = (await h.call('GET', `/api/my/admin/policy-signatures?userId=${RN.id}`)).data.policies;
+  assert.ok(one.every(p => p.people.length === 1 && p.people[0].userId === RN.id));
+  assert.match(read('public/document-sign-ui.js'), /<OfficePolicies userId=\{userId\} \/>/, 'shown on Documents to Sign and on each Staff Record');
 });

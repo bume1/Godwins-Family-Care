@@ -909,13 +909,15 @@ module.exports = function createStaffPortalRoutes(deps) {
   const policySignings = async () => (await db.get(POLICY_SIGNINGS)) || [];
   const PS = require('../onboarding/policySigning');
   const policyPdf = require('../onboarding/policyPdf');
-  async function policyStateFor(u) {
+  // `pre` lets the office view pass rows it already loaded for everyone.
+  async function policyStateFor(u, pre) {
     const T = require('../onboarding/track');
-    const recs = (await db.get('onboarding_records')) || [];
+    const recs = (pre && pre.recs) || (await db.get('onboarding_records')) || [];
     const rec = recs.find(r => String(r.userId) === String(u.id)) || null;
-    const fresh = (await getUsers()).find(x => String(x.id) === String(u.id)) || u;
+    const users = (pre && pre.users) || await getUsers();
+    const fresh = users.find(x => String(x.id) === String(u.id)) || u;
     const inputs = rec && rec.inputs ? rec.inputs : T.normalizeInputs({ chapter: require('./onboarding').defaultChapterFor(fresh) });
-    const list = PS.forPerson({ inputs, signings: await policySignings(), record: rec, userId: String(u.id) });
+    const list = PS.forPerson({ inputs, signings: (pre && pre.signings) || await policySignings(), record: rec, userId: String(u.id) });
     return { rec, recs, inputs, list };
   }
   const policyRow = (p) => ({
@@ -941,6 +943,24 @@ module.exports = function createStaffPortalRoutes(deps) {
   }
   const policyUnavailable = (res) => res.status(502).json({ error: 'That policy could not be opened just now. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE' });
 
+  // The office: each policy, and where every person who owes it stands
+  // (owner, 2026-11-16: who has re-signed the Code of Conduct). With
+  // ?userId, one person's policies, for their Staff Record.
+  router.get('/api/my/admin/policy-signatures', authenticateToken, requireAdmin, async (req, res) => {
+    const users = await getUsers();
+    const pre = { users, recs: (await db.get('onboarding_records')) || [], signings: await policySignings() };
+    let staff = users.filter(u => audienceOf(u) && u.accountStatus !== 'inactive');
+    if (req.query.userId) staff = staff.filter(u => String(u.id) === String(req.query.userId));
+    const byPolicy = new Map();
+    for (const u of staff) {
+      for (const p of (await policyStateFor(u, pre)).list) {
+        if (!byPolicy.has(p.policyId)) byPolicy.set(p.policyId, { policyId: p.policyId, title: p.title, version: p.version, action: p.action, people: [] });
+        byPolicy.get(p.policyId).people.push({ userId: String(u.id), name: u.name || u.email, done: p.done, doneAt: p.doneAt,
+          documentId: p.documentId, method: p.method, needsSignature: p.needsSignature });
+      }
+    }
+    return res.json({ policies: Array.from(byPolicy.values()) });
+  });
   router.get('/api/my/policy-docs/:policyId/file', authenticateToken, requireStaff, async (req, res) => {
     const o = await owedPolicy(req, res); if (!o) return;
     let built; try { built = await policyPdfFor(o.doc); } catch (err) { return policyUnavailable(res); }

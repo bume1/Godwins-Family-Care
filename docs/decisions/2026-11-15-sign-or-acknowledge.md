@@ -35,3 +35,9 @@
 ## Must not undo
 - A sign document must never count on a click or an in-app acknowledgment.
 - The policy's version comes from the server.
+
+## Follow-up (2026-11-16): the office sees who has signed each policy
+- Tracing the flow for the signing SOP found a gap: Documents to Sign → Who and the Staff Record's Sent to Sign listed only documents the office uploads. A policy's status showed only inside each person's onboarding checklist, and not at all for staff without one.
+- `GET /api/my/admin/policy-signatures` (admin team; `?userId` for one person) lists each policy and where every person who owes it stands: signed, signed on paper, acknowledged, "acknowledged, not signed", or not yet.
+- `GFCDocSign.OfficePolicies` shows it as **GFC Policies** under Documents to Sign (with Who) and on every Staff Record (with Signed Copy).
+- 1 test, 2 deliberate breaks caught. Suite 3,923, 0 failing. Rendered in Chromium.

@@ -362,9 +362,56 @@ function OfficeDocuments({ userId, userName }) {
           </div>
         );
       })}
+      <OfficePolicies userId={userId} />
     </div>
   );
 }
 
-window.GFCDocSign = { WaitingOnYou, SignWorkspace, SendForm, OfficeDocuments, openPdf };
+// GFC policies (owner, 2026-11-16): each policy every person signs or
+// acknowledges, and who has. With `userId`, that person's own policies (their
+// Staff Record). A policy is never sent or withdrawn here: who owes it comes
+// from their onboarding checklist, and a new version reaches everyone again.
+function OfficePolicies({ userId }) {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [openId, setOpenId] = useState(null);
+  useEffect(() => { setD(null); call(`/api/my/admin/policy-signatures${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`).then(setD).catch(e => setErr(e.message)); }, [userId]);
+  const openCopy = (r, p) => openPdf(`/api/caregiver/documents/${encodeURIComponent(r.documentId)}/file`, `${p.title} - ${r.name}.pdf`).catch(e => setErr(e.message));
+  const state = (r, p) => (r.done ? `${r.method === 'paper' ? 'Signed on paper' : done(p.action)} ${fmtDate(r.doneAt)}` : r.needsSignature ? 'Acknowledged, not signed' : 'Not yet');
+  return (
+    <div className="ds" style={{ marginTop: 18 }}>
+      <h3 style={{ margin: '0 0 4px', color: 'var(--n)' }}>GFC Policies</h3>
+      <div className="ds-who">Signed or acknowledged on the signing screen. Who owes each one comes from their onboarding checklist.</div>
+      {err && <div className="ds-err">{err}</div>}
+      {!d ? <div className="ds-note">Loading…</div> : !d.policies.length ? <div className="ds-note">No policies apply{userId ? ' to this person' : ''}.</div> : d.policies.map(p => {
+        const mine = userId ? p.people[0] : null;
+        const doneCount = p.people.filter(r => r.done).length;
+        return (
+          <div key={p.policyId}>
+            <div className="ds-row">
+              <i className="ti ti-file-certificate" style={{ fontSize: 22, color: 'var(--n)' }} />
+              <div className="ds-grow"><b>{p.title}</b><small>{p.action === 'sign' ? 'To sign' : 'To acknowledge'}{p.version && p.version !== 'Current' ? ` · version ${p.version}` : ''}</small></div>
+              {mine
+                ? <span className={`ds-pill ${mine.done ? 'ds-ok' : 'ds-wait'}`}>{state(mine, p)}</span>
+                : <span className="ds-pill">{doneCount} of {p.people.length} done</span>}
+              {mine && mine.done && mine.documentId && <button className="ds-btn ds-ghost" onClick={() => openCopy(mine, p)}>Signed Copy</button>}
+              {!userId && <button className="ds-btn ds-ghost" onClick={() => setOpenId(openId === p.policyId ? null : p.policyId)}>{openId === p.policyId ? 'Hide' : 'Who'}</button>}
+            </div>
+            {openId === p.policyId && (
+              <div className="ds-box">
+                {p.people.map(r => (
+                  <div className="ds-row" key={r.userId}>
+                    <div className="ds-grow"><b>{r.name}</b></div>
+                    <span className={`ds-pill ${r.done ? 'ds-ok' : 'ds-wait'}`}>{state(r, p)}</span>
+                    {r.done && r.documentId && <button className="ds-btn ds-ghost" onClick={() => openCopy(r, p)}>Signed Copy</button>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+window.GFCDocSign = { WaitingOnYou, SignWorkspace, SendForm, OfficeDocuments, OfficePolicies, openPdf };
 })();
