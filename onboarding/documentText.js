@@ -120,4 +120,4 @@ function toLines(buf, mimeType) {
   return docxToLines(buf);
 }
 
-module.exports = { readZipEntry, docxToLines, htmlToLines, toLines };
+module.exports = { readZipEntry, paragraphText, docxToLines, htmlToLines, toLines };

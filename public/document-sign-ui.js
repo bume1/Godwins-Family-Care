@@ -102,6 +102,13 @@ const fetchPdf = async (path, opts) => {
   if (!res.ok) { let m = 'The document could not be drawn.'; try { m = (await res.json()).error || m; } catch (_) { /* not json */ } throw new Error(m); }
   return res.arrayBuffer();
 };
+// A document the office sent, or a GFC policy (owner, 2026-11-15). Both
+// answer /file, /preview and /sign the same way.
+const DOC_PATHS = {
+  file: (d) => (d.kind === 'policy' ? `/api/my/policy-docs/${encodeURIComponent(d.policyId)}/file` : `/api/my/document-sends/${encodeURIComponent(d.id)}/file`),
+  preview: (d) => (d.kind === 'policy' ? `/api/my/policy-docs/${encodeURIComponent(d.policyId)}/preview` : `/api/my/document-sends/${encodeURIComponent(d.id)}/preview`),
+  sign: (d) => (d.kind === 'policy' ? `/api/my/policy-docs/${encodeURIComponent(d.policyId)}/sign` : `/api/my/document-sends/${encodeURIComponent(d.id)}/sign`)
+};
 function SignWorkspace({ doc, onDone, onCancel }) {
   const [name, setName] = useState('');
   const [ack, setAck] = useState(false);
@@ -123,7 +130,7 @@ function SignWorkspace({ doc, onDone, onCancel }) {
     (async () => {
       try {
         if (!Pdf) throw new Error('The document viewer could not load.');
-        const imgs = await Pdf.pages(await fetchPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/file`));
+        const imgs = await Pdf.pages(await fetchPdf(DOC_PATHS.file(doc)));
         if (!gone) setPages(imgs);
       } catch (e) { if (!gone) setProblem(e.message); }
     })();
@@ -136,7 +143,7 @@ function SignWorkspace({ doc, onDone, onCancel }) {
       if (abort.current) abort.current.abort();
       const ctl = new AbortController(); abort.current = ctl;
       try {
-        const buf = await fetchPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/preview`, { method: 'POST', signal: ctl.signal,
+        const buf = await fetchPdf(DOC_PATHS.preview(doc), { method: 'POST', signal: ctl.signal,
           body: JSON.stringify({ printedName: name.trim(), signaturePng: signing ? sig : undefined }) });
         if (ctl.signal.aborted) return;
         const imgs = await Pdf.pages(buf, { lastOnly: true });
@@ -150,16 +157,16 @@ function SignWorkspace({ doc, onDone, onCancel }) {
   const submit = async () => {
     setBusy(true); setErr('');
     try {
-      await call(`/api/my/document-sends/${encodeURIComponent(doc.id)}/sign`, { method: 'POST',
+      await call(DOC_PATHS.sign(doc), { method: 'POST',
         body: { printedName: name.trim(), acknowledged: ack, signaturePng: signing ? sig : undefined } });
       await onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
-  const fallback = () => openPdf(`/api/my/document-sends/${encodeURIComponent(doc.id)}/file`, doc.fileName).catch(e => setErr(e.message));
+  const fallback = () => openPdf(DOC_PATHS.file(doc), doc.fileName).catch(e => setErr(e.message));
   return ReactDOM.createPortal(
     <div className="ds ds-ws" role="dialog" aria-modal="true" aria-label={doc.title}>
       <div className="ds-ws-head">
-        <div><b>{doc.title}</b><small>Sent {fmtDate(doc.sentAt)}{doc.sentByName ? ` by ${doc.sentByName}` : ''}. It is a preview until you {signing ? 'sign' : 'acknowledge'}.</small></div>
+        <div><b>{doc.title}</b><small>{doc.kind === 'policy' ? `GFC policy${doc.version && doc.version !== 'Current' ? `, version ${doc.version}` : ''}` : `Sent ${fmtDate(doc.sentAt)}${doc.sentByName ? ` by ${doc.sentByName}` : ''}`}. It is a preview until you {signing ? 'sign' : 'acknowledge'}.</small></div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="ds-btn ds-ghost ds-ws-toggle" onClick={() => setShowDoc(!showDoc)}>{showDoc ? 'Hide Document' : 'Show Document'}</button>
           <button className="ds-btn ds-ghost" disabled={busy} onClick={onCancel}>Close</button>
@@ -225,7 +232,7 @@ function WaitingOnYou({ only, showDone = true, onChanged, emptyText }) {
         <div key={x.id}>
           <div className="ds-row">
             <i className="ti ti-signature" style={{ fontSize: 22, color: 'var(--n)' }} />
-            <div className="ds-grow"><b>{x.title}</b><small>Sent {fmtDate(x.sentAt)}{x.sentByName ? ` by ${x.sentByName}` : ''} · to {x.action === 'sign' ? 'sign' : 'acknowledge'}</small></div>
+            <div className="ds-grow"><b>{x.title}</b><small>{x.kind === 'policy' ? `GFC policy${x.version && x.version !== 'Current' ? `, version ${x.version}` : ''}` : `Sent ${fmtDate(x.sentAt)}${x.sentByName ? ` by ${x.sentByName}` : ''}`} · to {x.action === 'sign' ? 'sign' : 'acknowledge'}{x.needsSignature ? '. You acknowledged it before; it now has to be signed' : ''}</small></div>
             <span className="ds-pill ds-wait">Waiting on you</span>
             {open !== x.id && <button className="ds-btn" onClick={() => setOpen(x.id)}>{verb(x.action)}</button>}
           </div>
@@ -355,9 +362,56 @@ function OfficeDocuments({ userId, userName }) {
           </div>
         );
       })}
+      <OfficePolicies userId={userId} />
     </div>
   );
 }
 
-window.GFCDocSign = { WaitingOnYou, SignWorkspace, SendForm, OfficeDocuments, openPdf };
+// GFC policies (owner, 2026-11-16): each policy every person signs or
+// acknowledges, and who has. With `userId`, that person's own policies (their
+// Staff Record). A policy is never sent or withdrawn here: who owes it comes
+// from their onboarding checklist, and a new version reaches everyone again.
+function OfficePolicies({ userId }) {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [openId, setOpenId] = useState(null);
+  useEffect(() => { setD(null); call(`/api/my/admin/policy-signatures${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`).then(setD).catch(e => setErr(e.message)); }, [userId]);
+  const openCopy = (r, p) => openPdf(`/api/caregiver/documents/${encodeURIComponent(r.documentId)}/file`, `${p.title} - ${r.name}.pdf`).catch(e => setErr(e.message));
+  const state = (r, p) => (r.done ? `${r.method === 'paper' ? 'Signed on paper' : done(p.action)} ${fmtDate(r.doneAt)}` : r.needsSignature ? 'Acknowledged, not signed' : 'Not yet');
+  return (
+    <div className="ds" style={{ marginTop: 18 }}>
+      <h3 style={{ margin: '0 0 4px', color: 'var(--n)' }}>GFC Policies</h3>
+      <div className="ds-who">Signed or acknowledged on the signing screen. Who owes each one comes from their onboarding checklist.</div>
+      {err && <div className="ds-err">{err}</div>}
+      {!d ? <div className="ds-note">Loading…</div> : !d.policies.length ? <div className="ds-note">No policies apply{userId ? ' to this person' : ''}.</div> : d.policies.map(p => {
+        const mine = userId ? p.people[0] : null;
+        const doneCount = p.people.filter(r => r.done).length;
+        return (
+          <div key={p.policyId}>
+            <div className="ds-row">
+              <i className="ti ti-file-certificate" style={{ fontSize: 22, color: 'var(--n)' }} />
+              <div className="ds-grow"><b>{p.title}</b><small>{p.action === 'sign' ? 'To sign' : 'To acknowledge'}{p.version && p.version !== 'Current' ? ` · version ${p.version}` : ''}</small></div>
+              {mine
+                ? <span className={`ds-pill ${mine.done ? 'ds-ok' : 'ds-wait'}`}>{state(mine, p)}</span>
+                : <span className="ds-pill">{doneCount} of {p.people.length} done</span>}
+              {mine && mine.done && mine.documentId && <button className="ds-btn ds-ghost" onClick={() => openCopy(mine, p)}>Signed Copy</button>}
+              {!userId && <button className="ds-btn ds-ghost" onClick={() => setOpenId(openId === p.policyId ? null : p.policyId)}>{openId === p.policyId ? 'Hide' : 'Who'}</button>}
+            </div>
+            {openId === p.policyId && (
+              <div className="ds-box">
+                {p.people.map(r => (
+                  <div className="ds-row" key={r.userId}>
+                    <div className="ds-grow"><b>{r.name}</b></div>
+                    <span className={`ds-pill ${r.done ? 'ds-ok' : 'ds-wait'}`}>{state(r, p)}</span>
+                    {r.done && r.documentId && <button className="ds-btn ds-ghost" onClick={() => openCopy(r, p)}>Signed Copy</button>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+window.GFCDocSign = { WaitingOnYou, SignWorkspace, SendForm, OfficeDocuments, OfficePolicies, openPdf };
 })();

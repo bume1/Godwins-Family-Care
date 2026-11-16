@@ -169,6 +169,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'onboarding_custom_tasks', phi: false, owner: 'onboarding', note: 'tasks an admin or manager added to one person or to a chapter; removed tasks kept with who and when' },
   { key: 'staff_document_sends', phi: false, owner: 'staff-portal', note: 'documents the office sent staff to acknowledge or sign: title, scope, the stored PDF id and its SHA-256; withdrawn sends kept' },
   { key: 'staff_document_signings', phi: false, owner: 'staff-portal', note: 'one row per person who acknowledged or signed a sent document: printed name, time, hashed IP, the filed copy id' },
+  { key: 'staff_policy_signings', phi: false, owner: 'staff-portal', note: 'one row per policy a person signed or acknowledged in the app (Code of Conduct, Handbook, HIPAA, manuals): version, method, printed name, time, hashed IP, the filed copy id (2026-11-15)' },
   // Trainings the office added to the library, scoped to roles (2026-11-10).
   { key: 'onboarding_library_trainings', phi: false, owner: 'Onboarding' },
   // What the office rewrote an item's or a training's instructions to say (2026-11-10).

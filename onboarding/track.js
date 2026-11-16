@@ -219,23 +219,42 @@ function customItemsFor(rows, inputs, userId) {
 //     acknowledgments: { [ackId]: { version, at, byName, filedBy } },
 //     proofFiles: [...], notes: [...] }
 
+// SIGN OR ACKNOWLEDGE (owner, 2026-11-15). A document marked `sign` counts
+// only once it is signed: in the app with a drawn signature, or on paper and
+// filed by the office. An older click-acknowledgment of it is kept and shown,
+// but asks them to sign. A document marked `acknowledge` counts on any record.
+const ackAction = (doc) => (doc && doc.action === 'sign' ? 'sign' : 'acknowledge');
+const SIGNATURE_METHODS = Object.freeze(['signed', 'paper']);
+function ackSatisfies(doc, got) {
+  if (!got) return false;
+  const versionOk = doc.version === 'Current' || String(got.version) === String(doc.version);
+  if (!versionOk) return false;
+  return ackAction(doc) !== 'sign' || SIGNATURE_METHODS.includes(got.method);
+}
+
 function ackStatus(item, state) {
   if (!item.acknowledges) return null;
   const acks = (state && state.acknowledgments) || {};
   return item.acknowledges.map(id => {
     const doc = ALL_ACKS.find(a => a.id === id);
     const got = acks[id] || null;
-    const current = !!(got && (doc.version === 'Current' || String(got.version) === String(doc.version)));
+    const current = ackSatisfies(doc, got);
+    const versionOk = !!(got && (doc.version === 'Current' || String(got.version) === String(doc.version)));
     return {
       id, title: doc.title, required: doc.version,
+      action: ackAction(doc),
       playbookStates: doc.playbookStates || null,
       signed: got ? got.version : null,
       signedAt: got ? got.at : null,
       filedBy: got ? got.filedBy : null,
+      method: got ? (got.method || null) : null,
+      documentId: got ? (got.documentId || null) : null,
       current,
       // "signed 2.0, 2.2 required" — a signature on an older version is shown
       // as exactly that, never as complete.
-      stale: !!(got && !current)
+      stale: !!(got && !versionOk),
+      // Acknowledged at the right version, but this document must be signed.
+      needsSignature: !!(got && versionOk && !current)
     };
   });
 }
@@ -348,6 +367,16 @@ function recordStep(item, state, stepIndex, actor, body, now, opts) {
   if (item.acknowledges && step.action === ACTIONS.ACKNOWLEDGE) {
     throw refuse('ACK_PER_DOCUMENT', 'Acknowledge each document at its version instead.');
   }
+  // A SIGNATURE IS A SIGNATURE (owner, 2026-11-15): her SIGN step (an offer
+  // letter, an employment agreement) is done by her signing the document the
+  // office attaches, never by a tick. The office may record it only once the
+  // signed paper copy is on the item.
+  if (step.action === ACTIONS.SIGN && step.actor === ACTORS.NEW_HIRE && !(opts && opts.viaDocument === true)) {
+    if (!actor.isOffice) throw refuse('SIGN_IN_APP', 'The office sends this to you to sign in the app.');
+    if (!((state && state.files) || []).length) {
+      throw refuse('SIGNED_COPY_REQUIRED', 'Attach the document for them to sign, or upload the signed paper copy first.');
+    }
+  }
 
   const hers = step.actor === ACTORS.NEW_HIRE;
   if (!actor.isOffice && !hers) {
@@ -398,18 +427,40 @@ function returnStep(item, state, stepIndex, actor, reason, now) {
   return st;
 }
 
-/** An acknowledgment of one named document, at the version she signed. */
-function recordAcknowledgment(item, state, ackId, version, actor, now) {
+/**
+ * An acknowledgment of one named document, at the version she signed.
+ * `extra.method`: 'signed' or 'acknowledged' (in the app, through the signing
+ * screen, with `extra.documentId` the filed copy), or, from the office,
+ * 'paper' for a signed paper copy and 'office' for an acknowledgment.
+ */
+function recordAcknowledgment(item, state, ackId, version, actor, now, extra) {
   if (!item || !item.acknowledges || !item.acknowledges.includes(ackId)) {
     throw refuse('ACK_UNKNOWN', 'That document is not acknowledged on this item.');
   }
   const v = String(version || '').trim();
   if (!v) throw refuse('ACK_VERSION_REQUIRED', 'Record the version that was signed.');
+  const doc = ALL_ACKS.find(a => a.id === ackId);
+  const x = extra || {};
+  const method = actor.isOffice ? (ackAction(doc) === 'sign' ? 'paper' : 'office') : x.method;
+  if (!actor.isOffice && !['signed', 'acknowledged'].includes(method)) {
+    throw refuse('ACK_OPEN_DOCUMENT', ackAction(doc) === 'sign' ? 'Open the document and sign it.' : 'Open the document and acknowledge it.');
+  }
+  // A paper signature is filed with its signed copy on the item (owner,
+  // 2026-11-16), the same rule as an offer letter signed on paper.
+  if (actor.isOffice && ackAction(doc) === 'sign' && !((state && state.files) || []).length) {
+    throw refuse('SIGNED_COPY_REQUIRED', 'Upload the signed paper copy on this item first.');
+  }
+  if (!actor.isOffice && ackAction(doc) === 'sign' && method !== 'signed') {
+    throw refuse('ACK_SIGNATURE_REQUIRED', 'This document must be signed, not only acknowledged.');
+  }
   const st = JSON.parse(JSON.stringify(state || {}));
   st.acknowledgments = st.acknowledgments || {};
+  // The record it replaces is kept, so an older acknowledgment stays history.
+  if (st.acknowledgments[ackId]) st.ackHistory = (st.ackHistory || []).concat([Object.assign({ ackId }, st.acknowledgments[ackId])]);
   st.acknowledgments[ackId] = {
     version: v, at: now, byId: String(actor.id), byName: actor.name || null,
-    filedBy: actor.isOffice ? FILED_BY.OFFICE_ON_BEHALF : FILED_BY.SELF
+    filedBy: actor.isOffice ? FILED_BY.OFFICE_ON_BEHALF : FILED_BY.SELF,
+    method, documentId: x.documentId || null
   };
   return st;
 }
@@ -762,6 +813,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 }
 
 module.exports = {
+  ackAction, ackSatisfies, ackStatus, SIGNATURE_METHODS,
   chapterBaseIds,
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
   itemStatus, nextStep, recordStep, returnStep, recordAcknowledgment,

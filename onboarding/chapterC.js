@@ -99,14 +99,21 @@ const PHASES = Object.freeze([
 // Each document links its CANONICAL copy in 01 Company / Policies &
 // Procedures / Current (Admin P&P §17.2). #260 linked copies in another
 // folder, one of them a superseded Clinical P&P v2.0; those are not used.
+// SIGN OR ACKNOWLEDGE, declared once per document (owner, 2026-11-15): "the
+// Code of Conduct ... needs to be signed by all staff". A document marked
+// `sign` is signed in the app (typed name and drawn signature) and an older
+// click-acknowledgment no longer counts for it; one marked `acknowledge` is a
+// tick box and a typed name. Either way the copy files to their Documents.
+// Every chapter that lists one of these reads this same entry, so the setting
+// cannot differ between chapters. An entry with no `action` is acknowledged.
 const ACKNOWLEDGMENTS = Object.freeze([
-  { id: 'EMPLOYEE_HANDBOOK', title: 'Employee Handbook and its acknowledgment', version: '2.0', ref: P('R3.3'),
+  { id: 'EMPLOYEE_HANDBOOK', action: 'sign', title: 'Employee Handbook and its acknowledgment', version: '2.0', ref: P('R3.3'),
     driveFileIds: ['1T0xnb9XKYnWw4cP4CHTcLk6j453SSskc', '1I3evN7Y6ymBnroMLWMpEV134RDM4KzBU'] },
-  { id: 'CODE_OF_CONDUCT', title: 'Staff Code of Conduct', version: '2.0', ref: P('R3.3'),
+  { id: 'CODE_OF_CONDUCT', action: 'sign', title: 'Staff Code of Conduct', version: '2.0', ref: P('R3.3'),
     driveFileIds: ['1rbI6shvNo7zRpqh1nrw7-zrO2-Fsj1JO'] },
-  { id: 'FIELD_ADDENDUM', title: 'Field Addendum to the Staff Code of Conduct', version: '1.0', ref: P('R3.3'),
+  { id: 'FIELD_ADDENDUM', action: 'sign', title: 'Field Addendum to the Staff Code of Conduct', version: '1.0', ref: P('R3.3'),
     driveFileIds: ['1ju5IVJG50_EJUIqDTlCgQF6P3-f8HBCH'] },
-  { id: 'HIPAA_ACK', title: 'HIPAA and Confidentiality Acknowledgment', version: '2.0', ref: P('R3.3'),
+  { id: 'HIPAA_ACK', action: 'sign', title: 'HIPAA and Confidentiality Acknowledgment', version: '2.0', ref: P('R3.3'),
     driveFileIds: ['14EH51ldVGQZXWt_bSoSI8kYUWLLkJYAP'] },
   { id: 'CLINICAL_MANUAL', title: 'Clinical Policies and Procedures', version: '2.2', source: 'CLINICAL_MANUAL',
     ref: P('R3.3'), playbookStates: '2.0', versionSetBy: 'Owner decision, 2026-11-08',

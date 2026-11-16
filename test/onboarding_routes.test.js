@@ -113,12 +113,18 @@ test('the office files her step on her behalf, and it is stored that way', async
   assert.strictEqual(me.data.track.items.find(i => i.id === 'C.4.05').status, 'COMPLETE');
 });
 
-test('she acknowledges at the version the server states, whatever the page posts', async (t) => {
+// Owner, 2026-11-15: a policy with a file is signed or acknowledged on the
+// signing screen (/api/my/policy-docs/:id/sign, which takes the version from
+// the server: test/policy_signing.test.js), never by a tick here, whatever
+// version the page posts.
+test('a policy with a file cannot be ticked off here: she opens it on the signing screen', async (t) => {
   const h = await mount(t);
   await startHer(h);
   h.as(NP);
-  await h.call('POST', '/api/onboarding/me/items/C.5.04/acknowledgments/CLINICAL_MANUAL', { version: '1.0' });
-  assert.strictEqual(h.store.onboarding_records[0].items['C.5.04'].acknowledgments.CLINICAL_MANUAL.version, '2.2');
+  const r = await h.call('POST', '/api/onboarding/me/items/C.5.04/acknowledgments/CLINICAL_MANUAL', { version: '1.0' });
+  assert.strictEqual(r.status, 409);
+  assert.strictEqual(r.data.code, 'ACK_OPEN_DOCUMENT');
+  assert.ok(!((h.store.onboarding_records[0].items || {})['C.5.04'] || {}).acknowledgments, 'nothing recorded');
 });
 
 test('the office files an older signed copy, and it reads stale, never complete', async (t) => {

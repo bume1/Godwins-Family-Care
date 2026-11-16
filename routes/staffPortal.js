@@ -789,7 +789,15 @@ module.exports = function createStaffPortalRoutes(deps) {
 
   // The recipient: what is waiting on them, open it, acknowledge or sign it.
   router.get('/api/my/document-sends', authenticateToken, requireStaff, async (req, res) => {
-    return res.json(DS.forPerson(await sends(), await signings(), await personOf(req.user)));
+    const out = DS.forPerson(await sends(), await signings(), await personOf(req.user));
+    // The policies they sign or acknowledge sit in the same list (owner,
+    // 2026-11-15), so Home, the menu count and Waiting on You all see them.
+    const pol = await policyStateFor(req.user);
+    pol.list.forEach(p => {
+      const row = policyRow(p);
+      (p.done ? out.done : out.waiting).push(row);
+    });
+    return res.json(out);
   });
   // The original, for a recipient or the admin team. Through the app, audited.
   router.get('/api/my/document-sends/:id/file', authenticateToken, requireStaff, async (req, res) => {
@@ -888,6 +896,160 @@ module.exports = function createStaffPortalRoutes(deps) {
     return res.json({ ok: true, documentId });
   });
 
+  // ---- POLICIES TO SIGN OR ACKNOWLEDGE (owner, 2026-11-15) -------------------
+  // "Documents like offer letters that need to be signed should be shared with
+  // staff for signing, versus documents that need to be acknowledged. The Code
+  // of Conduct needs to be signed by all staff." Each policy declares sign or
+  // acknowledge once (chapterC ACKNOWLEDGMENTS), and is opened on the same
+  // signing screen as a document the office sends: the policy on the left, the
+  // tick box, name and (to sign) signature on the right, the page their
+  // signing adds as a preview. The copy files to their Documents and records
+  // the acknowledgment on every onboarding item that asks for it.
+  const POLICY_SIGNINGS = 'staff_policy_signings';
+  const policySignings = async () => (await db.get(POLICY_SIGNINGS)) || [];
+  const PS = require('../onboarding/policySigning');
+  const policyPdf = require('../onboarding/policyPdf');
+  // `pre` lets the office view pass rows it already loaded for everyone.
+  async function policyStateFor(u, pre) {
+    const T = require('../onboarding/track');
+    const recs = (pre && pre.recs) || (await db.get('onboarding_records')) || [];
+    const rec = recs.find(r => String(r.userId) === String(u.id)) || null;
+    const users = (pre && pre.users) || await getUsers();
+    const fresh = users.find(x => String(x.id) === String(u.id)) || u;
+    const inputs = rec && rec.inputs ? rec.inputs : T.normalizeInputs({ chapter: require('./onboarding').defaultChapterFor(fresh) });
+    const list = PS.forPerson({ inputs, signings: (pre && pre.signings) || await policySignings(), record: rec, userId: String(u.id) });
+    return { rec, recs, inputs, list };
+  }
+  const policyRow = (p) => ({
+    id: `policy:${p.policyId}`, kind: 'policy', policyId: p.policyId, title: p.title, version: p.version,
+    action: p.action,
+    fileName: `${p.title}.pdf`, sentAt: null, sentByName: null,
+    note: p.needsSignature ? `You acknowledged this${p.previousAt ? ` on ${new Date(p.previousAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''}. It now has to be signed.` : null,
+    needsSignature: p.needsSignature,
+    done: p.done, doneAt: p.doneAt, documentId: p.documentId
+  });
+  // The policy this person owes, or a refusal.
+  async function owedPolicy(req, res) {
+    const pol = await policyStateFor(req.user);
+    const p = pol.list.find(x => x.policyId === req.params.policyId);
+    if (!p) { res.status(404).json({ error: 'That policy is not one of yours.', code: 'POLICY_UNKNOWN' }); return null; }
+    return { pol, p, doc: PS.docById(p.policyId) };
+  }
+  // The policy drawn as a PDF from its file(s) in Policies / Current.
+  async function policyPdfFor(doc) {
+    const parts = [];
+    for (const id of doc.driveFileIds) parts.push({ name: id, buf: await drive.downloadFileBuffer(id) });
+    return policyPdf.buildPolicyPdf({ title: doc.title, version: doc.version, parts });
+  }
+  const policyUnavailable = (res) => res.status(502).json({ error: 'That policy could not be opened just now. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE' });
+
+  // The office: each policy, and where every person who owes it stands
+  // (owner, 2026-11-16: who has re-signed the Code of Conduct). With
+  // ?userId, one person's policies, for their Staff Record.
+  router.get('/api/my/admin/policy-signatures', authenticateToken, requireAdmin, async (req, res) => {
+    const users = await getUsers();
+    const pre = { users, recs: (await db.get('onboarding_records')) || [], signings: await policySignings() };
+    let staff = users.filter(u => audienceOf(u) && u.accountStatus !== 'inactive');
+    if (req.query.userId) staff = staff.filter(u => String(u.id) === String(req.query.userId));
+    const byPolicy = new Map();
+    for (const u of staff) {
+      for (const p of (await policyStateFor(u, pre)).list) {
+        if (!byPolicy.has(p.policyId)) byPolicy.set(p.policyId, { policyId: p.policyId, title: p.title, version: p.version, action: p.action, people: [] });
+        byPolicy.get(p.policyId).people.push({ userId: String(u.id), name: u.name || u.email, done: p.done, doneAt: p.doneAt,
+          documentId: p.documentId, method: p.method, needsSignature: p.needsSignature });
+      }
+    }
+    return res.json({ policies: Array.from(byPolicy.values()) });
+  });
+  router.get('/api/my/policy-docs/:policyId/file', authenticateToken, requireStaff, async (req, res) => {
+    const o = await owedPolicy(req, res); if (!o) return;
+    let built; try { built = await policyPdfFor(o.doc); } catch (err) { return policyUnavailable(res); }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'policy_opened', 'staff_policy', o.doc.id, {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', `${o.doc.title}.pdf`));
+    return res.send(built.bytes);
+  });
+  // The page their signing adds, marked PREVIEW. Writes nothing.
+  router.post('/api/my/policy-docs/:policyId/preview', authenticateToken, requireStaff, async (req, res) => {
+    const o = await owedPolicy(req, res); if (!o) return;
+    if (o.p.done) return res.status(409).json({ error: o.p.action === 'sign' ? 'You have already signed this.' : 'You have already acknowledged this.', code: 'DOC_ALREADY_DONE' });
+    const b = req.body || {};
+    let sig = String(b.signaturePng || '');
+    if (o.p.action !== 'sign' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig) || sig.length > 400000) sig = null;
+    let built; try { built = await policyPdfFor(o.doc); } catch (err) { return policyUnavailable(res); }
+    try {
+      const copy = await signedDocument.buildSignedCopy(built.bytes, { action: o.p.action, title: `${o.doc.title}, version ${o.doc.version}`,
+        printedName: String(b.printedName || '').trim().slice(0, 160), email: req.user.email, signaturePng: sig, preview: true });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(copy.bytes);
+    } catch (err) {
+      return res.status(500).json({ error: 'The preview could not be drawn.', code: 'PREVIEW_FAILED' });
+    }
+  });
+  router.post('/api/my/policy-docs/:policyId/sign', authenticateToken, requireStaff, async (req, res) => {
+    const o = await owedPolicy(req, res); if (!o) return;
+    const { p, doc } = o;
+    if (p.done) return res.status(409).json({ error: p.action === 'sign' ? 'You have already signed this.' : 'You have already acknowledged this.', code: 'DOC_ALREADY_DONE' });
+    const b = req.body || {};
+    const printedName = String(b.printedName || '').trim().slice(0, 160);
+    if (!printedName) return res.status(400).json({ error: 'Type your full name.', code: 'NAME_REQUIRED' });
+    if (b.acknowledged !== true) return res.status(400).json({ error: 'Tick the box to confirm you have read it.', code: 'ACK_REQUIRED' });
+    const sig = String(b.signaturePng || '');
+    if (p.action === 'sign') {
+      if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig)) return res.status(400).json({ error: 'Please sign in the box.', code: 'SIGNATURE_REQUIRED' });
+      if (sig.length > 400000) return res.status(413).json({ error: 'That signature is too large to store.', code: 'SIGNATURE_TOO_LARGE' });
+    }
+    let built; try { built = await policyPdfFor(doc); } catch (err) { return policyUnavailable(res); }
+    const signedAt = nowIso();
+    const ipHash = hashIp(req);
+    const copy = await signedDocument.buildSignedCopy(built.bytes, {
+      action: p.action, title: `${doc.title}, version ${doc.version}`, printedName, email: req.user.email, signedAt, ipHash,
+      signedAtLabel: new Date(signedAt).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'long', timeStyle: 'short' }) + ' Eastern',
+      signaturePng: p.action === 'sign' ? sig : null
+    });
+    const me = await personOf(req.user);
+    const fileName = `${doc.title} v${doc.version} - ${p.action === 'sign' ? 'signed' : 'acknowledged'} ${signedAt.slice(0, 10)}.pdf`.replace(/[\\/:*?"<>|]/g, '-');
+    let stored;
+    try {
+      stored = await drive.uploadStaffDocumentFile(staffFolders.folderForChapter(o.pol.inputs.chapter || me.chapter || 'C'), staffFolders.personFolderName(me.name, me.userId), fileName, copy.bytes, 'application/pdf');
+    } catch (err) {
+      return res.status(502).json({ error: 'We could not file your signed copy. Please try again.', code: 'FILE_STORAGE_UNAVAILABLE' });
+    }
+    const documentId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const docs = (await db.get('caregiver_documents')) || [];
+    docs.push(staffDocs.buildStaffDocumentRow({
+      id: documentId, ownerId: me.userId, ownerName: me.name, kind: 'signed_document', fileName, storedName: fileName,
+      mime: 'application/pdf', sizeBytes: copy.bytes.length, driveFileId: stored.fileId || stored.id || null, driveUrl: null,
+      note: `${p.action === 'sign' ? 'Signed' : 'Acknowledged'}: ${doc.title}, version ${doc.version}`, status: 'accepted',
+      uploadedById: req.user.id, uploadedByName: printedName, uploadedByOffice: false,
+      extra: { policy_id: doc.id, policy_version: doc.version }
+    }));
+    await db.set('caregiver_documents', docs);
+    const method = p.action === 'sign' ? 'signed' : 'acknowledged';
+    const rows = await policySignings();
+    rows.push({ id: uuidv4(), userId: me.userId, policyId: doc.id, version: doc.version, action: p.action, method,
+      printedName, signedAt, ipHash, documentId, sourceSha256: built.sourceSha256 });
+    await db.set(POLICY_SIGNINGS, rows);
+    // Every onboarding item that asks for this policy records it.
+    if (o.pol.rec) {
+      const T = require('../onboarding/track');
+      const rec = o.pol.recs.find(r => String(r.userId) === me.userId);
+      rec.items = rec.items || {};
+      for (const item of T.composeChecklist(rec.inputs)) {
+        if (!(item.acknowledges || []).includes(doc.id)) continue;
+        try {
+          rec.items[item.id] = Object.assign(rec.items[item.id] || {}, T.recordAcknowledgment(item, rec.items[item.id], doc.id, doc.version,
+            { id: req.user.id, name: req.user.name || req.user.email, isOffice: false }, signedAt, { method, documentId }));
+        } catch (_) { /* the signing stands; the item can be recorded by hand */ }
+      }
+      rec.updatedAt = nowIso();
+      await db.set('onboarding_records', o.pol.recs);
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, p.action === 'sign' ? 'policy_signed' : 'policy_acknowledged', 'staff_policy', doc.id, { version: doc.version, documentId });
+    return res.json({ ok: true, documentId });
+  });
+
   async function completeOnboardingTasks(send, me, user, at, documentId) {
     const tasks = ((await db.get('onboarding_custom_tasks')) || []).filter(t => !t.removedAt && t.documentSendId === send.id);
     const recs = (await db.get('onboarding_records')) || [];
@@ -904,7 +1066,7 @@ module.exports = function createStaffPortalRoutes(deps) {
       const idx = def.steps.findIndex(s => s.actor === 'NEW_HIRE');
       if (idx < 0 || (st.steps && st.steps[idx])) continue;
       try {
-        Object.assign(st, T.recordStep(def, st, idx, { id: user.id, name: user.name || user.email, isOffice: false }, {}, at));
+        Object.assign(st, T.recordStep(def, st, idx, { id: user.id, name: user.name || user.email, isOffice: false }, {}, at, { viaDocument: true }));
       } catch (_) { /* the signing stands; the step can be recorded by hand */ }
       st.files = (st.files || []).concat([{ id: uuidv4(), name: `${send.title} (${send.action === 'sign' ? 'signed' : 'acknowledged'})`,
         documentId, uploadedAt: at, uploadedById: user.id, uploadedByName: user.name || user.email, filedBy: 'SELF' }]);

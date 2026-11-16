@@ -475,6 +475,41 @@ const Rechecks = ({ track, base, onChanged }) => {
 };
 
 // ---- the item drawer (both views) -------------------------------------------
+// One policy on an item (owner, 2026-11-15): signed or acknowledged on the
+// shared signing screen, never by a tick. Whether it is signed comes from the
+// server (`a.action`), which reads the one setting each policy declares.
+const PolicyAck = ({ a, itemId, base, office, busy, ackVersion, setAckVersion, run, onChanged }) => {
+  const [open, setOpen] = useState(false);
+  const signs = a.action === 'sign';
+  const WS = window.GFCDocSign && window.GFCDocSign.SignWorkspace;
+  const doc = { id: `policy:${a.id}`, kind: 'policy', policyId: a.id, title: a.title, version: a.required, action: a.action, fileName: `${a.title}.pdf` };
+  const hasFile = (a.links || []).length > 0;
+  return (
+    <div className="line-card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <b>{a.title}</b>
+        <span>{signs ? 'To sign' : 'To acknowledge'} · {a.required === 'Current' ? 'Current version' : `v${a.required}`}</span>
+      </div>
+      {a.current && <div className="meta" style={{ color: 'var(--green)' }}><i className="ti ti-check" /> {signs ? (a.method === 'paper' ? 'Signed on paper' : 'Signed') : 'Acknowledged'}{a.filedBy === 'OFFICE_ON_BEHALF' ? ' · filed by the office' : ''}{a.signedAt ? ` · ${fmtDate(a.signedAt)}` : ''}</div>}
+      {a.stale && <div className="err">Signed v{a.signed} · v{a.required} needed</div>}
+      {a.needsSignature && <div className="err">Acknowledged{a.signedAt ? ` ${fmtDate(a.signedAt)}` : ''}, but this document has to be signed.</div>}
+      {!a.current && !office && hasFile && <button className="btn sm" disabled={busy} onClick={() => setOpen(true)}>{signs ? 'Open and Sign' : 'Open and Acknowledge'}</button>}
+      {!a.current && !office && !hasFile && !signs && <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: {} }), 'Acknowledged.')}>Acknowledge</button>}
+      {!a.current && !office && !hasFile && signs && <div className="meta">The office will give you this to sign.</div>}
+      {!a.current && office && (
+        <div style={{ marginTop: 6 }}>
+          <div className="meta">{signs ? 'They sign this in the app. If they signed a paper copy, file it here.' : 'They acknowledge this in the app. You can file it for them.'}</div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+            <input placeholder={`Version (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
+            <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>{signs ? 'File Paper Signature' : 'File For Her'}</button>
+          </div>
+        </div>
+      )}
+      {open && WS && <WS doc={doc} onCancel={() => setOpen(false)} onDone={async () => { setOpen(false); await onChanged(); }} />}
+    </div>
+  );
+};
+
 const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onChanged }) => {
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [ok, setOk] = useState('');
   const [verify, setVerify] = useState({ source: '', verifiedOn: '' });
@@ -548,25 +583,19 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {office && !item.document && item.steps.some(s => s.hers) && track.person && <AttachDocument item={item} userId={track.person.userId} onDone={onChanged} />}
         {item.acknowledgments ? (
           <div>
-            <label className="f">Documents to acknowledge</label>
-            {item.acknowledgments.map(a => (
-              <div key={a.id} className="line-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                  <b>{a.title}</b>
-                  <span>{a.required === 'Current' ? 'Current version' : `v${a.required}`}</span>
-                </div>
-                {a.links.map((l, i) => <div key={l}><a href={l} target="_blank" rel="noopener">Open document{a.links.length > 1 ? ` ${i + 1}` : ''}</a></div>)}
-                {a.current && <div className="meta" style={{ color: 'var(--green)' }}><i className="ti ti-check" /> Acknowledged{a.filedBy === 'OFFICE_ON_BEHALF' ? ' · filed by the office for you' : ''}</div>}
-                {a.stale && <div className="err">Signed v{a.signed} · v{a.required} needed</div>}
-                {!a.current && !office && <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, item.id, a.id), { method: 'POST', body: {} }), 'Acknowledged.')}>Acknowledge</button>}
-                {!a.current && office && (
-                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                    <input placeholder={`Version signed (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
-                    <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, item.id, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>File For Her</button>
-                  </div>
-                )}
+            <label className="f">Documents to sign or acknowledge</label>
+            {/* A paper signature is filed with its signed copy (owner, 2026-11-16). */}
+            {office && (
+              <div style={{ margin: '0 0 8px' }}>
+                <div className="meta">Signed on paper? Upload the signed copy here first, then file it on the policy below.</div>
+                <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 4 }}>
+                  <i className="ti ti-upload" />Upload Signed Paper Copy
+                  <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                </label>
               </div>
-            ))}
+            )}
+            {item.acknowledgments.map(a => <PolicyAck key={a.id} a={a} itemId={item.id} base={base} office={office} busy={busy}
+              ackVersion={ackVersion} setAckVersion={setAckVersion} run={run} onChanged={onChanged} />)}
           </div>
         ) : (
           <div>
@@ -587,7 +616,23 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                       <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>Verify</button>
                     </div>
                   )}
-                  {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && (
+                  {/* Her signature (an offer letter) is never a tick (owner, 2026-11-15): she
+                      signs the document the office attaches, or the office files the signed
+                      paper copy first. */}
+                  {canAct(s) && s.action === 'SIGN' && s.hers && !item.document && (
+                    office
+                      ? ((item.files || []).length
+                          ? <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>Mark Signed (Paper Copy On File)</button>
+                          : <div style={{ marginTop: 6 }}>
+                              <div className="meta">Attach the document below for them to sign in the app. If they signed on paper, upload the signed copy, then mark it signed.</div>
+                              <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 6 }}>
+                                <i className="ti ti-upload" />Upload Signed Paper Copy
+                                <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                              </label>
+                            </div>)
+                      : <div className="meta" style={{ marginTop: 6 }}>The office will send this to you to sign here.</div>
+                  )}
+                  {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && !(s.action === 'SIGN' && s.hers && !item.document) && (
                     <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.action === 'REVIEW' ? 'Mark Reviewed' : s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
                   )}
                   {canAct(s) && s.action === 'SUBMIT' && (
@@ -1447,7 +1492,7 @@ const ItemTasks = ({ item, subjectName, viewerIsSubject, office }) => {
     <div className="tasks">
       {item.description && <div className="desc1" style={{ color: 'var(--mut)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', marginBottom: 4 }}>{item.description}</div>}
       {steps.length > 0 && <><H>Steps</H>{steps.map(s => <div key={`s${s.index}`}><Tick on={s.done} /> {stepWho(s, subjectName, viewerIsSubject)} {stepVerb(s, viewerIsSubject)}</div>)}</>}
-      {(item.acknowledgments || []).length > 0 && <><H>To sign</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title}{a.stale ? ' (an older version was signed)' : ''}</div>)}</>}
+      {(item.acknowledgments || []).length > 0 && <><H>To sign or acknowledge</H>{item.acknowledgments.map(a => <div key={a.id}><Tick on={a.current} /> {a.title} ({a.action === 'sign' ? 'sign' : 'acknowledge'}){a.stale ? ' (an older version was signed)' : ''}{a.needsSignature ? ' (acknowledged, still to sign)' : ''}</div>)}</>}
       {(item.elements || []).length > 0 && <><H>{item.custom ? 'Details' : 'What is checked'}</H>{item.elements.map(e => <div key={e.row}>• {e.row}</div>)}</>}
       {item.courses && <div><Tick on={item.courses.hoursDone >= item.courses.totalHours} /> {item.courses.hoursDone} of {item.courses.totalHours} hours of courses</div>}
       {files.length > 0 && <><H>On file</H>{files.map(f => <div key={f.id}><i className="ti ti-file-text" /> {f.name}{f.status === 'received' ? ' (with the office for review)' : ''}</div>)}</>}
