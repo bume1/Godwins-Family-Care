@@ -35,6 +35,9 @@ The library and the document list read as the same thing to the owner. They are 
 - Full suite: 3,934 tests, 0 failing.
 - Rendered in Chromium on an iPhone 13 (not-started caregiver; started caregiver via `#library`; a greyed card; an opened training) and at 1280px (Admin Hub Policy & SOP Files; the office's staff view). No page errors.
 
-## Open
+## Set 1 v2.1
 
-- Set 1 v2.0 (SOP-ONB-03/04) says Document Links sits in the Training Library and that staff reach trainings only through My Onboarding. Both need a v2.1 correction.
+Administrative SOPs Set 1 is reissued as v2.1 (`1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD`, in Current, view-only to anyone with the link) and is now the app's default Set 1 file.
+- **SOP-ONB-03** gains The Training Library.
+- **SOP-ONB-04** replaces "Manage versions" with issuing a new version through Policy & SOP Files, and adds Library as Staff See It.
+- v2.0 (`1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs`) moved to Superseded and keeps its sharing, so links already sent still open.

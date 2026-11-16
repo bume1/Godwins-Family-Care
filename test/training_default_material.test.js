@@ -20,7 +20,7 @@ test('existing Drive material is attached and those trainings read ready', () =>
     mat.links.forEach(l => assert.match(l.url, /^https:\/\/(docs|drive)\.google\.com\//, id));
   }
   assert.deepStrictEqual(all['TRN-004'].links.map(l => l.url), [
-    'https://drive.google.com/file/d/1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs/view',
+    'https://drive.google.com/file/d/1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD/view',
     'https://drive.google.com/file/d/1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j/view',
     'https://drive.google.com/file/d/1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l/view',
     'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view'
@@ -39,9 +39,9 @@ test('the seed never overrides the office: not twice, not after removal, not ove
   assert.deepStrictEqual(TM.seedDefaults(first, 'T2').seeded, [], 'once only');
   const removed = TM.remove(first['TRN-004'], 'links', 'default-TRN-004-sop-set1', ACTOR, 'T3');
   assert.ok(!TM.seedDefaults(Object.assign({}, first, { 'TRN-004': removed }), 'T4').seeded.includes('TRN-004'), 'a removal stays removed');
-  const own = TM.addLink(null, { label: 'Our copy of Set 1', url: 'https://drive.google.com/file/d/1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs/view', kind: 'document' }, ACTOR, 'T0', 'x1');
+  const own = TM.addLink(null, { label: 'Our copy of Set 1', url: 'https://drive.google.com/file/d/1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD/view', kind: 'document' }, ACTOR, 'T0', 'x1');
   const kept = TM.seedDefaults({ 'TRN-004': own }, 'T5').all['TRN-004'];
-  assert.strictEqual(kept.links.filter(l => /1QYhVaYr5law/.test(l.url)).length, 1, 'the same document is never added twice');
+  assert.strictEqual(kept.links.filter(l => /1Rm4Q9Qk0C6n/.test(l.url)).length, 1, 'the same document is never added twice');
   assert.strictEqual(kept.links[0].label, 'Our copy of Set 1', 'the office label stays');
 });
 
