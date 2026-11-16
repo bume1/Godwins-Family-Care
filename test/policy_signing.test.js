@@ -58,7 +58,10 @@ test('a document to sign counts only when signed; a click-acknowledgment of it a
   assert.throws(() => T.recordAcknowledgment(it, st, 'CODE_OF_CONDUCT', '2.0', HER, NOW, { method: 'acknowledged' }), e => e.code === 'ACK_SIGNATURE_REQUIRED');
   // Nor by a tick with no screen behind it.
   assert.throws(() => T.recordAcknowledgment(it, st, 'CLINICAL_MANUAL', '2.2', HER, NOW), e => e.code === 'ACK_OPEN_DOCUMENT');
-  // The office files a signed paper copy: it counts, and says so.
+  // The office files a signed paper copy: only with the copy on the item, and
+  // then it counts, and says so.
+  assert.throws(() => T.recordAcknowledgment(it, st, 'CODE_OF_CONDUCT', '2.0', OFFICE, NOW), e => e.code === 'SIGNED_COPY_REQUIRED');
+  st = Object.assign({}, st, { files: [{ id: 'f1', name: 'Code of Conduct (signed).pdf' }] });
   const paper = T.recordAcknowledgment(it, st, 'CODE_OF_CONDUCT', '2.0', OFFICE, NOW);
   const p = T.ackStatus(it, paper).find(a => a.id === 'CODE_OF_CONDUCT');
   assert.strictEqual(p.current, true);
@@ -230,4 +233,9 @@ test('the office sees, per policy, who has signed it, and one person\'s policies
   const one = (await h.call('GET', `/api/my/admin/policy-signatures?userId=${RN.id}`)).data.policies;
   assert.ok(one.every(p => p.people.length === 1 && p.people[0].userId === RN.id));
   assert.match(read('public/document-sign-ui.js'), /<OfficePolicies userId=\{userId\} \/>/, 'shown on Documents to Sign and on each Staff Record');
+});
+
+test('the office can upload a signed paper copy on an offer letter or policy item', () => {
+  const page = read('public/onboarding.html');
+  assert.strictEqual((page.match(/Upload Signed Paper Copy/g) || []).length, 2);
 });

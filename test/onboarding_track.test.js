@@ -75,7 +75,8 @@ test('a returned step reopens with its reason, takes the verification with it, a
 
 test('an acknowledgment counts only at the required version: Clinical P&P signed at 2.0 is not 2.2', () => {
   const it = item('C.5.04');
-  let st = null;
+  // The office files paper signatures with the signed copy on the item (2026-11-16).
+  let st = { files: [{ id: 'f1', name: 'Signed policies.pdf' }] };
   for (const a of C.ACKNOWLEDGMENTS) st = T.recordAcknowledgment(it, st, a.id, a.id === 'CLINICAL_MANUAL' ? '2.0' : a.version, OFFICE, NOW);
   assert.notStrictEqual(T.itemStatus(it, st), T.STATUS.COMPLETE);
   const row = T.buildTrack({ inputs: { serviceLines: ['PRIVATE_PAY'] }, record: { items: { 'C.5.04': st } } })

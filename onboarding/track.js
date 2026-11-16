@@ -445,6 +445,11 @@ function recordAcknowledgment(item, state, ackId, version, actor, now, extra) {
   if (!actor.isOffice && !['signed', 'acknowledged'].includes(method)) {
     throw refuse('ACK_OPEN_DOCUMENT', ackAction(doc) === 'sign' ? 'Open the document and sign it.' : 'Open the document and acknowledge it.');
   }
+  // A paper signature is filed with its signed copy on the item (owner,
+  // 2026-11-16), the same rule as an offer letter signed on paper.
+  if (actor.isOffice && ackAction(doc) === 'sign' && !((state && state.files) || []).length) {
+    throw refuse('SIGNED_COPY_REQUIRED', 'Upload the signed paper copy on this item first.');
+  }
   if (!actor.isOffice && ackAction(doc) === 'sign' && method !== 'signed') {
     throw refuse('ACK_SIGNATURE_REQUIRED', 'This document must be signed, not only acknowledged.');
   }

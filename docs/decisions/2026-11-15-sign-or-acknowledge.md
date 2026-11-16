@@ -41,3 +41,9 @@
 - `GET /api/my/admin/policy-signatures` (admin team; `?userId` for one person) lists each policy and where every person who owes it stands: signed, signed on paper, acknowledged, "acknowledged, not signed", or not yet.
 - `GFCDocSign.OfficePolicies` shows it as **GFC Policies** under Documents to Sign (with Who) and on every Staff Record (with Signed Copy).
 - 1 test, 2 deliberate breaks caught. Suite 3,923, 0 failing. Rendered in Chromium.
+
+## Follow-up (2026-11-16): a paper signature needs its signed copy, and there is a place to upload it
+- Writing the SOP found that neither the offer letter item nor the policy item had an upload control, so the office could never put a paper copy on it and "Mark Signed (Paper Copy On File)" could never appear.
+- **Upload Signed Paper Copy** now sits on a SIGN step waiting on her (no attached document) and above an item's policy list, for the office. It uses the existing item upload route.
+- **File Paper Signature** on a policy to sign is refused until a file is on the item (`SIGNED_COPY_REQUIRED`), the same rule as the offer letter.
+- One test updated to upload first; 1 new test; 1 deliberate break caught. Suite 3,924, 0 failing.

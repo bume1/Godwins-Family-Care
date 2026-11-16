@@ -584,6 +584,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to sign or acknowledge</label>
+            {/* A paper signature is filed with its signed copy (owner, 2026-11-16). */}
+            {office && (
+              <div style={{ margin: '0 0 8px' }}>
+                <div className="meta">Signed on paper? Upload the signed copy here first, then file it on the policy below.</div>
+                <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 4 }}>
+                  <i className="ti ti-upload" />Upload Signed Paper Copy
+                  <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                </label>
+              </div>
+            )}
             {item.acknowledgments.map(a => <PolicyAck key={a.id} a={a} itemId={item.id} base={base} office={office} busy={busy}
               ackVersion={ackVersion} setAckVersion={setAckVersion} run={run} onChanged={onChanged} />)}
           </div>
@@ -613,7 +623,13 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                     office
                       ? ((item.files || []).length
                           ? <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>Mark Signed (Paper Copy On File)</button>
-                          : <div className="meta" style={{ marginTop: 6 }}>Attach the document below for them to sign in the app, or upload the signed paper copy, then mark it signed.</div>)
+                          : <div style={{ marginTop: 6 }}>
+                              <div className="meta">Attach the document below for them to sign in the app. If they signed on paper, upload the signed copy, then mark it signed.</div>
+                              <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 6 }}>
+                                <i className="ti ti-upload" />Upload Signed Paper Copy
+                                <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                              </label>
+                            </div>)
                       : <div className="meta" style={{ marginTop: 6 }}>The office will send this to you to sign here.</div>
                   )}
                   {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && !(s.action === 'SIGN' && s.hers && !item.document) && (
