@@ -178,7 +178,7 @@ function normalizeI9OnFile(b, { at, by }) {
   b = b || {};
   if (!isYmd(b.firstDay)) return { error: 'Give the first day of work shown on their I-9.', code: 'I9_FIRST_DAY' };
   if (b.completedOn !== undefined && b.completedOn !== null && b.completedOn !== '' && !isYmd(b.completedOn)) return { error: 'The date Section 2 was completed is not a date.', code: 'I9_COMPLETED_ON' };
-  if (b.copyFiled !== true && !b.documentId) return { error: 'File their signed I-9 on their Staff Record (Documents → Work authorization documents) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
+  if (b.copyFiled !== true && !b.documentId) return { error: 'File their signed I-9 on their Staff Record (Documents → I-9) first, then tick the box.', code: 'I9_COPY_NOT_FILED' };
   const source = I9_ON_FILE_SOURCES[b.source] ? b.source : 'gusto';
   // The uploaded copy it is on (2026-11-15), when the office names one.
   return { value: { source, firstDay: b.firstDay, completedOn: isYmd(b.completedOn) ? b.completedOn : null, note: str(b.note, 300) || null, recordedAt: at, recordedBy: by,

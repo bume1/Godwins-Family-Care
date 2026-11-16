@@ -82,7 +82,7 @@ const PHASES = Object.freeze([
 // The standards acknowledgment is a document the Clinical Director writes
 // into the agreement; no canonical copy is in Policies / Current, so the
 // office files the one for the engagement, as with a job description.
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   Object.freeze({ id: 'CONTRACT_STANDARDS', title: 'Documentation, quality and client experience standards incorporated into the agreement',
     version: 'Current', ref: P('D.6'), driveFileIds: [] })
 ]);

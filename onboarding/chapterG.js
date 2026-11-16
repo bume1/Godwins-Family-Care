@@ -54,7 +54,7 @@ const PHASES = Object.freeze([
 // G.7: the Chapter F set, the employment agreement and compensation schedule,
 // the Liaison Playbook and the Training Plan. No canonical Training Plan is in
 // Drive yet, so the office files the copy for the hire.
-const ACKNOWLEDGMENTS = Object.freeze(F.ACKNOWLEDGMENTS.concat([
+const ACKNOWLEDGMENTS = require('./sources').linkAll(F.ACKNOWLEDGMENTS.concat([
   Object.freeze({ id: 'LIAISON_PLAYBOOK', title: 'Community Care Liaison Playbook', version: '2.5',
     source: 'LIAISON_PLAYBOOK', ref: P('G.7'), driveFileIds: [SOURCES.LIAISON_PLAYBOOK.driveFileId] }),
   Object.freeze({ id: 'LIAISON_TRAINING_PLAN', title: 'Community Care Liaison Training Plan', version: 'Current',

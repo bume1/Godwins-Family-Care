@@ -74,7 +74,7 @@ function materialFor(module, entry, sopIdsInDrive) {
     sops: written,
     missingSops: missing,
     plannedSop: (module && module.plannedSop) || null,
-    links: live(entry && entry.links).map(publicLink),
+    links: live(entry && entry.links).map(l => publicLink(currentLink(l))),
     files: live(entry && entry.files).map(publicFile),
     note: (entry && entry.note) || '',
     updatedAt: (entry && entry.updatedAt) || null,
@@ -202,8 +202,9 @@ const drive = (id) => `https://drive.google.com/file/d/${id}/view`;
 // replaces never comes back, and a default added later still reaches a
 // module that was seeded before it existed.
 const { SOURCES, driveViewUrl } = require('./sources');
-const fromSource = (key, sourceKey, suffix) => Object.freeze({ key, kind: 'document',
-  label: `${SOURCES[sourceKey].title}${suffix ? ` (${suffix})` : ''}`, url: driveViewUrl(sourceKey) });
+// The url is read when used, so a Document Links change (sources.js) reaches it.
+const fromSource = (key, sourceKey, suffix) => Object.freeze(Object.defineProperty({ key, kind: 'document', sourceKey,
+  label: `${SOURCES[sourceKey].title}${suffix ? ` (${suffix})` : ''}` }, 'url', { enumerable: true, get: () => driveViewUrl(sourceKey) }));
 const DEFAULT_MATERIAL = Object.freeze({
   // The app training (owner, 2026-11-11): the controlled SOP sets in Drive,
   // replacing the working SOP 1 Google Doc, which is retired (RETIRED_URLS).
@@ -213,6 +214,7 @@ const DEFAULT_MATERIAL = Object.freeze({
   'TRN-004': Object.freeze([
     fromSource('sop-set1', 'ADMIN_SOPS_SET1'),
     fromSource('sop-set2', 'ADMIN_SOPS_SET2'),
+    fromSource('sop-set4', 'ADMIN_SOPS_SET4'),
     fromSource('pay-guide', 'STAFF_PAY_GUIDE')
   ]),
   // Material that already exists in Drive (owner's Training Material Tracker).
@@ -224,9 +226,16 @@ const DEFAULT_MATERIAL = Object.freeze({
     Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' }),
     // Caregivers sign documents and set up pay in the same app (owner, 2026-11-11).
     fromSource('pay-guide', 'STAFF_PAY_GUIDE'),
-    fromSource('sop-set2', 'ADMIN_SOPS_SET2', 'SOP-SIG-02 is yours')
+    fromSource('sop-set2', 'ADMIN_SOPS_SET2', 'SOP-SIG-02 is yours'),
+    fromSource('sop-set4', 'ADMIN_SOPS_SET4', 'your pay stub')
   ])
 });
+
+// A seeded default link keeps following its source document: its stored url is
+// what was current when it was seeded, so it is resolved again on every read.
+const DEFAULT_SOURCE_BY_LINK = Object.freeze(Object.fromEntries([].concat(...Object.entries(DEFAULT_MATERIAL)
+  .map(([moduleId, list]) => list.filter(d => d.sourceKey).map(d => [`default-${moduleId}-${d.key}`, d.sourceKey])))));
+const currentLink = (l) => (DEFAULT_SOURCE_BY_LINK[l.id] ? Object.assign({}, l, { url: driveViewUrl(DEFAULT_SOURCE_BY_LINK[l.id]) }) : l);
 
 // Material the app once seeded and has since replaced. Taken off a module once,
 // keeping the row with who and when, so a training does not keep pointing at a

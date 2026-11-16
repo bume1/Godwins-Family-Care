@@ -176,6 +176,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'onboarding_instructions', phi: false, owner: 'Onboarding' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
+  { key: 'document_links', phi: false, owner: 'onboarding', note: 'which Drive file each SOP, manual, policy and guide opens; the Super Admin\'s choices over the defaults in onboarding/sources.js' },
   { key: 'onboarding_training_materials', phi: false, owner: 'onboarding', note: 'per module: links and files the office added as training material (Drive ids stay server-side)' },
   { key: 'onboarding_manual_versions', phi: false, owner: 'onboarding', note: 'per manual version: section fingerprints (hashes, never text) and the computed change from the prior version' },
   // The four forms a caregiver signs IN THE APP rather than printing: the
