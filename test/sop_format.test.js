@@ -35,5 +35,6 @@ test('the training view uses it, and a text-only "video" reads as Read', () => {
   assert.match(page, /<script src="\/sop-format\.js"><\/script>/);
   assert.match(page, /window\.GFCSopFormat\.sopBlocks\(sec\.lines\)/);
   assert.match(page, /'VIDEO' : 'READ'/);
-  assert.strictEqual((page.match(/FORMAT\[shownFormat\(m\)\]/g) || []).length, 2);
+  // The staff card, the office card and the staff Training Library card (2026-11-16).
+  assert.strictEqual((page.match(/FORMAT\[shownFormat\(m\)\]/g) || []).length, 3);
 });

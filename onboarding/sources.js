@@ -118,10 +118,10 @@ const RAW_SOURCES = Object.freeze({
     key: 'ADMIN_SOPS_SET1',
     title: 'Administrative SOPs Set 1: Signing In, Onboarding and Training',
     docNumber: 'GFC-ADMIN-SOP-S1',
-    driveFileId: '1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs',
+    driveFileId: '1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
-    transcribedFromVersion: '2.0'
+    transcribedFromVersion: '2.1'
   }),
   ADMIN_SOPS_SET2: Object.freeze({
     key: 'ADMIN_SOPS_SET2',

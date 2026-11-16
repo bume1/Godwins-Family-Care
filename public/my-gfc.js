@@ -175,7 +175,12 @@ function OnboardingSummary({ onboarding, compact }) {
   if (!onboarding) return <p className="mg-note">Loading your onboarding…</p>;
   if (onboarding.error) return <p className="mg-note">Your onboarding could not be loaded right now.</p>;
   if (!onboarding.started) {
-    return <p className="mg-note">The office hasn't started your onboarding checklist yet. It will show here once they do.</p>;
+    return (
+      <div>
+        <p className="mg-note">The office hasn't started your onboarding checklist yet. It will show here once they do.</p>
+        <a className="mg-btn mg-ghost" href="/onboarding#library"><i className="ti ti-books" />Open the Training Library</a>
+      </div>
+    );
   }
   const c = onboarding.track.counts;
   const pct = c.items ? Math.round((c.complete / c.items) * 100) : 0;
@@ -191,6 +196,7 @@ function OnboardingSummary({ onboarding, compact }) {
       <div className="mg-bar"><span style={{ width: `${pct}%` }} /></div>
       {!compact && <p style={{ color: 'var(--mut)', fontSize: 14 }}>Your checklist, uploads, policy acknowledgments and training all live on your onboarding page.</p>}
       <a className="mg-btn" href="/onboarding"><i className="ti ti-route" />Open My Onboarding</a>
+      <a className="mg-btn mg-ghost" href="/onboarding#library" style={{ marginLeft: 8 }}><i className="ti ti-books" />Training Library</a>
     </div>
   );
 }

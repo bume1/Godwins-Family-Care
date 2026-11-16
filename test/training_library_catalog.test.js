@@ -152,7 +152,7 @@ test('the app training and the office payroll SOP link the right Drive files (ow
   const LC = require('../onboarding/libraryCatalog');
   const p = LC.policyFor('TRN-004');
   assert.match(p.document, /Administrative SOPs Set 1/);
-  assert.strictEqual(p.url, 'https://drive.google.com/file/d/1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs/view');
+  assert.strictEqual(p.url, 'https://drive.google.com/file/d/1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD/view');
   assert.match(p.sections, /SOP-ACC-01.*SOP-ONB-01.*SOP-SIG-02/);
   assert.match(LC.entryFor('TRN-004').note, /SOP-SCH-01/, 'scheduling is still owed');
   const set3 = LC.referenceRows().find(r => r.id === 'SOP Set 3');
