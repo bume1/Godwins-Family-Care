@@ -22,11 +22,12 @@ test('existing Drive material is attached and those trainings read ready', () =>
   assert.deepStrictEqual(all['TRN-004'].links.map(l => l.url), [
     'https://drive.google.com/file/d/1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma/view',
     'https://drive.google.com/file/d/1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j/view',
+    'https://drive.google.com/file/d/1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l/view',
     'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view'
-  ], 'Set 1, Set 2, then the staff pay guide');
+  ], 'Set 1, Set 2, Set 4, then the staff pay guide');
   // One source point: the training link and the onboarding pay step read the same entry.
   const { PAY_GUIDE } = require('../onboarding/sources');
-  const payLinks = ['TRN-004', 'TRN-503'].map(id => all[id].links.find(l => /Pay/.test(l.label)));
+  const payLinks = ['TRN-004', 'TRN-503'].map(id => all[id].links.find(l => /Setting Up Your Pay/.test(l.label)));
   payLinks.forEach(l => assert.strictEqual(l.url, PAY_GUIDE.url));
   assert.ok(!all['TRN-503'].links.some(l => /15I0r9-OCLSQIdsLQwBFb4PuR1wTJ4QKY/.test(l.url)), 'the office payroll SOP never reaches staff');
   assert.strictEqual(all['TRN-501'].links[0].kind, 'video');
@@ -57,22 +58,33 @@ test('a deployment that already has the old SOP 1 gets it retired and the SOP se
   assert.strictEqual(old.removedAt, 'T1');
   const mat = TM.materialFor(findModule('TRN-004'), all['TRN-004'], null);
   assert.ok(!mat.links.some(l => l.url === OLD_SOP1), 'staff no longer see it');
-  assert.strictEqual(mat.links.length, 3);
+  assert.strictEqual(mat.links.length, 4);
   assert.deepStrictEqual(TM.seedDefaults(all, 'T2').seeded, [], 'once only');
 });
 
 test('a module seeded before keys existed still gets the retirement and the new sets', () => {
   const legacy = { 'TRN-004': { links: [{ id: 'default-TRN-004', url: OLD_SOP1, label: 'SOP 1', kind: 'document' }], files: [], defaultSeededAt: 'T0' } };
   const mat = TM.materialFor(findModule('TRN-004'), TM.seedDefaults(legacy, 'T1').all['TRN-004'], null);
-  assert.deepStrictEqual(mat.links.map(l => l.label.slice(0, 26)), ['Administrative SOPs Set 1:', 'Administrative SOPs Set 2:', 'Staff Guide: Setting Up Yo']);
+  assert.deepStrictEqual(mat.links.map(l => l.label.slice(0, 26)), ['Administrative SOPs Set 1:', 'Administrative SOPs Set 2:', 'Administrative SOPs Set 4:', 'Staff Guide: Setting Up Yo']);
 });
 
 test('one module holds several guides: the app training can carry a file per area of the app', () => {
   let e = TM.seedDefaults({}, 'T1').all['TRN-004'];
   e = TM.addLink(e, { label: 'App guide: Hours & Pay', url: 'https://docs.google.com/document/d/a', kind: 'document' }, ACTOR, 'T2', 'l2');
   e = TM.addLink(e, { label: 'App guide: Scheduling & Availability', url: 'https://docs.google.com/document/d/b', kind: 'document' }, ACTOR, 'T3', 'l3');
-  assert.strictEqual(TM.materialFor(findModule('TRN-004'), e, null).links.length, 5);
+  assert.strictEqual(TM.materialFor(findModule('TRN-004'), e, null).links.length, 6);
   assert.match(findModule('TRN-004').title, /hours and pay, scheduling and availability/);
+});
+
+test('a deployment seeded before Set 4 existed gets Set 4 added, once', () => {
+  const all = TM.seedDefaults({}, 'T1').all;
+  for (const id of ['TRN-004', 'TRN-503']) all[id] = Object.assign({}, all[id], { links: all[id].links.filter(l => !/1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l/.test(l.url)), defaultKeysSeeded: all[id].defaultKeysSeeded.filter(k => k !== 'sop-set4') });
+  const again = TM.seedDefaults(all, 'T2').all;
+  for (const id of ['TRN-004', 'TRN-503']) {
+    const set4 = TM.materialFor(findModule(id), again[id], null).links.filter(l => /1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l/.test(l.url));
+    assert.strictEqual(set4.length, 1, id);
+  }
+  assert.deepStrictEqual(TM.seedDefaults(again, 'T3').seeded, [], 'once only');
 });
 
 test('the server runs the seed at boot', () => {

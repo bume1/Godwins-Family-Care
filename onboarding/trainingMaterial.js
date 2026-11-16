@@ -213,6 +213,7 @@ const DEFAULT_MATERIAL = Object.freeze({
   'TRN-004': Object.freeze([
     fromSource('sop-set1', 'ADMIN_SOPS_SET1'),
     fromSource('sop-set2', 'ADMIN_SOPS_SET2'),
+    fromSource('sop-set4', 'ADMIN_SOPS_SET4'),
     fromSource('pay-guide', 'STAFF_PAY_GUIDE')
   ]),
   // Material that already exists in Drive (owner's Training Material Tracker).
@@ -224,7 +225,8 @@ const DEFAULT_MATERIAL = Object.freeze({
     Object.freeze({ key: 'video', label: 'Video: Home Care Staff Onboarding Documents', url: drive('1na5b7HVJyXdVGBhuhzh655YmMT3TJuIR'), kind: 'video' }),
     // Caregivers sign documents and set up pay in the same app (owner, 2026-11-11).
     fromSource('pay-guide', 'STAFF_PAY_GUIDE'),
-    fromSource('sop-set2', 'ADMIN_SOPS_SET2', 'SOP-SIG-02 is yours')
+    fromSource('sop-set2', 'ADMIN_SOPS_SET2', 'SOP-SIG-02 is yours'),
+    fromSource('sop-set4', 'ADMIN_SOPS_SET4', 'your pay stub')
   ])
 });
 

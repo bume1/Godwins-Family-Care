@@ -134,6 +134,15 @@ const SOURCES = Object.freeze({
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '1.2'
   }),
+  ADMIN_SOPS_SET4: Object.freeze({
+    key: 'ADMIN_SOPS_SET4',
+    title: 'Administrative SOPs Set 4: Your Pay Stub',
+    docNumber: 'GFC-ADMIN-SOP-S4',
+    driveFileId: '1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
   STAFF_PAY_GUIDE: Object.freeze({
     key: 'STAFF_PAY_GUIDE',
     title: 'Staff Guide: Setting Up Your Pay',

@@ -37,7 +37,7 @@ const e = (group, policy, next, note) => Object.freeze({ group, policy: policy ?
 const CATALOG = Object.freeze({
   'TRN-001': e(ALL, { doc: 'TEAM_ROLES', sections: 'Whole guide' }, 'attach', 'Attached: Team Roles & Responsibilities v2. The Team Onboarding Deck slides 2 to 17 cover the same ground.'),
   'TRN-002': e(ALL, { doc: 'TEAM_ROLES', sections: 'Role cards, pages 12 to 21' }, 'attach', 'Attached: the guide. Split per role later if wanted.'),
-  'TRN-004': e(ALL, { doc: 'ADMIN_SOPS_SET1', sections: 'SOP-ACC-01 signing in, SOP-ONB-01 onboarding · Set 2 SOP-SIG-02 signing documents · Admin Manual 3' }, 'write', 'Attached: SOP Set 1, SOP Set 2 and the Staff Pay Guide (in Drive). The same pay guide is also on the pay setup step of every onboarding list. The working SOP 1 Google Doc is retired. Still to write: SOP-SCH-01 Scheduling & Availability.'),
+  'TRN-004': e(ALL, { doc: 'ADMIN_SOPS_SET1', sections: 'SOP-ACC-01 signing in, SOP-ONB-01 onboarding · Set 2 SOP-SIG-02 signing documents · Admin Manual 3' }, 'write', 'Attached: SOP Set 1, SOP Set 2, SOP Set 4 (your pay stub) and the Staff Pay Guide (in Drive). The same pay guide is also on the pay setup step of every onboarding list. The working SOP 1 Google Doc is retired. Still to write: SOP-SCH-01 Scheduling & Availability.'),
   'TRN-005': e(ALL, SOP('SOP-SYS-01', '3, 10.7–10.10, 21'), 'done'),
   'TRN-216': e(ALL, M('19.1–19.3'), 'write', 'Hole: 19.2 says report to the authority Georgia law requires, within the time it requires, and names neither. Verify against primary sources.'),
   'TRN-217': e(ALL, M('24.1–24.3 clinical · 21.5 privacy · 10.10 AI'), 'write', 'Three separate reporting paths. The SOP has to unify them into one decision point.'),
