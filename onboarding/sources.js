@@ -109,12 +109,12 @@ const SOURCES = Object.freeze({
   // replace is retired.
   ADMIN_SOPS_SET1: Object.freeze({
     key: 'ADMIN_SOPS_SET1',
-    title: 'Administrative SOPs Set 1: Signing In and Onboarding',
+    title: 'Administrative SOPs Set 1: Signing In, Onboarding and Training',
     docNumber: 'GFC-ADMIN-SOP-S1',
     driveFileId: '1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
-    transcribedFromVersion: '1.2'
+    transcribedFromVersion: '2.0'
   }),
   ADMIN_SOPS_SET2: Object.freeze({
     key: 'ADMIN_SOPS_SET2',

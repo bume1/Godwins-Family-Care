@@ -1297,7 +1297,7 @@ const AddTrainingForm = ({ roles, onAdded, onCancel }) => {
       </select>
       <label className="f">About how many minutes (optional)</label>
       <input value={f.minutes} onChange={e => set('minutes', e.target.value)} style={{ maxWidth: 120 }} />
-      <div className="note" style={{ marginTop: 8 }}>It becomes required in the onboarding of everyone in those roles. Add what it teaches from with Manage Material once it is saved; until then it shows greyed out.</div>
+      <div className="note" style={{ marginTop: 8 }}>It becomes required in the onboarding of everyone in those roles. Add its material under Details once it is saved; until then it shows greyed out.</div>
       {err && <div className="err">{err}</div>}
       <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
         <button className="btn sm" disabled={busy || !f.title.trim() || !f.types.length} onClick={save}>{busy ? 'Adding…' : 'Add Training'}</button>
@@ -1400,7 +1400,7 @@ const Library = () => {
           <li>The manual section gives the requirement.</li>
           <li>The SOP-writing skill turns it into an SOP with a completion standard, escalation, frequent errors and check questions.</li>
           <li>The deck slides become the visuals you narrate over.</li>
-          <li>The SOP's procedure is the script. Its check questions become the quiz at completion and at days 3, 10, 30 and 90.</li>
+          <li>The SOP's procedure is the script. Its check questions show with the module when check questions are turned on below. They are not graded. At days 3, 10, 30 and 90 after completion, staff are asked to review the module again.</li>
         </ol>
         <div>The deck and the SOP both trace to one manual section, so nothing is restated. Staff see a training greyed out until it has an SOP or material.</div>
       </details>
