@@ -335,6 +335,7 @@ module.exports = function createOnboardingRoutes(deps) {
     track.items.forEach(it => { if (ins[it.id] && ins[it.id].text) it.description = ins[it.id].text; if (audience === 'office') it.instructionsEditedBy = (ins[it.id] || {}).byName || null; });
     track.modules.forEach(x => {
       const mat = mm.byModule[x.id];
+      const fmt = TM.shownFormat(x.format, mat); x.shownFormat = fmt.format; x.formatPlanned = fmt.planned;
       x.material = audience === 'office' ? mat : TM.forStaff(mat);
       // Why it matters (2026-11-10): the policy it ties to, for staff and office alike.
       // The office's own edit wins; then the chapter's own line; then the default.
@@ -853,7 +854,8 @@ module.exports = function createOnboardingRoutes(deps) {
         const ready = !!(mat && mat.ready);
         return {
           id: x.id, title: x.title, group: (LC.entryFor(x.id) || {}).group || 'Added by GFC',
-          audience: LT.audienceLabel(x), format: x.format, minutes: x.minutes || null, host: x.host, signoff: x.signoff,
+          audience: LT.audienceLabel(x), format: x.format, shownFormat: TM.shownFormat(x.format, mat).format, formatPlanned: TM.shownFormat(x.format, mat).planned,
+          minutes: x.minutes || null, host: x.host, signoff: x.signoff,
           description: (ins[x.id] && ins[x.id].text) || x.description || null,
           policy: effectivePolicy(x.id, x, mats[x.id]) || null,
           ready, comingSoon: !ready && waitingOnSop(x.id, mats, mat),
@@ -1238,7 +1240,8 @@ module.exports = function createOnboardingRoutes(deps) {
         audience: LT.audienceLabel(x), addedByOffice: !!x.addedByOffice, types: x.types || null, description: x.description || null,
         forTypes: who[x.id] || [],
         id: x.id, title: x.title, phase: x.phase, phaseLabel: (x.addedByOffice || x.audience || LT.SHARED_MODULE_IDS.includes(x.id)) ? 'Training phase of each role' : (C.PHASES.find(p => p.id === x.phase) || {}).label, phaseNumber: (C.PHASES.find(p => p.id === x.phase) || {}).number,
-        format: x.format, minutes: x.minutes, host: x.host, signoff: x.signoff,
+        format: x.format, shownFormat: TM.shownFormat(x.format, mm.byModule[x.id]).format, formatPlanned: TM.shownFormat(x.format, mm.byModule[x.id]).planned,
+        minutes: x.minutes, host: x.host, signoff: x.signoff,
         manualRefs: x.manualRefs, proposedManualRefs: x.proposedManualRefs, proposedBasis: x.proposedBasis,
         plannedSop: x.plannedSop, flag: flags[x.id] || { status: 'CURRENT', hits: [] }, review: revs[x.id] || null,
         sopRefs: x.sopRefs, material: mm.byModule[x.id],

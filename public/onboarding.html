@@ -823,16 +823,13 @@ const Readiness = ({ track, base, office, onChanged }) => {
 };
 
 // ---- Training (both views) --------------------------------------------------
-const FORMAT = { LIBRARY: 'GFC Training', VIDEO: 'Video', READ: 'Read', LIVE: 'Live Session', EXTERNAL: 'Outside Training', OBSERVED: 'Observed', SHADOW: 'Shadowing', IN_APP: 'In the App', 'VIDEO + OBSERVED': 'Video and Observed' };
+const FORMAT = { LIBRARY: 'GFC Training', VIDEO: 'Video', READ: 'Read', LIVE: 'Live Session', EXTERNAL: 'Outside Training', OBSERVED: 'Observed', SHADOW: 'Shadowing', IN_APP: 'In the App', 'VIDEO + OBSERVED': 'Video and Observed', 'READ + OBSERVED': 'Read and Observed', 'VIDEO + READ': 'Video and Reading' };
 const HOST = { EXECUTIVE_DIRECTOR: 'Executive Director', CLINICAL_DIRECTOR: 'Clinical Director', CLINICAL_OPS_COORDINATOR: 'Clinical Ops Coordinator', SELF_PACED: 'Self-paced', SYSTEM: 'Automatic' };
 
-// A "video" module whose material is only written text reads as Read
-// (owner, 2026-11-10): the label says what they will actually get.
-const shownFormat = (m) => {
-  const mat = m.material;
-  if (m.format !== 'VIDEO' || !mat || !mat.ready) return m.format;
-  return (mat.links || []).some(l => l.kind === 'video') || (mat.files || []).some(f => /video/.test(f.mime || '')) ? 'VIDEO' : 'READ';
-};
+// The label says what is actually attached (owner, 2026-11-16). The server
+// decides it from the material (TM.shownFormat), so every screen agrees.
+const shownFormat = (m) => m.shownFormat || m.format;
+const formatLabel = (m) => `${FORMAT[shownFormat(m)] || shownFormat(m)}${m.formatPlanned ? ' (planned)' : ''}`;
 
 // The office attaches a PDF to one person's item. It goes to that person
 // only; signing it completes her step and files the signed copy.
@@ -914,7 +911,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
         <b style={{ flex: 1 }}>{m.title}</b>
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
-      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
+      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{formatLabel(m)}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
       {m.description && <div style={{ fontSize: 14, marginTop: 4, whiteSpace: 'pre-wrap' }}>{m.description}</div>}
       {m.policy && <div style={{ fontSize: 13, marginTop: 4 }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>}
       {office && m.material && <div style={{ fontSize: 13, marginTop: 4 }}><span className={`pill ${(MATERIAL_LABEL[m.material.status] || {}).cls}`}>{(MATERIAL_LABEL[m.material.status] || {}).label}</span> <span style={{ color: 'var(--mut)' }}>{materialDetail(m.material)}{m.waitingOnSop ? ' Staff see it greyed out until it is written.' : ''}</span></div>}
@@ -1435,7 +1432,7 @@ const Library = () => {
                   </tr>
                   {open === m.id && <tr><td colSpan={6} style={{ background: 'var(--cream)' }}>
                     <div style={{ display: 'grid', gap: 10, padding: '6px 2px' }}>
-                      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
+                      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{formatLabel(m)}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
                       {m.description && <div style={{ fontSize: 14 }}>{m.description}</div>}
                       <OfficeFields m={m} nextSteps={d.nextSteps} onSaved={load} />
                       {!m.addedByOffice && (
@@ -1527,7 +1524,7 @@ const LibraryCard = ({ m }) => {
         <b style={{ flex: 1 }}>{m.title}</b>
         {m.comingSoon && <span className="pill p-NOT_STARTED">Coming Soon</span>}
       </div>
-      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{m.assigned && <b style={{ color: 'var(--green)' }}>On your onboarding · </b>}{m.audience ? `For ${m.audience} · ` : ''}{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''}</div>
+      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{m.assigned && <b style={{ color: 'var(--green)' }}>On your onboarding · </b>}{m.audience ? `For ${m.audience} · ` : ''}{formatLabel(m)}{m.minutes ? ` · ${m.minutes} min` : ''}</div>
       {m.description && <div style={{ fontSize: 14, marginTop: 4, whiteSpace: 'pre-wrap' }}>{m.description}</div>}
       {tie}
       {m.comingSoon && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>The training material has not been added yet.{m.policy && m.policy.url ? ' Read the linked document in the meantime.' : ''}</div>}

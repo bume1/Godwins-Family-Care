@@ -64,6 +64,9 @@ test('a caregiver sees every training, before her onboarding starts, with the pe
   assert.strictEqual(pending.ready, false); assert.strictEqual(pending.comingSoon, true, 'greyed out while its SOP is written');
   assert.ok(r.data.modules.some(m => m.comingSoon && m.policy && m.policy.url), 'a greyed training still links the policy or SOP it ties to');
   assert.ok(r.data.modules.every(m => m.assigned === false));
+  // The label says what is attached (2026-11-16): an SOP-backed "video" reads as Read; an empty one is planned.
+  assert.strictEqual(sop.shownFormat, 'READ'); assert.strictEqual(sop.formatPlanned, false);
+  assert.strictEqual(pending.shownFormat, 'VIDEO'); assert.strictEqual(pending.formatPlanned, true);
   // Nothing the office works from reaches staff.
   for (const m of r.data.modules) {
     for (const k of ['nextStep', 'officeNote', 'officeEditedBy', 'material', 'review', 'flag', 'forTypes', 'catalogPolicy']) assert.ok(!(k in m), `${k} stays office-only`);
@@ -93,6 +96,11 @@ test('a training on her own onboarding is marked, and a client is refused the li
   r = await h.call('GET', '/api/onboarding/library');
   assert.strictEqual(r.data.onboardingStarted, true);
   const mine = r.data.modules.filter(m => m.assigned);
+  const track = (await h.call('GET', '/api/onboarding/me')).data.track;
+  assert.strictEqual(track.modules.find(m => m.id === 'TRN-207').shownFormat, 'READ', 'her own Training tab prints the same label');
+  h.as(OFFICE);
+  assert.strictEqual((await h.call('GET', '/api/onboarding/admin/library')).data.modules.find(m => m.id === 'TRN-207').shownFormat, 'READ', 'and so does the office library');
+  h.as(NP);
   assert.ok(mine.length > 0 && mine.length < r.data.modules.length, 'some trainings are hers, not all');
   h.as(CLIENT);
   r = await h.call('GET', '/api/onboarding/library');

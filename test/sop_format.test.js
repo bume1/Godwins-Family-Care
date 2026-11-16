@@ -34,7 +34,8 @@ test('the training view uses it, and a text-only "video" reads as Read', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(page, /<script src="\/sop-format\.js"><\/script>/);
   assert.match(page, /window\.GFCSopFormat\.sopBlocks\(sec\.lines\)/);
-  assert.match(page, /'VIDEO' : 'READ'/);
-  // The staff card, the office card and the staff Training Library card (2026-11-16).
-  assert.strictEqual((page.match(/FORMAT\[shownFormat\(m\)\]/g) || []).length, 3);
+  // The label is decided on the server (TM.shownFormat, test/training_format_labels.test.js);
+  // the staff card, the office card and the Training Library card all print it (2026-11-16).
+  assert.match(page, /const shownFormat = \(m\) => m\.shownFormat \|\| m\.format;/);
+  assert.strictEqual((page.match(/\{formatLabel\(m\)\}/g) || []).length, 3);
 });
