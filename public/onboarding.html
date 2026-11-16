@@ -251,8 +251,8 @@ const PATHS = {
   courseCert: (w, col, c) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate` : `/api/onboarding/me/courses/${col}/${c}/certificate`,
   courseCertFile: (w, col, c, f) => w.office ? `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/certificate/${f}` : `/api/onboarding/me/courses/${col}/${c}/certificate/${f}`,
   courseReturn: (w, col, c) => `/api/onboarding/admin/people/${w.userId}/courses/${col}/${c}/return`,
-  material: (w, m) => w.office ? `/api/onboarding/admin/library/${m}/material` : `/api/onboarding/me/modules/${m}/material`,
-  materialFile: (w, m, f) => w.office ? `/api/onboarding/admin/library/${m}/material/files/${f}` : `/api/onboarding/me/modules/${m}/material/files/${f}`,
+  material: (w, m) => w.library ? `/api/onboarding/library/${m}/material` : w.office ? `/api/onboarding/admin/library/${m}/material` : `/api/onboarding/me/modules/${m}/material`,
+  materialFile: (w, m, f) => w.library ? `/api/onboarding/library/${m}/material/files/${f}` : w.office ? `/api/onboarding/admin/library/${m}/material/files/${f}` : `/api/onboarding/me/modules/${m}/material/files/${f}`,
   materialLinks: (m) => `/api/onboarding/admin/library/${m}/material/links`,
   materialLink: (m, l) => `/api/onboarding/admin/library/${m}/material/links/${l}`,
   materialFiles: (m) => `/api/onboarding/admin/library/${m}/material/files`,
@@ -899,7 +899,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
           <span className="pill p-NOT_STARTED">Coming Soon</span>
         </div>
         <div style={{ fontSize: 13, color: 'var(--mut)' }}>The training material for this module has not been added yet.</div>
-        {m.policy && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>Ties to: {m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>}
+        {m.policy && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}. Read it there in the meantime.</div>}
       </div>
     );
   }
@@ -1358,50 +1358,6 @@ const LIB_STATUS = { ready: ['Ready', 'p-COMPLETE'], needs: ['Needs material', '
 const LIB_FILTERS = [['all', 'All'], ['needs', 'Needs material'], ['write', 'Needs writing'], ['attach', 'Attach today'], ['caregiver', 'Caregivers'], ['ready', 'Ready'], ['office', 'Office signs off']];
 const SIGNOFF_LABEL = { ATTEST: 'Attest', COUNTERSIGN: 'Countersign', OBSERVED: 'Observed', CERTIFICATE: 'Certificate', NONE: 'None' };
 
-// Which Drive file each SOP, manual, policy and guide opens (owner, 2026-11-16).
-// Uploading a new version as a new file and pasting its link here moves every
-// place in the app that opens it. Only the Super Admin changes a link.
-const DocumentLinks = () => {
-  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [ok, setOk] = useState('');
-  const [edit, setEdit] = useState(null); const [val, setVal] = useState(''); const [busy, setBusy] = useState(false);
-  const load = () => call('/api/onboarding/admin/document-links').then(setD).catch(e => setErr(e.message));
-  useEffect(() => { load(); }, []);
-  const save = async (key, body) => {
-    setBusy(true); setErr(''); setOk('');
-    try { setD(await call(`/api/onboarding/admin/document-links/${encodeURIComponent(key)}`, { method: 'PUT', body })); setEdit(null); setVal(''); setOk(body.reset ? 'Back to the default file.' : 'Link saved. Every place in the app that opens this document now opens the new file.'); }
-    catch (e) { setErr(e.message); } finally { setBusy(false); }
-  };
-  return (
-    <details className="note" style={{ margin: '4px 0 10px' }} data-doc-links>
-      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Document Links</summary>
-      <div style={{ margin: '8px 0' }}>The Drive file each SOP, manual, policy and guide opens, in trainings, policies, signing and Pay Setup. To issue a new version, upload it to Drive, share it view-only, then paste its link here.{d && !d.canEdit ? ' Only the Super Admin changes a link.' : ''}</div>
-      {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
-      {!d ? <div className="meta">Loading…</div> : (
-        <table className="lib"><thead><tr><th>Document</th><th>Opens</th><th></th></tr></thead><tbody>
-          {d.rows.map(r => (
-            <tr key={r.key} data-doc-link={r.key}>
-              <td><b>{r.title}</b>{r.docNumber && <div className="meta">{r.docNumber}</div>}
-                {r.changed && <div className="meta">Changed{r.changedByName ? ` by ${r.changedByName}` : ''}{r.changedAt ? ` · ${fmtDate(r.changedAt)}` : ''}</div>}</td>
-              <td>{r.url ? <a href={r.url} target="_blank" rel="noopener noreferrer">Open</a> : '—'}{r.changed ? ' · new file' : ' · default'}</td>
-              <td style={{ minWidth: 260 }}>
-                {d.canEdit && edit !== r.key && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <button className="btn ghost sm" onClick={() => { setEdit(r.key); setVal(''); }}>Change Link</button>
-                  {r.changed && <button className="btn ghost sm" disabled={busy} onClick={() => save(r.key, { reset: true })}>Use Default</button>}
-                </div>}
-                {edit === r.key && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <input placeholder="https://drive.google.com/file/d/…/view" value={val} onChange={e => setVal(e.target.value)} style={{ flex: '1 1 200px' }} />
-                  <button className="btn sm" disabled={busy || !val.trim()} onClick={() => save(r.key, { link: val })}>Save Link</button>
-                  <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
-                </div>}
-              </td>
-            </tr>
-          ))}
-        </tbody></table>
-      )}
-    </details>
-  );
-};
-
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
   const [open, setOpen] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState(''); const [filter, setFilter] = useState('all');
@@ -1448,7 +1404,6 @@ const Library = () => {
         </ol>
         <div>The deck and the SOP both trace to one manual section, so nothing is restated. Staff see a training greyed out until it has an SOP or material.</div>
       </details>
-      <DocumentLinks />
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', margin: '6px 0 10px' }}>
         {LIB_FILTERS.map(([k, l]) => <button key={k} className={`btn sm ${filter === k ? '' : 'ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}
         <select value={forRole} onChange={e => setForRole(e.target.value)} style={{ maxWidth: 230 }}>
@@ -1559,9 +1514,61 @@ const Stat = ({ icon, bg, color, n, l, s }) => (
     <div><div className="n">{n}</div><div className="l">{l}</div><div className="s">{s}</div></div></div>
 );
 
+// ---- THE TRAINING LIBRARY, for every staff member (owner, 2026-11-16) --------
+// Every GFC training, read only. One with no material yet is greyed out and
+// still links the policy or SOP it ties to, so the SOP can be read in Drive in
+// the meantime. Completing a training stays on her own Training tab.
+const LibraryCard = ({ m }) => {
+  const [open, setOpen] = useState(false);
+  const tie = m.policy && <div style={{ fontSize: 13, marginTop: 4, color: m.comingSoon ? 'var(--mut)' : undefined }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>;
+  return (
+    <div className="line-card" data-library-module={m.id} aria-disabled={m.comingSoon ? 'true' : undefined} style={m.comingSoon ? { opacity: 0.6, background: '#F3F1EC' } : undefined}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <b style={{ flex: 1 }}>{m.title}</b>
+        {m.comingSoon && <span className="pill p-NOT_STARTED">Coming Soon</span>}
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--mut)' }}>{m.assigned && <b style={{ color: 'var(--green)' }}>On your onboarding · </b>}{m.audience ? `For ${m.audience} · ` : ''}{FORMAT[shownFormat(m)] || m.format}{m.minutes ? ` · ${m.minutes} min` : ''}</div>
+      {m.description && <div style={{ fontSize: 14, marginTop: 4, whiteSpace: 'pre-wrap' }}>{m.description}</div>}
+      {tie}
+      {m.comingSoon && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>The training material has not been added yet.{m.policy && m.policy.url ? ' Read the linked document in the meantime.' : ''}</div>}
+      {!m.comingSoon && !m.ready && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>Nothing to read here. This one is done {m.format === 'EXTERNAL' ? 'through an outside course' : 'with the office'}.</div>}
+      {m.ready && <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setOpen(!open)}>{open ? 'Hide Training' : 'Open Training'}</button>}
+      {open && <MaterialView moduleId={m.id} base={{ library: true, office: false }} />}
+    </div>
+  );
+};
+const StaffLibrary = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState('');
+  const [q, setQ] = useState(''); const [group, setGroup] = useState(''); const [mineOnly, setMineOnly] = useState(false);
+  useEffect(() => { call('/api/onboarding/library').then(setD).catch(e => setErr(e.message)); }, []);
+  if (err) return <div className="err">{err}</div>;
+  if (!d) return <div className="note">Loading the library…</div>;
+  const needle = q.trim().toLowerCase();
+  const shown = d.modules.filter(m => (!group || m.group === group) && (!mineOnly || m.assigned)
+    && (!needle || `${m.title} ${(m.policy && m.policy.document) || ''}`.toLowerCase().includes(needle)));
+  const groups = d.groups.filter(g => shown.some(m => m.group === g));
+  const ready = d.modules.filter(m => m.ready).length;
+  return (
+    <div data-staff-library>
+      <h2 style={{ marginBottom: 4 }}>Training Library</h2>
+      <div style={{ fontSize: 14.5, color: 'var(--mut)', marginBottom: 10 }}>Every GFC training, {ready} of {d.modules.length} ready to open. Greyed out means the material is still being made; the policy or SOP it ties to opens in Drive now.{d.onboardingStarted ? ' The trainings you need to complete are on your Training tab.' : ''}</div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search trainings or SOPs" style={{ flex: '1 1 180px' }} />
+        <select value={group} onChange={e => setGroup(e.target.value)} style={{ maxWidth: 220 }}>
+          <option value="">All areas</option>
+          {d.groups.filter(g => d.modules.some(m => m.group === g)).map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+        {d.onboardingStarted && <button className={`btn sm ${mineOnly ? '' : 'ghost'}`} onClick={() => setMineOnly(!mineOnly)}>{mineOnly ? 'Showing Mine' : 'Only Mine'}</button>}
+      </div>
+      {shown.length === 0 && <div className="note">No training matches.</div>}
+      {groups.map(g => <div key={g} style={{ marginBottom: 12 }}><h3 style={{ margin: '10px 0 6px' }}>{g}</h3>{shown.filter(m => m.group === g).map(m => <LibraryCard key={m.id} m={m} />)}</div>)}
+    </div>
+  );
+};
+
 // ---- HER VIEW (phone first) ----------------------------------------------------
 const Mine = ({ viewer, track, onChanged }) => {
-  const [tab, setTab] = useState('home'); const [openPhase, setOpenPhase] = useState(null); const [openItem, setOpenItem] = useState(null);
+  const [tab, setTab] = useState(() => (window.location.hash === '#library' ? 'library' : 'home')); const [openPhase, setOpenPhase] = useState(null); const [openItem, setOpenItem] = useState(null);
   const base = { office: false, userId: null };
   const t = track;
   const first = String(viewer.name || '').split(' ')[0];
@@ -1642,6 +1649,7 @@ const Mine = ({ viewer, track, onChanged }) => {
         {t.modules.filter(m => !m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
         {t.modules.filter(m => m.complete).length > 0 && <><h3 style={{ margin: '14px 0 6px' }}>Completed</h3>{t.modules.filter(m => m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</>}
       </>}
+      {tab === 'library' && <StaffLibrary />}
       {tab === 'documents' && <>
         <h2 style={{ marginBottom: 10 }}>Your Documents</h2>
         {t.items.filter(i => i.files.length).length === 0 && <div className="note">Nothing filed yet.</div>}
@@ -1651,7 +1659,7 @@ const Mine = ({ viewer, track, onChanged }) => {
           </div>))}
       </>}
       <div className="bottom">
-        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0 || (t.trainingCourses || []).length > 0).map(([k, l, ic]) =>
+        {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['library', 'Library', 'ti-books'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0 || (t.trainingCourses || []).length > 0).map(([k, l, ic]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><i className={`ti ${ic}`} />{l}</button>)}
       </div>
       {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} />}
@@ -1664,7 +1672,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
   // ?person=<id> opens straight to one person: the staff record in User
   // Management links here for the full checklist (owner, 2026-11-09).
   const linked = (() => { try { return new URLSearchParams(window.location.search).get('person'); } catch (e) { return null; } })();
-  const [view, setView] = useState(linked ? 'person' : 'overview'); const [person, setPerson] = useState(linked || null);
+  const [view, setView] = useState(linked ? 'person' : window.location.hash === '#library' ? 'staffLibrary' : 'overview'); const [person, setPerson] = useState(linked || null);
   const open = (id) => { setPerson(id); setView('person'); };
   return (
     <div className="shell">
@@ -1673,6 +1681,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
         <nav className="nav">
           <button className={view === 'overview' || view === 'person' ? 'on' : ''} onClick={() => { setView('overview'); setPerson(null); }}><i className="ti ti-layout-dashboard" />Onboarding</button>
           <button className={view === 'library' ? 'on' : ''} onClick={() => setView('library')}><i className="ti ti-school" />Training Library</button>
+          <button className={view === 'staffLibrary' ? 'on' : ''} onClick={() => setView('staffLibrary')}><i className="ti ti-books" />Library as Staff See It</button>
           {mineTrack && <button className={view === 'mine' ? 'on' : ''} onClick={() => setView('mine')}><i className="ti ti-user" />My Onboarding</button>}
           <button onClick={() => { window.location.href = '/login?hub=1'; }}><i className="ti ti-layout-grid" />Portal Hub</button>
           <button onClick={() => { window.location.href = '/admin'; }}><i className="ti ti-arrow-left" />Admin Hub</button>
@@ -1686,6 +1695,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
         {view === 'overview' && <Overview onOpen={open} />}
         {view === 'person' && person && <Person userId={person} onBack={() => { setView('overview'); setPerson(null); }} />}
         {view === 'library' && <Library />}
+        {view === 'staffLibrary' && <div className="card"><StaffLibrary /></div>}
         {view === 'mine' && mineTrack && <Mine viewer={viewer} track={mineTrack} onChanged={onChanged} />}
       </main>
     </div>
@@ -1702,7 +1712,7 @@ const App = () => {
   if (err) return <div className="me"><div className="err">{err}</div></div>;
   if (!d) return <div className="me"><div className="note">Loading…</div></div>;
   if (d.viewer.isOffice) return <OfficeShell viewer={d.viewer} mineTrack={d.started ? d.track : null} onChanged={load} />;
-  if (!d.started) return <div className="me"><h1>Welcome, {String(d.viewer.name || '').split(' ')[0]}.</h1><div className="note" style={{ marginTop: 12 }}>The office has not started your onboarding yet. You will see your checklist here once they do.</div></div>;
+  if (!d.started) return <div className="me"><h1>Welcome, {String(d.viewer.name || '').split(' ')[0]}.</h1><div className="note" style={{ margin: '12px 0' }}>The office has not started your onboarding yet. You will see your checklist here once they do. The Training Library is open to you now.</div><StaffLibrary /></div>;
   return <Mine viewer={d.viewer} track={d.track} onChanged={load} />;
 };
 

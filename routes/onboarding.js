@@ -828,6 +828,58 @@ module.exports = function createOnboardingRoutes(deps) {
     return sendMaterialFile(req, res, row.id);
   });
 
+  // ---- the Training Library, for every staff member (owner, 2026-11-16) ----
+  // "Opening training library to employees where they can see all trainings,
+  // with those greyed out that are pending training material." Read only: every
+  // training in the library, whether or not it is on her own onboarding, with
+  // the policy or SOP it ties to as a direct link. Nothing here records a
+  // completion; that stays on her own Training tab. Works before the office has
+  // started her onboarding.
+  async function libraryPool() {
+    const added = LT.live(await libraryRows()).map(LT.toModule);
+    return MODULES.concat(added);
+  }
+  router.get('/api/onboarding/library', authenticateToken, requireStaff, async (req, res) => {
+    const pool = await libraryPool();
+    const [mm, mats, ins] = await Promise.all([materialMap(pool.map(x => x.id)), materials(), instructions()]);
+    const rec = find(await all(), req.user.id);
+    let mine = new Set();
+    if (rec) { try { mine = new Set((await buildFor(rec, 'new_hire')).modules.map(x => x.id)); } catch (e) { mine = new Set(); } }
+    return res.json({
+      groups: LC.GROUPS.concat(['Added by GFC']),
+      onboardingStarted: !!rec,
+      modules: pool.map(x => {
+        const mat = mm.byModule[x.id];
+        const ready = !!(mat && mat.ready);
+        return {
+          id: x.id, title: x.title, group: (LC.entryFor(x.id) || {}).group || 'Added by GFC',
+          audience: LT.audienceLabel(x), format: x.format, minutes: x.minutes || null, host: x.host, signoff: x.signoff,
+          description: (ins[x.id] && ins[x.id].text) || x.description || null,
+          policy: effectivePolicy(x.id, x, mats[x.id]) || null,
+          ready, comingSoon: !ready && waitingOnSop(x.id, mats, mat),
+          assigned: mine.has(x.id)
+        };
+      })
+    });
+  });
+  async function libraryModule(req, res) {
+    const id = req.params.moduleId;
+    const x = (await libraryPool()).find(m => m.id === id);
+    if (!x) { res.status(404).json({ error: 'No such training.', code: 'MODULE_UNKNOWN' }); return null; }
+    const mat = (await materialMap([id])).byModule[id];
+    if (!mat || !mat.ready) { res.status(409).json({ error: 'This training has no material to open yet.', code: 'MODULE_NO_MATERIAL' }); return null; }
+    return { id, mat };
+  }
+  router.get('/api/onboarding/library/:moduleId/material', authenticateToken, requireStaff, async (req, res) => {
+    const m = await libraryModule(req, res); if (!m) return;
+    await logActivity(req.user.id, req.user.name, 'onboarding_library_read', 'onboarding', req.user.id, { moduleId: m.id });
+    return res.json(await materialBody(m.id, m.mat));
+  });
+  router.get('/api/onboarding/library/:moduleId/material/files/:fileId', authenticateToken, requireStaff, async (req, res) => {
+    const m = await libraryModule(req, res); if (!m) return;
+    return sendMaterialFile(req, res, m.id);
+  });
+
   // The SOP sections a module teaches, in the catalog's order, plus the
   // office's links and files. A section that could not be read says so.
   async function materialBody(moduleId, mat) {
