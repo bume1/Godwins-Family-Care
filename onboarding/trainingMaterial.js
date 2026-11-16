@@ -91,6 +91,25 @@ function forStaff(material) {
   return { ready: true, sops: material.sops, links: material.links, files: material.files, note: material.note };
 }
 
+// What a training is, as a person will meet it (owner, 2026-11-16: "fix the
+// video vs in app vs etc"). The catalog's format is the plan. The label shown
+// says what is actually attached: a "video" or "in the app" training whose
+// material is written SOPs or documents reads as Read. Live, observed,
+// shadowing and outside training say how it is done, not what is attached, so
+// they keep their label. A training with nothing attached yet shows its plan,
+// marked as planned. One rule, read by every screen.
+const MEDIA_FORMATS = Object.freeze(['VIDEO', 'IN_APP', 'READ', 'LIBRARY']);
+function shownFormat(format, material) {
+  const mat = material || {};
+  const ready = !!mat.ready;
+  const video = (mat.links || []).some(l => l.kind === 'video') || (mat.files || []).some(f => /^video\//.test(f.mime || ''));
+  const reading = (mat.sops || []).length > 0 || (mat.links || []).some(l => l.kind !== 'video') || (mat.files || []).some(f => !/^video\//.test(f.mime || ''));
+  if (format === 'VIDEO + OBSERVED') return { format: ready && !video ? 'READ + OBSERVED' : format, planned: false };
+  if (!MEDIA_FORMATS.includes(format)) return { format, planned: false };
+  if (!ready) return { format, planned: true };
+  return { format: video && reading ? 'VIDEO + READ' : video ? 'VIDEO' : 'READ', planned: false };
+}
+
 function fail(code, message) {
   const e = new Error(message);
   e.code = code; e.status = 400;
@@ -276,7 +295,7 @@ function seedDefaults(all, now) {
 
 module.exports = {
   COLLECTION, STATUS, LINK_KINDS,
-  hasAddedMaterial, materialFor, forStaff, validateLink,
+  hasAddedMaterial, materialFor, forStaff, validateLink, shownFormat, MEDIA_FORMATS,
   addLink, addFile, remove, setNote, findFile,
   DEFAULT_MATERIAL, RETIRED_URLS, seedDefaults, NEXT_STEPS, setOffice, policyOverride
 };
