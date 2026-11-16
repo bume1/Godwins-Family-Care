@@ -60,7 +60,7 @@ const PHASES = Object.freeze([
 // Clinical P&P (2.2) and the admin team the current Administrative P&P (2.3).
 // The Playbook's figure is kept so the disagreement stays visible.
 const shared = (id) => C_ACKS.find(a => a.id === id);
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   shared('EMPLOYEE_HANDBOOK'),
   shared('CODE_OF_CONDUCT'),
   shared('FIELD_ADDENDUM'),

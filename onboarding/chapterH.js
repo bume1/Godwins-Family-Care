@@ -48,7 +48,7 @@ const PHASES = Object.freeze([
 // H.7: the Code of Conduct, the HIPAA acknowledgment, the Field Addendum where
 // it applies, and the Clinical Rotation Curriculum. Never the Handbook.
 const shared = (id) => C_ACKS.find(a => a.id === id);
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   shared('CODE_OF_CONDUCT'),
   shared('HIPAA_ACK'),
   shared('FIELD_ADDENDUM'),

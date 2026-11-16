@@ -66,7 +66,7 @@ const PHASES = Object.freeze([
 // the packet (items 17-19), so only the three it does not carry are
 // acknowledged here.
 const shared = (id) => C_ACKS.find(a => a.id === id);
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   shared('FIELD_ADDENDUM'),
   Object.freeze({ id: 'PHC_MANUAL', title: 'Private Home Care Policies and Procedures', version: '3.1',
     source: 'PHC_MANUAL', ref: P('A.13'), playbookStates: '3.0',

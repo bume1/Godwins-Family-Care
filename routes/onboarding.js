@@ -72,6 +72,7 @@ const { createSourceLoader } = require('../onboarding/sourceLoader');
 const { contentDisposition } = require('../contentDisposition');
 const staffDocs = require('../staffDocuments');
 const TM = require('../onboarding/trainingMaterial');
+const DL = require('../onboarding/documentLinks');
 
 const RECORDS = 'onboarding_records';
 const EVENTS = 'onboarding_events';
@@ -95,6 +96,8 @@ module.exports = function createOnboardingRoutes(deps) {
     return next(err);
   }) };
   const loader = deps.sourceLoader || createSourceLoader({ drive, db });
+  // The stored document links take effect from boot, not only after the list is opened.
+  Promise.resolve().then(() => db.get(DL.COLLECTION)).then(DL.apply).catch(() => {});
   const nowIso = () => new Date().toISOString();
   const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   const trim = (v, n = 2000) => String(v === undefined || v === null ? '' : v).trim().slice(0, n);
@@ -1237,6 +1240,35 @@ module.exports = function createOnboardingRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'onboarding_settings_changed', 'onboarding_settings', null, { checkQuestionsForStaff: next.checkQuestionsForStaff });
     return res.json(next);
   });
+  // ---- document links (owner, 2026-11-16) ----------------------------------
+  // Which Drive file each SOP, manual, policy and guide opens. The office sees
+  // the list; only the Super Admin changes it, because a policy's file is what
+  // staff sign. Changing a link never edits a signed copy already filed.
+  router.get('/api/onboarding/admin/document-links', authenticateToken, requireOffice, async (req, res) => {
+    const stored = (await db.get(DL.COLLECTION)) || {};
+    DL.apply(stored);
+    return res.json({ canEdit: req.user.role === 'admin', rows: DL.catalog(T.ALL_ACKS, stored) });
+  });
+  router.put('/api/onboarding/admin/document-links/:key', authenticateToken, requireOffice, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only the Super Admin changes document links.', code: 'DOC_LINK_SUPER_ADMIN' });
+    const key = String(req.params.key || '');
+    const stored = (await db.get(DL.COLLECTION)) || {};
+    if (!DL.catalog(T.ALL_ACKS, stored).some(r => r.key === key)) return res.status(404).json({ error: 'Unknown document.', code: 'DOC_LINK_UNKNOWN' });
+    const overrides = Object.assign({}, stored.overrides || {});
+    const before = overrides[key] ? overrides[key].fileId : null;
+    if (req.body && req.body.reset === true) delete overrides[key];
+    else {
+      const fileId = DL.parseDriveId(req.body && req.body.link);
+      if (!fileId) return res.status(400).json({ error: 'Paste a Google Drive link to the file, such as https://drive.google.com/file/d/…/view.', code: 'DOC_LINK_INVALID' });
+      overrides[key] = { fileId, at: nowIso(), byId: req.user.id, byName: req.user.name || req.user.email };
+    }
+    const next = Object.assign({}, stored, { overrides });
+    await db.set(DL.COLLECTION, next);
+    DL.apply(next);
+    await logActivity(req.user.id, req.user.name, 'document_link_changed', 'document_links', key,
+      { before, after: overrides[key] ? overrides[key].fileId : null });
+    return res.json({ canEdit: true, rows: DL.catalog(T.ALL_ACKS, next) });
+  });
   // The Clinical Director records a review against the current manual, which
   // clears a flag; or confirms a module's drafted manual sections, which makes
   // them drive the flag from then on.
@@ -1445,5 +1477,5 @@ module.exports = function createOnboardingRoutes(deps) {
   return router;
 };
 
-module.exports.COLLECTIONS = { RECORDS, EVENTS, REVIEWS, MATERIALS };
+module.exports.COLLECTIONS = { RECORDS, EVENTS, REVIEWS, MATERIALS, DOCUMENT_LINKS: DL.COLLECTION };
 module.exports.defaultChapterFor = defaultChapterFor;

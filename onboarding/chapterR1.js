@@ -48,7 +48,7 @@ const PHASES = Object.freeze([
     title: 'Engagement Sequence, steps 4 to 6', when: 'At execution', ref: P('R1.2') }
 ].map((p, n) => Object.freeze(Object.assign({}, p, { number: n + 1 }))));
 
-const ACKNOWLEDGMENTS = Object.freeze([]);
+const ACKNOWLEDGMENTS = require('./sources').linkAll([]);
 
 const ITEMS = Object.freeze([
   // ---- R1.2 steps 1-3 ---------------------------------------------------------

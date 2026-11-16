@@ -66,7 +66,7 @@ const PHASES = Object.freeze([
 // team acknowledges 2.3, the version in Policies / Current. The Playbook's
 // figure is kept so the disagreement stays visible until it is corrected.
 const shared = (id) => C_ACKS.find(a => a.id === id);
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   shared('EMPLOYEE_HANDBOOK'),
   shared('CODE_OF_CONDUCT'),
   shared('HIPAA_ACK'),

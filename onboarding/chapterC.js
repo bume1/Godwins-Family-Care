@@ -106,7 +106,7 @@ const PHASES = Object.freeze([
 // tick box and a typed name. Either way the copy files to their Documents.
 // Every chapter that lists one of these reads this same entry, so the setting
 // cannot differ between chapters. An entry with no `action` is acknowledged.
-const ACKNOWLEDGMENTS = Object.freeze([
+const ACKNOWLEDGMENTS = require('./sources').linkAll([
   { id: 'EMPLOYEE_HANDBOOK', action: 'sign', title: 'Employee Handbook and its acknowledgment', version: '2.0', ref: P('R3.3'),
     driveFileIds: ['1T0xnb9XKYnWw4cP4CHTcLk6j453SSskc', '1I3evN7Y6ymBnroMLWMpEV134RDM4KzBU'] },
   { id: 'CODE_OF_CONDUCT', action: 'sign', title: 'Staff Code of Conduct', version: '2.0', ref: P('R3.3'),

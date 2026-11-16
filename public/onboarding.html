@@ -1358,6 +1358,50 @@ const LIB_STATUS = { ready: ['Ready', 'p-COMPLETE'], needs: ['Needs material', '
 const LIB_FILTERS = [['all', 'All'], ['needs', 'Needs material'], ['write', 'Needs writing'], ['attach', 'Attach today'], ['caregiver', 'Caregivers'], ['ready', 'Ready'], ['office', 'Office signs off']];
 const SIGNOFF_LABEL = { ATTEST: 'Attest', COUNTERSIGN: 'Countersign', OBSERVED: 'Observed', CERTIFICATE: 'Certificate', NONE: 'None' };
 
+// Which Drive file each SOP, manual, policy and guide opens (owner, 2026-11-16).
+// Uploading a new version as a new file and pasting its link here moves every
+// place in the app that opens it. Only the Super Admin changes a link.
+const DocumentLinks = () => {
+  const [d, setD] = useState(null); const [err, setErr] = useState(''); const [ok, setOk] = useState('');
+  const [edit, setEdit] = useState(null); const [val, setVal] = useState(''); const [busy, setBusy] = useState(false);
+  const load = () => call('/api/onboarding/admin/document-links').then(setD).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const save = async (key, body) => {
+    setBusy(true); setErr(''); setOk('');
+    try { setD(await call(`/api/onboarding/admin/document-links/${encodeURIComponent(key)}`, { method: 'PUT', body })); setEdit(null); setVal(''); setOk(body.reset ? 'Back to the default file.' : 'Link saved. Every place in the app that opens this document now opens the new file.'); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <details className="note" style={{ margin: '4px 0 10px' }} data-doc-links>
+      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Document Links</summary>
+      <div style={{ margin: '8px 0' }}>The Drive file each SOP, manual, policy and guide opens, in trainings, policies, signing and Pay Setup. To issue a new version, upload it to Drive, share it view-only, then paste its link here.{d && !d.canEdit ? ' Only the Super Admin changes a link.' : ''}</div>
+      {err && <div className="err">{err}</div>}{ok && <div className="ok">{ok}</div>}
+      {!d ? <div className="meta">Loading…</div> : (
+        <table className="lib"><thead><tr><th>Document</th><th>Opens</th><th></th></tr></thead><tbody>
+          {d.rows.map(r => (
+            <tr key={r.key} data-doc-link={r.key}>
+              <td><b>{r.title}</b>{r.docNumber && <div className="meta">{r.docNumber}</div>}
+                {r.changed && <div className="meta">Changed{r.changedByName ? ` by ${r.changedByName}` : ''}{r.changedAt ? ` · ${fmtDate(r.changedAt)}` : ''}</div>}</td>
+              <td>{r.url ? <a href={r.url} target="_blank" rel="noopener noreferrer">Open</a> : '—'}{r.changed ? ' · new file' : ' · default'}</td>
+              <td style={{ minWidth: 260 }}>
+                {d.canEdit && edit !== r.key && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <button className="btn ghost sm" onClick={() => { setEdit(r.key); setVal(''); }}>Change Link</button>
+                  {r.changed && <button className="btn ghost sm" disabled={busy} onClick={() => save(r.key, { reset: true })}>Use Default</button>}
+                </div>}
+                {edit === r.key && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <input placeholder="https://drive.google.com/file/d/…/view" value={val} onChange={e => setVal(e.target.value)} style={{ flex: '1 1 200px' }} />
+                  <button className="btn sm" disabled={busy || !val.trim()} onClick={() => save(r.key, { link: val })}>Save Link</button>
+                  <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
+                </div>}
+              </td>
+            </tr>
+          ))}
+        </tbody></table>
+      )}
+    </details>
+  );
+};
+
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
   const [open, setOpen] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState(''); const [filter, setFilter] = useState('all');
@@ -1404,6 +1448,7 @@ const Library = () => {
         </ol>
         <div>The deck and the SOP both trace to one manual section, so nothing is restated. Staff see a training greyed out until it has an SOP or material.</div>
       </details>
+      <DocumentLinks />
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', margin: '6px 0 10px' }}>
         {LIB_FILTERS.map(([k, l]) => <button key={k} className={`btn sm ${filter === k ? '' : 'ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}
         <select value={forRole} onChange={e => setForRole(e.target.value)} style={{ maxWidth: 230 }}>

@@ -22,7 +22,14 @@
 
 'use strict';
 
-const SOURCES = Object.freeze({
+// The file ids below are DEFAULTS (owner, 2026-11-16: "not hardcoded; in the
+// field I can also swap out links"). A Super Admin can point any document at a
+// different Drive file from the Training Library's Document Links list; that
+// choice is stored in `document_links` and read back through the getters below,
+// so every caller that reads `driveFileId` sees it on its next request.
+const overrides = Object.create(null);
+
+const RAW_SOURCES = Object.freeze({
   PLAYBOOK: Object.freeze({
     key: 'PLAYBOOK',
     title: 'GFC Onboarding Playbook',
@@ -111,7 +118,7 @@ const SOURCES = Object.freeze({
     key: 'ADMIN_SOPS_SET1',
     title: 'Administrative SOPs Set 1: Signing In, Onboarding and Training',
     docNumber: 'GFC-ADMIN-SOP-S1',
-    driveFileId: '1vXFFEqeAJHGEidNdhB3atE59ZffHu7ma',
+    driveFileId: '1QYhVaYr5lawntGbBPZKyFCtNfUCwVQqs',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '2.0'
@@ -143,6 +150,24 @@ const SOURCES = Object.freeze({
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '1.0'
   }),
+  ADMIN_SOPS_SET5: Object.freeze({
+    key: 'ADMIN_SOPS_SET5',
+    title: 'Administrative SOPs Set 5: Issuing Pay Stubs',
+    docNumber: 'GFC-ADMIN-SOP-S5',
+    driveFileId: '13o8fuJTDawlELW3xRRs6ymlihNIYpg3F',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
+  ADMIN_SOPS_SET6: Object.freeze({
+    key: 'ADMIN_SOPS_SET6',
+    title: 'Administrative SOPs Set 6: Running Payroll',
+    docNumber: 'GFC-ADMIN-SOP-S6',
+    driveFileId: '1LVhRjbMxc70g18tEvhLrUCy2nx-Kqt1-',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
   STAFF_PAY_GUIDE: Object.freeze({
     key: 'STAFF_PAY_GUIDE',
     title: 'Staff Guide: Setting Up Your Pay',
@@ -153,6 +178,15 @@ const SOURCES = Object.freeze({
     transcribedFromVersion: '1.0'
   })
 });
+
+// Each source exposes `driveFileId` as a getter: the override when one is set,
+// else the default written here (`defaultDriveFileId`).
+const SOURCES = Object.freeze(Object.fromEntries(Object.entries(RAW_SOURCES).map(([key, s]) => {
+  const o = Object.assign({}, s, { defaultDriveFileId: s.driveFileId });
+  delete o.driveFileId;
+  Object.defineProperty(o, 'driveFileId', { enumerable: true, get: () => overrides['source:' + key] || s.driveFileId });
+  return [key, Object.freeze(o)];
+})));
 
 // The link a person clicks. Always the canonical copy, never a stored one.
 function driveViewUrl(sourceKey) {
@@ -171,6 +205,41 @@ function ref(source, section, extra) {
 
 // The staff pay guide, on the pay setup step of every onboarding list
 // (owner, 2026-11-11): the guide sits where the work is done, not in a training.
-const PAY_GUIDE = Object.freeze({ label: 'Read the Staff Pay Guide', url: driveViewUrl('STAFF_PAY_GUIDE') });
+const PAY_GUIDE = Object.freeze(Object.defineProperty({ label: 'Read the Staff Pay Guide' }, 'url',
+  { enumerable: true, get: () => driveViewUrl('STAFF_PAY_GUIDE') }));
 
-module.exports = { SOURCES, driveViewUrl, ref, PAY_GUIDE };
+// A policy acknowledgment's files, overridable the same way. A policy whose
+// files ARE a source document (the PHC manual, say) follows that source, so one
+// change moves both; a policy with its own files is keyed `policy:<id>`.
+const LINKED = Symbol('linkedAck');
+function linkedAck(ack) {
+  if (!ack || ack[LINKED]) return ack;
+  const own = (ack.driveFileIds || []).slice();
+  const src = ack.source && SOURCES[ack.source];
+  const followsSource = !!(src && own.length === 1 && own[0] === src.defaultDriveFileId);
+  const o = Object.assign({}, ack);
+  delete o.driveFileIds;
+  Object.defineProperty(o, 'driveFileIds', { enumerable: true, get: () => {
+    const set = overrides['policy:' + ack.id];
+    if (set) return [set];
+    if (followsSource) return [src.driveFileId];
+    return own.slice();
+  } });
+  Object.defineProperty(o, 'defaultDriveFileIds', { enumerable: false, value: Object.freeze(own) });
+  Object.defineProperty(o, 'linkKey', { enumerable: false, value: followsSource ? 'source:' + ack.source : 'policy:' + ack.id });
+  Object.defineProperty(o, LINKED, { value: true });
+  return Object.freeze(o);
+}
+
+// The stored choices, loaded at boot and after every change.
+function setOverrides(map) {
+  Object.keys(overrides).forEach(k => { delete overrides[k]; });
+  Object.entries(map || {}).forEach(([k, v]) => {
+    const id = v && typeof v === 'object' ? v.fileId : v;
+    if (typeof id === 'string' && /^[A-Za-z0-9_-]{20,}$/.test(id)) overrides[k] = id;
+  });
+}
+const overrideFor = (key) => overrides[key] || null;
+const linkAll = (list) => Object.freeze((list || []).map(linkedAck));
+
+module.exports = { SOURCES, driveViewUrl, ref, PAY_GUIDE, linkedAck, linkAll, setOverrides, overrideFor };
