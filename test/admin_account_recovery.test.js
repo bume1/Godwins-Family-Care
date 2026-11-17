@@ -76,9 +76,14 @@ test('the server really does email a link and return no password', () => {
   const i = SERVER.indexOf("app.post('/api/admin/reset-user-password/:userId'");
   assert.ok(i > 0);
   const route = SERVER.slice(i, SERVER.indexOf('\n});', i));
-  assert.match(route, /createPasswordResetLink/, 'the route must create a reset link');
-  assert.match(route, /sendPasswordResetEmail/, 'the route must email it');
-  assert.doesNotMatch(route, /res\.json\(\{[\s\S]{0,200}newPassword/, 'the response must not carry the password');
+  // REPOINTED 2026-11-17: the button's path (no password typed) now emails a
+  // link where the person chooses their own password; no temp password exists.
+  const linkPath = route.slice(0, route.indexOf('// Use custom password or generate temp password'));
+  assert.match(linkPath, /await issuePasswordSetLink\(user, 'admin'\)/, 'the route must email a link');
+  assert.match(linkPath, /users\[userIndex\]\.password = await bcrypt\.hash\(require\('crypto'\)\.randomBytes/, 'and stop the current password, as the card says');
+  for (const reply of route.match(/res\.json\(\{[^}]*\}/g) || []) {
+    assert.doesNotMatch(reply, /newPassword|tempPassword|password:/, 'no response carries a password');
+  }
 });
 
 test('the sessions copy says the password is NOT changed', () => {

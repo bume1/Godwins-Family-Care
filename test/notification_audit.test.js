@@ -715,7 +715,10 @@ test('each route that demands a reason now also delivers it', () => {
 test('the four promises the app makes on screen are now kept', () => {
   const s = stripLineComments(src('server.js'));
   for (const [re, what] of [
-    [/notify\.passwordResetRequested\(/, '"an administrator will reach out to you shortly"'],
+    // 2026-11-17: the promise is now "we have sent a link", kept by the link
+    // itself; the office is still told when no link can be sent.
+    [/issuePasswordSetLink\(user, 'self_service'\)/, '"we have sent it a link to choose a new password"'],
+    [/notify\.passwordResetRequested\(/, 'an account that cannot receive a link reaches the office'],
     [/notify\.selfSignupVerified\(/, '"our office will review your account and email you"'],
     [/notify\.familyInviteRequested\(/, '"we will confirm it and email them their sign-in details"'],
     [/notify\.feedbackSubmitted\(/, 'a report that only an admin screen showed']

@@ -98,7 +98,8 @@ const chartComms = require('./chartCommunications'); // calls and messages into 
 const clinicalTasks = require('./clinicalTasks');
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
-const insurance = require('./insuranceEligibility'); // ONE payer vocabulary, verification, the claim gate (B1)
+const insurance = require('./insuranceEligibility');
+const passwordSetLinks = require('./passwordSetLinks'); // self-service "choose a new password" links (2026-11-17) // ONE payer vocabulary, verification, the claim gate (B1)
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
                                                       // packet (4.12). Pure — the clock is passed in.
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
@@ -4697,50 +4698,141 @@ app.post('/api/auth/self-signup/verify', async (req, res) => {
   }
 });
 
-// ============== PASSWORD RESET REQUESTS (Admin-managed) ==============
+// ============== PASSWORD RESET (self-service, 2026-11-17) ==============
+// "Forgot password" used to file a request for an admin, and the Inbox's
+// Reset Password button only marked it handled: the password never changed and
+// the person was never told anything. Now the request itself emails the person
+// a one-time link to choose their own password (passwordSetLinks.js).
+//
+// The reply is the same sentence whatever happens, so the form cannot be used
+// to find out who has an account. An account that cannot receive a link (no
+// inbox, or switched off) is still told to the office, which can help by phone.
+const FORGOT_PASSWORD_REPLY = 'If an account uses that email, we have sent it a link to choose a new password. The link expires in 1 hour. Check your spam folder if it does not arrive.';
+const PASSWORD_SET_LINKS = 'password_set_links';
+
+// Can this person be sent a link? Returns null when yes, or why not.
+const passwordLinkBlocker = (users, user) => {
+  if (!user || !user.email) return 'no_account';
+  if (user.accountStatus === 'inactive') return 'account_inactive';
+  if (familyLinks.isPlaceholderEmail(user.email) || placeholderResetRefusal(users, user)) return 'no_inbox';
+  return null;
+};
+
+// Issue a link, store only its fingerprint, and email it.
+async function issuePasswordSetLink(user, purpose) {
+  const { token, record } = passwordSetLinks.buildLink({ userId: user.id, purpose });
+  const links = (await db.get(PASSWORD_SET_LINKS)) || [];
+  await db.set(PASSWORD_SET_LINKS, passwordSetLinks.addLink(links, record));
+  await sendPasswordSetLinkEmail(user, token, purpose);
+  return record;
+}
+
+async function sendPasswordSetLinkEmail(user, token, purpose) {
+  const url = `${await getAppBaseUrl()}/password-reset-${token}`;
+  const name = (user.preferredName || user.name || 'there').split(' ')[0];
+  const lasts = purpose === 'admin' ? '24 hours' : '1 hour';
+  const paragraphs = [
+    purpose === 'admin'
+      ? `Our office has asked you to choose a new password for your ${config.BRAND.COMPANY_NAME} account.`
+      : `We received a request to reset the password for your ${config.BRAND.COMPANY_NAME} account.`,
+    `Use the button below to choose a new password. The link works once and expires in ${lasts}.`,
+    `If you did not ask for this, you can ignore this email and your password will not change. If you are worried, call us on ${consentText.ORG.phone}.`
+  ];
+  const htmlBody = emailTemplates.renderGfcEmail({ greeting: name, headline: 'Choose a new password', paragraphs, ctaUrl: url, ctaLabel: 'Choose a New Password' }).html;
+  const text = `Hi ${name},\n\n${paragraphs.join('\n\n')}\n\n${url}`;
+  // Sent whatever the person's email preferences: they asked for it.
+  return sendEmail(user.email, `Reset your ${config.BRAND.COMPANY_NAME} password`, text, { htmlBody });
+}
+
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
-    }
+    const email = String((req.body || {}).email || '').trim();
+    if (!email) return res.status(400).json({ error: 'Email is required' });
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
-    if (!user) {
-      return res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
+    if (!user) return res.json({ message: FORGOT_PASSWORD_REPLY });
+
+    const blocker = passwordLinkBlocker(users, user);
+    const resetRequests = (await db.get('password_reset_requests')) || [];
+    const request = { id: uuidv4(), userId: user.id, email: user.email, name: user.name, requestedAt: new Date().toISOString() };
+
+    if (blocker) {
+      // Nothing can be emailed, so the office is the only way back in. One
+      // pending request per person, as before.
+      if (!resetRequests.some(r => r.userId === user.id && r.status === 'pending')) {
+        resetRequests.push({ ...request, status: 'pending', blockedReason: blocker });
+        await db.set('password_reset_requests', resetRequests);
+        await notify.passwordResetRequested({
+          requesterName: user.name, requesterEmail: user.email, requestId: request.id,
+          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`, actorId: user.id
+        });
+      }
+      return res.json({ message: FORGOT_PASSWORD_REPLY });
     }
 
-    // Store password reset request for admin to handle
-    const resetRequests = await db.get('password_reset_requests') || [];
-
-    // Check if there's already a pending request for this user
-    const existingIdx = resetRequests.findIndex(r => r.email?.toLowerCase() === email.toLowerCase() && r.status === 'pending');
-    if (existingIdx !== -1) {
-      return res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
+    const links = (await db.get(PASSWORD_SET_LINKS)) || [];
+    if (passwordSetLinks.overSelfServiceLimit(links, user.id)) {
+      await logActivity(user.id, user.name || user.email, 'password_reset_link_rate_limited', 'user', user.id, {});
+      return res.json({ message: FORGOT_PASSWORD_REPLY });
     }
-    
-    resetRequests.push({
-      id: uuidv4(),
-      userId: user.id,
-      email: user.email,
-      name: user.name,
-      requestedAt: new Date().toISOString(),
-      status: 'pending'
-    });
+    await issuePasswordSetLink(user, 'self_service');
+    // A record of the request for the office's history; nothing for anyone to do.
+    resetRequests.push({ ...request, status: 'link_sent', handledAt: request.requestedAt, handledBy: 'automatic' });
     await db.set('password_reset_requests', resetRequests);
-
-    // The person is told an administrator will reach out. Until the
-    // 2026-11-09 audit nothing told an administrator, so a console line was
-    // the only signal and self-service reset was a dead end.
-    await notify.passwordResetRequested({
-      requesterName: user.name, requesterEmail: user.email,
-      requestId: resetRequests[resetRequests.length - 1].id,
-      ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`,
-      actorId: user.id
-    });
-    res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
+    await logActivity(user.id, user.name || user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'self_service' });
+    res.json({ message: FORGOT_PASSWORD_REPLY });
   } catch (error) {
     console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Set a new password from a link. The token is the whole proof, so it is
+// checked first and used once. Signs the person out everywhere.
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body || {};
+    const links = (await db.get(PASSWORD_SET_LINKS)) || [];
+    const found = passwordSetLinks.findLink(links, token);
+    if (found.error) {
+      const msg = {
+        expired: 'This link has expired. Ask for a new one from the sign-in page.',
+        used: 'This link has already been used. Sign in with your new password, or ask for a new link.',
+        superseded: 'A newer link was sent after this one. Use the most recent email.',
+        invalid: 'This link is not valid. Ask for a new one from the sign-in page.'
+      }[found.error];
+      return res.status(found.error === 'expired' ? 410 : 400).json({ error: msg, code: `RESET_LINK_${found.error.toUpperCase()}` });
+    }
+    const problem = passwordSetLinks.passwordProblem(newPassword, { minLength: config.MIN_PASSWORD_LENGTH, regex: config.PASSWORD_REGEX });
+    if (problem) return res.status(400).json({ error: problem, code: 'PASSWORD_TOO_WEAK' });
+
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === found.record.userId);
+    if (idx === -1 || passwordLinkBlocker(users, users[idx])) {
+      return res.status(400).json({ error: 'This account cannot be reset with a link. Please call our office.', code: 'RESET_LINK_INVALID' });
+    }
+    const now = new Date().toISOString();
+    users[idx].password = await bcrypt.hash(newPassword, config.BCRYPT_SALT_ROUNDS);
+    users[idx].requirePasswordChange = false;
+    users[idx].lastPasswordChange = now;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await db.set(PASSWORD_SET_LINKS, passwordSetLinks.markUsed(links, found.record.id));
+    // Any older admin temp-password link stops working too.
+    const legacy = (await db.get('password_reset_links')) || [];
+    if (legacy.some(l => l.userId === users[idx].id)) await db.set('password_reset_links', legacy.filter(l => l.userId !== users[idx].id));
+    // Close any request still waiting in the admin Inbox for this person.
+    const reqs = (await db.get('password_reset_requests')) || [];
+    if (reqs.some(r => r.userId === users[idx].id && r.status === 'pending')) {
+      await db.set('password_reset_requests', reqs.map(r => (r.userId === users[idx].id && r.status === 'pending')
+        ? { ...r, status: 'completed', handledAt: now, handledBy: 'self_service' } : r));
+    }
+    await sessions.revokeAllForUser(users[idx].id, 'password_reset_by_link');
+    await logActivity(users[idx].id, users[idx].name || users[idx].email, 'password_reset_by_link', 'user', users[idx].id, { purpose: found.record.purpose });
+    sendPasswordChangedEmail(users[idx]).catch(err => console.error('Password changed email failed (non-fatal):', err.message));
+    res.json({ message: 'Your password has been changed. Sign in with your new password.' });
+  } catch (error) {
+    console.error('Reset password error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -4749,6 +4841,20 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.get('/api/auth/password-reset-link/:token', async (req, res) => {
   try {
     const { token } = req.params;
+    // A "choose a new password" link (2026-11-17). Only the first name goes
+    // back: the page needs nothing else.
+    if (/^[0-9a-f]{64}$/.test(String(token))) {
+      const setLinks = (await db.get(PASSWORD_SET_LINKS)) || [];
+      const found = passwordSetLinks.findLink(setLinks, token);
+      if (found.record || found.error !== 'invalid') {
+        if (found.error === 'expired') return res.status(410).json({ error: 'This link has expired.', mode: 'set_password' });
+        if (found.error) return res.status(400).json({ error: found.error === 'used' ? 'This link has already been used.' : 'A newer link was sent after this one. Use the most recent email.', mode: 'set_password' });
+        const u = (await getUsers()).find(x => x.id === found.record.userId);
+        if (!u) return res.status(404).json({ error: 'Invalid or expired reset link.' });
+        return res.json({ mode: 'set_password', firstName: (u.preferredName || u.name || '').split(' ')[0] || null,
+          minLength: config.MIN_PASSWORD_LENGTH });
+      }
+    }
     const links = (await db.get('password_reset_links')) || [];
     const link = links.find(l => l.token === token);
     if (!link) return res.status(404).json({ error: 'Invalid or expired reset link.' });
@@ -4756,7 +4862,7 @@ app.get('/api/auth/password-reset-link/:token', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.id === link.userId);
     if (!user) return res.status(404).json({ error: 'User not found.' });
-    res.json({ name: user.name, email: user.email, tempPassword: link.tempPassword });
+    res.json({ mode: 'temp_password', name: user.name, email: user.email, tempPassword: link.tempPassword });
   } catch (error) {
     console.error('Password reset link lookup error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -4881,17 +4987,35 @@ app.get('/api/admin/password-reset-requests', authenticateToken, requireAdmin, a
 app.put('/api/admin/password-reset-requests/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body || {};
     const resetRequests = await db.get('password_reset_requests') || [];
     const idx = resetRequests.findIndex(r => r.id === id);
     if (idx === -1) return res.status(404).json({ error: 'Request not found' });
-    
+
+    // The Inbox's "Reset Password" button. It used to mark the request handled
+    // and do nothing else, so the person never heard back. It now emails them
+    // a link to choose their own password (2026-11-17).
+    let message = 'Request updated';
+    if (!status || status === 'completed') {
+      const users = await getUsers();
+      const user = users.find(u => u.id === resetRequests[idx].userId) ||
+        users.find(u => u.email && resetRequests[idx].email && u.email.toLowerCase() === resetRequests[idx].email.toLowerCase());
+      const blocker = passwordLinkBlocker(users, user);
+      if (blocker) {
+        const why = { no_account: 'That account no longer exists.', account_inactive: 'That account is switched off. Turn it back on first.',
+          no_inbox: 'Nobody signs in with that login, so a link would reach no one. Reset it from the user form instead.' }[blocker];
+        return res.status(409).json({ error: why, code: 'RESET_LINK_NOT_SENDABLE' });
+      }
+      await issuePasswordSetLink(user, 'admin');
+      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin', requestId: id });
+      message = `Emailed ${user.email} a link to choose a new password.`;
+    }
     resetRequests[idx].status = status || 'completed';
     resetRequests[idx].handledAt = new Date().toISOString();
     resetRequests[idx].handledBy = req.user.email;
     await db.set('password_reset_requests', resetRequests);
-    
-    res.json({ message: 'Request updated' });
+
+    res.json({ message });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -32111,6 +32235,25 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
     const user = users[userIndex];
     const refusal = placeholderResetRefusal(users, user);
     if (refusal) return res.status(409).json(refusal);
+
+    // No password given (the user form's "Email reset link" button): send the
+    // person a link to choose their own (2026-11-17). No password is ever
+    // stored or emailed. As the card says, their CURRENT password stops
+    // working now. Signing them out is the separate "Sign Out Everywhere"
+    // button, on purpose (2026-11-06). A person asking for themselves changes
+    // nothing until they use the link. A typed password keeps the route below.
+    if (!customPassword) {
+      if (passwordLinkBlocker(users, user) === 'account_inactive') {
+        return res.status(409).json({ error: 'That account is switched off. Turn it back on first.', code: 'RESET_LINK_NOT_SENDABLE' });
+      }
+      users[userIndex].password = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), config.BCRYPT_SALT_ROUNDS);
+      users[userIndex].lastPasswordReset = new Date().toISOString();
+      await db.set('users', users);
+      invalidateUsersCache();
+      await issuePasswordSetLink(user, 'admin');
+      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin' });
+      return res.json({ message: `Emailed ${user.email} a link to choose a new password. It expires in 24 hours.`, linkSent: true });
+    }
 
     // Use custom password or generate temp password
     const newPassword = customPassword || generateTempPassword(user);
