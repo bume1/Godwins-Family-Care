@@ -31,6 +31,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'users', phi: true, owner: 'core', note: 'every account incl. client profiles, intake, consents, care plan pointer, MFA + EMR link fields' },
   { key: 'password_reset_requests', phi: false, owner: 'core' },
   { key: 'password_reset_links', phi: false, owner: 'core' },
+  // "Choose a new password" links (2026-11-17): a SHA-256 of the token, never the token.
+  { key: 'password_set_links', phi: false, owner: 'core' },
   { pattern: /^auth_session:/, phi: false, owner: '5.3', note: 'server-side sessions (per key)' },
   { pattern: /^mfa_pending:/, phi: false, owner: '5.3', note: 'short-lived MFA challenge state' },
   { pattern: /^emr_user_token:/, phi: false, owner: '5.2', note: 'per-user OpenEMR refresh tokens, encrypted at rest' },

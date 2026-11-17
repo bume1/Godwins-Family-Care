@@ -1226,8 +1226,11 @@
         setSelectedItem(null);
       };
 
+      // Sends the person a link to choose their own password (2026-11-17).
+      // Says what happened, because the old button changed nothing silently.
       const handlePasswordReset = async (id) => {
-        await api.handlePasswordReset(token, id);
+        const r = await api.handlePasswordReset(token, id);
+        window.alert(r && r.error ? r.error : ((r && r.message) || 'Reset link sent.'));
         loadData();
       };
 
@@ -1389,7 +1392,7 @@
                       <div className="flex gap-2">
                         <button onClick={() => handlePasswordReset(request.id)}
                           className="px-3 py-1.5 bg-gradient-to-r from-primary to-accent text-white text-sm rounded-lg hover:opacity-90 transition">
-                          Reset Password
+                          Email Reset Link
                         </button>
                         <button onClick={() => dismissPasswordReset(request.id)}
                           className="px-3 py-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 text-sm rounded-lg transition">

@@ -139,7 +139,7 @@
             body: JSON.stringify({ email })
           });
           const result = await response.json();
-          setResetMessage(result.error || 'Password reset request submitted. An administrator will contact you.');
+          setResetMessage(result.error || result.message || 'If an account uses that email, we have sent it a link to choose a new password.');
         } catch (err) {
           setResetMessage('Error submitting request. Please try again.');
         }
@@ -164,11 +164,11 @@
         return shell(
           <form onSubmit={handleForgotPassword}>
             <h1>Reset password</h1>
-            <p className="lead">Enter your email and our office will help you reset it.</p>
+            <p className="lead">Enter your email and we will send you a link to choose a new password.</p>
             {resetMessage && <div className={resetMessage.includes('Error') ? 'err' : 'ok'}>{resetMessage}</div>}
             <label className="fl">Email</label>
             <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            <button type="submit" disabled={loading} className="btn navy">{loading ? 'Sending…' : 'Request Reset'}</button>
+            <button type="submit" disabled={loading} className="btn navy">{loading ? 'Sending…' : 'Email Me a Link'}</button>
             <div className="center"><button type="button" className="link" onClick={() => setShowForgotPassword(false)}>Back to Sign In</button></div>
           </form>
         );
