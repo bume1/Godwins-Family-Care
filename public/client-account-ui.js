@@ -330,14 +330,21 @@
       setMsg(typeof ok === 'function' ? ok(r) : ok); onChanged && onChanged();
     };
     const name = person.name || 'this person';
+    // No inbox, but a phone they sign in with: the link goes by text.
+    const byText = !!(person.loginPhone && person.emailIsPlaceholder);
     return (
       <Block title="Account Recovery">
         <div className="flex flex-wrap gap-2">
           {person.accountStatus !== 'inactive' && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => startViewAs(token, person, setMsg)}>View As</button>}
           <button type="button" className="btn btn-ghost" disabled={busy || !person.mfaEnrolled}
             onClick={() => run(`Reset ${name}'s authenticator? Every session they hold ends now and they set it up again at their next sign-in.`, () => req(`/api/users/${encodeURIComponent(person.id)}/mfa/reset`, { method: 'POST', token }), 'Authenticator reset.')}>Reset Authenticator</button>
-          <button type="button" className="btn btn-ghost" disabled={busy || person.noLogin}
-            onClick={() => run(`Email ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${person.email}.`, () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: {}, token }), `A password reset link has been emailed to ${person.email}. Their old password no longer works.`)}>Email Reset Link</button>
+          {byText ? (
+            <button type="button" className="btn btn-ghost" disabled={busy}
+              onClick={() => run(`Text ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is texted to ${person.loginPhone}.`, () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: {}, token }), (r) => `${r.message || `A reset link was texted to ${person.loginPhone}.`} Their old password no longer works.`)}>Text Reset Link</button>
+          ) : (
+            <button type="button" className="btn btn-ghost" disabled={busy || person.noLogin}
+              onClick={() => run(`Email ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${person.email}.`, () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: {}, token }), `A password reset link has been emailed to ${person.email}. Their old password no longer works.`)}>Email Reset Link</button>
+          )}
           <button type="button" className="btn btn-ghost" disabled={busy}
             onClick={() => run(`Sign ${name} out everywhere?\n\nEvery device they are signed in on is ended. Their password is unchanged.`, () => req(`/api/users/${encodeURIComponent(person.id)}/sessions/revoke`, { method: 'POST', token }),
               (r) => (r.revoked ? `${name} was signed out of ${r.revoked} session${r.revoked === 1 ? '' : 's'}.` : `${name} had no active sessions, so nothing was signed out.`))}>Sign Out Everywhere</button>
@@ -348,9 +355,42 @@
         {showPw && (
           <div className="flex gap-2 mt-3 flex-wrap">
             <input className="input" style={{ maxWidth: 280 }} type="password" autoComplete="new-password" placeholder="New temporary password" value={pw} onChange={e => setPw(e.target.value)} />
-            <button type="button" className="btn btn-primary" disabled={busy || !pw} onClick={() => run(null, () => updateUser(person.id, { password: pw, resetPassword: true }), 'Password set. They are emailed a link.').then(() => { setPw(''); setShowPw(false); })}>Save Password</button>
+            <button type="button" className="btn btn-primary" disabled={busy || !pw} onClick={() => run(null, () => updateUser(person.id, { password: pw, resetPassword: true }), byText ? 'Password set. Nothing is texted: tell them the new password.' : 'Password set. They are emailed a link.').then(() => { setPw(''); setShowPw(false); })}>Save Password</button>
           </div>
         )}
+        <Msg msg={msg} />
+      </Block>
+    );
+  };
+
+  // ── Signing in by phone (owner, 2026-11-18) ────────────────────────────
+  // A client or family account can sign in with a phone number instead of an
+  // email. With no email on file, their updates and password links come by
+  // text (phoneLogin.js on the server).
+  const PhoneSignIn = ({ person, updateUser, onChanged }) => {
+    const [val, setVal] = useState(person.loginPhone || person.phone || '');
+    const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
+    useEffect(() => { setVal(person.loginPhone || person.phone || ''); }, [person.id, person.loginPhone]);
+    const save = async (loginPhone, ok) => {
+      setBusy(true); setMsg('');
+      const r = await updateUser(person.id, { loginPhone }); setBusy(false);
+      if (r.error) { setMsg(`Error: ${r.error}`); return; }
+      setMsg(ok); onChanged && onChanged();
+    };
+    const name = person.name || 'They';
+    return (
+      <Block title="Sign In by Phone">
+        <p className="text-sm text-gray-600 mb-2">
+          {person.loginPhone
+            ? `${name} can sign in with ${person.loginPhone}.${person.emailIsPlaceholder ? ' They have no email on file, so their updates and password links come by text.' : ''}`
+            : `${name} signs in with ${person.emailIsPlaceholder ? 'nothing yet' : 'their email'}. Add a mobile number to let them sign in with it instead.`}
+        </p>
+        <div className="flex gap-2 flex-wrap">
+          <input className="input" style={{ maxWidth: 220 }} type="tel" placeholder="(555) 123-4567" value={val} onChange={e => setVal(e.target.value)} />
+          <button type="button" className="btn btn-primary" disabled={busy || !val.trim() || val === person.loginPhone} onClick={() => save(val, 'Saved. They can sign in with this number. Any device they were signed in on is signed out.')}>{person.loginPhone ? 'Change Number' : 'Turn On'}</button>
+          {person.loginPhone && <button type="button" className="btn btn-ghost" disabled={busy}
+            onClick={() => { if (window.confirm(`Stop ${name} signing in with ${person.loginPhone}?${person.emailIsPlaceholder ? '\n\nThey have no email, so they will not be able to sign in at all.' : ''}`)) save('', 'Phone sign-in turned off.'); }}>Turn Off</button>}
+        </div>
         <Msg msg={msg} />
       </Block>
     );
@@ -359,7 +399,8 @@
   // ── The client's account, on their record ──────────────────────────────
   // Account & Login for one client. Each block saves only its own keys.
   const ClientAccountSection = ({ token, client, users, projects, me, onChanged, onDeleted }) => {
-    const [basic, setBasic] = useState({ name: client.name || '', email: client.email || '', phone: client.phone || '' });
+    const realEmail = (u) => (u.emailIsPlaceholder ? '' : (u.email || ''));
+    const [basic, setBasic] = useState({ name: client.name || '', email: realEmail(client), phone: client.phone || '' });
     const [portalName, setPortalName] = useState(client.practiceName || '');
     const [status, setStatus] = useState(client.enrollmentStatus || 'intake_pending');
     const [assigned, setAssigned] = useState(client.assignedProjects || []);
@@ -367,7 +408,7 @@
     const [cutover, setCutover] = useState(false);
     const photoRef = useRef(null);
     useEffect(() => {
-      setBasic({ name: client.name || '', email: client.email || '', phone: client.phone || '' });
+      setBasic({ name: client.name || '', email: realEmail(client), phone: client.phone || '' });
       setPortalName(client.practiceName || ''); setStatus(client.enrollmentStatus || 'intake_pending'); setAssigned(client.assignedProjects || []);
     }, [client.id, client.name, client.email, client.phone, client.practiceName, client.enrollmentStatus]);
     const save = async (body, ok) => {
@@ -384,13 +425,13 @@
             <Field label="Name"><input className="input" value={basic.name} onChange={e => setBasic({ ...basic, name: e.target.value })} /></Field>
             <Field label="Email">
               {client.noLogin
-                ? <p className="text-sm text-gray-500 py-2">No login (placeholder). Their POA signs in with their own account.</p>
-                : <input className="input" type="email" autoComplete="off" value={basic.email} onChange={e => setBasic({ ...basic, email: e.target.value })} />}
+                ? <p className="text-sm text-gray-500 py-2">No login (placeholder). Their POA signs in with their own account, or turn on Sign In by Phone below.</p>
+                : <input className="input" type="email" autoComplete="off" placeholder={client.emailIsPlaceholder ? 'None. They sign in by phone.' : ''} value={basic.email} onChange={e => setBasic({ ...basic, email: e.target.value })} />}
             </Field>
             <Field label="Phone"><input className="input" type="tel" value={basic.phone} onChange={e => setBasic({ ...basic, phone: e.target.value })} /></Field>
           </div>
           <button type="button" className="btn btn-primary" disabled={busy || !basic.name.trim()}
-            onClick={() => save(client.noLogin ? { name: basic.name, phone: basic.phone } : basic, 'Saved.')}>Save</button>
+            onClick={() => save((client.noLogin || (client.emailIsPlaceholder && !basic.email.trim())) ? { name: basic.name, phone: basic.phone } : basic, 'Saved.')}>Save</button>
           <p className="text-xs text-gray-500 mt-2">Account type: Client. A patient's account type can't be changed: it would hide their care team and records. If their POA has been using this login, use "Move this login to the POA" below.</p>
         </Block>
 
@@ -474,6 +515,7 @@
           </Block>
         )}
 
+        <PhoneSignIn person={client} updateUser={updateUser} onChanged={onChanged} />
         <AccountRecovery token={token} person={client} me={me} onChanged={onChanged} />
 
         {isSuperAdmin(me) && (
@@ -528,7 +570,7 @@
     return (
       <div className="border rounded-lg p-3 mb-2">
         <div className="flex justify-between gap-2 flex-wrap">
-          <div><b>{family.name}</b> <span className="text-sm text-gray-500">{family.noLogin ? 'no login of their own' : family.email}{family.phone ? ` · ${family.phone}` : ''}</span>
+          <div><b>{family.name}</b> <span className="text-sm text-gray-500">{family.noLogin ? 'no login of their own' : (family.emailIsPlaceholder && family.loginPhone ? `signs in with ${family.loginPhone}` : family.email)}{family.phone ? ` · ${family.phone}` : ''}</span>
             {family.accountStatus === 'inactive' && <span className="badge bg-red-50 text-red-600 ml-2">Inactive</span>}</div>
           {poa && <span className="badge bg-primary-50 text-primary-600">Power of Attorney</span>}
         </div>
@@ -629,7 +671,7 @@
 
   // The quick client account: User Management's Add User, for a client.
   const AddClientForm = ({ token, users, portals, onCreated, onCancel, onOpenClient, onOpenFamily }) => {
-    const [f, setF] = useState({ name: '', email: '', noEmail: false, phone: '', password: '', practiceName: '', existingPortalSlug: '', logo: '',
+    const [f, setF] = useState({ name: '', email: '', noEmail: false, phoneLogin: false, phone: '', password: '', practiceName: '', existingPortalSlug: '', logo: '',
       rateAgreement: { hourlyRate: '', dailyMinimumHours: '' }, careTeam: Object.assign({}, EMPTY_TEAM), sendWelcomeEmail: true });
     const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [clash, setClash] = useState(null);
     const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
@@ -637,10 +679,12 @@
     const submit = async () => {
       setBusy(true); setErr(''); setClash(null);
       const body = Object.assign({}, f, { role: 'client', accountType: 'client', enrollmentStatus: 'intake_pending' });
+      if (f.noEmail && f.phoneLogin) body.loginPhone = f.phone;
+      delete body.phoneLogin;
       const r = await req('/api/users', { method: 'POST', body, token });
       setBusy(false);
       if (r.error) { setErr(r.error); if (r.existingUser) setClash(r.existingUser); return; }
-      onCreated(r.id || (r.user && r.user.id), r.message);
+      onCreated(r.id || (r.user && r.user.id), [r.message, r.welcomeTextMessage].filter(Boolean).join(' ') || undefined);
     };
     const portal = (portals || []).find(p => p.slug === f.existingPortalSlug);
     return (
@@ -652,11 +696,19 @@
           <Field label={`Email${f.noEmail ? '' : ' *'}`}>
             <input className="input" type="email" autoComplete="off" disabled={f.noEmail} value={f.noEmail ? '' : f.email} onChange={e => set('email', e.target.value)} />
             <label className="flex items-start gap-2 mt-2 text-xs text-gray-600">
-              <input type="checkbox" className="mt-0.5" checked={f.noEmail} onChange={e => setF(Object.assign({}, f, { noEmail: e.target.checked, email: '', password: '' }))} />
-              <span>No email for this patient. Their POA or family member will sign in with their own account instead. No welcome email is sent.</span>
+              <input type="checkbox" className="mt-0.5" checked={f.noEmail} onChange={e => setF(Object.assign({}, f, { noEmail: e.target.checked, phoneLogin: e.target.checked ? f.phoneLogin : false, email: '', password: '' }))} />
+              <span>No email for this patient.</span>
             </label>
+            {f.noEmail && (
+              <div className="mt-1 ml-5 text-xs text-gray-600 space-y-1">
+                <label className="flex items-start gap-2"><input type="radio" name="client-no-email" className="mt-0.5" checked={f.phoneLogin} onChange={() => set('phoneLogin', true)} />
+                  <span>They sign in with their mobile number. Updates and password links come by text.</span></label>
+                <label className="flex items-start gap-2"><input type="radio" name="client-no-email" className="mt-0.5" checked={!f.phoneLogin} onChange={() => set('phoneLogin', false)} />
+                  <span>They don't sign in. Their POA or family member signs in with their own account.</span></label>
+              </div>
+            )}
           </Field>
-          <Field label="Phone (optional)"><input className="input" type="tel" value={f.phone} onChange={e => set('phone', e.target.value)} placeholder="(555) 123-4567" /></Field>
+          <Field label={f.noEmail && f.phoneLogin ? 'Mobile phone (they sign in with this) *' : 'Phone (optional)'}><input className="input" type="tel" value={f.phone} onChange={e => set('phone', e.target.value)} placeholder="(555) 123-4567" /></Field>
           <Field label={`Password${f.noEmail ? '' : ' *'}`}><input className="input" type="password" autoComplete="new-password" disabled={f.noEmail} placeholder={f.noEmail ? 'Not needed' : ''} value={f.noEmail ? '' : f.password} onChange={e => set('password', e.target.value)} /></Field>
         </div>
         <div className="p-4 bg-amber-50 rounded-xl mb-3">
@@ -692,16 +744,18 @@
         </Field>
         <h4 className="font-semibold text-gray-800 mt-2 mb-2">Care Team</h4>
         <CareTeamFields team={f.careTeam} setTeam={(t) => set('careTeam', t)} users={users} />
-        {!f.noEmail && (
+        {(!f.noEmail || f.phoneLogin) && (
           <label className="flex items-start gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
             <input type="checkbox" className="mt-0.5" checked={f.sendWelcomeEmail} onChange={e => set('sendWelcomeEmail', e.target.checked)} />
-            <span><b>Send welcome email</b>: email them their username and temporary password with a sign-in link.</span>
+            {f.noEmail
+              ? <span><b>Send welcome text</b>: text them a link to choose their own password. It expires in 24 hours.</span>
+              : <span><b>Send welcome email</b>: email them their username and temporary password with a sign-in link.</span>}
           </label>
         )}
         {err && <p className="text-sm text-red-600 mt-3">{err}</p>}
         {clash && <EmailClash clash={clash} form={Object.assign({ role: 'client' }, f)} users={users} token={token} onOpenClient={onOpenClient} onOpenFamily={onOpenFamily} onDone={(m) => onCreated(null, m)} />}
         <div className="flex gap-2 mt-4">
-          <button type="button" className="btn btn-primary" disabled={busy || !f.name.trim() || (!f.noEmail && (!f.email.trim() || !f.password)) || (!f.existingPortalSlug && !f.practiceName.trim())} onClick={submit}>{busy ? 'Creating…' : 'Create Client'}</button>
+          <button type="button" className="btn btn-primary" disabled={busy || !f.name.trim() || (!f.noEmail && (!f.email.trim() || !f.password)) || (f.noEmail && f.phoneLogin && !f.phone.trim()) || (!f.existingPortalSlug && !f.practiceName.trim())} onClick={submit}>{busy ? 'Creating…' : 'Create Client'}</button>
           <button type="button" className="btn btn-ghost" disabled={busy} onClick={onCancel}>Cancel</button>
         </div>
       </div>
@@ -737,17 +791,19 @@
 
   const AddFamilyForm = ({ token, users, presetClientId, onCreated, onCancel, onOpenClient, onOpenFamily }) => {
     const clients = users.filter(u => u.role === 'client');
-    const [f, setF] = useState({ name: '', email: '', phone: '', password: '', sendWelcomeEmail: true,
+    const [f, setF] = useState({ name: '', email: '', phone: '', password: '', sendWelcomeEmail: true, noEmail: false,
       familyLinks: presetClientId ? [{ clientId: String(presetClientId), relationship: '', isPoa: false }] : [] });
     const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [clash, setClash] = useState(null);
     const set = (k, v) => setF(Object.assign({}, f, { [k]: v }));
     const submit = async () => {
       setBusy(true); setErr(''); setClash(null);
       const body = Object.assign({}, f, { role: 'family', accountType: 'family', familyLinks: f.familyLinks.filter(l => l.clientId) });
+      // No email: they sign in with their mobile number (phoneLogin.js).
+      if (f.noEmail) { body.loginPhone = f.phone; body.email = ''; body.password = ''; }
       const r = await req('/api/users', { method: 'POST', body, token });
       setBusy(false);
       if (r.error) { setErr(r.error); if (r.existingUser) setClash(r.existingUser); return; }
-      onCreated(r.id || (r.user && r.user.id), r.message);
+      onCreated(r.id || (r.user && r.user.id), [r.message, r.welcomeTextMessage].filter(Boolean).join(' ') || undefined);
     };
     return (
       <div className="card p-6 mb-6">
@@ -755,20 +811,28 @@
         <p className="text-sm text-gray-500 mb-4">A family member or authorized contact with their own login, linked to the patients they may see.</p>
         <div className="grid md:grid-cols-2 gap-x-4">
           <Field label="Name *"><input className="input" value={f.name} onChange={e => set('name', e.target.value)} /></Field>
-          <Field label="Email *"><input className="input" type="email" autoComplete="off" value={f.email} onChange={e => set('email', e.target.value)} /></Field>
-          <Field label="Phone (optional)"><input className="input" type="tel" value={f.phone} onChange={e => set('phone', e.target.value)} /></Field>
-          <Field label="Password *"><input className="input" type="password" autoComplete="new-password" value={f.password} onChange={e => set('password', e.target.value)} /></Field>
+          <Field label={`Email${f.noEmail ? '' : ' *'}`}>
+            <input className="input" type="email" autoComplete="off" disabled={f.noEmail} value={f.noEmail ? '' : f.email} onChange={e => set('email', e.target.value)} />
+            <label className="flex items-start gap-2 mt-2 text-xs text-gray-600">
+              <input type="checkbox" className="mt-0.5" checked={f.noEmail} onChange={e => setF(Object.assign({}, f, { noEmail: e.target.checked, email: '', password: '' }))} />
+              <span>No email. They sign in with their mobile number, and updates and password links come by text.</span>
+            </label>
+          </Field>
+          <Field label={f.noEmail ? 'Mobile phone (they sign in with this) *' : 'Phone (optional)'}><input className="input" type="tel" value={f.phone} onChange={e => set('phone', e.target.value)} /></Field>
+          <Field label={`Password${f.noEmail ? '' : ' *'}`}><input className="input" type="password" autoComplete="new-password" disabled={f.noEmail} placeholder={f.noEmail ? 'Not needed. They choose it from the text.' : ''} value={f.noEmail ? '' : f.password} onChange={e => set('password', e.target.value)} /></Field>
         </div>
         <h4 className="font-semibold text-gray-800 mb-2">Patients They Can See</h4>
         <LinksEditor links={f.familyLinks} setLinks={(l) => set('familyLinks', l)} clients={clients} />
         <label className="flex items-start gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 mt-3">
           <input type="checkbox" className="mt-0.5" checked={f.sendWelcomeEmail} onChange={e => set('sendWelcomeEmail', e.target.checked)} />
-          <span><b>Send welcome email</b>: email them their username and temporary password with a sign-in link.</span>
+          {f.noEmail
+            ? <span><b>Send welcome text</b>: text them a link to choose their own password. It expires in 24 hours.</span>
+            : <span><b>Send welcome email</b>: email them their username and temporary password with a sign-in link.</span>}
         </label>
         {err && <p className="text-sm text-red-600 mt-3">{err}</p>}
         {clash && <EmailClash clash={clash} form={Object.assign({ role: 'family' }, f)} users={users} token={token} onOpenClient={onOpenClient} onOpenFamily={onOpenFamily} onDone={(m) => onCreated(null, m)} />}
         <div className="flex gap-2 mt-4">
-          <button type="button" className="btn btn-primary" disabled={busy || !f.name.trim() || !f.email.trim() || !f.password} onClick={submit}>{busy ? 'Creating…' : 'Create Family Contact'}</button>
+          <button type="button" className="btn btn-primary" disabled={busy || !f.name.trim() || (f.noEmail ? !f.phone.trim() : (!f.email.trim() || !f.password))} onClick={submit}>{busy ? 'Creating…' : 'Create Family Contact'}</button>
           <button type="button" className="btn btn-ghost" disabled={busy} onClick={onCancel}>Cancel</button>
         </div>
       </div>
@@ -778,7 +842,7 @@
   // A family account on its own: name, contact, links, status and recovery.
   const FamilyEditor = ({ token, family, users, me, onChanged, onClose, onDeleted }) => {
     const clients = users.filter(u => u.role === 'client');
-    const [basic, setBasic] = useState({ name: family.name || '', email: family.email || '', phone: family.phone || '' });
+    const [basic, setBasic] = useState({ name: family.name || '', email: family.emailIsPlaceholder ? '' : (family.email || ''), phone: family.phone || '' });
     const [links, setLinks] = useState(linksOf(family));
     const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
     const save = async (body, ok) => {
@@ -796,10 +860,10 @@
         <Block title="Name and Contact">
           <div className="grid md:grid-cols-3 gap-x-4">
             <Field label="Name"><input className="input" value={basic.name} onChange={e => setBasic({ ...basic, name: e.target.value })} /></Field>
-            <Field label="Email">{family.noLogin ? <p className="text-sm text-gray-500 py-2">No login of their own (placeholder).</p> : <input className="input" type="email" value={basic.email} onChange={e => setBasic({ ...basic, email: e.target.value })} />}</Field>
+            <Field label="Email">{family.noLogin ? <p className="text-sm text-gray-500 py-2">No login of their own (placeholder).</p> : <input className="input" type="email" placeholder={family.emailIsPlaceholder ? 'None. They sign in by phone.' : ''} value={basic.email} onChange={e => setBasic({ ...basic, email: e.target.value })} />}</Field>
             <Field label="Phone"><input className="input" type="tel" value={basic.phone} onChange={e => setBasic({ ...basic, phone: e.target.value })} /></Field>
           </div>
-          <button type="button" className="btn btn-primary" disabled={busy || !basic.name.trim()} onClick={() => save(family.noLogin ? { name: basic.name, phone: basic.phone } : basic, 'Saved.')}>Save</button>
+          <button type="button" className="btn btn-primary" disabled={busy || !basic.name.trim()} onClick={() => save((family.noLogin || (family.emailIsPlaceholder && !basic.email.trim())) ? { name: basic.name, phone: basic.phone } : basic, 'Saved.')}>Save</button>
         </Block>
         <Block title="Patients They Can See">
           <LinksEditor links={links} setLinks={setLinks} clients={clients} />
@@ -812,6 +876,7 @@
             <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => save({ emailUnsubscribed: !family.emailUnsubscribed }, family.emailUnsubscribed ? 'Resubscribed.' : 'Unsubscribed.')}>{family.emailUnsubscribed ? 'Resubscribe to Emails' : 'Unsubscribe from Emails'}</button>
           </div>
         </Block>
+        <PhoneSignIn person={family} updateUser={updateUser} onChanged={onChanged} />
         <AccountRecovery token={token} person={family} me={me} onChanged={onChanged} />
         {isSuperAdmin(me) && (
           <Block title="Delete Contact">
@@ -842,7 +907,7 @@
               {fam.length === 0 && <tr><td colSpan="4" className="text-center text-gray-400 py-10">No family contacts.</td></tr>}
               {fam.map(u => (
                 <tr key={u.id} onClick={() => onEdit(u.id)}>
-                  <td><div className="font-medium text-primary-500">{u.name}</div><div className="text-xs text-gray-500">{u.noLogin ? 'no login of their own' : u.email}</div></td>
+                  <td><div className="font-medium text-primary-500">{u.name}</div><div className="text-xs text-gray-500">{u.noLogin ? 'no login of their own' : (u.emailIsPlaceholder && u.loginPhone ? `signs in with ${u.loginPhone}` : u.email)}</div></td>
                   <td>{linksOf(u).length === 0 ? <span className="text-amber-700 text-sm">Not linked</span>
                     : linksOf(u).map(l => <div key={l.clientId}><a href="#" onClick={e => { e.preventDefault(); e.stopPropagation(); onOpenClient(l.clientId); }}>{nameOf(l.clientId)}</a>{l.relationship ? ` · ${l.relationship}` : ''}{l.isPoa ? ' · POA' : ''}</div>)}</td>
                   <td><span className={`badge ${u.accountStatus === 'inactive' ? 'bg-red-50 text-red-600' : 'bg-success-50 text-success-600'}`}>{u.accountStatus === 'inactive' ? 'Inactive' : 'Active'}</span>
@@ -893,7 +958,7 @@
     if (!window.XLSX) { window.alert('The spreadsheet tool did not load. Refresh and try again.'); return; }
     const nameOf = (id) => (users.find(u => String(u.id) === String(id)) || {}).name || '';
     const rows = users.filter(u => ['client', 'family'].includes(u.role)).map(u => ({
-      Name: u.name || '', Email: u.noLogin ? '' : (u.email || ''), 'Account Type': u.role === 'client' ? 'Client' : 'Family',
+      Name: u.name || '', Email: (u.noLogin || u.emailIsPlaceholder) ? '' : (u.email || ''), 'Account Type': u.role === 'client' ? 'Client' : 'Family',
       Status: u.accountStatus === 'inactive' ? 'Inactive' : 'Active', Phone: u.phone || '',
       'Portal Name': u.practiceName || '', 'Enrollment Status': u.role === 'client' ? (u.enrollmentStatus || '') : '',
       'Linked Patients': u.role === 'family' ? linksOf(u).map(l => `${nameOf(l.clientId)}${l.isPoa ? ' (POA)' : ''}`).join('; ') : '',

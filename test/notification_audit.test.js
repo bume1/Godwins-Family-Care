@@ -717,7 +717,7 @@ test('the four promises the app makes on screen are now kept', () => {
   for (const [re, what] of [
     // 2026-11-17: the promise is now "we have sent a link", kept by the link
     // itself; the office is still told when no link can be sent.
-    [/issuePasswordSetLink\(user, 'self_service'\)/, '"we have sent it a link to choose a new password"'],
+    [/issuePasswordSetLink\(user, 'self_service', typed\)/, '"we have sent it a link to choose a new password"'],
     [/notify\.passwordResetRequested\(/, 'an account that cannot receive a link reaches the office'],
     [/notify\.selfSignupVerified\(/, '"our office will review your account and email you"'],
     [/notify\.familyInviteRequested\(/, '"we will confirm it and email them their sign-in details"'],
