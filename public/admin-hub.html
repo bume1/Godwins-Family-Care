@@ -6114,12 +6114,16 @@
         if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
         return j;
       };
-      useEffect(() => { req('/api/onboarding/admin/document-links').then(setD).catch(e => setErr(e.message)); }, [token]);
+      const [share, setShare] = useState(null);   // key -> { state, label }; null while checking
+      const [shareErr, setShareErr] = useState('');
+      const loadSharing = () => { setShare(null); setShareErr('');
+        req('/api/onboarding/admin/document-links/sharing').then(j => setShare(Object.fromEntries((j.rows || []).map(r => [r.key, r])))).catch(e => { setShare({}); setShareErr(e.message); }); };
+      useEffect(() => { req('/api/onboarding/admin/document-links').then(setD).catch(e => setErr(e.message)); loadSharing(); }, [token]);
       const save = async (key, body) => {
         setBusy(true); setErr(''); setOk('');
         try {
           setD(await req(`/api/onboarding/admin/document-links/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(body) }));
-          setEdit(null); setVal('');
+          setEdit(null); setVal(''); loadSharing();
           setOk(body.reset ? 'Back to the default file.' : 'Link saved. Every place in the app that opens this document now opens the new file.');
         } catch (e) { setErr(e.message); } finally { setBusy(false); }
       };
@@ -6133,16 +6137,22 @@
           {err && <p className="text-sm text-red-700" style={{ margin: '8px 0' }}>{err}</p>}
           {ok && <p className="text-sm text-green-700" style={{ margin: '8px 0' }}>{ok}</p>}
           {!d ? <p className="mg-note">Loading…</p> : <>
+            {shareErr && <p className="mg-note" style={{ margin: '6px 0' }}>Sharing could not be checked: {shareErr}</p>}
+            {share && (() => { const bad = d.rows.filter(r => share[r.key] && ['private', 'domain', 'trashed'].includes(share[r.key].state)).length;
+              return bad ? <p data-sharing-warning className="text-sm text-red-700" style={{ margin: '8px 0' }}>{bad} {bad === 1 ? 'file' : 'files'} below cannot be opened by most staff. In Drive, open each one, choose Share, set General access to Anyone with the link, Viewer.</p> : null; })()}
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search documents" className="border rounded px-3 py-2 text-sm" style={{ width: '100%', maxWidth: 360, margin: '6px 0 10px' }} />
             <div style={{ overflowX: 'auto' }}>
               <table className="w-full text-sm">
-                <thead><tr className="text-left text-gray-600"><th className="py-2 pr-3">Document</th><th className="py-2 pr-3">Opens</th><th className="py-2"></th></tr></thead>
+                <thead><tr className="text-left text-gray-600"><th className="py-2 pr-3">Document</th><th className="py-2 pr-3">Opens</th><th className="py-2 pr-3">Staff access</th><th className="py-2"></th></tr></thead>
                 <tbody>
                   {rows.map(r => (
                     <tr key={r.key} data-doc-link={r.key} className="border-t align-top">
                       <td className="py-2 pr-3"><b>{r.title}</b>{r.docNumber && <div className="text-xs text-gray-500">{r.docNumber}</div>}
                         {r.changed && <div className="text-xs text-gray-500">Changed{r.changedByName ? ` by ${r.changedByName}` : ''}{r.changedAt ? ` · ${fmt(r.changedAt)}` : ''}</div>}</td>
                       <td className="py-2 pr-3" style={{ whiteSpace: 'nowrap' }}>{r.url ? <a href={r.url} target="_blank" rel="noopener noreferrer" className="text-blue-700 underline">Open</a> : '—'}{r.changed ? ' · new file' : ' · default'}</td>
+                      <td className="py-2 pr-3" data-sharing={share && share[r.key] ? share[r.key].state : 'checking'} style={{ minWidth: 160 }}>{!share ? <span className="text-gray-500">Checking…</span>
+                        : !share[r.key] ? <span className="text-gray-500">—</span>
+                        : <span className={share[r.key].state === 'open' ? 'text-green-700' : share[r.key].state === 'unknown' ? 'text-gray-500' : 'text-red-700'}>{share[r.key].label}</span>}</td>
                       <td className="py-2" style={{ minWidth: 240 }}>
                         {d.canEdit && edit !== r.key && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           <button className="mg-btn mg-ghost mg-sm" onClick={() => { setEdit(r.key); setVal(''); }}>Change Link</button>
