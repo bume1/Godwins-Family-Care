@@ -62,7 +62,7 @@ test('rename, move to another phase, reorder, hide and restore a built-in task: 
   assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/items/A.4.03', { chapter: 'A', phase: 'C.4' })).data.code, 'PHASE_UNKNOWN');
   // Reorder within the phase.
   const a5 = ids(tr, 'A.5');
-  await h.call('POST', `/api/onboarding/admin/items/${a5[1]}/move`, { chapter: 'A', direction: 'up' });
+  await h.call('PUT', '/api/onboarding/admin/phases/A.5/order', { chapter: 'A', ids: [a5[1], a5[0]] });
   tr = await trackOf(h, CG.id);
   assert.deepStrictEqual(ids(tr, 'A.5').slice(0, 2), [a5[1], a5[0]]);
   // Staff see the same order.
@@ -140,4 +140,51 @@ test('the office library lists who has each training, and the pages connect onbo
   assert.match(page, /\/reopen`, \{ method: 'POST'/);
   const my = fs.readFileSync(path.join(__dirname, '..', 'public', 'my-gfc.js'), 'utf8');
   assert.match(my, /href="\/onboarding#training"/);
+});
+
+test('drag-and-drop reorder saves a whole phase at once; one row of controls, not arrows on every row', async (t) => {
+  const h = await mount(t);
+  let tr = await trackOf(h, CG.id);
+  const a5 = ids(tr, 'A.5');
+  const want = a5.slice().reverse();
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/phases/A.5/order', { chapter: 'A', userId: CG.id, ids: want })).status, 200);
+  tr = await trackOf(h, CG.id);
+  assert.deepStrictEqual(ids(tr, 'A.5'), want);
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/phases/A.5/order', { chapter: 'A', ids: ['A.4.01'] })).data.code, 'ORDER_MISMATCH');
+  assert.strictEqual((await h.call('PUT', '/api/onboarding/admin/phases/Z.9/order', { chapter: 'A', ids: [] })).data.code, 'PHASE_UNKNOWN');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /<ReorderList items=\{items\}/);
+  assert.doesNotMatch(page, /aria-label="Move up"/, 'no arrows on every row');
+});
+
+test('admins and managers rename and remove a file on a task; staff cannot', async (t) => {
+  const h = await mount(t);
+  const fd = new FormData(); fd.append('file', new Blob([Buffer.from('%PDF-1.4 x')], { type: 'application/pdf' }), 'scan.pdf');
+  assert.strictEqual((await h.call('POST', `/api/onboarding/admin/people/${RN.id}/items/B.4.02/files`, fd)).status, 200);
+  const item = async () => (await trackOf(h, RN.id)).items.find(i => i.id === 'B.4.02');
+  const f = (await item()).files[0];
+  const url = `/api/onboarding/admin/people/${RN.id}/items/B.4.02/files/${f.id}`;
+  assert.strictEqual((await h.call('PUT', url, { name: 'Documentation sample.pdf' })).status, 200);
+  assert.strictEqual((await item()).files[0].name, 'Documentation sample.pdf');
+  assert.strictEqual(h.store.caregiver_documents[0].file_name, 'Documentation sample.pdf', 'the Staff Record copy follows the name');
+  h.as(RN);
+  assert.strictEqual((await h.call('DELETE', url)).status, 403);
+  h.as(OFFICE);
+  assert.strictEqual((await h.call('DELETE', url)).status, 200);
+  assert.strictEqual((await item()).files.length, 0);
+  assert.strictEqual((await h.call('GET', url)).status, 404, 'a removed file no longer opens from the task');
+  assert.ok(h.store.caregiver_documents[0], 'the Staff Record keeps its copy');
+});
+
+test('policies are signed in the app from the task, the same signature as My GFC → Policies; paper is the tucked-away exception', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /It is the same signature, so it ticks both\./);
+  assert.match(page, /<summary className="meta" style=\{\{ cursor: 'pointer' \}\}>Signed on paper instead\?<\/summary>/);
+  assert.match(page, /\{signs \? 'Open and Sign' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'document-sign-ui.js'), 'utf8');
+  assert.match(ui, /\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign/, 'one signing route for both places');
+  assert.match(page, /r\.signs && r\.status !== 'complete'/, 'a welcome-packet form opens where it is signed');
+  const T = require('../onboarding/track');
+  const t = T.buildTrack({ inputs: { chapter: 'A' }, record: { userId: 'c1' }, accountType: 'caregiver', packetRows: require('../welcomePacketRepository').buildChecklist({}, [], {}, []) });
+  assert.ok(t.items.find(i => i.id === 'A.5.03').packet.every(p => p.signs), 'handbook, privacy and code of conduct are signed forms');
 });

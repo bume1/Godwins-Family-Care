@@ -86,6 +86,12 @@
     .item:last-child{border-bottom:0}
     .item .dot{width:22px;height:22px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px}
     .item{flex-wrap:wrap}
+    .rl-row{display:flex;align-items:center;gap:10px;padding:10px 12px;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 2px rgba(3,61,80,.06);font-size:14.5px;transition:transform .12s,box-shadow .12s,border-color .12s}
+    .rl-row[draggable=true]{cursor:grab} .rl-row:hover{box-shadow:0 3px 10px rgba(3,61,80,.10)}
+    .rl-drag{opacity:.45} .rl-over{border-color:#C9A44A;box-shadow:0 0 0 2px rgba(201,164,74,.35);transform:translateY(-1px)}
+    .rl-grip{border:none;background:none;color:var(--mut);cursor:grab;font-size:18px;padding:2px;display:flex}
+    .rl-grip:focus-visible{outline:2px solid #C9A44A;border-radius:6px}
+    .rl-num{width:22px;height:22px;border-radius:50%;background:#F6EFE2;color:var(--navy);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
     /* The title keeps room; tags and status drop under it rather than squeeze it (owner, 2026-11-18). */
     .item .t{flex:1 1 260px;min-width:0} .item .t b{font-weight:500}
     .item .meta{font-size:12.5px;color:var(--mut)}
@@ -500,11 +506,14 @@ const PolicyAck = ({ a, itemId, base, office, busy, ackVersion, setAckVersion, r
       {!a.current && !office && !hasFile && signs && <div className="meta">The office will give you this to sign.</div>}
       {!a.current && office && (
         <div style={{ marginTop: 6 }}>
-          <div className="meta">{signs ? 'They sign this in the app. If they signed a paper copy, file it here.' : 'They acknowledge this in the app. You can file it for them.'}</div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-            <input placeholder={`Version (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
-            <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>{signs ? 'File Paper Signature' : 'File For Her'}</button>
-          </div>
+          <div className="meta">{signs ? 'Waiting on their signature in the app.' : 'Waiting on them in the app.'}</div>
+          <details style={{ marginTop: 4 }}>
+            <summary className="meta" style={{ cursor: 'pointer' }}>{signs ? 'Signed on paper?' : 'File it for them'}</summary>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              <input placeholder={`Version (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
+              <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>{signs ? 'File Paper Signature' : 'File For Her'}</button>
+            </div>
+          </details>
         </div>
       )}
       {open && WS && <WS doc={doc} onCancel={() => setOpen(false)} onDone={async () => { setOpen(false); await onChanged(); }} />}
@@ -591,15 +600,20 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to sign or acknowledge</label>
-            {/* A paper signature is filed with its signed copy (owner, 2026-11-16). */}
+            {/* Policies are signed in the app, here or in My GFC → Policies: one
+                signature, both places (owner, 2026-11-18). Paper is the exception. */}
+            <div className="meta" style={{ margin: '0 0 8px' }}>{office
+              ? 'They sign each one in the app: from this task or from My GFC → Policies. It is the same signature, so it ticks both.'
+              : 'Sign each one right here. It is the same as signing in My GFC → Policies, so it ticks both.'}</div>
             {office && (
-              <div style={{ margin: '0 0 8px' }}>
-                <div className="meta">Signed on paper? Upload the signed copy here first, then file it on the policy below.</div>
+              <details style={{ margin: '0 0 8px' }}>
+                <summary className="meta" style={{ cursor: 'pointer' }}>Signed on paper instead?</summary>
+                <div className="meta" style={{ marginTop: 4 }}>Upload the signed copy here, then file it on the policy below.</div>
                 <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 4 }}>
                   <i className="ti ti-upload" />Upload Signed Paper Copy
                   <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
                 </label>
-              </div>
+              </details>
             )}
             {item.acknowledgments.map(a => <PolicyAck key={a.id} a={a} itemId={item.id} base={base} office={office} busy={busy}
               ackVersion={ackVersion} setAckVersion={setAckVersion} run={run} onChanged={onChanged} />)}
@@ -692,6 +706,10 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               : "These are the same items as the caregiver's welcome packet. Done here is done there."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
               <li key={r.kind} style={{ marginBottom: 4 }}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b>
+                {/* A form she signs in her welcome packet: one tap there (owner, 2026-11-18). */}
+                {!office && r.signs && r.status !== 'complete' && r.status !== 'in_review' && (
+                  <a className="btn sm gold" style={{ marginLeft: 8 }} href={r.kind === 'staff_welcome' ? '/my#welcome' : '/caregiver#onboarding'}>{r.kind === 'staff_welcome' ? 'Open Welcome Packet' : 'Sign in Welcome Packet'}</a>
+                )}
                 {office && r.office && r.status !== 'complete' && track.person && (
                   <button className="btn sm" style={{ marginLeft: 8 }} disabled={busy} onClick={() => run(() => call(`/api/caregiver/admin/welcome-packets/${encodeURIComponent(track.person.userId)}/office-item`, { method: 'PUT', body: { kind: r.kind, status: 'done' } }), 'Marked done.')}>Mark Done</button>
                 )}</li>
@@ -723,6 +741,10 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '4px 0', fontSize: 14 }}>
                 <a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.file(base, item.id, f.id), f.name).catch(x => setErr(x.message)); }}>{f.name}</a>
                 <span className="meta" style={{ color: 'var(--mut)', fontSize: 12.5 }}>{fmtDate(f.uploadedAt)}{f.filedBy === 'OFFICE_ON_BEHALF' ? ` · filed by ${f.uploadedByName}` : ''}{f.status === 'accepted' ? ' · Accepted' : ''}</span>
+                {/* Admins and managers edit a task's own files (owner, 2026-11-18). */}
+                {office && base.userId && !String(f.id).includes(':') && <FileTools f={f} fileUrl={`/api/onboarding/admin/people/${encodeURIComponent(base.userId)}/items/${encodeURIComponent(item.id)}/files/${encodeURIComponent(f.id)}`}
+                  onReplace={(file) => run(async () => { const fd = new FormData(); fd.append('file', file); if (upKinds.length > 1) fd.append('kind', upKind || (upKinds[0] || {}).kind || ''); await call(PATHS.files(base, item.id), { method: 'POST', body: fd }); await call(`/api/onboarding/admin/people/${encodeURIComponent(base.userId)}/items/${encodeURIComponent(item.id)}/files/${encodeURIComponent(f.id)}`, { method: 'DELETE' }); }, 'Replaced.')}
+                  run={run} busy={busy} />}
                 {office && f.documentId && f.status === 'received' && (
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', width: '100%' }}>
                     <button className="btn sm" disabled={busy} onClick={() => run(() => call(`/api/caregiver/documents/${encodeURIComponent(f.documentId)}/review`, { method: 'POST', body: { decision: 'accepted' } }), 'Accepted.')}>Accept</button>
@@ -899,6 +921,58 @@ const InstructionsEditor = ({ id, text, onSaved }) => {
         <button className="btn sm" onClick={save}>Save</button>
         <button className="btn sm ghost" onClick={() => setOpen(false)}>Cancel</button>
       </div>
+    </div>
+  );
+};
+
+// Rename, replace or remove one file on a task (admins and managers).
+const FileTools = ({ f, fileUrl, onReplace, run, busy }) => {
+  const [renaming, setRenaming] = useState(false); const [name, setName] = useState(f.name);
+  if (renaming) return (
+    <div style={{ display: 'flex', gap: 6, width: '100%' }}>
+      <input value={name} onChange={e => setName(e.target.value)} />
+      <button className="btn sm" disabled={busy || !name.trim()} onClick={() => run(() => call(fileUrl, { method: 'PUT', body: { name } }).then(() => setRenaming(false)), 'Renamed.')}>Save</button>
+      <button className="btn sm ghost" onClick={() => setRenaming(false)}>Cancel</button>
+    </div>
+  );
+  return (
+    <span style={{ display: 'flex', gap: 4 }}>
+      <button className="btn sm ghost" title="Rename" aria-label={`Rename ${f.name}`} onClick={() => { setName(f.name); setRenaming(true); }}><i className="ti ti-pencil" /></button>
+      <label className="btn sm ghost" title="Replace" aria-label={`Replace ${f.name}`} style={{ cursor: 'pointer' }}><i className="ti ti-replace" /><input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && onReplace(e.target.files[0])} /></label>
+      <button className="btn sm ghost" title="Remove" aria-label={`Remove ${f.name}`} disabled={busy} onClick={() => { if (window.confirm(`Remove "${f.name}" from this task? Their Staff Record keeps a copy.`)) run(() => call(fileUrl, { method: 'DELETE' }), 'Removed.'); }}><i className="ti ti-trash" /></button>
+    </span>
+  );
+};
+
+// Drag a task by its handle to reorder the phase (owner, 2026-11-18: "more
+// user friendly and modern"). Saves on drop; keyboard users press the arrow
+// keys on a focused handle.
+const ReorderList = ({ items, onSave }) => {
+  const [list, setList] = useState(items.filter(i => i.id !== 'WELCOME'));
+  const fixed = items.filter(i => i.id === 'WELCOME');
+  const [drag, setDrag] = useState(null); const [over, setOver] = useState(null);
+  const [state, setState] = useState(''); const [err, setErr] = useState('');
+  const save = async (next) => {
+    setList(next); setState('Saving…'); setErr('');
+    try { await onSave(next.map(i => i.id)); setState('Saved'); setTimeout(() => setState(''), 1500); } catch (e) { setErr(e.message); setState(''); }
+  };
+  const moveTo = (from, to) => { if (from === to || to < 0 || to >= list.length) return; const next = list.slice(); const [x] = next.splice(from, 1); next.splice(to, 0, x); save(next); };
+  return (
+    <div style={{ margin: '4px 0 10px' }}>
+      <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 8 }}>Drag a task by its handle to change the order. It saves as you go, for everyone on this checklist. {state && <b style={{ color: 'var(--ok, #2f6b4f)' }}>{state}</b>}</div>
+      {err && <div className="err">{err}</div>}
+      {fixed.map(i => <div key={i.id} className="rl-row" style={{ opacity: 0.6 }}><i className="ti ti-lock" />{i.title}</div>)}
+      {list.map((i, n) => (
+        <div key={i.id} className={`rl-row${over === n && drag !== null && drag !== n ? ' rl-over' : ''}${drag === n ? ' rl-drag' : ''}`}
+          draggable onDragStart={e => { setDrag(n); e.dataTransfer.effectAllowed = 'move'; }}
+          onDragOver={e => { e.preventDefault(); setOver(n); }} onDragLeave={() => setOver(o => (o === n ? null : o))}
+          onDrop={e => { e.preventDefault(); moveTo(drag, n); setDrag(null); setOver(null); }} onDragEnd={() => { setDrag(null); setOver(null); }}>
+          <button className="rl-grip" aria-label={`Move ${i.title}. Use the arrow keys.`} title="Drag to reorder"
+            onKeyDown={e => { if (e.key === 'ArrowUp') { e.preventDefault(); moveTo(n, n - 1); } if (e.key === 'ArrowDown') { e.preventDefault(); moveTo(n, n + 1); } }}><i className="ti ti-grip-vertical" /></button>
+          <span className="rl-num">{n + 1}</span>
+          <span style={{ flex: 1 }}>{i.title}</span>
+        </div>
+      ))}
     </div>
   );
 };
@@ -1095,7 +1169,7 @@ const CustomTaskList = () => {
 const Person = ({ userId, onBack }) => {
   const [data, setData] = useState(null); const [err, setErr] = useState('');
   const [phase, setPhase] = useState(null); const [openItem, setOpenItem] = useState(null); const [tab, setTab] = useState('checklist');
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(false); const [reordering, setReordering] = useState(false);
   const base = { office: true, userId };
   const personPath = `/api/onboarding/admin/people/${userId}`;
   const load = useCallback(async () => {
@@ -1109,7 +1183,6 @@ const Person = ({ userId, onBack }) => {
   const ph = t.phases.find(p => p.id === cur);
   const items = t.items.filter(i => i.phase === cur);
   const item = openItem && t.items.find(i => i.id === openItem);
-  const move = (i, direction) => call(`/api/onboarding/admin/items/${encodeURIComponent(i.id)}/move`, { method: 'POST', body: { direction, chapter: t.chapter.id, userId } }).then(load).catch(e => window.alert(e.message));
   const unhide = (h) => call(`/api/onboarding/admin/items/${encodeURIComponent(h.id)}`, { method: 'PUT', body: { hidden: false, chapter: t.chapter.id } }).then(load).catch(e => window.alert(e.message));
   return (
     <div>
@@ -1138,7 +1211,7 @@ const Person = ({ userId, onBack }) => {
         <div className="card">
           <div className="phases">
             {t.phases.map(p => (
-              <button key={p.id} className={`ph ${p.id === cur ? 'on' : ''} ${p.complete ? 'done' : ''}`} onClick={() => setPhase(p.id)}>
+              <button key={p.id} className={`ph ${p.id === cur ? 'on' : ''} ${p.complete ? 'done' : ''}`} onClick={() => { setPhase(p.id); setReordering(false); }}>
                 <span className="num">{p.complete ? <i className="ti ti-check" /> : p.number}</span>
                 <b>{p.label}</b><small>{p.plainWhen}</small>
               </button>
@@ -1146,17 +1219,18 @@ const Person = ({ userId, onBack }) => {
           </div>
           <div className="card-h"><h2>Phase {ph.number} · {ph.label}</h2>
             {ph.separateRecord && <span className="note" style={{ margin: 0 }}>Also tracked on its own credentialing record, so a payer delay never reads as not ready.</span>}
-            {!adding && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}</div>
+            <span style={{ display: 'flex', gap: 6 }}>
+              {items.length > 1 && !adding && (reordering
+                ? <button className="btn sm" onClick={() => setReordering(false)}><i className="ti ti-check" />Done</button>
+                : <button className="btn sm ghost" onClick={() => setReordering(true)}><i className="ti ti-arrows-sort" />Reorder</button>)}
+              {!adding && !reordering && <button className="btn sm" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add a Task</button>}
+            </span></div>
+          {reordering && <ReorderList items={items} onSave={(ids) => call(`/api/onboarding/admin/phases/${encodeURIComponent(ph.id)}/order`, { method: 'PUT', body: { chapter: t.chapter.id, userId, ids } }).then(load)} />}
           {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES} phase={ph.id}
             onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
-          {items.map((i, n) => (
+          {!reordering && items.map(i => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
-              {/* Reorder within the phase (owner, 2026-11-18). */}
-              {i.id === 'WELCOME' ? <span style={{ width: 30 }} /> : <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }} onClick={e => e.stopPropagation()}>
-                <button className="btn sm ghost" aria-label="Move up" title="Move up" disabled={n === 0} style={{ padding: '0 6px' }} onClick={() => move(i, 'up')}><i className="ti ti-chevron-up" /></button>
-                <button className="btn sm ghost" aria-label="Move down" title="Move down" disabled={n === items.length - 1} style={{ padding: '0 6px' }} onClick={() => move(i, 'down')}><i className="ti ti-chevron-down" /></button>
-              </span>}
               <Dot status={i.status} />
               <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div>
                 <ItemTasks item={i} subjectName={String(t.person.name || '').split(' ')[0]} viewerIsSubject={false} office /></div>
