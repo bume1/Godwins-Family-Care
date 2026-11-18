@@ -273,6 +273,9 @@
       videoRoom: (eid) => authedFetch(`/api/clinical/visits/${eid}/video`),
       startVideoVisit: (eid) => authedFetch(`/api/clinical/visits/${eid}/video/start`, { method: 'POST' }),
       createVideoRoom: (eid) => authedFetch(`/api/clinical/appointments/${eid}/video-room`, { method: 'POST' }),
+      // The fallback when the app cannot create a room: a Meet link staff made
+      // themselves becomes the patient's Join button.
+      pasteMeetLink: (eid, url) => authedFetch(`/api/clinical/appointments/${eid}/video-link`, { method: 'POST', body: JSON.stringify({ url }) }),
       telehealthCheck: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${encodeURIComponent(euuid)}/telehealth-checks`, {
         method: 'POST', body: JSON.stringify(body)
       }),
@@ -9308,9 +9311,10 @@
     // that invites a click that does nothing, and the SERVER decides which
     // this is (`isVideoVisit`): the page names no check and no rule of its own,
     // so it cannot drift from the validator that refuses one it did not offer.
-    const VideoVisitCard = ({ d, eid, busy, onStart, onCreateRoom, onCheck }) => {
+    const VideoVisitCard = ({ d, eid, busy, onStart, onCreateRoom, onPasteLink, onCheck }) => {
       const tele = d.telehealthChecklist;
       const [notes, setNotes] = useState({});
+      const [pasted, setPasted] = useState('');
       if (!d.isVideoVisit) return null;
       return (
         <div className="border border-primary/30 bg-primary/[0.03] rounded-lg p-2.5 mt-1 text-xs">
@@ -9333,6 +9337,22 @@
                 </span>
                 : <span className="text-amber-800">No video room for this visit. Attach this note to its appointment to create one.</span>)}
           </div>
+          {!d.video && eid && onPasteLink && (
+            /* The fallback: if Create Video Room fails, make a meeting in
+               Google Calendar or Meet and paste its link here. */
+            <div className="mt-2">
+              <div className="text-stone-600 mb-1">Or paste a Google Meet link you made yourself:</div>
+              <div className="flex gap-1.5 flex-wrap">
+                <input className="inp !py-1 text-[12px] flex-1 min-w-[200px]" placeholder="https://meet.google.com/abc-defg-hij"
+                  value={pasted} onChange={e => setPasted(e.target.value)} />
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === 'paste' || !pasted.trim()}
+                  onClick={() => onPasteLink(pasted)}>
+                  <i className="ti ti-link" />{busy === 'paste' ? 'Saving…' : 'Save Meet Link'}
+                </button>
+              </div>
+              <p className="text-stone-500 mt-1">In that meeting's settings, turn off recording, transcripts and AI notes. The app can't do it for a link you made.</p>
+            </div>
+          )}
           {d.video && d.video.meetingCode && (
             <p className="text-stone-500 mt-1">Meeting code <b>{d.video.meetingCode}</b> — read it out if someone cannot open the link.</p>
           )}
@@ -9562,6 +9582,13 @@
                 onCreateRoom={() => {
                   setBusy('room'); setMsg(null);
                   api.createVideoRoom(d.linkedAppointmentEid)
+                    .then(r => { setMsg({ ok: true, text: r.message }); load(); })
+                    .catch(e => setMsg({ ok: false, text: e.message }))
+                    .finally(() => setBusy(''));
+                }}
+                onPasteLink={(url) => {
+                  setBusy('paste'); setMsg(null);
+                  api.pasteMeetLink(d.linkedAppointmentEid, url)
                     .then(r => { setMsg({ ok: true, text: r.message }); load(); })
                     .catch(e => setMsg({ ok: false, text: e.message }))
                     .finally(() => setBusy(''));

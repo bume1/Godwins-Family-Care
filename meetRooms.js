@@ -249,8 +249,25 @@ const createTransport = ({ getAuth = authFor } = {}) => {
   };
 };
 
+// A Meet link typed in by staff (the fallback when the app cannot create a
+// room). Only a real meet.google.com meeting link is accepted: anything else
+// pasted here would become the patient's Join button.
+const MEET_CODE_RE = /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/;
+const parseManualMeetLink = (input) => {
+  const raw = String(input || '').trim();
+  if (!raw) return { ok: false, error: 'Paste the Google Meet link.' };
+  let u;
+  try { u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`); } catch (_) { u = null; }
+  const code = u ? u.pathname.replace(/^\/+|\/+$/g, '').toLowerCase() : '';
+  if (!u || u.protocol !== 'https:' || u.hostname.toLowerCase() !== 'meet.google.com' || !MEET_CODE_RE.test(code)) {
+    return { ok: false, error: 'That is not a Google Meet link. It should look like https://meet.google.com/abc-defg-hij.' };
+  }
+  return { ok: true, meetingUri: `https://meet.google.com/${code}`, meetingCode: code };
+};
+
 module.exports = {
   MEET_SCOPES, MEET_API, SPACE_CONFIG,
+  parseManualMeetLink,
   MeetNotConfiguredError,
   meetStatus, clinicianWorkspaceEmail, workspaceDomains,
   createTransport,
