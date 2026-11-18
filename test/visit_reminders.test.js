@@ -200,8 +200,10 @@ test('A3: booking creates one, cancel voids, and a no-show still sends nothing',
   // unconditional day-before pair above is still the thing being pinned —
   // what is counted here is that nothing LOST its call.
   const schedules = SERVER_CODE.match(/\n\s*await scheduleVisitReminder\(/g) || [];
-  assert.equal(schedules.length, 4,
-    'day-before scheduled unconditionally at booking AND reschedule, plus T1\'s gated video nudge at each');
+  // 2026-11-18: a fifth, the video nudge from Create Video Room, for a video
+  // visit booked before its room could be made.
+  assert.equal(schedules.length, 5,
+    'day-before scheduled unconditionally at booking AND reschedule, plus T1\'s gated video nudge at each and at Create Video Room');
   const voids = SERVER_CODE.match(/\n\s*await voidVisitReminders\(/g) || [];
   assert.equal(voids.length, 3,
     'voided at reschedule, cancel, and (T1) no-show');

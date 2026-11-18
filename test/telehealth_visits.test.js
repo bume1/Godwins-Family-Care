@@ -331,6 +331,38 @@ test('B3: starting a video visit stamps the start through the ONE writer', () =>
   assert.equal(guards, 2, 'exactly those two');
 });
 
+// ---- B4: a video visit booked before its room could be made -----------
+// (owner report 2026-11-18, "our telehealth link is not working"). A room was
+// only ever made at booking or reschedule, so a visit booked while Meet was
+// still being set up had no room and no way to get one short of moving it.
+
+test('B4: Create Video Room makes a room for a video visit that has none, and only that', () => {
+  const src = SERVER.slice(SERVER.indexOf("app.post('/api/clinical/appointments/:eid/video-room'"));
+  assert.ok(src.length > 0, 'the route exists');
+  const body = src.slice(0, src.indexOf('\n});'));
+  // Same gate as every other change to a visit's booking.
+  assert.match(body.split('\n')[0], /requireClinicalDocumenter, requireCapability\(clinicalRoles\.CAPABILITIES\.SCHEDULING\)/);
+  // An existing room is RETURNED, never replaced: a patient already holding
+  // the link must not be handed a different one.
+  assert.match(body, /if \(existing && existing\.meetingUri\) \{[\s\S]{0,200}created: false/);
+  assert.ok(body.indexOf('existing.meetingUri') < body.indexOf('createVideoRoomFor('), 'checked before anything is created');
+  // It never turns a house call into a video visit.
+  assert.match(body, /if \(!clinicalRepo\.locationNeedsVideoRoom\(dec\.location\)\) \{[\s\S]{0,300}code: 'APPT_NOT_VIDEO'/);
+  // The ONE room builder, so the host rule and the room config cannot fork.
+  assert.match(body, /await createVideoRoomFor\(\{ eid, client, providerId/);
+  assert.ok(!/meetRooms\.createSpace/.test(body), 'never calls Meet directly');
+  // The day-of link and the patient's Join button follow the room.
+  assert.match(body, /kind: visitReminders\.REMINDER_KINDS\.VIDEO_JOIN/);
+  assert.match(body, /await publishAppointmentsForClient\(/);
+});
+
+test('B4: the encounter card offers Create Video Room instead of "reschedule it"', () => {
+  const page = code(read('public/clinical.html'), 'clinical.html');
+  assert.match(page, /createVideoRoom: \(eid\) => authedFetch\(`\/api\/clinical\/appointments\/\$\{eid\}\/video-room`, \{ method: 'POST' \}\)/);
+  assert.match(page, /onClick=\{onCreateRoom\}/);
+  assert.ok(!/reschedule it as one so a room is created/.test(page), 'the dead-end advice is gone');
+});
+
 // ---- C1 / C5: what is published, and the labels ------------------------
 
 test('C1: the published row carries hasVideo and never the join link', () => {

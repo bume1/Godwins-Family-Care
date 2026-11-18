@@ -272,6 +272,7 @@
       // plus a Start visit somebody has to remember to press.
       videoRoom: (eid) => authedFetch(`/api/clinical/visits/${eid}/video`),
       startVideoVisit: (eid) => authedFetch(`/api/clinical/visits/${eid}/video/start`, { method: 'POST' }),
+      createVideoRoom: (eid) => authedFetch(`/api/clinical/appointments/${eid}/video-room`, { method: 'POST' }),
       telehealthCheck: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${encodeURIComponent(euuid)}/telehealth-checks`, {
         method: 'POST', body: JSON.stringify(body)
       }),
@@ -9307,7 +9308,7 @@
     // that invites a click that does nothing, and the SERVER decides which
     // this is (`isVideoVisit`): the page names no check and no rule of its own,
     // so it cannot drift from the validator that refuses one it did not offer.
-    const VideoVisitCard = ({ d, eid, busy, onStart, onCheck }) => {
+    const VideoVisitCard = ({ d, eid, busy, onStart, onCreateRoom, onCheck }) => {
       const tele = d.telehealthChecklist;
       const [notes, setNotes] = useState({});
       if (!d.isVideoVisit) return null;
@@ -9323,7 +9324,14 @@
                 /* The room belongs to the APPOINTMENT, so without one there is
                    nothing to key a start on. Said plainly rather than hidden. */
                 : <span className="text-stone-500">Attach this note to its appointment to open the room from here.</span>)
-              : <span className="text-amber-800">No video room for this visit. If it should be a video visit, reschedule it as one so a room is created.</span>}
+              : (eid && onCreateRoom
+                ? <span className="flex items-center gap-2 flex-wrap">
+                  <span className="text-amber-800">No video room yet, so the patient has no link to join.</span>
+                  <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === 'room'} onClick={onCreateRoom}>
+                    <i className="ti ti-video-plus" />{busy === 'room' ? 'Creating…' : 'Create Video Room'}
+                  </button>
+                </span>
+                : <span className="text-amber-800">No video room for this visit. Attach this note to its appointment to create one.</span>)}
           </div>
           {d.video && d.video.meetingCode && (
             <p className="text-stone-500 mt-1">Meeting code <b>{d.video.meetingCode}</b> — read it out if someone cannot open the link.</p>
@@ -9551,6 +9559,13 @@
                 </div>
               )}
               <VideoVisitCard d={d} eid={d.linkedAppointmentEid} busy={busy}
+                onCreateRoom={() => {
+                  setBusy('room'); setMsg(null);
+                  api.createVideoRoom(d.linkedAppointmentEid)
+                    .then(r => { setMsg({ ok: true, text: r.message }); load(); })
+                    .catch(e => setMsg({ ok: false, text: e.message }))
+                    .finally(() => setBusy(''));
+                }}
                 onStart={() => {
                   // Opened from the CLICK, not from the response: a
                   // `window.open` after an await is outside the user-gesture

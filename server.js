@@ -13048,6 +13048,83 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
   }
 });
 
+// POST /api/clinical/appointments/:eid/video-room — open the Meet room for a
+// video visit that does not have one (owner report, 2026-11-18: "our
+// telehealth link is not working").
+//
+// A room is only ever created at BOOKING or at a RESCHEDULE. So a video visit
+// booked while Meet was still being set up, or while its clinician had no GFC
+// Google account, or on a day Google refused the call, had no room and NO WAY
+// TO GET ONE short of moving the visit — and the screens said exactly that:
+// "reschedule it as one so a room is created". The patient's Join button never
+// appeared, the day-of email carried no link, and the clinician's Start Video
+// Visit button was missing. This is the missing door: same room builder, same
+// host rule, nothing about the visit itself changes.
+//
+// IDEMPOTENT: an existing room is returned, never replaced, because a patient
+// who already holds the link must not be handed a different one.
+app.post('/api/clinical/appointments/:eid/video-room', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const eid = String(req.params.eid || '').trim();
+    if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
+    const existing = videoLinkFor(await loadVideoLinks(), eid);
+    if (existing && existing.meetingUri) {
+      return res.json({
+        message: 'This visit already has a video room.', created: false,
+        video: { meetingUri: existing.meetingUri, meetingCode: existing.meetingCode || null }
+      });
+    }
+    const emr = openemr.forActor(req.user);
+    const loaded = await loadAppointmentForMutation(emr, eid, req.user);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
+    const { row } = loaded;
+    const dec = clinicalRepo.decodeAppointmentNotes(row.pc_hometext);
+    // Never turns a house call into a video visit: the place is the
+    // appointment's, and changing it is a reschedule.
+    if (!clinicalRepo.locationNeedsVideoRoom(dec.location)) {
+      return res.status(409).json({
+        error: 'This visit is not booked as a video visit. To make it one, reschedule it and choose Video visit as the place.',
+        code: 'APPT_NOT_VIDEO'
+      });
+    }
+    const client = (await getUsers()).find(u => u && u.role === config.ROLES.CLIENT &&
+      String(u.openEmrPatientId || '') === String(row.puuid)) || null;
+    if (!client) {
+      return res.status(409).json({ error: 'This appointment is not linked to a patient in the app, so no video room can be made for it.', code: 'APPT_NO_CLIENT' });
+    }
+    const providerId = String(row.pc_aid || '');
+    const room = await createVideoRoomFor({ eid, client, providerId, actor: actorFromReq(req) });
+    if (!room.created) {
+      // Google's own reason or the named setup gap — the only thing that says
+      // what to fix.
+      return res.status(room.code === 'MEET_CALL_FAILED' ? 502 : 409).json({
+        error: `The video room could not be created: ${room.reason}`, code: room.code, blockers: room.blockers || undefined
+      });
+    }
+    // The day-of email with the one-tap link, which a room-less visit never
+    // got. buildVisitReminder skips a send time already in the past.
+    const date = String(row.pc_eventDate || '');
+    const startTime = String(row.pc_startTime || '').slice(0, 5);
+    const when = formatVisitWhen(date, startTime);
+    await scheduleVisitReminder({
+      clientId: client.id, eid, visitDate: date, startTime, when,
+      clinician: await clinicianNameForProviderId(providerId),
+      place: VISIT_PLACE_LABEL[dec.location] || null, actorId: req.user.id,
+      kind: visitReminders.REMINDER_KINDS.VIDEO_JOIN
+    });
+    // The patient's Join button reads the published calendar's hasVideo flag.
+    await publishAppointmentsForClient(emr, client, actorFromReq(req));
+    res.json({
+      message: 'Video room created. The patient can now join from their portal.', created: true,
+      video: { meetingUri: room.meetingUri, meetingCode: room.meetingCode || null }
+    });
+  } catch (error) {
+    console.error('Create video room error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============================================================
 // CLINICAL COMPLETENESS P0 (Session 4.4) — coding · orders · Rx ·
 // sign-and-close · note→billing route
@@ -19469,13 +19546,13 @@ app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClin
       const row = videoLinkFor(await loadVideoLinks(), eid);
       if (!row) {
         return res.status(409).json({
-          error: 'This visit has no video room. If it should be a video visit, reschedule it as one so a room is created.',
+          error: 'This visit has no video room yet. Open the visit and press Create Video Room.',
           code: 'MEET_NO_ROOM'
         });
       }
       if (!row.meetingUri) {
         return res.status(502).json({
-          error: 'The video room has no join link on file — create a new one by rescheduling the visit as a video visit.',
+          error: 'The video room has no join link on file. Press Create Video Room on the visit to make a new one.',
           code: 'MEET_NO_ROOM'
         });
       }
