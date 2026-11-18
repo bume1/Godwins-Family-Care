@@ -53,3 +53,22 @@ test('the video card offers the paste box and calls the route', () => {
   assert.match(page, /onPasteLink=\{\(url\) => \{[\s\S]{0,120}api\.pasteMeetLink\(d\.linkedAppointmentEid, url\)/);
   assert.match(page, /Save Meet Link/);
 });
+
+test('My Day: a video visit with no room offers Create Video Room and the paste box', () => {
+  const page = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(page, /const DayVideoRoomSetup = \(\{ v, busy, onVideoRoom \}\)/);
+  assert.match(page, /canWrite && onVideoRoom && !v\.video && v\.location === 'telehealth'/);
+  assert.match(page, /\(url \? api\.pasteMeetLink\(v\.eid, url\) : api\.createVideoRoom\(v\.eid\)\)/);
+  assert.match(page, /onStartVideo=\{startVideo\} onVideoRoom=\{videoRoom\}/);
+  assert.match(page, /onStartVideo=\{onStartVideo\} onVideoRoom=\{onVideoRoom\}/);
+});
+
+test('My Day: the day\'s rows are filled in with the visit\'s place before they are summarized', () => {
+  const server = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("app.get('/api/clinical/my-day'"));
+  const body = route.slice(0, route.indexOf('\n});'));
+  const fill = body.indexOf('emr.getAppointmentRow(r.puuid, r.pc_eid)');
+  assert.ok(fill > 0, 'hydrates the notes');
+  assert.ok(fill < body.indexOf('summarizeCalendarRows('), 'before summarizing');
+  assert.match(body, /String\(r\.pc_eventDate \|\| ''\) !== date/, 'this day only');
+});

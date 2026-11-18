@@ -225,9 +225,13 @@ test('B1: the page keys its button on the room, never on the location', () => {
   const page = code(read('public/clinical.html'), 'clinical.html');
   assert.match(page, /canWrite && v\.video && \['scheduled', 'en_route', 'arrived'\]\.includes\(v\.state\)/,
     'Start video visit is offered on the room');
-  // The location marker is null on every list row, so a button keyed on it
-  // would never appear at all.
-  assert.ok(!/v\.location === 'telehealth'/.test(page), 'and never on the marker the list cannot show');
+  // The location marker is null on every list row, so Start is never keyed
+  // on it. The one place the page reads it is the no-room setup on My Day,
+  // whose rows the server fills in for that day (2026-11-18).
+  assert.ok(!/v\.location === 'telehealth'[^\n]*Start Video Visit/.test(page), 'Start is never keyed on the marker');
+  const uses = page.match(/v\.location === 'telehealth'/g) || [];
+  assert.equal(uses.length, 1, 'only the room setup reads it');
+  assert.match(SERVER, /emr\.getAppointmentRow\(r\.puuid, r\.pc_eid\)/, 'and My Day fills it in');
   // Nobody drives to or arrives at a video visit.
   assert.match(page, /canWrite && !v\.video && v\.state === 'scheduled'/);
   assert.match(page, /canWrite && !v\.video && \['scheduled', 'en_route'\]\.includes\(v\.state\)/);
