@@ -506,11 +506,14 @@ const PolicyAck = ({ a, itemId, base, office, busy, ackVersion, setAckVersion, r
       {!a.current && !office && !hasFile && signs && <div className="meta">The office will give you this to sign.</div>}
       {!a.current && office && (
         <div style={{ marginTop: 6 }}>
-          <div className="meta">{signs ? 'They sign this in the app. If they signed a paper copy, file it here.' : 'They acknowledge this in the app. You can file it for them.'}</div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-            <input placeholder={`Version (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
-            <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>{signs ? 'File Paper Signature' : 'File For Her'}</button>
-          </div>
+          <div className="meta">{signs ? 'Waiting on their signature in the app.' : 'Waiting on them in the app.'}</div>
+          <details style={{ marginTop: 4 }}>
+            <summary className="meta" style={{ cursor: 'pointer' }}>{signs ? 'Signed on paper?' : 'File it for them'}</summary>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              <input placeholder={`Version (default ${a.required})`} value={ackVersion[a.id] || ''} onChange={e => setAckVersion(Object.assign({}, ackVersion, { [a.id]: e.target.value }))} />
+              <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: { version: ackVersion[a.id] || '' } }), 'Filed for her.')}>{signs ? 'File Paper Signature' : 'File For Her'}</button>
+            </div>
+          </details>
         </div>
       )}
       {open && WS && <WS doc={doc} onCancel={() => setOpen(false)} onDone={async () => { setOpen(false); await onChanged(); }} />}
@@ -597,15 +600,20 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to sign or acknowledge</label>
-            {/* A paper signature is filed with its signed copy (owner, 2026-11-16). */}
+            {/* Policies are signed in the app, here or in My GFC → Policies: one
+                signature, both places (owner, 2026-11-18). Paper is the exception. */}
+            <div className="meta" style={{ margin: '0 0 8px' }}>{office
+              ? 'They sign each one in the app: from this task or from My GFC → Policies. It is the same signature, so it ticks both.'
+              : 'Sign each one right here. It is the same as signing in My GFC → Policies, so it ticks both.'}</div>
             {office && (
-              <div style={{ margin: '0 0 8px' }}>
-                <div className="meta">Signed on paper? Upload the signed copy here first, then file it on the policy below.</div>
+              <details style={{ margin: '0 0 8px' }}>
+                <summary className="meta" style={{ cursor: 'pointer' }}>Signed on paper instead?</summary>
+                <div className="meta" style={{ marginTop: 4 }}>Upload the signed copy here, then file it on the policy below.</div>
                 <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 4 }}>
                   <i className="ti ti-upload" />Upload Signed Paper Copy
                   <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
                 </label>
-              </div>
+              </details>
             )}
             {item.acknowledgments.map(a => <PolicyAck key={a.id} a={a} itemId={item.id} base={base} office={office} busy={busy}
               ackVersion={ackVersion} setAckVersion={setAckVersion} run={run} onChanged={onChanged} />)}
@@ -698,6 +706,10 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
               : "These are the same items as the caregiver's welcome packet. Done here is done there."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
               <li key={r.kind} style={{ marginBottom: 4 }}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b>
+                {/* A form she signs in her welcome packet: one tap there (owner, 2026-11-18). */}
+                {!office && r.signs && r.status !== 'complete' && r.status !== 'in_review' && (
+                  <a className="btn sm gold" style={{ marginLeft: 8 }} href={r.kind === 'staff_welcome' ? '/my#welcome' : '/caregiver#onboarding'}>{r.kind === 'staff_welcome' ? 'Open Welcome Packet' : 'Sign in Welcome Packet'}</a>
+                )}
                 {office && r.office && r.status !== 'complete' && track.person && (
                   <button className="btn sm" style={{ marginLeft: 8 }} disabled={busy} onClick={() => run(() => call(`/api/caregiver/admin/welcome-packets/${encodeURIComponent(track.person.userId)}/office-item`, { method: 'PUT', body: { kind: r.kind, status: 'done' } }), 'Marked done.')}>Mark Done</button>
                 )}</li>

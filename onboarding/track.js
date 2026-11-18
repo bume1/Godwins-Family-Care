@@ -280,6 +280,7 @@ function packetEvidence(item, packetRows) {
       status: r ? r.status : 'missing',
       hers: r ? PACKET_HERS.includes(r.source) : true,
       office: !!(r && r.source === 'office'),
+      signs: !!(r && r.source === 'gfc_sign'),
       ...(assist ? { assist: true } : {})
     };
   });

@@ -175,3 +175,16 @@ test('admins and managers rename and remove a file on a task; staff cannot', asy
   assert.strictEqual((await h.call('GET', url)).status, 404, 'a removed file no longer opens from the task');
   assert.ok(h.store.caregiver_documents[0], 'the Staff Record keeps its copy');
 });
+
+test('policies are signed in the app from the task, the same signature as My GFC → Policies; paper is the tucked-away exception', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /It is the same signature, so it ticks both\./);
+  assert.match(page, /<summary className="meta" style=\{\{ cursor: 'pointer' \}\}>Signed on paper instead\?<\/summary>/);
+  assert.match(page, /\{signs \? 'Open and Sign' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'document-sign-ui.js'), 'utf8');
+  assert.match(ui, /\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign/, 'one signing route for both places');
+  assert.match(page, /r\.signs && r\.status !== 'complete'/, 'a welcome-packet form opens where it is signed');
+  const T = require('../onboarding/track');
+  const t = T.buildTrack({ inputs: { chapter: 'A' }, record: { userId: 'c1' }, accountType: 'caregiver', packetRows: require('../welcomePacketRepository').buildChecklist({}, [], {}, []) });
+  assert.ok(t.items.find(i => i.id === 'A.5.03').packet.every(p => p.signs), 'handbook, privacy and code of conduct are signed forms');
+});
