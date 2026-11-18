@@ -3575,8 +3575,35 @@
     // 2026-10-12 redesign: the row on the schedule list is now compact (time,
     // patient, status), and the visit's ACTIONS live here, in the Visit Details
     // pane for the visit the clinician picked. Every gate below is unchanged.
-    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, onStartVideo, busy, canWrite }) => (
+    // A video visit with no room yet, on My Day. Without this the visit showed
+    // no video button at all, and the only way to make or paste a room was
+    // from inside a started note (owner report, 2026-11-18).
+    const DayVideoRoomSetup = ({ v, busy, onVideoRoom }) => {
+      const [url, setUrl] = useState('');
+      return (
+        <div className="border border-amber-200 bg-amber-50/60 rounded-lg p-2.5 mt-2 text-[12px]">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-amber-800">No video room yet, so the patient has no link to join.</span>
+            <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+              onClick={() => onVideoRoom(v)}><i className="ti ti-video-plus" />Create Video Room</button>
+          </div>
+          <div className="text-stone-600 mt-2 mb-1">Or paste a Google Meet link you made yourself:</div>
+          <div className="flex gap-1.5 flex-wrap">
+            <input className="inp !py-1 text-[12px] flex-1 min-w-[200px]" placeholder="https://meet.google.com/abc-defg-hij"
+              value={url} onChange={e => setUrl(e.target.value)} />
+            <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid || !url.trim()}
+              onClick={() => onVideoRoom(v, url)}><i className="ti ti-link" />Save Meet Link</button>
+          </div>
+          <p className="text-stone-500 mt-1">In that meeting's settings, turn off recording, transcripts and AI notes. The app can't do it for a link you made.</p>
+        </div>
+      );
+    };
+
+    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, onStartVideo, onVideoRoom, busy, canWrite }) => (
       <div>
+        {canWrite && onVideoRoom && !v.video && v.location === 'telehealth' && ['scheduled', 'en_route', 'arrived', 'in_progress'].includes(v.state) && (
+          <DayVideoRoomSetup v={v} busy={busy} onVideoRoom={onVideoRoom} />
+        )}
         {v.timing && (v.timing.arrivedAt || v.timing.startedAt) && (
           <div className="text-[11px] text-stone-500 mt-1">
             {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
@@ -3906,6 +3933,14 @@
       // is opened from the CLICK, not from the response: a `window.open` after
       // an await is outside the user-gesture stack and mobile Safari blocks it,
       // which is the trap the portal's PDF downloads already paid for.
+      // Make a room, or save a pasted Meet link, for a video visit that has none.
+      const videoRoom = (v, url) => {
+        setBusy(v.eid); setErr('');
+        (url ? api.pasteMeetLink(v.eid, url) : api.createVideoRoom(v.eid))
+          .then(() => load())
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(null));
+      };
       const startVideo = (v) => {
         setBusy(v.eid); setErr('');
         const tab = window.open('', '_blank');
@@ -4097,7 +4132,7 @@
                     onBack={() => setSelEid(null)}
                     onOpenChart={onOpenChart}
                     onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
-                    onStamp={stamp} onStartVideo={startVideo} />
+                    onStamp={stamp} onStartVideo={startVideo} onVideoRoom={videoRoom} />
                 : (
                   <div className="card px-6 py-12 text-center">
                     <i className="ti ti-hand-click text-3xl text-stone-300" />
@@ -4157,7 +4192,7 @@
         {onClick && <i className="ti ti-chevron-right text-stone-300" />}
       </button>
     );
-    const VisitDetails = ({ v, busy, canWrite, onBack, onOpenChart, onPacket, onStamp, onStartVideo }) => {
+    const VisitDetails = ({ v, busy, canWrite, onBack, onOpenChart, onPacket, onStamp, onStartVideo, onVideoRoom }) => {
       const [p, setP] = useState(null);
       const [err, setErr] = useState('');
       const [tab, setTab] = useState('pre');
@@ -4268,7 +4303,7 @@
 
             <div className="mt-4 pt-3 border-t border-stone-100">
               <DayVisitRow v={v} busy={busy} canWrite={canWrite} onOpenChart={onOpenChart}
-                onPacket={onPacket} onStamp={onStamp} onStartVideo={onStartVideo} />
+                onPacket={onPacket} onStamp={onStamp} onStartVideo={onStartVideo} onVideoRoom={onVideoRoom} />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
               <button className="btn gold justify-center" onClick={() => onOpenChart(v.clientId)}><i className="ti ti-folder-open" />Open Chart</button>

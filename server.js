@@ -19450,7 +19450,17 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
       calendar = { ok: false, error: 'OpenEMR is not configured, so the calendar could not be read.' };
     } else {
       try {
-        const rows = await openemr.forActor(req.user).listAppointmentRows();
+        const emr = openemr.forActor(req.user);
+        const rows = await emr.listAppointmentRows();
+        // The list read leaves out the notes that carry the visit's place, so
+        // a video visit with no room yet read as no kind of visit and showed
+        // no way to make one. Fill it in for this day's rows only.
+        await Promise.all(rows.map(async (r, i) => {
+          if (String(r.pc_eventDate || '') !== date || r.pc_hometext || !r.puuid) return;
+          if (scope.providerId && String(r.pc_aid) !== scope.providerId) return;
+          const full = await emr.getAppointmentRow(r.puuid, r.pc_eid).catch(() => null);
+          if (full && full.pc_hometext) rows[i] = { ...r, pc_hometext: full.pc_hometext };
+        }));
         appointments = await summarizeCalendarRows(rows, r =>
           (!scope.providerId || String(r.pc_aid) === scope.providerId));
       } catch (e) {
