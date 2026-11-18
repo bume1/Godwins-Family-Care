@@ -196,6 +196,7 @@ function OnboardingSummary({ onboarding, compact }) {
       <div className="mg-bar"><span style={{ width: `${pct}%` }} /></div>
       {!compact && <p style={{ color: 'var(--mut)', fontSize: 14 }}>Your checklist, uploads, policy acknowledgments and training all live on your onboarding page.</p>}
       <a className="mg-btn" href="/onboarding"><i className="ti ti-route" />Open My Onboarding</a>
+      <a className="mg-btn mg-ghost" href="/onboarding#training" style={{ marginLeft: 8 }}><i className="ti ti-school" />My Training</a>
       <a className="mg-btn mg-ghost" href="/onboarding#library" style={{ marginLeft: 8 }}><i className="ti ti-books" />Training Library</a>
     </div>
   );

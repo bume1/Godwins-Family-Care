@@ -96,8 +96,10 @@ const ITEMS = Object.freeze([
     packet: ['offer_letter'],
     steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED)],
     classifications: [], classificationNote: NO_A2_ROW },
-  { id: 'A.5.02', guide: PAY_GUIDE, link: { label: 'Open Welcome Packet', url: '/caregiver#onboarding' }, phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
-    packet: ['id_document', 'ssn_card', 'work_authorization', 'direct_deposit', 'emergency_contact', 'payform:w4', 'payform:i9'],
+  { id: 'A.5.02', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/caregiver#hours' }, phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
+    // W-4, I-9 and direct deposit are filled in Pay Setup, which payroll reads
+    // (owner, 2026-11-18); the ID and SSN card come from the welcome packet.
+    packet: ['id_document', 'ssn_card', 'work_authorization', 'direct_deposit', 'emergency_contact', 'payform:w4', 'payform:i9', 'payform:pay'],
     // Form I-9 within three business days, and the W-4, which the packet does
     // not collect.
     elements: ['Form I-9 completed within three business days of the start date', 'Form W-4'],

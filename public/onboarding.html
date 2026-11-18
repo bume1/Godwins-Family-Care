@@ -512,11 +512,12 @@ const PolicyAck = ({ a, itemId, base, office, busy, ackVersion, setAckVersion, r
   );
 };
 
-const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onChanged }) => {
+const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onChanged, onGoTraining }) => {
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [ok, setOk] = useState('');
   const [verify, setVerify] = useState({ source: '', verifiedOn: '' });
   const [reason, setReason] = useState(''); const [naReason, setNaReason] = useState(''); const [note, setNote] = useState('');
   const [ackVersion, setAckVersion] = useState({});
+  const [reopenWhy, setReopenWhy] = useState('');
   const subject = track.person && track.person.name;
   const run = async (fn, msg) => {
     setBusy(true); setErr(''); setOk('');
@@ -536,6 +537,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
   const canAct = (s) => !s.done && (office || s.hers) && !(s.action === 'VERIFY' && s.index > 0 && !item.steps[s.index - 1].done)
     // A document step is recorded only by signing it, never by Mark Done.
     && !(item.document && s.hers && s.index === item.steps.findIndex(x => x.hers));
+  const paySetup = (item.packet || []).some(r => String(r.kind).startsWith('payform:'));
   const DocSign = window.GFCDocSign;
   return (
     <>
@@ -552,6 +554,9 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
             words came from, and the Playbook bookkeeping note, are the office's. */}
         {item.description && <p className="desc" style={{ fontSize: 14.5, lineHeight: 1.55, margin: '4px 0 10px', whiteSpace: 'pre-wrap' }}>{item.description}</p>}
         {office && <InstructionsEditor id={item.id} text={item.description} onSaved={onChanged} />}
+        {office && item.id !== 'WELCOME' && <TaskEditor item={item} track={track} onSaved={onChanged} />}
+        {/* Done through courses or this phase's trainings: one button there (owner, 2026-11-18). */}
+        {(item.courses || item.modulesFrom) && onGoTraining && <div style={{ margin: '8px 0' }}><button className="btn sm gold" onClick={onGoTraining}><i className="ti ti-school" />Open Training</button></div>}
         {office && (item.descriptionSource || item.classificationNote) && (
           <div className="meta" style={{ fontSize: 12.5, color: 'var(--mut)' }}>
             {item.descriptionSource && <span>{({ PLAYBOOK: 'From the Onboarding Playbook.', PLAYBOOK_ADAPTED: 'Adapted from the Onboarding Playbook.', DRAFTED: 'Drafted for review: not in the Onboarding Playbook.' })[item.descriptionSource]} </span>}
@@ -637,7 +642,11 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                   {canAct(s) && s.action !== 'VERIFY' && s.action !== 'SUBMIT' && !(s.action === 'SIGN' && s.hers && !item.document) && (
                     <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>{s.action === 'REVIEW' ? 'Mark Reviewed' : s.hers && office ? 'Mark Done For Her' : 'Mark Done'}</button>
                   )}
-                  {canAct(s) && s.action === 'SUBMIT' && (
+                  {/* Pay and tax forms: one place, Pay Setup (owner, 2026-11-18). */}
+                  {canAct(s) && s.action === 'SUBMIT' && paySetup && (
+                    <div style={{ marginTop: 6, fontSize: 13.5 }}>{office ? 'They fill these in Hours & Pay → Pay Setup, and this ticks itself. A paper copy is filed from their staff record (Documents), then marked on file.' : <>Fill these in Hours &amp; Pay → Pay Setup. This ticks itself when you do. {item.link && <a className="btn sm gold" href={item.link.url} style={{ marginLeft: 6 }}>{item.link.label}</a>}</>}</div>
+                  )}
+                  {canAct(s) && s.action === 'SUBMIT' && !paySetup && (
                     <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       <label className="btn sm gold" style={{ cursor: 'pointer' }}>
                         <i className="ti ti-upload" />{office ? 'Upload For Her' : 'Upload'}
@@ -676,9 +685,10 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         {item.guide && <div style={{ margin: '6px 0 10px' }}><a className="btn ghost sm" href={item.guide.url} target="_blank" rel="noopener noreferrer"><i className="ti ti-book" />{item.guide.label}</a></div>}
 
         {item.packet && item.packet.length > 0 && (
-          <div><label className="f">From the welcome packet</label>
+          <div><label className="f">{item.packet.every(r => String(r.kind).startsWith('payform:')) ? 'From Pay Setup' : item.packet.some(r => String(r.kind).startsWith('payform:')) ? 'From the welcome packet and Pay Setup' : 'From the welcome packet'}</label>
             <div style={{ fontSize: 13, color: 'var(--mut)', marginBottom: 6 }}>{item.id === 'WELCOME'
               ? (office ? 'This ticks itself when they sign their welcome packet in My GFC. Their staff record in User Management shows the signed packet.' : 'This ticks itself when you sign your welcome packet in My GFC.')
+              : item.packet.every(r => String(r.kind).startsWith('payform:')) ? 'These come from Hours & Pay → Pay Setup and tick themselves when done there.'
               : "These are the same items as the caregiver's welcome packet. Done here is done there."}</div>
             <ul style={{ margin: '4px 0 10px', paddingLeft: 18, fontSize: 14 }}>{item.packet.map(r => (
               <li key={r.kind} style={{ marginBottom: 4 }}>{r.title}{' '}<b style={{ color: r.status === 'complete' ? 'var(--ok, #2f6b4f)' : 'var(--mut)' }}>{({ complete: 'Done', in_review: 'Waiting on review', in_progress: 'Scheduled', rejected: 'Sent back', missing: r.required ? 'Not yet' : 'Not needed' })[r.status] || r.status}</b>
@@ -740,6 +750,16 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
         <textarea rows={2} placeholder="Add a note" value={note} onChange={e => setNote(e.target.value)} style={{ marginTop: 6 }} />
         <button className="btn sm ghost" style={{ marginTop: 6 }} disabled={busy || !note.trim()} onClick={() => run(() => call(PATHS.notes(base, item.id), { method: 'POST', body: { text: note } }).then(() => setNote('')), 'Note added.')}>Add Note</button>
 
+        {office && base.userId && item.id !== 'WELCOME' && (done(item.status) || item.status === 'SUBMITTED' || item.status === 'IN_PROGRESS') && (
+          <div style={{ marginTop: 16 }}>
+            <label className="f">Reopen this task</label>
+            <div style={{ fontSize: 12.5, color: 'var(--mut)', marginBottom: 6 }}>Clears what was recorded so it can be done again. The record is kept in the task's history. Anything that ticks from the welcome packet or Pay Setup stays done there.</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input placeholder="Reason" value={reopenWhy} onChange={e => setReopenWhy(e.target.value)} />
+              <button className="btn sm warn" disabled={busy || !reopenWhy.trim()} onClick={() => run(() => call(`/api/onboarding/admin/people/${encodeURIComponent(base.userId)}/items/${encodeURIComponent(item.id)}/reopen`, { method: 'POST', body: { reason: reopenWhy } }).then(() => setReopenWhy('')), 'Reopened.')}>Reopen Task</button>
+            </div>
+          </div>
+        )}
         {office && !item.notApplicable && !done(item.status) && (
           <div style={{ marginTop: 16 }}>
             <label className="f">Does not apply to her</label>
@@ -796,7 +816,7 @@ const Readiness = ({ track, base, office, onChanged }) => {
             </div>
             {d.perPayer && d.openedPayers.map(o => <div key={o.payer} className="meta" style={{ fontSize: 13, color: 'var(--mut)' }}>{o.payer}: opened by {o.reviewedBy.name} on {fmtDate(o.at)} · {o.approvedScope}</div>)}
             {!d.perPayer && d.opened && <div style={{ fontSize: 13, color: 'var(--mut)' }}>Opened by {d.opened.reviewedBy.name} on {fmtDate(d.opened.at)} · Scope: {d.opened.approvedScope}</div>}
-            {!isOpen && d.outstandingModules.length > 0 && <div style={{ fontSize: 13, color: 'var(--mut)' }}>Training to finish first: {d.outstandingModules.length} module{d.outstandingModules.length === 1 ? '' : 's'}</div>}
+            {!isOpen && d.outstandingModules.length > 0 && <div style={{ fontSize: 13, color: 'var(--mut)' }}>Training to finish first: {d.outstandingModules.map(id => ((track.modules || []).find(x => x.id === id) || {}).title || id).join(', ')}</div>}
             {d.openItem === 'NON_PRESCRIBING_PROTOCOL' && office && <div className="note">Waiting on counsel: whether exams can run under a non-prescribing protocol. Until then she works under a filed protocol agreement.</div>}
             {office && (!isOpen || d.perPayer) && open !== d.id && <button className="btn sm" style={{ marginTop: 6 }} onClick={() => { setOpen(d.id); setForm({ conditionsConfirmed: [], approvedScope: '', payer: '' }); }}>{d.perPayer && isOpen ? 'Open Another Payer' : 'Record Determination'}</button>}
             {office && open === d.id && (
@@ -883,6 +903,35 @@ const InstructionsEditor = ({ id, text, onSaved }) => {
   );
 };
 
+// Edit a built-in task (owner, 2026-11-18): its title, its phase, or take it
+// off this checklist. Applies to everyone on this checklist.
+const TaskEditor = ({ item, track, onSaved }) => {
+  const [open, setOpen] = useState(false); const [err, setErr] = useState('');
+  const [f, setF] = useState({ title: item.title, phase: item.phase });
+  const chapter = track.chapter && track.chapter.id;
+  const go = async (fn) => { setErr(''); try { await fn(); setOpen(false); await onSaved(); } catch (e) { setErr(e.message); } };
+  const put = (body) => call(`/api/onboarding/admin/items/${encodeURIComponent(item.id)}`, { method: 'PUT', body: Object.assign({ chapter }, body) });
+  if (!open) return <button className="btn sm ghost" style={{ marginTop: 6, marginRight: 6 }} onClick={() => { setF({ title: item.title, phase: item.phase }); setOpen(true); }}>Edit Task</button>;
+  return (
+    <div className="note" style={{ marginTop: 6 }}>
+      <label className="f">Title</label>
+      <input value={f.title} onChange={e => setF({ ...f, title: e.target.value })} />
+      <label className="f">Phase</label>
+      <select value={f.phase} onChange={e => setF({ ...f, phase: e.target.value })}>
+        {track.phases.map(p => <option key={p.id} value={p.id}>Phase {p.number} · {p.label}</option>)}
+      </select>
+      <div style={{ fontSize: 12.5, color: 'var(--mut)', margin: '6px 0' }}>Changes apply to everyone on this checklist.</div>
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <button className="btn sm" onClick={() => go(() => put({ title: f.title, phase: f.phase }))}>Save</button>
+        <button className="btn sm warn" onClick={() => { if (window.confirm('Take this task off this checklist for everyone? Anything already recorded is kept, and you can restore it.')) go(() => put({ hidden: true })); }}>Hide From Checklist</button>
+        {item.edited && <button className="btn sm ghost" onClick={() => go(() => call(`/api/onboarding/admin/items/${encodeURIComponent(item.id)}/override`, { method: 'DELETE' }))}>Restore Original</button>}
+        <button className="btn sm ghost" onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
 const ModuleCard = ({ m, checks, base, office, onChanged }) => {
   const [openQs, setOpenQs] = useState(false); const [shown, setShown] = useState({}); const [err, setErr] = useState('');
   const [openMat, setOpenMat] = useState(false);
@@ -911,6 +960,7 @@ const ModuleCard = ({ m, checks, base, office, onChanged }) => {
     <div className="line-card">
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
         <b style={{ flex: 1 }}>{m.title}</b>
+        {office && <a href={`/onboarding?module=${encodeURIComponent(m.id)}#office-library`} style={{ fontSize: 13 }}>View in Library</a>}
         {m.complete ? <span className="pill p-COMPLETE">Complete</span> : m.underReview ? <span className="pill p-NOT_APPLICABLE">Being Updated</span> : <span className="pill p-NOT_STARTED">To Do</span>}
       </div>
       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{formatLabel(m)}{m.minutes ? ` · ${m.minutes} min` : ''} · {HOST[m.host] || m.host}</div>
@@ -1059,6 +1109,8 @@ const Person = ({ userId, onBack }) => {
   const ph = t.phases.find(p => p.id === cur);
   const items = t.items.filter(i => i.phase === cur);
   const item = openItem && t.items.find(i => i.id === openItem);
+  const move = (i, direction) => call(`/api/onboarding/admin/items/${encodeURIComponent(i.id)}/move`, { method: 'POST', body: { direction, chapter: t.chapter.id, userId } }).then(load).catch(e => window.alert(e.message));
+  const unhide = (h) => call(`/api/onboarding/admin/items/${encodeURIComponent(h.id)}`, { method: 'PUT', body: { hidden: false, chapter: t.chapter.id } }).then(load).catch(e => window.alert(e.message));
   return (
     <div>
       <button className="btn ghost sm" onClick={onBack}><i className="ti ti-arrow-left" />All People</button>
@@ -1098,8 +1150,13 @@ const Person = ({ userId, onBack }) => {
           {adding && <AddTaskForm person={{ userId, name: t.person.name, chapter: t.chapter.id }} chapters={CHAPTER_CHOICES} phase={ph.id}
             onAdded={async () => { setAdding(false); await load(); }} onCancel={() => setAdding(false)} />}
           {items.length === 0 && ph.requiredModules.length === 0 && <div className="note">{ph.readiness ? 'This phase is opened service line by service line. See Ready to See Patients.' : 'Nothing in this phase applies to her.'}</div>}
-          {items.map(i => (
+          {items.map((i, n) => (
             <div key={i.id} className="item" onClick={() => setOpenItem(i.id)} style={{ alignItems: 'flex-start' }}>
+              {/* Reorder within the phase (owner, 2026-11-18). */}
+              {i.id === 'WELCOME' ? <span style={{ width: 30 }} /> : <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }} onClick={e => e.stopPropagation()}>
+                <button className="btn sm ghost" aria-label="Move up" title="Move up" disabled={n === 0} style={{ padding: '0 6px' }} onClick={() => move(i, 'up')}><i className="ti ti-chevron-up" /></button>
+                <button className="btn sm ghost" aria-label="Move down" title="Move down" disabled={n === items.length - 1} style={{ padding: '0 6px' }} onClick={() => move(i, 'down')}><i className="ti ti-chevron-down" /></button>
+              </span>}
               <Dot status={i.status} />
               <div className="t"><b>{i.title}</b><div className="meta">{i.returned ? `Returned: ${i.returned.reason}` : ''}</div>
                 <ItemTasks item={i} subjectName={String(t.person.name || '').split(' ')[0]} viewerIsSubject={false} office /></div>
@@ -1109,7 +1166,14 @@ const Person = ({ userId, onBack }) => {
               <i className="ti ti-chevron-right" />
             </div>
           ))}
-          {ph.requiredModules.length > 0 && <div className="meta" style={{ marginTop: 8, color: 'var(--mut)' }}>{ph.requiredModules.length} training module{ph.requiredModules.length === 1 ? '' : 's'} also count toward this phase ({ph.outstandingModules.length} to finish).</div>}
+          {ph.requiredModules.length > 0 && <div className="meta" style={{ marginTop: 8, color: 'var(--mut)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>{ph.requiredModules.length} training module{ph.requiredModules.length === 1 ? '' : 's'} also count toward this phase ({ph.outstandingModules.length} to finish).
+            <button className="btn sm ghost" onClick={() => setTab('training')}><i className="ti ti-school" />Open Training</button></div>}
+          {(t.hiddenItems || []).filter(h => h.phase === ph.id).length > 0 && (
+            <div className="meta" style={{ marginTop: 8, color: 'var(--mut)' }}>Hidden from this checklist:{' '}
+              {(t.hiddenItems || []).filter(h => h.phase === ph.id).map(h => (
+                <span key={h.id} style={{ marginRight: 10 }}>{h.title} <button className="btn sm ghost" onClick={() => unhide(h)}>Restore</button></span>
+              ))}</div>
+          )}
         </div>
       )}
       {tab === 'credentialing' && (
@@ -1145,7 +1209,7 @@ const Person = ({ userId, onBack }) => {
         </div>
       )}
       {tab === 'setup' && <Setup userId={userId} inputs={t.inputs} onSaved={load} />}
-      {item && <ItemDrawer item={item} track={t} base={base} office viewerIsSubject={false} onClose={() => setOpenItem(null)} onChanged={load} />}
+      {item && <ItemDrawer item={item} track={t} base={base} office viewerIsSubject={false} onClose={() => setOpenItem(null)} onChanged={load} onGoTraining={() => { setOpenItem(null); setTab('training'); }} />}
     </div>
   );
 };
@@ -1359,7 +1423,9 @@ const SIGNOFF_LABEL = { ATTEST: 'Attest', COUNTERSIGN: 'Countersign', OBSERVED: 
 
 const Library = () => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [refs, setRefs] = useState({}); const [ok, setOk] = useState('');
-  const [open, setOpen] = useState(null); const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState(''); const [filter, setFilter] = useState('all');
+  // ?module=<id> opens straight to that training's details (a person's Training tab links here).
+  const [open, setOpen] = useState(() => { try { return new URLSearchParams(window.location.search).get('module'); } catch (e) { return null; } });
+  const [adding, setAdding] = useState(false); const [forRole, setForRole] = useState(''); const [filter, setFilter] = useState('all');
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/library')); } catch (e) { setErr(e.message); } }, []);
   const removeTraining = async (m) => {
     if (!window.confirm(`Remove "${m.title}" from the library? It leaves everyone's onboarding; anything already completed stays on record.`)) return;
@@ -1437,6 +1503,10 @@ const Library = () => {
                       <div style={{ fontSize: 13, color: 'var(--mut)' }}>{formatLabel(m)}{m.minutes ? ` · ${m.minutes} min` : ''} · Sign-off: {SIGNOFF_LABEL[m.signoff] || m.signoff}{m.phaseLabel ? ` · ${m.phaseLabel}` : ''}</div>
                       {m.description && <div style={{ fontSize: 14 }}>{m.description}</div>}
                       <OfficeFields m={m} nextSteps={d.nextSteps} onSaved={load} />
+                      {/* Who has it, each opening their onboarding (owner, 2026-11-18). */}
+                      <div style={{ fontSize: 13.5 }}><b>On these checklists:</b>{' '}
+                        {(m.people || []).length === 0 ? <span style={{ color: 'var(--mut)' }}>No one yet.</span>
+                          : m.people.map(p => <a key={p.userId} href={`/onboarding?person=${encodeURIComponent(p.userId)}`} style={{ marginRight: 10 }}>{p.name}{p.complete ? ' (done)' : ''}</a>)}</div>
                       {!m.addedByOffice && (
                         <div style={{ fontSize: 13 }}>
                           <b>Manual sections:</b> {m.manualRefs.length ? m.manualRefs.join(', ')
@@ -1518,7 +1588,7 @@ const Stat = ({ icon, bg, color, n, l, s }) => (
 // Every GFC training, read only. One with no material yet is greyed out and
 // still links the policy or SOP it ties to, so the SOP can be read in Drive in
 // the meantime. Completing a training stays on her own Training tab.
-const LibraryCard = ({ m }) => {
+const LibraryCard = ({ m, onGoTraining }) => {
   const [open, setOpen] = useState(false);
   const tie = m.policy && <div style={{ fontSize: 13, marginTop: 4, color: m.comingSoon ? 'var(--mut)' : undefined }}>Ties to: {m.policy.url ? <a href={m.policy.url} target="_blank" rel="noopener">{m.policy.document}</a> : m.policy.document}{m.policy.sections ? `, ${m.policy.sections}` : ''}</div>;
   return (
@@ -1534,10 +1604,11 @@ const LibraryCard = ({ m }) => {
       {!m.comingSoon && !m.ready && <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>Nothing to read here. This one is done {m.format === 'EXTERNAL' ? 'through an outside course' : 'with the office'}.</div>}
       {m.ready && <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setOpen(!open)}>{open ? 'Hide Training' : 'Open Training'}</button>}
       {open && <MaterialView moduleId={m.id} base={{ library: true, office: false }} />}
+      {m.assigned && onGoTraining && <button className="btn sm gold" style={{ marginTop: 6, marginLeft: 6 }} onClick={onGoTraining}><i className="ti ti-school" />Go to My Training</button>}
     </div>
   );
 };
-const StaffLibrary = () => {
+const StaffLibrary = ({ onGoTraining }) => {
   const [d, setD] = useState(null); const [err, setErr] = useState('');
   const [q, setQ] = useState(''); const [group, setGroup] = useState(''); const [mineOnly, setMineOnly] = useState(false);
   useEffect(() => { call('/api/onboarding/library').then(setD).catch(e => setErr(e.message)); }, []);
@@ -1552,6 +1623,7 @@ const StaffLibrary = () => {
     <div data-staff-library>
       <h2 style={{ marginBottom: 4 }}>Training Library</h2>
       <div style={{ fontSize: 14.5, color: 'var(--mut)', marginBottom: 10 }}>Every GFC training, {ready} of {d.modules.length} ready to open. Greyed out means the material is still being made; the policy or SOP it ties to opens in Drive now.{d.onboardingStarted ? ' The trainings you need to complete are on your Training tab.' : ''}</div>
+      {d.onboardingStarted && onGoTraining && <button className="btn sm gold" style={{ marginBottom: 10 }} onClick={onGoTraining}><i className="ti ti-school" />Go to My Training</button>}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search trainings or SOPs" style={{ flex: '1 1 180px' }} />
         <select value={group} onChange={e => setGroup(e.target.value)} style={{ maxWidth: 220 }}>
@@ -1561,14 +1633,18 @@ const StaffLibrary = () => {
         {d.onboardingStarted && <button className={`btn sm ${mineOnly ? '' : 'ghost'}`} onClick={() => setMineOnly(!mineOnly)}>{mineOnly ? 'Showing Mine' : 'Only Mine'}</button>}
       </div>
       {shown.length === 0 && <div className="note">No training matches.</div>}
-      {groups.map(g => <div key={g} style={{ marginBottom: 12 }}><h3 style={{ margin: '10px 0 6px' }}>{g}</h3>{shown.filter(m => m.group === g).map(m => <LibraryCard key={m.id} m={m} />)}</div>)}
+      {groups.map(g => <div key={g} style={{ marginBottom: 12 }}><h3 style={{ margin: '10px 0 6px' }}>{g}</h3>{shown.filter(m => m.group === g).map(m => <LibraryCard key={m.id} m={m} onGoTraining={onGoTraining} />)}</div>)}
     </div>
   );
 };
 
 // ---- HER VIEW (phone first) ----------------------------------------------------
-const Mine = ({ viewer, track, onChanged }) => {
-  const [tab, setTab] = useState(() => (window.location.hash === '#library' ? 'library' : 'home')); const [openPhase, setOpenPhase] = useState(null); const [openItem, setOpenItem] = useState(null);
+// Each tab has its own link (#checklist, #training, #library, #documents), so a
+// reload or a link from My GFC lands on the right tab (owner, 2026-11-18).
+const MINE_TABS = ['home', 'checklist', 'training', 'library', 'documents'];
+const Mine = ({ viewer, track, onChanged, useHash = true }) => {
+  const [tab, setTabRaw] = useState(() => { const h = useHash ? (window.location.hash || '').slice(1) : ''; return MINE_TABS.includes(h) ? h : 'home'; });
+  const setTab = (k) => { setTabRaw(k); if (useHash) { try { window.history.replaceState(null, '', `#${k}`); } catch (e) { /* ignore */ } } }; const [openPhase, setOpenPhase] = useState(null); const [openItem, setOpenItem] = useState(null);
   const base = { office: false, userId: null };
   const t = track;
   const first = String(viewer.name || '').split(' ')[0];
@@ -1635,6 +1711,9 @@ const Mine = ({ viewer, track, onChanged }) => {
                 {its.length === 0 && ph.readiness && <Readiness track={t} base={base} office={false} onChanged={onChanged} />}
                 {its.length === 0 && !ph.readiness && <div className="note">Nothing here for you to do.</div>}
                 {its.map(i => <ItemRow key={i.id} i={i} onOpen={setOpenItem} expanded />)}
+                {ph.requiredModules.length > 0 && <div style={{ fontSize: 13.5, color: 'var(--mut)', marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  {ph.requiredModules.length} training{ph.requiredModules.length === 1 ? '' : 's'} also count toward this phase ({ph.outstandingModules.length} to finish).
+                  <button className="btn sm ghost" onClick={() => setTab('training')}><i className="ti ti-school" />Open Training</button></div>}
               </div>}
             </div>
           );
@@ -1646,23 +1725,25 @@ const Mine = ({ viewer, track, onChanged }) => {
         <Rechecks track={t} base={base} onChanged={onChanged} />
         {t.checks && !t.checks.ok && <div className="note">Some check questions could not be loaded just now.</div>}
         {t.modules.length > 0 && t.modules.filter(m => !m.complete && m.available).length === 0 && <div className="ok">No training waiting right now.</div>}
-        {t.modules.filter(m => !m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
+        {/* Grouped by the phase each training counts toward (owner, 2026-11-18). */}
+        {t.phases.map(ph => { const ms = t.modules.filter(m => !m.complete && m.phase === ph.id); return ms.length ? <div key={ph.id}><h3 style={{ margin: '14px 0 6px' }}>Phase {ph.number} · {ph.label}</h3>{ms.map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</div> : null; })}
+        {t.modules.filter(m => !m.complete && !t.phases.some(ph => ph.id === m.phase)).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}
         {t.modules.filter(m => m.complete).length > 0 && <><h3 style={{ margin: '14px 0 6px' }}>Completed</h3>{t.modules.filter(m => m.complete).map(m => <ModuleCard key={m.id} m={m} checks={t.checks && t.checks.byModule} base={base} office={false} onChanged={onChanged} />)}</>}
       </>}
-      {tab === 'library' && <StaffLibrary />}
+      {tab === 'library' && <StaffLibrary onGoTraining={() => setTab('training')} />}
       {tab === 'documents' && <>
         <h2 style={{ marginBottom: 10 }}>Your Documents</h2>
         {t.items.filter(i => i.files.length).length === 0 && <div className="note">Nothing filed yet.</div>}
         {t.items.filter(i => i.files.length).map(i => (
           <div key={i.id} className="card"><b>{i.title}</b>
-            {i.files.map(f => <div key={f.id} style={{ fontSize: 14, marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.file(base, i.id, f.id), f.name); }}>{f.name}</a> <span style={{ color: 'var(--mut)', fontSize: 12.5 }}>{fmtDate(f.uploadedAt)}{f.filedBy === 'OFFICE_ON_BEHALF' ? ` · filed by ${f.uploadedByName} for you` : ''}</span></div>)}
+            {i.files.map(f => <div key={f.id} style={{ fontSize: 14, marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); openFile(PATHS.file(base, i.id, f.id), f.name).catch(x => window.alert(x.message)); }}>{f.name}</a> <span style={{ color: 'var(--mut)', fontSize: 12.5 }}>{fmtDate(f.uploadedAt)}{f.filedBy === 'OFFICE_ON_BEHALF' ? ` · filed by ${f.uploadedByName} for you` : ''}</span></div>)}
           </div>))}
       </>}
       <div className="bottom">
         {[['home', 'Home', 'ti-home'], ['checklist', 'Milestones', 'ti-list-check'], ['training', 'Training', 'ti-school'], ['library', 'Library', 'ti-books'], ['documents', 'Documents', 'ti-file-text']].filter(([k]) => k !== 'training' || t.modules.length > 0 || (t.trainingCourses || []).length > 0).map(([k, l, ic]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><i className={`ti ${ic}`} />{l}</button>)}
       </div>
-      {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} />}
+      {item && <ItemDrawer item={item} track={t} base={base} office={false} viewerIsSubject onClose={() => setOpenItem(null)} onChanged={onChanged} onGoTraining={() => { setOpenItem(null); setTab('training'); }} />}
     </div>
   );
 };
@@ -1672,7 +1753,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
   // ?person=<id> opens straight to one person: the staff record in User
   // Management links here for the full checklist (owner, 2026-11-09).
   const linked = (() => { try { return new URLSearchParams(window.location.search).get('person'); } catch (e) { return null; } })();
-  const [view, setView] = useState(linked ? 'person' : window.location.hash === '#library' ? 'staffLibrary' : 'overview'); const [person, setPerson] = useState(linked || null);
+  const [view, setView] = useState(linked ? 'person' : window.location.hash === '#library' ? 'staffLibrary' : window.location.hash === '#office-library' ? 'library' : 'overview'); const [person, setPerson] = useState(linked || null);
   const open = (id) => { setPerson(id); setView('person'); };
   return (
     <div className="shell">
@@ -1704,7 +1785,7 @@ const OfficeShell = ({ viewer, mineTrack, onChanged }) => {
         )}
         {view === 'library' && <Library />}
         {view === 'staffLibrary' && <div className="card"><StaffLibrary /></div>}
-        {view === 'mine' && mineTrack && <Mine viewer={viewer} track={mineTrack} onChanged={onChanged} />}
+        {view === 'mine' && mineTrack && <Mine viewer={viewer} track={mineTrack} onChanged={onChanged} useHash={false} />}
       </main>
     </div>
   );

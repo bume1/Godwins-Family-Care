@@ -14,7 +14,9 @@ const LINKS = {
   '/my#hours/clock': ['F.6.03'],
   '/my#hours/availability': ['G.3.01'],
   '/clinical#settings': ['C.7.01', 'D.6.01'],
-  '/caregiver#onboarding': ['A.5.02', 'A.5.04', 'A.6.03', 'A.6.04', 'A.6.05', 'A.6.06', 'A.6.08']
+  // Pay and tax forms are in Pay Setup (owner, 2026-11-18).
+  '/caregiver#hours': ['A.5.02'],
+  '/caregiver#onboarding': ['A.5.04', 'A.6.03', 'A.6.04', 'A.6.05', 'A.6.06', 'A.6.08']
 };
 
 test('each in-app item links to where it is done', () => {

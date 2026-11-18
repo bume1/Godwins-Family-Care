@@ -90,6 +90,8 @@ const ITEMS = Object.freeze([
     classifications: [], classificationNote: NO_B2_ROW },
   { id: 'B.5.02', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/my#hours/pay' }, phase: 'B.5', title: 'Employment and tax documentation', ref: P('B.5'),
     steps: [step(A.NEW_HIRE, X.SUBMIT, STATED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, STATED)],
+    // Ticks from Pay Setup (owner, 2026-11-18).
+    packet: ['payform:w4', 'payform:i9', 'payform:pay'],
     elements: ['Form I-9 within three business days of the start date', 'Form W-4', 'Direct deposit authorization', 'Emergency contact information'],
     classifications: [], classificationNote: NO_B2_ROW },
   { id: 'B.5.03', phase: 'B.5', title: 'Policy acknowledgments', ref: P('B.5'),
