@@ -176,6 +176,27 @@ const RAW_SOURCES = Object.freeze({
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     folder: '06 People / Training',
     transcribedFromVersion: '1.0'
+  }),
+  // The staff how-to for what changed in the app (owner, 2026-11-18): in the
+  // app training. Each new edition is swapped in from Policy & SOP Files.
+  STAFF_APP_UPDATES_GUIDE: Object.freeze({
+    key: 'STAFF_APP_UPDATES_GUIDE',
+    title: 'Staff Guide to App Updates',
+    docNumber: 'GFC-STAFF-GUIDE-APP',
+    driveFileId: '1Q8YLuHuxhZoSdYJSZw-gErD1cQmjSgSau81J44L_YDY',
+    mimeType: 'application/vnd.google-apps.document',
+    folder: 'EMR & App Guides',
+    transcribedFromVersion: '1.0'
+  }),
+  // The office's how-to for moving records off Gusto: on the SOP Set 3 row.
+  GUSTO_RECORDS_GUIDE: Object.freeze({
+    key: 'GUSTO_RECORDS_GUIDE',
+    title: 'Moving Employee Records from Gusto into the GFC App',
+    docNumber: 'GFC-OFFICE-GUIDE-GUSTO',
+    driveFileId: '1FrWwUksOxQ1LivUbSZ-KbaRxPh2ZYNpgK8gieEJumDg',
+    mimeType: 'application/vnd.google-apps.document',
+    folder: 'EMR & App Guides',
+    transcribedFromVersion: '1.0'
   })
 });
 

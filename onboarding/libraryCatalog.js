@@ -97,7 +97,8 @@ const REFERENCE_ROWS = Object.freeze([
   // Office only: moving payroll records off Gusto (owner, 2026-11-11). Not a
   // staff training, so it is a reference row rather than a module.
   Object.freeze({ id: 'SOP Set 3', title: 'Payroll records, Gusto to the app (admins and managers)', group: SY,
-    policy: Object.freeze({ doc: 'ADMIN_SOPS_SET3', sections: 'SOP-PAY-01 moving the records, SOP-PAY-02 what staff set up' }), where: 'Admin hub, User Management and Payroll' })
+    policy: Object.freeze({ doc: 'ADMIN_SOPS_SET3', sections: 'SOP-PAY-01 moving the records, SOP-PAY-02 what staff set up' }), where: 'Admin hub, User Management and Payroll',
+    guide: Object.freeze({ doc: 'GUSTO_RECORDS_GUIDE' }) })
 ]);
 
 const entryFor = (id) => CATALOG[id] || null;
@@ -114,7 +115,7 @@ function resolve(policy) {
 /** The policy line, resolved to its document's title and canonical link. */
 const policyFor = (id) => resolve((entryFor(id) || {}).policy);
 /** The reference rows with their policy resolved. */
-const referenceRows = () => REFERENCE_ROWS.map(r => Object.assign({}, r, { policy: resolve(r.policy) }));
+const referenceRows = () => REFERENCE_ROWS.map(r => Object.assign({}, r, { policy: resolve(r.policy), guide: resolve(r.guide) }));
 
 
 module.exports = { GROUPS, NEXT, CATALOG, REFERENCE_ROWS, entryFor, policyFor, referenceRows };
