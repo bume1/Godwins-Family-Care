@@ -311,14 +311,14 @@ module.exports = function createOnboardingRoutes(deps) {
       });
       // Files: our own ids only. A Drive id never leaves the server.
       const st = (rec.items || {})[it.id] || {};
-      it.files = (st.files || []).map(f => ({ id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy }));
+      it.files = (st.files || []).filter(f => !f.removedAt).map(f => ({ id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy }));
       // Chapter A: what she sent or signed in the welcome wizard shows on the
       // item it belongs to (owner, 2026-11-09), read from the stores the
       // welcome packet writes, never copied. Opened through doDownload.
       if (pk.docs) {
         // A file uploaded here is also a packet row now: list it once, with
         // its review status, so the office can accept it right here.
-        it.files = (st.files || []).map(f => {
+        it.files = (st.files || []).filter(f => !f.removedAt).map(f => {
           const row = f.documentId ? pk.docs.find(d => d.id === f.documentId && !d.deleted_at) : null;
           const out = { id: f.id, name: f.name, uploadedAt: f.uploadedAt, uploadedByName: f.uploadedByName, filedBy: f.filedBy };
           if (row && row.kind !== 'clinician_onboarding') { out.status = row.status; out.documentId = row.id; }
@@ -698,7 +698,7 @@ module.exports = function createOnboardingRoutes(deps) {
       }
     }
     const st = (rec.items || {})[req.params.itemId] || {};
-    const f = (st.files || []).find(x => x.id === req.params.fileId);
+    const f = (st.files || []).find(x => x.id === req.params.fileId && !x.removedAt);
     if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
     try {
       // A signed copy points at her Documents row, where the Drive file is.
@@ -1210,6 +1210,39 @@ module.exports = function createOnboardingRoutes(deps) {
     const rec = await personRecord(req, res); if (!rec) return;
     return doFile(req, res, rec, officeActorOf(req));
   });
+  // The office edits the files on a task (owner, 2026-11-18: admins and
+  // managers): rename one, or remove it from the task. The record keeps who
+  // removed it, and her Staff Record Documents keep the copy.
+  router.put('/api/onboarding/admin/people/:userId/items/:itemId/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const st = (rec.items || {})[req.params.itemId] || {};
+    const f = (st.files || []).find(x => x.id === req.params.fileId && !x.removedAt);
+    if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    const name = trim((req.body || {}).name, 200);
+    if (!name) return res.status(400).json({ error: 'Give the file a name.', code: 'FILE_NAME_REQUIRED' });
+    f.name = name;
+    if (f.documentId) {
+      const rows = (await db.get('caregiver_documents')) || [];
+      const row = rows.find(d => d.id === f.documentId && String(d.caregiver_id) === String(rec.userId));
+      if (row) { row.file_name = name; await db.set('caregiver_documents', rows); }
+    }
+    await save(rec);
+    await logActivity(req.user.id, req.user.name, 'onboarding_file_renamed', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
+    return res.json({ ok: true });
+  });
+  router.delete('/api/onboarding/admin/people/:userId/items/:itemId/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const st = (rec.items || {})[req.params.itemId] || {};
+    const f = (st.files || []).find(x => x.id === req.params.fileId && !x.removedAt);
+    if (!f) return res.status(404).json({ error: 'No such file.', code: 'FILE_UNKNOWN' });
+    // Off the task only. Her Staff Record Documents keep the copy; deleting it
+    // outright stays the Super Admin's, from there.
+    Object.assign(f, { removedAt: nowIso(), removedByName: req.user.name || req.user.email });
+    await save(rec);
+    await event({ userId: rec.userId, type: 'file_removed', itemId: req.params.itemId, byId: req.user.id, byName: req.user.name });
+    await logActivity(req.user.id, req.user.name, 'onboarding_file_removed', 'onboarding', rec.userId, { itemId: req.params.itemId, fileId: f.id });
+    return res.json({ ok: true });
+  });
   router.get('/api/onboarding/admin/people/:userId/items/:itemId/files/:fileId', authenticateToken, requireOffice, async (req, res) => {
     const rec = await personRecord(req, res); if (!rec) return;
     return doDownload(req, res, rec);
@@ -1460,27 +1493,24 @@ module.exports = function createOnboardingRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'onboarding_item_edited', 'onboarding', id, { fields: Object.keys(b) });
     return res.json({ ok: true, override: all[id] || null });
   });
-  router.post('/api/onboarding/admin/items/:id/move', authenticateToken, requireOffice, async (req, res) => {
-    const id = String(req.params.id);
+  // Drag-and-drop reorder (owner, 2026-11-18: "more user friendly and
+  // modern"): the whole phase's new order in one save.
+  router.put('/api/onboarding/admin/phases/:phaseId/order', authenticateToken, requireOffice, async (req, res) => {
     const b = req.body || {};
     const ch = T.CHAPTERS[String(b.chapter || '')];
-    if (!ch) return res.status(400).json({ error: 'Which checklist?', code: 'CHAPTER_UNKNOWN' });
-    if (!['up', 'down'].includes(b.direction)) return res.status(400).json({ error: 'Move up or down.', code: 'DIRECTION_UNKNOWN' });
+    if (!ch || !ch.PHASES.some(p => p.id === req.params.phaseId)) return res.status(400).json({ error: 'Choose a phase of this checklist.', code: 'PHASE_UNKNOWN' });
+    const order = Array.isArray(b.ids) ? b.ids.map(String) : [];
     const all = await itemOverrides();
     const custom = T.customItemsFor(await customTasks(), { chapter: String(b.chapter) }, b.userId ? String(b.userId) : null);
-    const list = T.applyItemOverrides(ch.ITEMS.concat(custom), all, ch.PHASES);
-    const me = list.find(x => x.id === id);
-    if (!me) return res.status(404).json({ error: 'No such task on this checklist.', code: 'ITEM_UNKNOWN' });
-    const inPhase = list.filter(x => x.phase === me.phase);
-    const i = inPhase.findIndex(x => x.id === id);
-    const j = b.direction === 'up' ? i - 1 : i + 1;
-    if (j < 0 || j >= inPhase.length) return res.json({ ok: true, moved: false });
-    [inPhase[i], inPhase[j]] = [inPhase[j], inPhase[i]];
+    const inPhase = T.applyItemOverrides(ch.ITEMS.concat(custom), all, ch.PHASES).filter(x => x.phase === req.params.phaseId).map(x => x.id);
+    if (order.some(id => !inPhase.includes(id))) return res.status(400).json({ error: 'That list has a task from another phase.', code: 'ORDER_MISMATCH' });
+    // Anything not sent keeps its place after the ones that were.
+    const full = order.concat(inPhase.filter(id => !order.includes(id)));
     const who = { byName: req.user.name || req.user.email, at: nowIso() };
-    inPhase.forEach((x, k) => { all[x.id] = Object.assign({}, all[x.id] || {}, { order: (k + 1) * 10 }, x.id === id ? who : {}); if (!all[x.id].byName) Object.assign(all[x.id], who); });
+    full.forEach((id, k) => { all[id] = Object.assign({}, all[id] || {}, { order: (k + 1) * 10 }, who); });
     await db.set(OVERRIDES, all);
-    await logActivity(req.user.id, req.user.name, 'onboarding_item_moved', 'onboarding', id, { direction: b.direction });
-    return res.json({ ok: true, moved: true });
+    await logActivity(req.user.id, req.user.name, 'onboarding_phase_reordered', 'onboarding', req.params.phaseId, { count: order.length });
+    return res.json({ ok: true });
   });
   router.delete('/api/onboarding/admin/items/:id/override', authenticateToken, requireOffice, async (req, res) => {
     const id = String(req.params.id);
