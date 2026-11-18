@@ -26,7 +26,7 @@ function lift(name) {
 }
 
 const config = { ROLES: { CLIENT: 'client' }, BRAND: { COMPANY_NAME: 'Godwins Family Care' } };
-const refusalOf = new Function('familyLinks', 'config', `${lift('placeholderResetRefusal')}; return placeholderResetRefusal;`)(familyLinks, config);
+const refusalOf = new Function('familyLinks', 'config', 'phoneLogin', `${lift('placeholderResetRefusal')}; return placeholderResetRefusal;`)(familyLinks, config, require('../phoneLogin'));
 
 const patient = { id: 'c1', role: 'client', name: 'Juanita Guess', email: familyLinks.placeholderEmailFor('client', 'c1') };
 const poa = { id: 'f1', role: 'family', name: 'Dana Guess', email: 'dana@example.com', familyLinks: [{ clientId: 'c1', isPoa: true }] };
@@ -44,6 +44,10 @@ test('a placeholder login with no POA on file says to add a real email', () => {
   const r = refusalOf([patient], patient);
   assert.ok(r);
   assert.match(r.error, /Add a real email address/);
+});
+
+test('a placeholder that signs in by phone is a real login, not refused (2026-11-18)', () => {
+  assert.strictEqual(refusalOf([patient, poa], { ...patient, loginPhone: '+14045550100' }), null);
 });
 
 test('a real email address is never refused', () => {
@@ -75,11 +79,13 @@ test('changing your own password sends the changed notice, after the save', () =
 
 test('the changed notice: right recipient, no link, never a placeholder', async () => {
   const sent = [];
-  const fn = new Function('familyLinks', 'config', 'consentText', 'emailTemplates', 'sendEmail',
+  const texts = [];
+  const fn = new Function('familyLinks', 'config', 'consentText', 'emailTemplates', 'sendEmail', 'phoneLogin', 'messagingRouter',
     `${lift('sendPasswordChangedEmail')}; return sendPasswordChangedEmail;`)(
     familyLinks, config, { ORG: { phone: '404-913-6705' } },
     { renderGfcEmail: (o) => ({ html: JSON.stringify(o) }) },
-    async (to, subject, text, opts) => { sent.push({ to, subject, text, opts }); });
+    async (to, subject, text, opts) => { sent.push({ to, subject, text, opts }); },
+    require('../phoneLogin'), { sms: { sendAccountText: async (o) => { texts.push(o); return { ok: true }; } } });
   await fn({ name: 'Dana Guess', email: 'dana@example.com' });
   assert.strictEqual(sent.length, 1);
   assert.strictEqual(sent[0].to, 'dana@example.com');
@@ -89,4 +95,12 @@ test('the changed notice: right recipient, no link, never a placeholder', async 
   assert.ok(!/ctaUrl/.test(sent[0].opts.htmlBody), 'no button');
   await fn(patient);
   assert.strictEqual(sent.length, 1, 'a placeholder login is never emailed');
+  assert.strictEqual(texts.length, 0, 'and a placeholder with no phone sign-in is never texted');
+  // A phone sign-in hears by text, with no link in it (owner, 2026-11-18).
+  await fn({ ...patient, loginPhone: '+14045550100' });
+  assert.strictEqual(sent.length, 1, 'still no email');
+  assert.strictEqual(texts.length, 1);
+  assert.strictEqual(texts[0].to, '+14045550100');
+  assert.match(texts[0].content, /404-913-6705/);
+  assert.ok(!/https?:\/\//.test(texts[0].content), 'the text carries no link');
 });

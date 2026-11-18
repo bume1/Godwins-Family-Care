@@ -38,6 +38,7 @@ const caregiverRepo = require('../caregiverRepository');
 const nf = require('../public/note-format.js');   // the message formatting: plain text for escalations and previews
 const familyLinks = require('../familyLinks');   // POA is per patient; one family account can cover several
 const quoSms = require('../quoSms');   // Care Team messages by text (owner, 2026-10-15)
+const phoneLogin = require('../phoneLogin');   // phone sign-in: update notices by text (owner, 2026-11-18)
 const chartComms = require('../chartCommunications');   // calls into the chart (owner, 2026-10-19)
 
 module.exports = function createMessagingRoutes(deps) {
@@ -1013,6 +1014,69 @@ module.exports = function createMessagingRoutes(deps) {
     return row.id;
   }
 
+  // An "you have an update" text for someone who signs in by phone and has no
+  // inbox (phoneLogin.js). PHI-free by construction: the caller passes only a
+  // link. One waiting notice per person: a second one while the first is held
+  // for quiet hours adds nothing the first does not already say.
+  async function queueNoticeText({ user: given, portalUrl }) {
+    // Read fresh: whether they said STOP, and whether they have had a text yet.
+    const user = (given && (await getUsers()).find(x => x && x.id === given.id)) || given;
+    if (!phoneLogin.mayTextNotices(user)) return null;
+    const box = await readRows('sms_outbox');
+    const waiting = box.find(r => r && r.kind === 'notice' && r.user_id === user.id && (r.status === 'waiting' || r.status === 'retry'));
+    if (waiting) return waiting.id;
+    const row = {
+      id: uuidv4(), kind: 'notice', to: user.loginPhone, user_id: user.id, client_id: null, thread_id: null, message_id: null,
+      content: phoneLogin.noticeText({ portalUrl, first: !(user.smsOptIn && user.smsOptIn.firstTextAt) }),
+      status: 'waiting', send_after: quoSms.quietUntil() || nowIso(), attempts: 0,
+      quo_message_id: null, error: null, created_at: nowIso(), sent_at: null
+    };
+    box.push(row);
+    await db.set('sms_outbox', box);
+    if (row.send_after <= nowIso()) await sendOutboxRow(row.id);
+    return row.id;
+  }
+
+  // A text the person asked for just now: a password link, a welcome link, a
+  // "your password changed" notice. Sent at once, whatever the hour and
+  // whatever the opt-in, because they are standing at the screen waiting.
+  //
+  // ⚠️ THE WORDS ARE NEVER STORED. A reset text carries a working link, and
+  // passwordSetLinks.js promises a copy of the database holds none. The row
+  // keeps only a SHA-256 of the text so the webhook for our own send is still
+  // recognised as ours (handleQuoEvent) and never recorded into a thread as
+  // "a reply typed in the Quo app". It is written BEFORE the send, so a
+  // webhook that beats our own write still finds it.
+  const sha = (t) => require('crypto').createHash('sha256').update(String(t || '').trim()).digest('hex');
+  async function sendAccountText({ user, to, content, kind }) {
+    if (!to) return { ok: false, error: 'No phone number to text.' };
+    if (!quoSms.status().sending) return { ok: false, error: 'Texting is not set up (QUO_API_KEY).' };
+    const box = await readRows('sms_outbox');
+    const row = {
+      id: uuidv4(), kind: kind || 'account', to, user_id: user ? user.id : null, client_id: null, thread_id: null, message_id: null,
+      content: '', content_sha: sha(content), status: 'sending', send_after: nowIso(), attempts: 1,
+      quo_message_id: null, error: null, created_at: nowIso(), sent_at: null
+    };
+    box.push(row);
+    await db.set('sms_outbox', box);
+    let result;
+    try {
+      const sent = await smsClient.sendText({ to, content, from: quoSms.careTeamNumber() });
+      Object.assign(row, { status: 'sent', sent_at: nowIso(), quo_message_id: sent.id || null });
+      result = { ok: true };
+    } catch (e) {
+      Object.assign(row, { status: 'failed', error: String(e.message || e).slice(0, 300) });
+      console.error('[SMS] account text failed:', row.error);
+      result = { ok: false, error: row.error };
+    }
+    const fresh = await readRows('sms_outbox');
+    const i = fresh.findIndex(r => r && r.id === row.id);
+    if (i === -1) fresh.push(row); else fresh[i] = row;
+    await db.set('sms_outbox', fresh);
+    await logActivity(null, 'system', result.ok ? 'sms_sent' : 'sms_send_failed', 'user', row.user_id, { kind: row.kind });
+    return result;
+  }
+
   async function sendOutboxRow(id) {
     const box = await readRows('sms_outbox');
     const row = box.find(r => r && r.id === id);
@@ -1020,7 +1084,10 @@ module.exports = function createMessagingRoutes(deps) {
     // Re-read the person: a STOP or a turned-off switch since this was queued
     // means it never goes.
     const u = (await getUsers()).find(x => x && x.id === row.user_id);
-    if (!quoSms.textsOn(u)) {
+    // An update notice follows the phone sign-in rules; a Care Team message
+    // follows the opt-in. Either way a STOP since it was queued stops it.
+    const mayGo = row.kind === 'notice' ? phoneLogin.mayTextNotices(u) : quoSms.textsOn(u);
+    if (!mayGo) {
       row.status = 'cancelled'; row.error = 'Texts were turned off before this went.';
       await db.set('sms_outbox', box);
       return row;
@@ -1050,7 +1117,7 @@ module.exports = function createMessagingRoutes(deps) {
         if (typeof deps.invalidateUsersCache === 'function') deps.invalidateUsersCache();
       }
     }
-    await logActivity(null, 'system', row.status === 'sent' ? 'sms_sent' : 'sms_send_failed', 'message', row.message_id,
+    await logActivity(null, 'system', row.status === 'sent' ? 'sms_sent' : 'sms_send_failed', row.kind === 'notice' ? 'user' : 'message', row.kind === 'notice' ? row.user_id : row.message_id,
       { threadId: row.thread_id, clientId: row.client_id, userId: row.user_id, attempts: row.attempts });
     return row;
   }
@@ -1300,7 +1367,8 @@ module.exports = function createMessagingRoutes(deps) {
     const box = await readRows('sms_outbox');
     const tenMin = Date.now() - 10 * 60 * 1000;
     const ours = box.some(r => r && ((r.quo_message_id && r.quo_message_id === ev.id) ||
-      (r.to === ev.patientPhone && r.content.trim() === ev.body.trim() && Date.parse(r.sent_at || r.created_at) >= tenMin)));
+      (r.to === ev.patientPhone && Date.parse(r.sent_at || r.created_at) >= tenMin &&
+        (r.content_sha ? r.content_sha === sha(ev.body) : String(r.content || '').trim() === ev.body.trim()))));
     if (ours) return record('own_send');
     const who = resolveTexter(ev.patientPhone, users);
     if (!who.hit) return record(who.outcome);
@@ -1371,7 +1439,8 @@ module.exports = function createMessagingRoutes(deps) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
       // A placeholder login (a patient whose POA signs in for them) has no inbox.
-      if (!u || !u.email || familyLinks.isPlaceholderEmail(u.email)) continue;
+      // Someone who signs in by phone hears by text instead (phoneLogin.js).
+      if (!u || ((!u.email || familyLinks.isPlaceholderEmail(u.email)) && !phoneLogin.mayTextNotices(u))) continue;
       // Admin sees Direct threads but is not emailed about them (owner, 2026-10-15).
       if (thread.channel === 'direct_care' && u.role === ROLES.ADMIN) continue;
       // A family member who is no longer the client's designated POA was on the
@@ -1405,8 +1474,12 @@ module.exports = function createMessagingRoutes(deps) {
         // turned texts on (owner, 2026-10-15). Best-effort: a texting failure
         // never fails the send, and the email below still goes.
         if (thread.channel === 'care_team') {
-          try { await textMessageTo(u, thread, message); }
+          let textedMessage = null;
+          try { textedMessage = await textMessageTo(u, thread, message); }
           catch (e) { console.error('[SMS] could not queue a text:', e.message); }
+          // They already have the message itself by text; a second text saying
+          // "you have an update" would be noise.
+          if (textedMessage && !phoneLogin.hasRealEmail(u)) continue;
         }
         await queueNotification('message_received', u.id, u.email, u.name,
           {
@@ -1535,6 +1608,6 @@ module.exports = function createMessagingRoutes(deps) {
   });
 
   // For server.js (the every-minute outbox sweep) and the probes.
-  router.sms = { drainSmsOutbox, handleQuoEvent, sendOutboxRow };
+  router.sms = { drainSmsOutbox, handleQuoEvent, sendOutboxRow, queueNoticeText, sendAccountText };
   return router;
 };

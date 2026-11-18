@@ -83,12 +83,13 @@ function status() {
 // the number of each designated POA (owner, 2026-10-15: "make sure both patient
 // and POA phone numbers are recognized as being connected to the patient").
 // Plain family are not: they are not on Care Team messages.
-const phonesForClient = (client) => [client && client.intake && client.intake.phone, client && client.phone]
-  .map(toE164).filter(Boolean);
+// A client who signs in by phone (phoneLogin.js) is recognised on that number too.
+const phonesForClient = (client) => [client && client.loginPhone, client && client.intake && client.intake.phone, client && client.phone]
+  .map(toE164).filter((p, i, a) => p && a.indexOf(p) === i);
 const phoneForUser = (user, client) => {
   if (!user) return null;
   if (user.role === 'client') return phonesForClient(client || user)[0] || null;
-  return toE164(user.phone);
+  return toE164(user.phone) || toE164(user.loginPhone);
 };
 
 // Every patient-side person a number names: [{ user, client, isPoa }].
@@ -107,7 +108,7 @@ function matchPhone(e164, users) {
   // texting from one phone names two patients, and the caller treats that as
   // ambiguous rather than guessing.
   for (const u of list) {
-    if (u.role !== 'family' || toE164(u.phone) !== want) continue;
+    if (u.role !== 'family' || (toE164(u.phone) !== want && toE164(u.loginPhone) !== want)) continue;
     for (const l of familyLinks.linksOf(u)) {
       const c = l.isPoa ? clients.get(l.clientId) : null;
       if (c) out.push({ user: u, client: c, isPoa: true });

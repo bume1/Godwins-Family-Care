@@ -99,6 +99,7 @@ const clinicalTasks = require('./clinicalTasks');
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
 const insurance = require('./insuranceEligibility');
+const phoneLogin = require('./phoneLogin');           // sign in with a phone number, hear by text (owner, 2026-11-18)
 const passwordSetLinks = require('./passwordSetLinks'); // self-service "choose a new password" links (2026-11-17) // ONE payer vocabulary, verification, the claim gate (B1)
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
                                                       // packet (4.12). Pure — the clock is passed in.
@@ -634,9 +635,50 @@ const recipientMayBeEmailed = async (recipientUserId, recipientEmail) => {
   }
 };
 
+// A notice for someone with no inbox who signs in by phone becomes a text
+// (phoneLogin.js). Returns null when email rules apply instead. The text says
+// only that there is an update; the wording of the email never reaches it.
+// Same cooldown as email, and one waiting text per person at a time, so a
+// burst of notices overnight is one text at 8am, not six.
+const textInPlaceOfEmail = async (type, recipientUserId, recipientEmail, templateData, options = {}) => {
+  if (!recipientUserId || phoneLogin.hasRealEmail({ email: recipientEmail })) return null;
+  let user = null;
+  try { user = (await getUsers()).find(u => u && u.id === recipientUserId) || null; } catch (_) { return null; }
+  if (!phoneLogin.mayTextNotices(user)) return null;
+  try {
+    const relatedEntityId = options.relatedEntityId || null;
+    const cooldownHours = (config.NOTIFICATION_COOLDOWN_HOURS && config.NOTIFICATION_COOLDOWN_HOURS[type]) ?? 20;
+    const cutoff = new Date(Date.now() - cooldownHours * 3600 * 1000).toISOString();
+    const log = (await db.get('notification_log')) || [];
+    if (log.some(n => n.type === type && n.recipientUserId === user.id && n.channel === 'sms' &&
+      n.relatedEntityId === relatedEntityId && n.sentAt && n.sentAt >= cutoff)) return null;
+    const portalUrl = phoneLogin.portalLinkFor(templateData && templateData.ctaUrl, await getAppBaseUrl());
+    const rowId = await messagingRouter.sms.queueNoticeText({ user, portalUrl });
+    const at = new Date().toISOString();
+    log.unshift({
+      id: uuidv4(), type, recipientUserId: user.id, recipientEmail, recipientName: user.name,
+      channel: 'sms', status: 'sent', sentAt: at, createdAt: at, smsOutboxId: rowId || null,
+      relatedEntityId, relatedEntityType: options.relatedEntityType || null, createdBy: options.createdBy || 'system',
+      // Only the subject, for the office's history. The text itself never says it.
+      templateData: { subject: templateData && templateData.subject }
+    });
+    if (log.length > config.NOTIFICATION_LOG_MAX_ENTRIES) log.length = config.NOTIFICATION_LOG_MAX_ENTRIES;
+    await db.set('notification_log', log);
+    return { texted: true, type, smsOutboxId: rowId || null };
+  } catch (e) {
+    console.error('[NOTIFICATIONS] Could not text a notice:', e.message);
+    return { skipped: true, reason: 'text could not be queued', type };
+  }
+};
+
 // Create a notification queue entry
 const queueNotification = async (type, recipientUserId, recipientEmail, recipientName, templateData, options = {}) => {
   try {
+    // NO INBOX, BUT A PHONE THEY SIGN IN WITH (owner, 2026-11-18): the notice
+    // goes as a PHI-free text instead of being dropped. One check here covers
+    // every notice, the same way the placeholder skip below does.
+    const texted = await textInPlaceOfEmail(type, recipientUserId, recipientEmail, templateData, options);
+    if (texted) return texted;
     // A skip is reported as a skip, never as a queue failure — `sendWelcomeEmail`
     // and others log an error on a null return, and "unsubscribed" is not an error.
     const eligible = await recipientMayBeEmailed(recipientUserId, recipientEmail);
@@ -3508,7 +3550,7 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail, employmentType
+      accountType, managerClinicalAccess, familyLinks: familyLinksInput, noEmail, employmentType, loginPhone
     } = req.body;
     let { email, password } = req.body;
 
@@ -3529,7 +3571,12 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
     // (owner, 2026-10-20). They get a placeholder login nobody can use, the
     // same as offline onboarding, and the POA signs in with their own account.
     const newUserId = uuidv4();
-    const placeholderLogin = noEmail === true && role === config.ROLES.CLIENT;
+    // ...or they sign in with their own phone number and hear from us by text
+    // (owner, 2026-11-18: "a phone number OR email"). A client or family
+    // account only; phoneLogin.js holds the rules.
+    const wantsPhoneLogin = loginPhone !== undefined && loginPhone !== null && String(loginPhone).trim() !== '';
+    const placeholderLogin = noEmail === true &&
+      (role === config.ROLES.CLIENT || (role === config.ROLES.FAMILY && wantsPhoneLogin));
     if (placeholderLogin) {
       email = familyLinks.placeholderEmailFor('client', newUserId);
       password = uuidv4() + uuidv4();
@@ -3539,6 +3586,12 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       return res.status(400).json({ error: 'Email, password, and name are required' });
     }
     const users = await getUsers();
+    let signInPhone = null;
+    if (wantsPhoneLogin) {
+      const checked = phoneLogin.checkLoginPhone({ users, raw: loginPhone, role });
+      if (checked.error) return res.status(checked.status).json({ error: checked.error, code: checked.code });
+      signInPhone = checked.value;
+    }
     // Case-blind, because sign-in is: "Ann@x.com" and "ann@x.com" are one
     // login, and the second account would never be reachable.
     // The page is told WHOSE account it is, so it can offer the right next
@@ -3717,7 +3770,11 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
     if (role === config.ROLES.FAMILY && createLinks) {
       familyLinks.applyLinks(newUser, createLinks);
     }
-    if (placeholderLogin) newUser.noLogin = true;
+    if (signInPhone) {
+      newUser.loginPhone = signInPhone;
+      if (!newUser.phone) newUser.phone = quoSms.prettyPhone(signInPhone);
+    }
+    if (placeholderLogin && !signInPhone) newUser.noLogin = true;
 
     // User/team member fields
     if (role === config.ROLES.USER) {
@@ -3741,6 +3798,14 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
         console.error('Welcome email error (non-fatal):', err)
       );
     }
+    // A phone sign-in is welcomed by text, with a link to choose their own
+    // password. No password is ever texted. Awaited, so the office is told
+    // here and now if the text did not go.
+    let welcomeText = null;
+    if (shouldSendWelcome !== false && placeholderLogin && signInPhone) {
+      welcomeText = await sendPhoneWelcome(newUser);
+      await logActivity(req.user.id, req.user.name || req.user.email, welcomeText.ok ? 'phone_welcome_sent' : 'phone_welcome_failed', 'user', newUser.id, welcomeText.ok ? {} : { error: welcomeText.error });
+    }
 
     res.json({
       id: newUser.id,
@@ -3761,6 +3826,11 @@ app.post('/api/users', authenticateToken, guardUserWrite, async (req, res) => {
       logo: newUser.logo || '',
       createdAt: newUser.createdAt,
       financialHeld: financial.held,
+      loginPhone: newUser.loginPhone || null,
+      ...(welcomeText ? { welcomeText: welcomeText.ok ? 'sent' : 'failed',
+        welcomeTextMessage: welcomeText.ok
+          ? `Texted ${quoSms.prettyPhone(signInPhone)} a link to choose their password. It expires in 24 hours.`
+          : `The welcome text did not go (${welcomeText.error}). Use "Send reset link" on their record, or call them.` } : {}),
       ...(financialHeldMessage(financial) ? { message: financialHeldMessage(financial) } : {})
     });
   } catch (error) {
@@ -4157,12 +4227,14 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Missing credentials' });
     }
     const users = await getUsers();
-    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
+    // The box takes an email or, for a client or family account set up that
+    // way, the phone number they sign in with (phoneLogin.js, 2026-11-18).
+    const user = phoneLogin.findByIdentifier(users, email);
     if (!user) {
       // A self sign-up that is not an account yet says where it stands, but
       // only to someone who knows its password: an email alone reveals nothing.
       const pending = ((await db.get('signup_requests')) || [])
-        .filter(r => r && r.email === String(email).toLowerCase().trim() && r.status !== 'approved')
+        .filter(r => r && phoneLogin.looksLikeEmail(email) && r.email === String(email).toLowerCase().trim() && r.status !== 'approved')
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
       if (pending && await bcrypt.compare(password, pending.passwordHash)) {
         const m = signups.loginMessageFor(pending);
@@ -4195,7 +4267,7 @@ app.post('/api/auth/login', async (req, res) => {
       // Auto-generate slug if client doesn't have one
       if (!user.slug) {
         const existingSlugs = users.filter(u => u.slug).map(u => u.slug);
-        const generatedSlug = generateClientSlug(user.practiceName || user.name || user.email.split('@')[0], existingSlugs);
+        const generatedSlug = generateClientSlug(user.practiceName || user.name || String(user.email || '').split('@')[0], existingSlugs);
         // Update user in database with new slug
         const userIndex = users.findIndex(u => u.id === user.id);
         if (userIndex !== -1) {
@@ -4230,7 +4302,7 @@ app.post('/api/auth/client-login', async (req, res) => {
     }
     const users = await getUsers();
     // Allow clients, admins (super admin), and managers to log into the portal
-    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase() && (u.role === config.ROLES.CLIENT || u.role === config.ROLES.ADMIN));
+    const user = phoneLogin.findByIdentifier(users, email, { roles: [config.ROLES.CLIENT, config.ROLES.ADMIN] });
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -4707,24 +4779,48 @@ app.post('/api/auth/self-signup/verify', async (req, res) => {
 // The reply is the same sentence whatever happens, so the form cannot be used
 // to find out who has an account. An account that cannot receive a link (no
 // inbox, or switched off) is still told to the office, which can help by phone.
-const FORGOT_PASSWORD_REPLY = 'If an account uses that email, we have sent it a link to choose a new password. The link expires in 1 hour. Check your spam folder if it does not arrive.';
+const FORGOT_PASSWORD_REPLY = 'If an account uses that email or phone number, we have sent it a link to choose a new password. The link expires in 1 hour. Check your spam folder or your texts if it does not arrive.';
 const PASSWORD_SET_LINKS = 'password_set_links';
 
 // Can this person be sent a link? Returns null when yes, or why not.
-const passwordLinkBlocker = (users, user) => {
-  if (!user || !user.email) return 'no_account';
+// `typed` is what they typed on Forgot Password (an email or a phone number);
+// an office-sent link leaves it out. A phone sign-in with no inbox is sent a
+// text (phoneLogin.js, owner 2026-11-18); a placeholder with neither is not.
+const passwordLinkBlocker = (users, user, typed) => {
+  if (!user || (!user.email && !user.loginPhone)) return 'no_account';
   if (user.accountStatus === 'inactive') return 'account_inactive';
-  if (familyLinks.isPlaceholderEmail(user.email) || placeholderResetRefusal(users, user)) return 'no_inbox';
-  return null;
+  if (phoneLogin.resetChannel(user, typed)) return null;
+  return 'no_inbox';
 };
 
-// Issue a link, store only its fingerprint, and email it.
-async function issuePasswordSetLink(user, purpose) {
+// Issue a link, store only its fingerprint, and email or text it. Returns the
+// record plus where it went ('email' | 'sms') and whether a text actually
+// left (a text that Quo refuses is reported, never assumed).
+async function issuePasswordSetLink(user, purpose, typed) {
+  const channel = phoneLogin.resetChannel(user, typed) || 'email';
   const { token, record } = passwordSetLinks.buildLink({ userId: user.id, purpose });
   const links = (await db.get(PASSWORD_SET_LINKS)) || [];
   await db.set(PASSWORD_SET_LINKS, passwordSetLinks.addLink(links, record));
+  if (channel === 'sms') {
+    const url = `${await getAppBaseUrl()}/password-reset-${token}`;
+    const sent = await messagingRouter.sms.sendAccountText({
+      user, to: user.loginPhone, kind: 'password_link', content: phoneLogin.resetText({ url, purpose })
+    });
+    return { record, channel, ok: sent.ok, error: sent.error || null };
+  }
   await sendPasswordSetLinkEmail(user, token, purpose);
-  return record;
+  return { record, channel, ok: true };
+}
+
+// The welcome text for someone who signs in by phone: a 24-hour link to
+// choose their own password (the office purpose), never a password.
+async function sendPhoneWelcome(user) {
+  const { token, record } = passwordSetLinks.buildLink({ userId: user.id, purpose: 'admin' });
+  const links = (await db.get(PASSWORD_SET_LINKS)) || [];
+  await db.set(PASSWORD_SET_LINKS, passwordSetLinks.addLink(links, record));
+  const url = `${await getAppBaseUrl()}/password-reset-${token}`;
+  const firstName = (user.preferredName || user.name || '').split(' ')[0];
+  return messagingRouter.sms.sendAccountText({ user, to: user.loginPhone, kind: 'welcome_link', content: phoneLogin.welcomeText({ firstName, url }) });
 }
 
 async function sendPasswordSetLinkEmail(user, token, purpose) {
@@ -4746,27 +4842,31 @@ async function sendPasswordSetLinkEmail(user, token, purpose) {
 
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
-    const email = String((req.body || {}).email || '').trim();
-    if (!email) return res.status(400).json({ error: 'Email is required' });
+    // An email or a phone number (owner, 2026-11-18). `email` is the field's
+    // old name and still works.
+    const typed = String((req.body || {}).identifier || (req.body || {}).email || '').trim();
+    if (!typed) return res.status(400).json({ error: 'Enter your email or phone number' });
     const users = await getUsers();
-    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
+    const user = phoneLogin.findByIdentifier(users, typed);
     if (!user) return res.json({ message: FORGOT_PASSWORD_REPLY });
 
-    const blocker = passwordLinkBlocker(users, user);
+    const blocker = passwordLinkBlocker(users, user, typed);
     const resetRequests = (await db.get('password_reset_requests')) || [];
     const request = { id: uuidv4(), userId: user.id, email: user.email, name: user.name, requestedAt: new Date().toISOString() };
+    const fileForOffice = async (blockedReason) => {
+      if (resetRequests.some(r => r.userId === user.id && r.status === 'pending')) return;
+      resetRequests.push({ ...request, status: 'pending', blockedReason });
+      await db.set('password_reset_requests', resetRequests);
+      await notify.passwordResetRequested({
+        requesterName: user.name, requesterEmail: phoneLogin.hasRealEmail(user) ? user.email : (user.loginPhone ? quoSms.prettyPhone(user.loginPhone) : user.email),
+        requestId: request.id, ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`, actorId: user.id
+      });
+    };
 
     if (blocker) {
-      // Nothing can be emailed, so the office is the only way back in. One
-      // pending request per person, as before.
-      if (!resetRequests.some(r => r.userId === user.id && r.status === 'pending')) {
-        resetRequests.push({ ...request, status: 'pending', blockedReason: blocker });
-        await db.set('password_reset_requests', resetRequests);
-        await notify.passwordResetRequested({
-          requesterName: user.name, requesterEmail: user.email, requestId: request.id,
-          ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ADMIN}`, actorId: user.id
-        });
-      }
+      // Nothing can be emailed or texted, so the office is the only way back
+      // in. One pending request per person, as before.
+      await fileForOffice(blocker);
       return res.json({ message: FORGOT_PASSWORD_REPLY });
     }
 
@@ -4775,11 +4875,18 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       await logActivity(user.id, user.name || user.email, 'password_reset_link_rate_limited', 'user', user.id, {});
       return res.json({ message: FORGOT_PASSWORD_REPLY });
     }
-    await issuePasswordSetLink(user, 'self_service');
+    const issued = await issuePasswordSetLink(user, 'self_service', typed);
+    if (!issued.ok) {
+      // The text did not leave (texting not set up, or Quo refused it). The
+      // office is the way back in, exactly as for an account with no inbox.
+      await logActivity(user.id, user.name || user.email, 'password_reset_text_failed', 'user', user.id, { error: issued.error });
+      await fileForOffice('text_failed');
+      return res.json({ message: FORGOT_PASSWORD_REPLY });
+    }
     // A record of the request for the office's history; nothing for anyone to do.
-    resetRequests.push({ ...request, status: 'link_sent', handledAt: request.requestedAt, handledBy: 'automatic' });
+    resetRequests.push({ ...request, status: 'link_sent', channel: issued.channel, handledAt: request.requestedAt, handledBy: 'automatic' });
     await db.set('password_reset_requests', resetRequests);
-    await logActivity(user.id, user.name || user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'self_service' });
+    await logActivity(user.id, user.name || user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'self_service', channel: issued.channel });
     res.json({ message: FORGOT_PASSWORD_REPLY });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -5006,9 +5113,12 @@ app.put('/api/admin/password-reset-requests/:id', authenticateToken, requireAdmi
           no_inbox: 'Nobody signs in with that login, so a link would reach no one. Reset it from the user form instead.' }[blocker];
         return res.status(409).json({ error: why, code: 'RESET_LINK_NOT_SENDABLE' });
       }
-      await issuePasswordSetLink(user, 'admin');
-      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin', requestId: id });
-      message = `Emailed ${user.email} a link to choose a new password.`;
+      const issued = await issuePasswordSetLink(user, 'admin');
+      if (!issued.ok) {
+        return res.status(502).json({ error: `The text to ${quoSms.prettyPhone(user.loginPhone)} did not go: ${issued.error} Call them instead.`, code: 'RESET_TEXT_FAILED' });
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin', requestId: id, channel: issued.channel });
+      message = `${phoneLogin.describeChannel(user, issued.channel)} a link to choose a new password.`;
     }
     resetRequests[idx].status = status || 'completed';
     resetRequests[idx].handledAt = new Date().toISOString();
@@ -5193,7 +5303,10 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       familyOfClientId: u.familyOfClientId || null,
       familyIsPoa: u.familyIsPoa || false,
       familyLinks: familyLinks.linksOf(u),
-      noLogin: familyLinks.isPlaceholderEmail(u.email),
+      noLogin: familyLinks.isPlaceholderEmail(u.email) && !u.loginPhone,
+      // No inbox on file (a placeholder address), whether or not they sign in by phone.
+      emailIsPlaceholder: familyLinks.isPlaceholderEmail(u.email),
+      loginPhone: u.loginPhone ? quoSms.prettyPhone(u.loginPhone) : null,
       loginHeldByPoa: !!u.loginHeldByPoa,
       poaCutover: u.poaCutover || null,
       openEmrProviderId: u.openEmrProviderId || null,
@@ -5339,11 +5452,20 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa, employmentType
+      resetPassword, accountType, managerClinicalAccess, familyLinks: familyLinksInput, loginHeldByPoa, employmentType,
+      loginPhone
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    // The phone number they sign in with (phoneLogin.js). Sent as '' or null
+    // to take it away. Checked before anything is written.
+    let loginPhoneChange;   // undefined = leave alone
+    if (loginPhone !== undefined) {
+      const checked = phoneLogin.checkLoginPhone({ users, raw: loginPhone, role: users[idx].role, userId: users[idx].id });
+      if (checked.error) return res.status(checked.status).json({ error: checked.error, code: checked.code });
+      if (checked.value !== (users[idx].loginPhone || null)) loginPhoneChange = checked.value;
+    }
     // Snapshotted BEFORE anything is written. A person whose access changes is
     // told about it (audit, 2026-11-09), and the only way to know it changed
     // is to hold what it was. A shallow read of users[idx] afterwards would
@@ -5442,6 +5564,20 @@ app.put('/api/users/:userId', authenticateToken, guardUserWrite, async (req, res
     if (email) {
       users[idx].email = String(email).trim();
       if (!familyLinks.isPlaceholderEmail(users[idx].email)) users[idx].noLogin = false;
+    }
+    if (loginPhoneChange !== undefined) {
+      if (loginPhoneChange) {
+        users[idx].loginPhone = loginPhoneChange;
+        users[idx].noLogin = false;
+        if (!users[idx].phone) users[idx].phone = quoSms.prettyPhone(loginPhoneChange);
+      } else {
+        delete users[idx].loginPhone;
+        // No email and no phone sign-in: nobody can sign in with it again.
+        if (familyLinks.isPlaceholderEmail(users[idx].email)) users[idx].noLogin = true;
+      }
+      // A new or removed way in ends every session on the old one.
+      await sessions.revokeAllForUser(users[idx].id, 'login_phone_changed');
+      await logActivity(req.user.id, req.user.name || req.user.email, 'login_phone_changed', 'user', users[idx].id, { set: !!loginPhoneChange });
     }
     if (role) users[idx].role = role;
     // A password resets the account only when the caller says so. A browser
@@ -18023,6 +18159,16 @@ const newInvoiceNumber = async () => {
   for (let i = 0; i < 20; i++) { const n = billing.invoiceNumber(); if (!taken.has(n)) return n; }
   throw new Error('could not make a unique invoice number');
 };
+// A notice sent with raw sendEmail (not the queue) reaches a phone sign-in
+// this way: the same PHI-free "you have an update" text. Best-effort.
+const textNoticeToPhoneLogins = (people, portalUrl) => {
+  for (const u of people || []) {
+    if (!phoneLogin.mayTextNotices(u)) continue;
+    messagingRouter.sms.queueNoticeText({ user: u, portalUrl })
+      .catch(err => console.error('Notice text failed (non-fatal):', err.message));
+  }
+};
+
 // "You have a statement" — no amount, no service, no date. The portal says the rest.
 const notifyStatement = async (clientId, { skipEmails } = {}) => {
   try {
@@ -18035,6 +18181,8 @@ const notifyStatement = async (clientId, { skipEmails } = {}) => {
     const to = [{ email: client.email, url: `${base}/portal` },
       ...familyLinks.familyFor(users, clientId, { poaOnly: true }).map(f => ({ email: f.user.email, url: `${base}/portal?for=${encodeURIComponent(clientId)}` }))]
       .filter(r => r.email && !familyLinks.isPlaceholderEmail(r.email));
+    textNoticeToPhoneLogins([client], `${base}/portal`);
+    textNoticeToPhoneLogins(familyLinks.familyFor(users, clientId, { poaOnly: true }).map(f => f.user), `${base}/portal?for=${encodeURIComponent(clientId)}`);
     const seen = new Set((skipEmails || []).map(e => String(e).toLowerCase()));
     for (const r of to) {
       if (seen.has(r.email.toLowerCase())) continue;
@@ -21859,6 +22007,8 @@ async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
         .catch(err => console.error('POA enrollment confirmation failed (non-fatal):', err.message));
     }
   }
+  // Anyone here who signs in by phone with no inbox hears by text (phoneLogin.js).
+  textNoticeToPhoneLogins([client, ...familyLinks.familyFor(users, client.id, { poaOnly: true }).map(f => f.user)], portalUrl);
   const poaSet = new Set(poas.map(x => x.toLowerCase()));
   const to = [...new Set([client.email, extraRecipient]
     .filter(e => e && !familyLinks.isPlaceholderEmail(e) && !poaSet.has(String(e).toLowerCase())))];
@@ -32047,7 +32197,8 @@ app.get('/api/changelog', async (req, res) => {
 // POA cutover (2026-10-20) ended. So the reset is refused, and the refusal
 // names the account to reset instead (owner, 2026-10-28).
 function placeholderResetRefusal(users, user) {
-  if (!user || !familyLinks.isPlaceholderEmail(user.email)) return null;
+  // A phone sign-in has no inbox but is a real login: its link goes by text.
+  if (!user || !familyLinks.isPlaceholderEmail(user.email) || (user.loginPhone && phoneLogin.canUsePhoneLogin(user.role))) return null;
   const poas = user.role === config.ROLES.CLIENT
     ? familyLinks.familyFor(users, user.id, { poaOnly: true }).map(f => f.user.name || f.user.email).filter(Boolean)
     : [];
@@ -32065,6 +32216,11 @@ function placeholderResetRefusal(users, user) {
 // noticed. Sent whatever their email preferences: this is a security notice.
 // Carries no link, so a forwarded copy gives nobody a way in.
 async function sendPasswordChangedEmail(user) {
+  // A phone sign-in hears by text instead (phoneLogin.js). No link in it.
+  if (user && !phoneLogin.hasRealEmail(user) && user.loginPhone && phoneLogin.canUsePhoneLogin(user.role)) {
+    return messagingRouter.sms.sendAccountText({ user, to: user.loginPhone, kind: 'password_changed',
+      content: phoneLogin.passwordChangedText({ officePhone: consentText.ORG.phone }) });
+  }
   if (!user || !user.email || familyLinks.isPlaceholderEmail(user.email)) return;
   const name = (user.preferredName || user.name || 'there').split(' ')[0];
   const when = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' });
@@ -32152,6 +32308,12 @@ app.post('/api/admin/bulk-password-reset', authenticateToken, requireAdmin, asyn
 
       if (placeholderResetRefusal(users, user)) {
         results.skipped.push({ email: user.email, reason: 'Nobody signs in with this login (placeholder)' });
+        continue;
+      }
+      // A phone sign-in has no inbox for a temporary password. Its link goes by
+      // text from the person's own record instead (phoneLogin.js).
+      if (!phoneLogin.hasRealEmail(user)) {
+        results.skipped.push({ email: user.email, reason: 'Signs in by phone: send a reset link from their record' });
         continue;
       }
 
@@ -32250,9 +32412,12 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
       users[userIndex].lastPasswordReset = new Date().toISOString();
       await db.set('users', users);
       invalidateUsersCache();
-      await issuePasswordSetLink(user, 'admin');
-      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin' });
-      return res.json({ message: `Emailed ${user.email} a link to choose a new password. It expires in 24 hours.`, linkSent: true });
+      const issued = await issuePasswordSetLink(user, 'admin');
+      if (!issued.ok) {
+        return res.status(502).json({ error: `The text to ${quoSms.prettyPhone(user.loginPhone)} did not go: ${issued.error} Their old password no longer works, so send it again or call them.`, code: 'RESET_TEXT_FAILED' });
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'password_reset_link_sent', 'user', user.id, { purpose: 'admin', channel: issued.channel });
+      return res.json({ message: `${phoneLogin.describeChannel(user, issued.channel)} a link to choose a new password. It expires in 24 hours.`, linkSent: true });
     }
 
     // Use custom password or generate temp password
@@ -32271,7 +32436,11 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
     sendPasswordResetEmail(user, token).catch(err => console.error('Password reset email error:', err));
 
     res.json({
-      message: 'Password reset successfully. A reset link has been emailed to the user.',
+      // A phone sign-in has no inbox, and a typed password is never texted:
+      // the office tells them, and they choose their own at next sign-in.
+      message: phoneLogin.hasRealEmail(user)
+        ? 'Password reset successfully. A reset link has been emailed to the user.'
+        : 'Password reset. They sign in by phone, so nothing was sent: tell them the new password. They will choose their own when they sign in.',
       requirePasswordChange: true
     });
   } catch (error) {

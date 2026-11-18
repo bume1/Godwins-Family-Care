@@ -338,7 +338,7 @@ test('the Admin Hub and Client Portal Admin gates admit only the Super Admin', (
 test('the user routes let the account type decide role, manager flag and clinical role', () => {
   for (const sig of ["app.post('/api/users', authenticateToken", "app.put('/api/users/:userId', authenticateToken"]) {
     const i = serverSrc.indexOf(sig);
-    const body = serverSrc.slice(i, i + 6000);
+    const body = serverSrc.slice(i, i + 8000);   // widened 2026-11-18: the PUT route checks a sign-in phone first
     assert.match(body, /accountTypes\.fieldsFor\(accountType, \{ managerClinicalAccess \}\)/, sig);
     assert.match(body, /const role = typed \? typed\.role : req\.body\.role;/, sig);
     assert.match(body, /const isManager = typed \? typed\.isManager : req\.body\.isManager;/, sig);
@@ -346,8 +346,8 @@ test('the user routes let the account type decide role, manager flag and clinica
     assert.match(body, /ACCOUNT_TYPE_INVALID/, `${sig} refuses an unknown type by name`);
   }
   const put = serverSrc.slice(serverSrc.indexOf("app.put('/api/users/:userId', authenticateToken"));
-  assert.match(put.slice(0, 9000), /users\[idx\]\.hasAdminHubAccess = false;/, 'any save clears the retired checkboxes');
-  assert.match(put.slice(0, 9000), /LAST_SUPER_ADMIN/, 'the only Super Admin cannot be demoted');
+  assert.match(put.slice(0, 12000), /users\[idx\]\.hasAdminHubAccess = false;/, 'any save clears the retired checkboxes');
+  assert.match(put.slice(0, 12000), /LAST_SUPER_ADMIN/, 'the only Super Admin cannot be demoted');
 });
 
 test('the login response carries the landing and the hub tiles, and the page reads them', () => {

@@ -56,6 +56,7 @@ const emailCopy = require('./emailCopy');       // the wording, in one editable 
 // where the rule is declared.
 const reminders = require('./visitReminders');
 const familyLinks = require('./familyLinks');   // POA is per patient; one family account can cover several
+const phoneLogin = require('./phoneLogin');     // no inbox but a phone sign-in: the notice goes by text (2026-11-18)
 
 // Roles that receive staff-side PHC notices. Mirrors ENROLLMENT_STAFF_ROLES in
 // server.js — passed in rather than restated, so the two cannot drift.
@@ -119,12 +120,14 @@ function createNotifier(deps) {
     const recipients = [];
     // A patient with no login of their own (placeholder email) has no inbox;
     // their POA below hears about it instead.
-    if (client.email && !familyLinks.isPlaceholderEmail(client.email)) recipients.push({ user: client, actingFor: null });
+    // One who signs in by phone is kept: queueNotification texts them instead.
+    const reachable = (u) => (u.email && !familyLinks.isPlaceholderEmail(u.email)) || phoneLogin.mayTextNotices(u);
+    if (reachable(client)) recipients.push({ user: client, actingFor: null });
     // POA is per patient (familyLinks.js): a family account linked to several
     // patients hears only about the ones it is POA for. A placeholder login
     // has no inbox.
     for (const { user: u } of familyLinks.familyFor(users, clientId, { poaOnly: true, activeOnly: false })) {
-      if (u.role === familyRole && u.email && !familyLinks.isPlaceholderEmail(u.email)) {
+      if (u.role === familyRole && reachable(u)) {
         recipients.push({ user: u, actingFor: client });
       }
     }

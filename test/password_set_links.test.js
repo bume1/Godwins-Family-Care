@@ -54,7 +54,7 @@ test('the password rules are the app\'s own', () => {
 
 test('forgot-password sends the link itself; the reply never says whether an account exists', () => {
   const route = SERVER.slice(SERVER.indexOf("app.post('/api/auth/forgot-password'"), SERVER.indexOf("app.post('/api/auth/reset-password'"));
-  assert.match(route, /issuePasswordSetLink\(user, 'self_service'\)/);
+  assert.match(route, /issuePasswordSetLink\(user, 'self_service', typed\)/);
   assert.match(route, /overSelfServiceLimit/);
   // Every reply is the one generic sentence.
   const replies = route.match(/res\.json\(\{ message: [A-Z_]+ \}\)/g) || [];
