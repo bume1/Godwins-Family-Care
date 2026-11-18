@@ -258,7 +258,7 @@ test('build guard: a POA can do the patient’s own tasks, and the routes work o
   assert.match(server, /if \(familyLinks\.isPlaceholderEmail\(recipientEmail\)\) return \{ ok: false/);
   const portal = read('public/portal.html');
   assert.match(portal, /showIntake && \(!isFamily \|\| isPoa\)/);
-  assert.match(portal, /\(isFamily && !isPoa\) \? !me\.roiFamilySigned/);
+  assert.match(portal, /\(isFamily && !isPoa\) \? \(!me\.roiFamilySigned \|\| !!me\.releaseExpired\)/);
 });
 
 test('the record-release receipt: the POA is greeted by their own name and the patient is not told about "your records" by someone else', () => {

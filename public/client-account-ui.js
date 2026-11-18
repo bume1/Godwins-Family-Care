@@ -560,7 +560,12 @@
   // their own account (familyLinks), never on the client.
   const FamilyLinkRow = ({ family, clientId, me, token, onChanged }) => {
     const link = linksOf(family).find(l => l.clientId === String(clientId)) || { clientId: String(clientId), isPoa: false, relationship: '' };
+    const stored = ((family.familyLinks || []).find(l => String(l.clientId) === String(clientId)) || {}).release || null;
     const [rel, setRel] = useState(link.relationship); const [poa, setPoa] = useState(link.isPoa);
+    const [relSigned, setRelSigned] = useState((stored && stored.signedOn) || '');
+    const [relExpires, setRelExpires] = useState((stored && stored.expiresOn) || '');
+    const release = { signedOn: relSigned, expiresOn: relExpires };
+    const state = releaseStateOf(stored, poa);
     const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
     const write = async (links, ok) => {
       setBusy(true); setMsg(''); const r = await updateUser(family.id, { familyLinks: links }); setBusy(false);
@@ -577,13 +582,35 @@
         <div className="flex gap-2 flex-wrap items-center mt-2">
           <input className="input" style={{ maxWidth: 220 }} placeholder="Relationship, e.g. Daughter" value={rel} onChange={e => setRel(e.target.value)} />
           <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={poa} onChange={e => setPoa(e.target.checked)} /> Designated Power of Attorney</label>
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => write(others.concat({ clientId: String(clientId), relationship: rel, isPoa: poa }), 'Saved.')}>Save</button>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => write(others.concat({ clientId: String(clientId), relationship: rel, isPoa: poa, release }), 'Saved.')}>Save</button>
           <button type="button" className="btn btn-danger" disabled={busy} onClick={() => { if (window.confirm(`Remove ${family.name}'s access to this client? Their own account stays.`)) write(others, 'Removed.'); }}>Remove Link</button>
         </div>
+        {!poa && (
+          <div className="flex gap-2 flex-wrap items-center mt-2">
+            <span className="text-sm font-medium">HIPAA release on file</span>
+            <label className="text-sm flex items-center gap-1">Signed <input type="date" className="input" style={{ maxWidth: 170 }} value={relSigned} onChange={e => setRelSigned(e.target.value)} /></label>
+            <label className="text-sm flex items-center gap-1">Expires <input type="date" className="input" style={{ maxWidth: 170 }} value={relExpires} onChange={e => setRelExpires(e.target.value)} /></label>
+            <span className={`badge ${state.tone}`}>{state.label}</span>
+          </div>
+        )}
         <p className="text-xs text-gray-500 mt-1">Only tick Power of Attorney once the POA document is verified on file. A POA can act for the client in the portal.</p>
+        {!poa && <p className="text-xs text-gray-500">For a caregiver or contact with no legal authority: record their signed HIPAA release. When it expires, their access pauses on its own until a new one is recorded. Leave Expires blank for a release that runs until revoked.</p>}
         <Msg msg={msg} />
       </div>
     );
+  };
+
+  // Where a contact's own release stands, for the badge. The server decides
+  // access (familyLinks.releaseState); this only labels what was saved.
+  const releaseStateOf = (release, isPoa) => {
+    if (isPoa) return { label: 'Not needed for a POA', tone: 'bg-gray-100 text-gray-600' };
+    if (!release || !release.signedOn) return { label: 'No release recorded', tone: 'bg-amber-50 text-amber-700' };
+    if (!release.expiresOn) return { label: 'On file, no expiry', tone: 'bg-green-50 text-green-700' };
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const days = Math.round((Date.parse(`${release.expiresOn}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+    if (days < 0) return { label: 'Expired, access paused', tone: 'bg-red-50 text-red-600' };
+    if (days <= 30) return { label: `Expires in ${days} day${days === 1 ? '' : 's'}`, tone: 'bg-amber-50 text-amber-700' };
+    return { label: 'On file', tone: 'bg-green-50 text-green-700' };
   };
 
   const FamilySection = ({ token, client, users, me, onChanged, onAddNew }) => {

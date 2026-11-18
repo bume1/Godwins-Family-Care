@@ -102,6 +102,11 @@ module.exports = function createMessagingRoutes(deps) {
   });
 
   const requireMessagingRole = (req, res, next) => {
+    // A family contact whose own HIPAA release has lapsed reads no care
+    // information, and a conversation is care information (owner, 2026-11-18).
+    if (req.user && req.user.familyReleaseExpired) {
+      return res.status(403).json({ error: 'Your HIPAA release for this patient has expired, so access is paused. Call the office to renew it.', code: 'FAMILY_RELEASE_EXPIRED' });
+    }
     if (msg.actorRole(req.user)) return next();
     return res.status(403).json({ error: 'This account cannot use messaging.', code: 'NO_MESSAGING_ROLE' });
   };

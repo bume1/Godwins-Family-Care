@@ -147,6 +147,10 @@ const evaluateClinicalReadAccess = ({ reqUser, client, isConsentSatisfied, isCli
   if (audience !== 'patient' && !isConsentSatisfied(consents.roiFamily)) {
     return { ok: false, status: 403, code: 'ROI_FAMILY_REQUIRED', error: 'Family access is locked until the Release of Information (family) consent is signed.' };
   }
+  // A non-POA contact whose own HIPAA release has expired (familyLinks.js).
+  if (audience === 'family' && reqUser.familyReleaseExpired) {
+    return { ok: false, status: 403, code: 'FAMILY_RELEASE_EXPIRED', error: 'Your HIPAA release for this patient has expired, so access is paused. Call the office to renew it.' };
+  }
   if (!isClinicalServiceLine(client.serviceLine)) {
     return { ok: false, status: 403, code: 'CLINICAL_NOT_ON_LINE', error: 'Clinical sections apply to In-Home Primary Care clients only.' };
   }
