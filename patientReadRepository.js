@@ -164,6 +164,35 @@ const evaluateClinicalReadAccess = ({ reqUser, client, isConsentSatisfied, isCli
   return { ok: true, audience, sharing, sections: sectionsFor(audience, sharing) };
 };
 
+// Seeing WHEN a visit is booked, and with whom, is scheduling, not the
+// clinical record (owner report, 2026-11-18: a patient with a clinical visit
+// today saw only her caregiver visit). The clinical record stays behind the
+// full gate above; the appointment list needs only a linked chart and, for
+// family, the same release and sharing rules. Service line and consent to
+// treat are deliberately NOT checked here: a visit that was booked is a visit
+// the patient has to be able to find. Joining a video room still checks
+// consent to treat (see the join route).
+const evaluateAppointmentReadAccess = ({ reqUser, client, isConsentSatisfied }) => {
+  if (!reqUser) return { ok: false, status: 401, code: 'UNAUTHENTICATED', error: 'Sign in required' };
+  let audience = null;
+  if (reqUser.role === 'client') audience = 'patient';
+  else if (reqUser.role === 'family') audience = reqUser.familyIsPoa ? 'poa' : 'family';
+  else return { ok: false, status: 403, code: 'CLIENT_OR_FAMILY_ONLY', error: 'Client or family access required' };
+  if (!client) return { ok: false, status: 404, code: 'NO_CLIENT', error: 'No client record on file' };
+  const consents = client.consents || {};
+  if (audience !== 'patient' && !isConsentSatisfied(consents.roiFamily)) {
+    return { ok: false, status: 403, code: 'ROI_FAMILY_REQUIRED', error: 'Family access is locked until the Release of Information (family) consent is signed.' };
+  }
+  if (audience === 'family' && reqUser.familyReleaseExpired) {
+    return { ok: false, status: 403, code: 'FAMILY_RELEASE_EXPIRED', error: 'Your HIPAA release for this patient has expired, so access is paused. Call the office to renew it.' };
+  }
+  if (!client.openEmrPatientId) {
+    return { ok: false, status: 403, code: 'CLINICAL_NOT_LINKED', error: 'No clinical visits are booked yet.' };
+  }
+  const sharing = normalizeSharing(client.sharing);
+  return { ok: true, audience, sharing, sections: sectionsFor(audience, sharing) };
+};
+
 // Which sections an audience gets, and at what level (none | summary | full).
 const sectionsFor = (audience, sharingInput) => {
   const s = normalizeSharing(sharingInput);
@@ -397,7 +426,7 @@ const summarizeProblemForPatient = (p) => ({
 module.exports = {
   AUDIENCES, VISIT_LEVELS, SHARING_DEFAULTS, normalizeSharing,
   FILTER_MAP, CLINICIAN_ONLY_FIELDS, NOTE_CONTENT_FIELDS, RESULT_CLINICIAN_ONLY_FIELDS, pickFields, filterFor, filterRow, filterRows,
-  evaluateClinicalReadAccess, sectionsFor,
+  evaluateClinicalReadAccess, evaluateAppointmentReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,
   buildVisitSummary, buildPatientFacingFields, cleanMultiline, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
