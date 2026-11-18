@@ -19674,6 +19674,22 @@ app.get('/api/clinical/visits/:eid/video', authenticateToken, requireClinicalRea
   }
 });
 
+// When this visit's room "opens" for the clinician's start stamp: the same
+// 15 minutes before the scheduled start the patient's Join button uses. Null
+// when the calendar cannot be read, and then the start is stamped as before,
+// because a missing time statement costs more than an early one.
+const videoVisitOpensAt = async (req, eid) => {
+  try {
+    if (!openemr.isConfigured()) return null;
+    const rows = await openemr.forActor(req.user).listAppointmentRows();
+    const r = rows.find(x => String(x.pc_eid) === String(eid));
+    if (!r) return null;
+    const date = String(r.pc_eventDate || ''); const time = String(r.pc_startTime || '').slice(0, 5);
+    const start = joinInstant(date, time);
+    if (!Number.isFinite(start)) return null;
+    return { opensAt: start - patientPublish.JOIN_OPENS_MINUTES_BEFORE * 60000, label: formatVisitWhen(date, time) };
+  } catch (_) { return null; }
+};
 app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClinicalDocumenter,
   requireNoteWriter, async (req, res) => {
     try {
@@ -19695,11 +19711,25 @@ app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClin
       // The stamp is best-effort relative to JOINING: a clinician must never be
       // kept out of a visit because a time could not be written.
       let timing = null; let timingNote = null;
+      // OPENING THE ROOM EARLY IS NOT STARTING THE VISIT (owner, 2026-11-18: a
+      // test join at 11:33 marked a 1:15 visit as started). Before the visit's
+      // window opens (the same 15 minutes before the start the patient gets),
+      // the room opens and nothing is stamped. A start stamped early like that
+      // is reset the first time the room is opened inside the window.
+      const sched = await videoVisitOpensAt(req, eid);
       try {
-        const out = await stampVisitTiming({
-          eid, field: VISIT_TIMING_EVENTS.start, event: 'start',
-          clientId: row.clientId, user: req.user
-        });
+        const early = sched && Date.now() < sched.opensAt;
+        const prior = (await loadVisitTimings()).find(t => t && t.id === myDay.timingId(eid)) || null;
+        const priorEarly = !early && sched && prior && prior.startedAt && !prior.endedAt &&
+          Date.parse(prior.startedAt) < sched.opensAt;
+        const out = early
+          ? { ok: false, code: 'VIDEO_OPENED_EARLY',
+            error: `Room opened. The visit was not marked as started because it is more than ${patientPublish.JOIN_OPENS_MINUTES_BEFORE} minutes before ${sched.label}. Open the room again at the visit time to start it.` }
+          : await stampVisitTiming({
+            eid, field: VISIT_TIMING_EVENTS.start, event: 'start',
+            clientId: row.clientId, user: req.user,
+            reason: priorEarly ? 'The room was opened before the visit time. Start reset when the visit began.' : undefined
+          });
         if (out.ok) timing = timingPayload(out.timing);
         else if (out.code === 'TIMING_ALREADY_SET') {
           timing = out.timing ? timingPayload(out.timing) : null;

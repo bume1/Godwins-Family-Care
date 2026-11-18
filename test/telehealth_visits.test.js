@@ -322,7 +322,7 @@ test('B3: starting a video visit stamps the start through the ONE writer', () =>
   assert.match(body, /rejoining did not change it/);
   // The stamp is best-effort relative to JOINING: a clinician must never be
   // kept out of a visit because a time could not be written.
-  assert.match(body, /try \{[\s\S]{0,600}stampVisitTiming[\s\S]{0,900}catch \(e\) \{[\s\S]{0,300}timingNote/);
+  assert.match(body, /try \{[\s\S]{0,1600}stampVisitTiming[\s\S]{0,900}catch \(e\) \{[\s\S]{0,300}timingNote/);
   // No room, no start. MY FIRST DRAFT ASSERTED THE STRING `MEET_NO_ROOM`,
   // which appears TWICE in this route — no pointer at all, and a pointer with
   // no join link — so deleting the first guard left the second one matching and
