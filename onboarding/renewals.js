@@ -33,6 +33,7 @@ const EXPIRING_ITEMS = Object.freeze({
   'C.6.10': 'TB screening',
   'C.6.12': "Driver's license or auto insurance",
   'C.6.13': 'License in another state',
+  'C.6.18': 'BLS certification',
   // Chapter B (registered nurse)
   'B.6.01': 'RN license',
   'B.6.04': 'TB screening',

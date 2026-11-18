@@ -53,6 +53,7 @@ const INFERRED = 'INFERRED';
 const CONFIRMED = 'OWNER_CONFIRMED';
 const M_ = (section) => ref('CLINICAL_MANUAL', section);
 const OWNER_ADDED = 'Owner addition, 2026-11-08: kept from the #260 checklist though Playbook v3.0 Chapter C does not list it.';
+const OWNER_ADDED_1118 = 'Owner addition, 2026-11-18: the credentialing tasks set up for the first clinicians, on every clinician\'s checklist.';
 const NO_CLASS = 'Owner addition; neither Playbook C.2 nor Clinical Manual §1.6 classifies it.';
 const NO_C2_ROW = 'Playbook C.2 carries no row for this item.';
 
@@ -287,6 +288,27 @@ const ITEMS = Object.freeze([
   { id: 'C.6.14', phase: 'C.6', title: 'Controlled prescribing by telehealth follows the DEA rule in effect', ref: null, addedBy: OWNER_ADDED,
     when: { telehealth: true, controlledSubstances: true },
     steps: [step(A.NEW_HIRE, X.ACKNOWLEDGE, INFERRED), step(A.CLINICAL_DIRECTOR, X.RECORD, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  // Credentialing tasks first set up by hand for one clinician, now on every
+  // clinician's checklist (owner, 2026-11-18).
+  { id: 'C.5.07', phase: 'C.5', title: 'I-9 identity document copies', ref: null, addedBy: OWNER_ADDED_1118,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.PAYROLL_FINANCE_OFFICER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.15', phase: 'C.6', title: 'Medicare enrollment and reassignment to Godwins Family Care', ref: null, addedBy: OWNER_ADDED_1118,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.RECORD, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.16', phase: 'C.6', title: 'CAQH ProView profile', ref: null, addedBy: OWNER_ADDED_1118,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.17', phase: 'C.6', title: 'Georgia PDMP registration', ref: null, addedBy: OWNER_ADDED_1118,
+    when: { prescribes: true },
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.18', phase: 'C.6', title: 'BLS card', ref: null, addedBy: OWNER_ADDED_1118,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
+    classifications: [], classificationNote: NO_CLASS },
+  { id: 'C.6.19', phase: 'C.6', title: 'Education: diplomas and transcripts', ref: null, addedBy: OWNER_ADDED_1118,
+    steps: [step(A.NEW_HIRE, X.SUBMIT, INFERRED), step(A.CREDENTIALING_OWNER, X.VERIFY, INFERRED)],
     classifications: [], classificationNote: NO_CLASS },
   { id: 'C.7.06', phase: 'C.7', title: 'Annual pharmacology training documented', ref: null, addedBy: OWNER_ADDED,
     when: { prescribes: true },
