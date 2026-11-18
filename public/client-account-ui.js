@@ -330,21 +330,26 @@
       setMsg(typeof ok === 'function' ? ok(r) : ok); onChanged && onChanged();
     };
     const name = person.name || 'this person';
-    // No inbox, but a phone they sign in with: the link goes by text.
-    const byText = !!(person.loginPhone && person.emailIsPlaceholder);
+    // A phone they sign in with: Text Reset Link. A real inbox: Email Reset
+    // Link. Both: both buttons, and the office picks (2026-11-18). Before,
+    // a phone sign-in with an email on file showed only Email.
+    const canText = !!(person.loginPhone && !person.noLogin);
+    const canEmail = !!(person.email && !person.emailIsPlaceholder && !person.noLogin);
+    const byText = canText && !canEmail;
+    const sendLink = (channel) => run(
+      channel === 'sms'
+        ? `Text ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is texted to ${person.loginPhone}.`
+        : `Email ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${person.email}.`,
+      () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: { channel }, token }),
+      (r) => `${r.message || (channel === 'sms' ? `A reset link was texted to ${person.loginPhone}.` : `A reset link was emailed to ${person.email}.`)} Their old password no longer works.`);
     return (
       <Block title="Account Recovery">
         <div className="flex flex-wrap gap-2">
           {person.accountStatus !== 'inactive' && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => startViewAs(token, person, setMsg)}>View As</button>}
           <button type="button" className="btn btn-ghost" disabled={busy || !person.mfaEnrolled}
             onClick={() => run(`Reset ${name}'s authenticator? Every session they hold ends now and they set it up again at their next sign-in.`, () => req(`/api/users/${encodeURIComponent(person.id)}/mfa/reset`, { method: 'POST', token }), 'Authenticator reset.')}>Reset Authenticator</button>
-          {byText ? (
-            <button type="button" className="btn btn-ghost" disabled={busy}
-              onClick={() => run(`Text ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is texted to ${person.loginPhone}.`, () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: {}, token }), (r) => `${r.message || `A reset link was texted to ${person.loginPhone}.`} Their old password no longer works.`)}>Text Reset Link</button>
-          ) : (
-            <button type="button" className="btn btn-ghost" disabled={busy || person.noLogin}
-              onClick={() => run(`Email ${name} a password reset link?\n\nTheir current password stops working straight away and a secure link is emailed to ${person.email}.`, () => req(`/api/admin/reset-user-password/${encodeURIComponent(person.id)}`, { method: 'POST', body: {}, token }), `A password reset link has been emailed to ${person.email}. Their old password no longer works.`)}>Email Reset Link</button>
-          )}
+          {canText && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => sendLink('sms')}>Text Reset Link</button>}
+          {(canEmail || !canText) && <button type="button" className="btn btn-ghost" disabled={busy || !canEmail} onClick={() => sendLink('email')}>Email Reset Link</button>}
           <button type="button" className="btn btn-ghost" disabled={busy}
             onClick={() => run(`Sign ${name} out everywhere?\n\nEvery device they are signed in on is ended. Their password is unchanged.`, () => req(`/api/users/${encodeURIComponent(person.id)}/sessions/revoke`, { method: 'POST', token }),
               (r) => (r.revoked ? `${name} was signed out of ${r.revoked} session${r.revoked === 1 ? '' : 's'}.` : `${name} had no active sessions, so nothing was signed out.`))}>Sign Out Everywhere</button>
@@ -382,7 +387,7 @@
       <Block title="Sign In by Phone">
         <p className="text-sm text-gray-600 mb-2">
           {person.loginPhone
-            ? `${name} can sign in with ${person.loginPhone}.${person.emailIsPlaceholder ? ' They have no email on file, so their updates and password links come by text.' : ''}`
+            ? `${name} can sign in with ${person.loginPhone}.${person.emailIsPlaceholder ? ' They have no email on file, so their updates and password links come by text.' : ' They also have an email on file, so updates go there. Account Recovery can text or email a reset link.'}`
             : `${name} signs in with ${person.emailIsPlaceholder ? 'nothing yet' : 'their email'}. Add a mobile number to let them sign in with it instead.`}
         </p>
         <div className="flex gap-2 flex-wrap">

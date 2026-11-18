@@ -32476,6 +32476,11 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
   try {
     const { userId } = req.params;
     const { customPassword } = req.body;
+    // Which way the link goes when the account has both an inbox and a
+    // sign-in phone (2026-11-18): the office picks. Without a choice the
+    // email wins, as before. A choice the account cannot take is refused,
+    // never quietly sent the other way.
+    const wantChannel = req.body && (req.body.channel === 'sms' || req.body.channel === 'email') ? req.body.channel : null;
 
     const users = await getUsers();
     const userIndex = users.findIndex(u => u.id === userId);
@@ -32498,11 +32503,18 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
       if (passwordLinkBlocker(users, user) === 'account_inactive') {
         return res.status(409).json({ error: 'That account is switched off. Turn it back on first.', code: 'RESET_LINK_NOT_SENDABLE' });
       }
+      const typed = wantChannel === 'sms' ? (user.loginPhone || '') : wantChannel === 'email' ? (user.email || '') : undefined;
+      if (wantChannel && phoneLogin.resetChannel(user, typed) !== wantChannel) {
+        return res.status(409).json({
+          error: wantChannel === 'sms' ? 'This account does not sign in by phone, so a link cannot be texted.' : 'This account has no email on file, so a link cannot be emailed.',
+          code: 'RESET_CHANNEL_UNAVAILABLE'
+        });
+      }
       users[userIndex].password = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), config.BCRYPT_SALT_ROUNDS);
       users[userIndex].lastPasswordReset = new Date().toISOString();
       await db.set('users', users);
       invalidateUsersCache();
-      const issued = await issuePasswordSetLink(user, 'admin');
+      const issued = await issuePasswordSetLink(user, 'admin', typed);
       if (!issued.ok) {
         return res.status(502).json({ error: `The text to ${quoSms.prettyPhone(user.loginPhone)} did not go: ${issued.error} Their old password no longer works, so send it again or call them.`, code: 'RESET_TEXT_FAILED' });
       }
