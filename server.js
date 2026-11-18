@@ -9662,6 +9662,16 @@ const resolvePatientClinicalContext = async (req, res) => {
   if (!access.ok) { res.status(access.status).json({ error: access.error, code: access.code }); return null; }
   return { client, ...access, acting: patientRead.buildActingIdentity(req.user, client) };
 };
+// The lighter gate for the visit list and the Join button: a linked chart,
+// and for family the release and sharing rules. See
+// patientRead.evaluateAppointmentReadAccess for why service line and consent
+// to treat are not part of it.
+const resolvePatientAppointmentContext = async (req, res) => {
+  const client = await resolveGfcClientRecord(req.user);
+  const access = patientRead.evaluateAppointmentReadAccess({ reqUser: req.user, client, isConsentSatisfied });
+  if (!access.ok) { res.status(access.status).json({ error: access.error, code: access.code }); return null; }
+  return { client, ...access, acting: patientRead.buildActingIdentity(req.user, client) };
+};
 const logPatientClinicalRead = (req, ctx, resource, details) =>
   logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', ctx.client.id, {
     role: req.user.role, audience: ctx.audience, actingFor: ctx.acting.actingFor,
@@ -9690,6 +9700,33 @@ const providerNameMap = async () => {
 // on every read, so a sharing change takes effect with no republish.
 //
 // Appointments come from the P2 copy written whenever staff touch the calendar.
+// GET /api/gfc/clinical/appointments — the patient's clinical visits on
+// their own, for a client the full clinical read does not clear yet (home care
+// line, or consent to treat not on file). Served from the published copy only;
+// never touches OpenEMR.
+app.get('/api/gfc/clinical/appointments', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientAppointmentContext(req, res);
+    if (!ctx) return;
+    const { client, sections } = ctx;
+    if (!sections.appointments || sections.appointments === 'none') {
+      return res.json({ appointments: [], appointmentsPublished: false, appointmentsShared: false });
+    }
+    const apptRow = await loadPublishedAppointments(client.id);
+    const published = !!(apptRow && apptRow.sourcePuuid === client.openEmrPatientId);
+    await logPatientClinicalRead(req, ctx, 'appointments', {});
+    res.json({
+      appointments: published ? patientRead.filterRows('appointment', sections.appointments, apptRow.appointments || []) : [],
+      appointmentsPublished: published,
+      appointmentsUpdatedAt: published ? apptRow.publishedAt : null,
+      appointmentsShared: true
+    });
+  } catch (error) {
+    console.error('Patient appointments read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
     const ctx = await resolvePatientClinicalContext(req, res);
@@ -9989,9 +10026,18 @@ const joinInstant = (date, time) => {
 };
 app.get('/api/gfc/clinical/appointments/:eid/join', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
-    const ctx = await resolvePatientClinicalContext(req, res);
+    const ctx = await resolvePatientAppointmentContext(req, res);
     if (!ctx) return;
     const { client, audience, sections } = ctx;
+    // A video visit is medical care, so consent to treatment must be on file
+    // before the room opens. Said plainly, because "call the office" is the
+    // one thing the patient can do about it.
+    if (!isConsentSatisfied((client.consents || {}).consentToTreat)) {
+      return res.status(409).json({
+        error: 'Your consent to medical treatment is not on file yet, so the video room cannot open. Please call the office before your visit.',
+        code: 'CLINICAL_CONSENT_REQUIRED'
+      });
+    }
     if (audience !== 'patient' && audience !== 'poa') {
       return res.status(403).json({
         error: 'Only the patient or their designated Power of Attorney can open the video room. Ask them to invite you from inside the visit.',

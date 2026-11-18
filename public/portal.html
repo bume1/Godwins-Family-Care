@@ -809,6 +809,13 @@
         }).then(handleResponse).catch(asError),
 
       // ---- Patient clinical read (Session 4.3) — no ids: the server scopes to the session ----
+      // The visit list alone, for a client the full clinical read has not
+      // cleared (home care line, or consent to treat not on file yet).
+      getGfcClinicalAppointments: (token) =>
+        fetch(`${API_URL}/api/gfc/clinical/appointments`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getGfcClinicalSummary: (token) =>
         fetch(`${API_URL}/api/gfc/clinical/summary`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -7794,6 +7801,7 @@
       // Back from Stripe's checkout page: /portal?billing=paid|cancelled opens Billing.
       const [billingReturn] = useState(() => { try { return new URLSearchParams(window.location.search).get('billing'); } catch (_) { return null; } });
       useEffect(() => { if (billingReturn) setView('billing'); }, [billingReturn]);       // home | care | messages | documents
+      const [visitsOnly, setVisitsOnly] = useState(null);  // booked clinical visits for a client not yet cleared for the full clinical read
       const [showIntake, setShowIntake] = useState(false);
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
@@ -7918,6 +7926,12 @@
             if (cancelled) return;
             setClinical(cl);
             if (!cd.error) { setClinicalDocs(cd.documents || []); setClinicalDocsErr(''); } else setClinicalDocsErr(cd.error);
+          } else {
+            // Not cleared for the clinical record, but a booked clinical visit
+            // must still show on the calendar (owner report, 2026-11-18).
+            const va = await api.getGfcClinicalAppointments(token);
+            if (cancelled) return;
+            setVisitsOnly(va && !va.error ? va : null);
           }
         })();
         return () => { cancelled = true; };
@@ -8046,9 +8060,9 @@
               <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
               <button className="ib" onClick={() => go('messages')} aria-label={unread ? `${unread} unread messages` : 'Messages'}><i className="ti ti-bell" />{unread > 0 && <span className="rd" />}</button>
             </header>
-            {view === 'home' && data && <GfcDashboard data={data} onNavigate={onNavigate} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} threads={threads} threadsErr={threadsErr} />}
-            {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} me={me} onNavigate={onNavigate} />}
-            {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} onNavigate={onNavigate} />}
+            {view === 'home' && data && <GfcDashboard data={data} onNavigate={onNavigate} me={me} clinical={clinicalAvailable ? clinical : visitsOnly} shifts={shifts} shiftsErr={shiftsErr} threads={threads} threadsErr={threadsErr} />}
+            {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : visitsOnly} me={me} onNavigate={onNavigate} />}
+            {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : visitsOnly} onNavigate={onNavigate} />}
             {view === 'results' && clinicalAvailable && <GfcResults clinical={clinical} token={token} />}
             {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
             {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
