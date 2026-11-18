@@ -596,7 +596,8 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
           </div>
         )}
         {/* Attach a PDF for her to sign on this item (owner, 2026-11-10). */}
-        {office && !item.document && item.steps.some(s => s.hers) && track.person && <AttachDocument item={item} userId={track.person.userId} onDone={onChanged} />}
+        {/* A signature step carries its own Send button (owner, 2026-11-18); other items keep this one at the top. */}
+        {office && !item.document && item.steps.some(s => s.hers) && !item.steps.some(s => s.hers && s.action === 'SIGN') && track.person && <AttachDocument item={item} userId={track.person.userId} onDone={onChanged} />}
         {item.acknowledgments ? (
           <div>
             <label className="f">Documents to sign or acknowledge</label>
@@ -646,7 +647,7 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                           ? <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>Mark Signed (Paper Copy On File)</button>
                           : <div style={{ marginTop: 6 }}>
                               {/* Signing happens in the app; paper is the backup (owner, 2026-11-18). */}
-                              <div className="meta">Use Attach Document to Sign above, and they sign it in the app.</div>
+                              {track.person && <AttachDocument item={item} userId={track.person.userId} onDone={onChanged} />}
                               <details style={{ marginTop: 4 }}>
                                 <summary className="meta" style={{ cursor: 'pointer' }}>Signed on paper instead?</summary>
                                 <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 6 }}>

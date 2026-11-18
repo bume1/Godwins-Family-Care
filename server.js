@@ -33986,6 +33986,13 @@ app.listen(PORT, () => {
       console.error('Onboarding packet sync repair failed (non-fatal):', err.message);
     }
     try {
+      // Hand-added tasks that copy a built-in one are removed once (2026-11-18).
+      const r = await require('./onboarding/dedupeCustom').dedupeOnce(db, { T: require('./onboarding/track'), now: new Date().toISOString() });
+      if (!r.skipped) console.log(`[onboarding] duplicate tasks: ${r.removed.length} removed (${r.removed.map(x => `${x.title} -> ${x.builtIn}`).join('; ') || 'none'}), ${r.kept.length} kept.`);
+    } catch (err) {
+      console.error('Onboarding duplicate-task cleanup failed (non-fatal):', err.message);
+    }
+    try {
       await migrateFamilyLinks();
     } catch (err) {
       console.error('Family-link migration failed (non-fatal):', err.message);
