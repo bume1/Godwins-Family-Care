@@ -346,14 +346,22 @@ test('B4: Create Video Room makes a room for a video visit that has none, and on
   // the link must not be handed a different one.
   assert.match(body, /if \(existing && existing\.meetingUri\) \{[\s\S]{0,200}created: false/);
   assert.ok(body.indexOf('existing.meetingUri') < body.indexOf('createVideoRoomFor('), 'checked before anything is created');
+  // The visit checks and the follow-up live in two helpers shared with the
+  // pasted-link route, so both doors apply the same rules.
+  assert.match(body, /await loadVideoVisitContext\(req, eid\)/);
+  assert.match(body, /await afterVideoRoomReady\(req, ctx, eid\)/);
+  const ctxFn = SERVER.slice(SERVER.indexOf('const loadVideoVisitContext'));
+  const ctxBody = ctxFn.slice(0, ctxFn.indexOf('\n};'));
   // It never turns a house call into a video visit.
-  assert.match(body, /if \(!clinicalRepo\.locationNeedsVideoRoom\(dec\.location\)\) \{[\s\S]{0,300}code: 'APPT_NOT_VIDEO'/);
+  assert.match(ctxBody, /if \(!clinicalRepo\.locationNeedsVideoRoom\(dec\.location\)\) \{[\s\S]{0,300}code: 'APPT_NOT_VIDEO'/);
   // The ONE room builder, so the host rule and the room config cannot fork.
-  assert.match(body, /await createVideoRoomFor\(\{ eid, client, providerId/);
+  assert.match(body, /await createVideoRoomFor\(\{ eid, client: ctx\.client, providerId: ctx\.providerId/);
   assert.ok(!/meetRooms\.createSpace/.test(body), 'never calls Meet directly');
   // The day-of link and the patient's Join button follow the room.
-  assert.match(body, /kind: visitReminders\.REMINDER_KINDS\.VIDEO_JOIN/);
-  assert.match(body, /await publishAppointmentsForClient\(/);
+  const afterFn = SERVER.slice(SERVER.indexOf('const afterVideoRoomReady'));
+  const afterBody = afterFn.slice(0, afterFn.indexOf('\n};'));
+  assert.match(afterBody, /kind: visitReminders\.REMINDER_KINDS\.VIDEO_JOIN/);
+  assert.match(afterBody, /await publishAppointmentsForClient\(/);
 });
 
 test('B4: the encounter card offers Create Video Room instead of "reschedule it"', () => {
