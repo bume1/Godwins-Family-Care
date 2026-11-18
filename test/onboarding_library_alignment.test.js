@@ -163,3 +163,11 @@ test('the pipeline names each person\'s own role, never a blanket "Clinician (W-
   assert.match(page, /<td className="hide-sm">\{roleLabel\(p\.chapter, p\.relationship\)\}<\/td>/);
   assert.doesNotMatch(page, />Clinician \(W-2\)</);
 });
+
+test('one Training Library in the menu, with the staff view behind a toggle; rows wrap rather than squeeze the title', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.doesNotMatch(page, /Library as Staff See It/);
+  assert.match(page, /onClick=\{\(\) => setView\('staffLibrary'\)\}><i className="ti ti-eye" \/>See It as Staff/);
+  assert.match(page, /\.item\{flex-wrap:wrap\}/);
+  assert.match(page, /\.item \.t\{flex:1 1 260px;min-width:0\}/);
+});
