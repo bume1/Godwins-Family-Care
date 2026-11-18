@@ -211,7 +211,7 @@ test('a policy that is not theirs is refused', async (t) => {
 test('the onboarding drawer opens policies on the signing screen and shows sign or acknowledge', () => {
   const page = read('public/onboarding.html');
   assert.match(page, /const PolicyAck = /);
-  assert.match(page, /signs \? 'Open and Sign' : 'Open and Acknowledge'/);
+  assert.match(page, /signs \? 'Sign Here' : 'Open and Acknowledge'/);
   assert.match(page, /signs \? 'File Paper Signature' : 'File For Her'/);
   assert.match(read('public/document-sign-ui.js'), /`\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign`/);
 });

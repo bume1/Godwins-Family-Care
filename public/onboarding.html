@@ -501,7 +501,7 @@ const PolicyAck = ({ a, itemId, base, office, busy, ackVersion, setAckVersion, r
       {a.current && <div className="meta" style={{ color: 'var(--green)' }}><i className="ti ti-check" /> {signs ? (a.method === 'paper' ? 'Signed on paper' : 'Signed') : 'Acknowledged'}{a.filedBy === 'OFFICE_ON_BEHALF' ? ' · filed by the office' : ''}{a.signedAt ? ` · ${fmtDate(a.signedAt)}` : ''}</div>}
       {a.stale && <div className="err">Signed v{a.signed} · v{a.required} needed</div>}
       {a.needsSignature && <div className="err">Acknowledged{a.signedAt ? ` ${fmtDate(a.signedAt)}` : ''}, but this document has to be signed.</div>}
-      {!a.current && !office && hasFile && <button className="btn sm" disabled={busy} onClick={() => setOpen(true)}>{signs ? 'Open and Sign' : 'Open and Acknowledge'}</button>}
+      {!a.current && !office && hasFile && <button className="btn sm" disabled={busy} onClick={() => setOpen(true)}>{signs ? 'Sign Here' : 'Open and Acknowledge'}</button>}
       {!a.current && !office && !hasFile && !signs && <button className="btn sm" disabled={busy} onClick={() => run(() => call(PATHS.ack(base, itemId, a.id), { method: 'POST', body: {} }), 'Acknowledged.')}>Acknowledge</button>}
       {!a.current && !office && !hasFile && signs && <div className="meta">The office will give you this to sign.</div>}
       {!a.current && office && (
@@ -895,7 +895,7 @@ const AttachDocument = ({ item, userId, onDone }) => {
       setOpen(false); await onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
-  if (!open) return <button className="btn sm ghost" style={{ margin: '4px 0 10px' }} onClick={() => setOpen(true)}><i className="ti ti-signature" />Attach Document to Sign</button>;
+  if (!open) return <button className="btn sm ghost" style={{ margin: '4px 0 10px' }} onClick={() => setOpen(true)}><i className="ti ti-upload" />Upload the Document They Sign</button>;
   return (
     <div className="line-card" style={{ margin: '4px 0 12px' }}>
       <input type="file" accept="application/pdf,.pdf" onChange={e => setFile(e.target.files[0] || null)} />

@@ -32,3 +32,9 @@
 - Tests in `test/onboarding_reorganize.test.js` and a repointed pin in `test/onboarding_item_documents.test.js`.
 - Full suite passing.
 - Chromium: the offer letter task shows the button under the signature step.
+
+## "Sign Here" (owner, later the same day)
+- **Staff:** "there should be no 'attach document to sign', just a 'sign here' button that opens the document viewer to sign in app."
+  - The person signing now sees **Sign Here** on the task. It opens the full in-app viewer: the document, the box to tick, their name and a drawn signature. This is the same viewer tax forms use.
+  - Policies use **Sign Here** too. The button that finishes inside the viewer still says **Sign**.
+- **Office:** the office button is now **Upload the Document They Sign**. An offer letter is personal, so the office gives the app that PDF once. Only then can the person see Sign Here.

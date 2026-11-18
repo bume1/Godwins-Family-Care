@@ -180,7 +180,7 @@ test('policies are signed in the app from the task, the same signature as My GFC
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(page, /It is the same signature, so it ticks both\./);
   assert.match(page, /<summary className="meta" style=\{\{ cursor: 'pointer' \}\}>Signed on paper instead\?<\/summary>/);
-  assert.match(page, /\{signs \? 'Open and Sign' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
+  assert.match(page, /\{signs \? 'Sign Here' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
   const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'document-sign-ui.js'), 'utf8');
   assert.match(ui, /\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign/, 'one signing route for both places');
   assert.match(page, /r\.signs && r\.status !== 'complete'/, 'a welcome-packet form opens where it is signed');
