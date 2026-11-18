@@ -23,8 +23,9 @@ test('existing Drive material is attached and those trainings read ready', () =>
     'https://drive.google.com/file/d/1Rm4Q9Qk0C6nRh_G4uvM8uWCGF3sB7FQD/view',
     'https://drive.google.com/file/d/1fLC9VWBJ3uzzjMgKUUtRThtF3M3m4P5j/view',
     'https://drive.google.com/file/d/1UHVLazg9Wd7m_Z9R1_A397KJOhjLQp7l/view',
-    'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view'
-  ], 'Set 1, Set 2, Set 4, then the staff pay guide');
+    'https://drive.google.com/file/d/1pdgksZaDfczISVC6uTV20bMT0MKaHWVv/view',
+    'https://drive.google.com/file/d/1Q8YLuHuxhZoSdYJSZw-gErD1cQmjSgSau81J44L_YDY/view'
+  ], 'Set 1, Set 2, Set 4, the staff pay guide, then the guide to app updates');
   // One source point: the training link and the onboarding pay step read the same entry.
   const { PAY_GUIDE } = require('../onboarding/sources');
   const payLinks = ['TRN-004', 'TRN-503'].map(id => all[id].links.find(l => /Setting Up Your Pay/.test(l.label)));
@@ -58,21 +59,21 @@ test('a deployment that already has the old SOP 1 gets it retired and the SOP se
   assert.strictEqual(old.removedAt, 'T1');
   const mat = TM.materialFor(findModule('TRN-004'), all['TRN-004'], null);
   assert.ok(!mat.links.some(l => l.url === OLD_SOP1), 'staff no longer see it');
-  assert.strictEqual(mat.links.length, 4);
+  assert.strictEqual(mat.links.length, 5);
   assert.deepStrictEqual(TM.seedDefaults(all, 'T2').seeded, [], 'once only');
 });
 
 test('a module seeded before keys existed still gets the retirement and the new sets', () => {
   const legacy = { 'TRN-004': { links: [{ id: 'default-TRN-004', url: OLD_SOP1, label: 'SOP 1', kind: 'document' }], files: [], defaultSeededAt: 'T0' } };
   const mat = TM.materialFor(findModule('TRN-004'), TM.seedDefaults(legacy, 'T1').all['TRN-004'], null);
-  assert.deepStrictEqual(mat.links.map(l => l.label.slice(0, 26)), ['Administrative SOPs Set 1:', 'Administrative SOPs Set 2:', 'Administrative SOPs Set 4:', 'Staff Guide: Setting Up Yo']);
+  assert.deepStrictEqual(mat.links.map(l => l.label.slice(0, 26)), ['Administrative SOPs Set 1:', 'Administrative SOPs Set 2:', 'Administrative SOPs Set 4:', 'Staff Guide: Setting Up Yo', 'Staff Guide to App Updates']);
 });
 
 test('one module holds several guides: the app training can carry a file per area of the app', () => {
   let e = TM.seedDefaults({}, 'T1').all['TRN-004'];
   e = TM.addLink(e, { label: 'App guide: Hours & Pay', url: 'https://docs.google.com/document/d/a', kind: 'document' }, ACTOR, 'T2', 'l2');
   e = TM.addLink(e, { label: 'App guide: Scheduling & Availability', url: 'https://docs.google.com/document/d/b', kind: 'document' }, ACTOR, 'T3', 'l3');
-  assert.strictEqual(TM.materialFor(findModule('TRN-004'), e, null).links.length, 6);
+  assert.strictEqual(TM.materialFor(findModule('TRN-004'), e, null).links.length, 7);
   assert.match(findModule('TRN-004').title, /hours and pay, scheduling and availability/);
 });
 

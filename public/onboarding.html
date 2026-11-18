@@ -1458,7 +1458,8 @@ const Library = () => {
                   <td style={{ whiteSpace: 'nowrap', color: 'var(--mut)' }}>{r.id}</td>
                   <td><b>{r.title}</b><div style={{ fontSize: 12.5, color: 'var(--mut)' }}>Lives in: {r.where}</div></td>
                   <td><span className="pill p-NOT_APPLICABLE">Elsewhere</span></td>
-                  <td style={{ fontSize: 13 }}>{r.policy && <a href={r.policy.url} target="_blank" rel="noopener">{r.policy.document}</a>}{r.policy && <div style={{ color: 'var(--mut)' }}>{r.policy.sections}</div>}</td>
+                  <td style={{ fontSize: 13 }}>{r.policy && <a href={r.policy.url} target="_blank" rel="noopener">{r.policy.document}</a>}{r.policy && <div style={{ color: 'var(--mut)' }}>{r.policy.sections}</div>}
+                    {r.guide && <div style={{ marginTop: 4 }}><a href={r.guide.url} target="_blank" rel="noopener">How-to: {r.guide.document}</a></div>}</td>
                   <td style={{ fontSize: 13 }}>External</td><td></td>
                 </tr>
               ))}

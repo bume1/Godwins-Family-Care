@@ -234,7 +234,8 @@ const DEFAULT_MATERIAL = Object.freeze({
     fromSource('sop-set1', 'ADMIN_SOPS_SET1'),
     fromSource('sop-set2', 'ADMIN_SOPS_SET2'),
     fromSource('sop-set4', 'ADMIN_SOPS_SET4'),
-    fromSource('pay-guide', 'STAFF_PAY_GUIDE')
+    fromSource('pay-guide', 'STAFF_PAY_GUIDE'),
+    fromSource('app-updates', 'STAFF_APP_UPDATES_GUIDE')
   ]),
   // Material that already exists in Drive (owner's Training Material Tracker).
   'TRN-001': Object.freeze([Object.freeze({ key: 'team-roles', label: 'Team Roles and Responsibilities v2', url: drive('1Z6v89NQvbcY7yBmixo8hw-LIPQ3YE5yc'), kind: 'document' })]),
