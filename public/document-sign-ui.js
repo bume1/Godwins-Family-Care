@@ -88,6 +88,8 @@ const openPdf = async (path, name) => {
 const TZ = window.GFC_TIME && window.GFC_TIME.PRACTICE_TIMEZONE;
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: TZ }) : '');
 const verb = (action) => (action === 'sign' ? 'Sign' : 'Acknowledge');
+// "Sign Here" opens the in-app viewer (owner, 2026-11-18), the same one tax forms use.
+const openVerb = (action) => (action === 'sign' ? 'Sign Here' : 'Acknowledge');
 const done = (action) => (action === 'sign' ? 'Signed' : 'Acknowledged');
 
 // ---- The staff member ---------------------------------------------------------
@@ -234,7 +236,7 @@ function WaitingOnYou({ only, showDone = true, onChanged, emptyText }) {
             <i className="ti ti-signature" style={{ fontSize: 22, color: 'var(--n)' }} />
             <div className="ds-grow"><b>{x.title}</b><small>{x.kind === 'policy' ? `GFC policy${x.version && x.version !== 'Current' ? `, version ${x.version}` : ''}` : `Sent ${fmtDate(x.sentAt)}${x.sentByName ? ` by ${x.sentByName}` : ''}`} · to {x.action === 'sign' ? 'sign' : 'acknowledge'}{x.needsSignature ? '. You acknowledged it before; it now has to be signed' : ''}</small></div>
             <span className="ds-pill ds-wait">Waiting on you</span>
-            {open !== x.id && <button className="ds-btn" onClick={() => setOpen(x.id)}>{verb(x.action)}</button>}
+            {open !== x.id && <button className="ds-btn" onClick={() => setOpen(x.id)}>{openVerb(x.action)}</button>}
           </div>
           {open === x.id && <SignWorkspace doc={x} onDone={() => after(x)} onCancel={() => setOpen(null)} />}
         </div>

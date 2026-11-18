@@ -180,7 +180,7 @@ test('policies are signed in the app from the task, the same signature as My GFC
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
   assert.match(page, /It is the same signature, so it ticks both\./);
   assert.match(page, /<summary className="meta" style=\{\{ cursor: 'pointer' \}\}>Signed on paper instead\?<\/summary>/);
-  assert.match(page, /\{signs \? 'Open and Sign' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
+  assert.match(page, /\{signs \? 'Sign Here' : 'Open and Acknowledge'\}/, 'the Sign button sits on the task');
   const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'document-sign-ui.js'), 'utf8');
   assert.match(ui, /\/api\/my\/policy-docs\/\$\{encodeURIComponent\(d\.policyId\)\}\/sign/, 'one signing route for both places');
   assert.match(page, /r\.signs && r\.status !== 'complete'/, 'a welcome-packet form opens where it is signed');
@@ -200,5 +200,32 @@ test('every clinician gets the credentialing tasks first set up by hand: Medicar
   }
   assert.ok(require('../onboarding/renewals').EXPIRING_ITEMS['C.6.18'], 'the BLS card expiry is tracked');
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
-  assert.match(page, /Use Attach Document to Sign above, and they sign it in the app\./, 'an offer letter is signed in the app; paper is the backup');
+  assert.doesNotMatch(page, /Use Attach Document to Sign above/, 'the send button sits on the signature step itself');
+  assert.match(page, /\{track\.person && <AttachDocument item=\{item\} userId=\{track\.person\.userId\} onDone=\{onChanged\} \/>\}/);
+});
+
+test('hand-added tasks that copy a built-in one are removed once, and what they held moves over', async () => {
+  const D = require('../onboarding/dedupeCustom');
+  const T = require('../onboarding/track');
+  const store = {
+    onboarding_custom_tasks: [
+      { id: 'GFC-caqh', title: 'CAQH ProView profile', scope: { userId: 'n1' }, removedAt: null },
+      { id: 'GFC-agree', title: 'Sign updated Clinician Offer, Employment and IME Examiner Agreements', scope: { userId: 'n1' }, documentSendId: 's1', removedAt: null },
+      { id: 'GFC-other', title: 'Insurance plan applications', scope: { userId: 'n1' }, removedAt: null }
+    ],
+    onboarding_records: [{ userId: 'n1', inputs: { chapter: 'E' }, items: {
+      'GFC-caqh': { steps: { 0: { at: 't', byName: 'Thanmayie', filedBy: 'SELF' } }, files: [{ id: 'f1', name: 'caqh.png' }], notes: [{ id: 'n', text: 'ID 123' }] }
+    } }]
+  };
+  const db = { get: async (k) => store[k] || null, set: async (k, v) => { store[k] = v; } };
+  const r = await D.dedupeOnce(db, { T, now: '2026-11-18T12:00:00Z' });
+  assert.deepStrictEqual(r.removed.map(x => x.builtIn), ['C.6.16']);
+  assert.ok(store.onboarding_custom_tasks.find(t => t.id === 'GFC-caqh').removedAt);
+  assert.ok(!store.onboarding_custom_tasks.find(t => t.id === 'GFC-agree').removedAt, 'a task carrying a document is left alone');
+  assert.ok(!store.onboarding_custom_tasks.find(t => t.id === 'GFC-other').removedAt, 'no built-in copy, kept');
+  const moved = store.onboarding_records[0].items['C.6.16'];
+  assert.strictEqual(moved.files[0].name, 'caqh.png');
+  assert.ok(moved.notes.some(n => n.text === 'ID 123'));
+  assert.ok(moved.steps[0], 'her step moved');
+  assert.ok((await D.dedupeOnce(db, { T, now: 'x' })).skipped, 'once');
 });

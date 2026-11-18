@@ -104,5 +104,6 @@ test('attaching refuses a document sent to someone else, and only the office att
 
 test('the side panel offers Attach Document to Sign to the office', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
-  assert.match(page, /\{office && !item\.document && item\.steps\.some\(s => s\.hers\) && track\.person && <AttachDocument/);
+  // On a signature step the button sits on the step itself (2026-11-18).
+  assert.match(page, /\{office && !item\.document && item\.steps\.some\(s => s\.hers\) && !item\.steps\.some\(s => s\.hers && s\.action === 'SIGN'\) && track\.person && <AttachDocument/);
 });
