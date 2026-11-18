@@ -10,7 +10,16 @@
 // Now a family account carries a list of links, one per patient, and the POA
 // tick lives on each link: POA for Mom does not make anyone POA for Dad.
 //
-//   familyLinks: [{ clientId, isPoa, relationship, addedAt, addedBy, via }]
+//   familyLinks: [{ clientId, isPoa, relationship, addedAt, addedBy, via, release }]
+//
+// `release` (owner, 2026-11-18) is THIS person's signed HIPAA release for
+// THIS patient: { signedOn, expiresOn, note, recordedBy, recordedAt }, or
+// null when none is recorded. The patient-level family ROI consent still
+// gates every family login; this sits on top of it for a non-POA contact,
+// such as an informal caregiver acting for the patient with no legal
+// authority. Once `expiresOn` has passed, that contact is refused on the
+// very next request (releaseState). A POA is the patient's personal
+// representative and is never gated on it.
 //
 // Two readers, two rules:
 //   - A REQUEST works on one patient at a time, chosen per sign-in and kept on
@@ -43,11 +52,11 @@ const placeholderEmailFor = (kind, id) => `${kind}+${id}@${PLACEHOLDER_DOMAIN}`;
 function linksOf(user) {
   if (!user || user.role !== 'family') return [];
   if (Array.isArray(user.familyLinks)) {
-    return user.familyLinks.filter(l => l && l.clientId).map(l => ({ ...l, clientId: str(l.clientId), isPoa: l.isPoa === true }));
+    return user.familyLinks.filter(l => l && l.clientId).map(l => ({ ...l, clientId: str(l.clientId), isPoa: l.isPoa === true, release: l.release || null }));
   }
   const clientId = user.familyOfClientId || (Array.isArray(user.assignedClients) ? user.assignedClients[0] : null);
   if (!clientId) return [];
-  return [{ clientId: str(clientId), isPoa: user.familyIsPoa === true, relationship: user.familyRelationship || null, addedAt: null, addedBy: null, via: 'migration' }];
+  return [{ clientId: str(clientId), isPoa: user.familyIsPoa === true, relationship: user.familyRelationship || null, addedAt: null, addedBy: null, via: 'migration', release: null }];
 }
 
 const linkFor = (user, clientId) => linksOf(user).find(l => l.clientId === str(clientId)) || null;
@@ -85,7 +94,8 @@ function applyLinks(user, links) {
       relationship: l.relationship ? str(l.relationship).slice(0, 80) : null,
       addedAt: l.addedAt || null,
       addedBy: l.addedBy || null,
-      via: VIA.includes(l.via) ? l.via : 'admin'
+      via: VIA.includes(l.via) ? l.via : 'admin',
+      release: l.release && l.release.signedOn ? l.release : null
     });
   }
   user.familyLinks = clean;
@@ -120,17 +130,74 @@ function normalizeLinksInput(input, { users, actorId = null, previous = [], now 
     if (seen.has(clientId)) return { error: 'A patient is listed twice.', code: 'FAMILY_LINK_DUPLICATE' };
     seen.add(clientId);
     const was = prior.get(clientId);
+    // A page that does not send `release` keeps what is stored, so an older
+    // screen saving a link can never wipe a release on file. null clears it.
+    let release = was ? (was.release || null) : null;
+    if (raw && Object.prototype.hasOwnProperty.call(raw, 'release')) {
+      const r = normalizeRelease(raw.release, { previous: release, actorId, now });
+      if (r.error) return r;
+      release = r.release;
+    }
     links.push({
       clientId,
       isPoa: raw.isPoa === true,
       relationship: raw.relationship ? str(raw.relationship).trim().slice(0, 80) : null,
       addedAt: was ? was.addedAt : now(),
       addedBy: was ? was.addedBy : actorId,
-      via: was ? was.via : 'admin'
+      via: was ? was.via : 'admin',
+      release
     });
   }
   return { links };
 }
+
+// ---- A contact's own HIPAA release ----------------------------------------
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isRealDate = (d) => DATE_RE.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) && new Date(`${d}T00:00:00Z`).toISOString().slice(0, 10) === d;
+
+// What the admin form posts for one link's release. → { release } | { error, code }
+//   null / {}                → no release on file
+//   { signedOn, expiresOn?, note? }
+// The expiry is optional because some releases run "until revoked"; when it
+// is given it must fall after the signing date.
+function normalizeRelease(input, { previous = null, actorId = null, now = () => new Date().toISOString() } = {}) {
+  if (input == null || (typeof input === 'object' && !str(input.signedOn).trim() && !str(input.expiresOn).trim())) return { release: null };
+  if (typeof input !== 'object') return { error: 'The release must be an object.', code: 'FAMILY_RELEASE_INVALID' };
+  const signedOn = str(input.signedOn).trim();
+  const expiresOn = str(input.expiresOn).trim() || null;
+  if (!isRealDate(signedOn)) return { error: 'Enter the date the release was signed.', code: 'FAMILY_RELEASE_SIGNED_ON_REQUIRED' };
+  if (expiresOn && !isRealDate(expiresOn)) return { error: 'The release expiry date is not a real date.', code: 'FAMILY_RELEASE_EXPIRY_INVALID' };
+  if (expiresOn && expiresOn <= signedOn) return { error: 'The release must expire after the date it was signed.', code: 'FAMILY_RELEASE_EXPIRY_BEFORE_SIGNED' };
+  const note = input.note ? str(input.note).trim().slice(0, 200) : null;
+  const same = previous && previous.signedOn === signedOn && (previous.expiresOn || null) === expiresOn && (previous.note || null) === note;
+  if (same) return { release: previous };
+  return { release: { signedOn, expiresOn, note, recordedBy: actorId, recordedAt: now() } };
+}
+
+// Georgia's date today, as YYYY-MM-DD. A release dated to expire on the 30th
+// is good through the end of the 30th in Georgia, never cut off at 8 pm
+// because the server's clock had already rolled over to UTC tomorrow.
+const todayInGeorgia = (at = new Date()) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+
+// Where one link's release stands. → { status, expiresOn, daysLeft }
+//   'poa'      a POA link: no release needed
+//   'none'     nothing recorded (access still rests on the patient's family ROI)
+//   'active'   on file, no expiry or not yet expired
+//   'expiring' on file, expires within 30 days
+//   'expired'  past its expiry date: access refused
+const EXPIRING_SOON_DAYS = 30;
+function releaseState(link, { today = todayInGeorgia() } = {}) {
+  if (!link) return { status: 'none', expiresOn: null, daysLeft: null };
+  if (link.isPoa) return { status: 'poa', expiresOn: null, daysLeft: null };
+  const r = link.release;
+  if (!r || !r.signedOn) return { status: 'none', expiresOn: null, daysLeft: null };
+  if (!r.expiresOn) return { status: 'active', expiresOn: null, daysLeft: null };
+  const daysLeft = Math.round((Date.parse(`${r.expiresOn}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  if (daysLeft < 0) return { status: 'expired', expiresOn: r.expiresOn, daysLeft };
+  return { status: daysLeft <= EXPIRING_SOON_DAYS ? 'expiring' : 'active', expiresOn: r.expiresOn, daysLeft };
+}
+const releaseExpired = (link, opts) => releaseState(link, opts).status === 'expired';
 
 // Which patient this request is about.
 //   one link            → that one
@@ -237,5 +304,6 @@ module.exports = {
   isPlaceholderEmail, placeholderEmailFor,
   linksOf, linkFor, isFamilyOf, isPoaFor, familyFor,
   applyLinks, upsertLink, normalizeLinksInput, resolveActive,
+  normalizeRelease, releaseState, releaseExpired, todayInGeorgia, EXPIRING_SOON_DAYS,
   planPoaCutover, possiblePoaLoginReasons
 };

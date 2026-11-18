@@ -2657,6 +2657,10 @@ const authenticateToken = async (req, res, next) => {
         // request-scoped reader keeps reading these two fields.
         familyOfClientId: familyActive.link ? familyActive.link.clientId : null,
         familyIsPoa: familyActive.link ? familyActive.link.isPoa : false,
+        // This contact's own HIPAA release for the patient in use (owner,
+        // 2026-11-18). Read fresh on every request, so an expiry takes effect
+        // on the next one with no sign-out needed. Never set for a POA.
+        familyReleaseExpired: familyActive.link ? familyLinks.releaseExpired(familyActive.link) : false,
         familyLinkIds: familyLinkIds,
         needsClientChoice: familyActive.needsChoice,
         // Session 4.8: the credential every clinical capability is decided
@@ -3053,6 +3057,7 @@ const resolveGfcClientRecord = async (reqUser) => {
 //   - family  + linked client's consents.roiFamily 'signed' → allowed, else 403 ROI_FAMILY_REQUIRED
 //   - admin / manager / clinical / case manager     → allowed (staff oversight)
 // Anything not explicitly allowed is denied.
+const FAMILY_RELEASE_EXPIRED_MESSAGE = 'Your HIPAA release for this patient has expired, so access is paused. Call the office to renew it.';
 const requireEnrolledClient = async (req, res, next) => {
   try {
     const role = req.user.role;
@@ -3095,6 +3100,11 @@ const requireEnrolledClient = async (req, res, next) => {
           return res.status(403).json({ error: 'Enrollment is not complete. Finish intake and required consents to unlock this portal.', code: 'INTAKE_REQUIRED' });
         }
         return next();
+      }
+      // This contact's own HIPAA release has lapsed (familyLinks.releaseState).
+      // Checked before the patient-level ROI so the message names the real cause.
+      if (req.user.familyReleaseExpired) {
+        return res.status(403).json({ error: FAMILY_RELEASE_EXPIRED_MESSAGE, code: 'FAMILY_RELEASE_EXPIRED' });
       }
       // Accept signed OR signed_offline (paper-signed ROI is equally valid — Scope B1).
       if (!isConsentSatisfied(roiFamily)) {
@@ -8758,6 +8768,9 @@ app.get('/api/gfc/me', authenticateToken, async (req, res) => {
       // Sharing settings are the client's (or POA's) to see and edit
       sharing: (req.user.role === config.ROLES.CLIENT || acting.isPoa) ? patientRead.normalizeSharing(client.sharing) : undefined,
       ...snapshot,
+      // This contact's own HIPAA release has lapsed: the portal shows the
+      // renewal screen rather than the family-ROI one (owner, 2026-11-18).
+      releaseExpired: !!req.user.familyReleaseExpired,
       needsClientChoice: false,
       linkedClients: linked,
       activeClientId: req.user.role === config.ROLES.FAMILY ? client.id : null

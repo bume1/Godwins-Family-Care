@@ -4134,7 +4134,16 @@
       const intakeStarted = me.enrollmentStatus && me.enrollmentStatus !== 'intake_pending';
       return (
         <div className="gfc-body gate">
-          {isFamily ? (
+          {isFamily && me.releaseExpired ? (
+            <React.Fragment>
+              <h2 className="disp">Your access is paused</h2>
+              <p className="sub">Your HIPAA release for {firstName} has expired.</p>
+              <div className="lockcard">
+                <i className="ti ti-lock" />
+                <div><b>Release expired</b><span>Call the office to sign a new release. Your access comes back as soon as it is recorded.</span></div>
+              </div>
+            </React.Fragment>
+          ) : isFamily ? (
             <React.Fragment>
               <h2 className="disp">Family access is locked</h2>
               <p className="sub">This portal opens once {firstName}'s Release of Information (family) consent is signed.</p>
@@ -7869,7 +7878,7 @@
       // PHC-only clients never see it (schema §6).
       const clinicalBlocked = !!(me && me.clinicalRead && !me.clinicalRead.available && me.clinicalRead.code && me.clinicalRead.code !== 'CLINICAL_NOT_ON_LINE');
       // A POA is gated like the patient: on intake, never on the family release.
-      const locked = me && !me.needsClientChoice && ((isFamily && !isPoa) ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
+      const locked = me && !me.needsClientChoice && ((isFamily && !isPoa) ? (!me.roiFamilySigned || !!me.releaseExpired) : me.enrollmentStatus === 'intake_pending');
 
       // Re-read the documents payload after an upload, so the checklist reflects
       // what we now hold rather than what the page loaded with.
