@@ -158,6 +158,7 @@ module.exports = function createOnboardingRoutes(deps) {
   // Chapter A reads the caregiver's welcome packet checklist, derived the
   // same way the caregiver app and the scheduling gate derive it. Never
   // stored here: a stored copy goes stale the moment a document is accepted.
+  const isPaySetupItem = (item) => ((item && item.packet) || []).some(k => String(k).startsWith('payform:'));
   const isChapterA = (rec) => !!(rec && rec.inputs && rec.inputs.chapter === 'A');
 
   const CARE_CERTIFICATES = ['pca', 'cna', 'hha', 'lpn', 'rn'];
@@ -282,6 +283,11 @@ module.exports = function createOnboardingRoutes(deps) {
   const INSTRUCTIONS = 'onboarding_instructions';
   const instructions = async () => (await db.get(INSTRUCTIONS)) || {};
 
+  // The office's edits to built-in tasks (owner, 2026-11-18): title, phase,
+  // order, hidden. Applied inside buildTrack, so every view agrees.
+  const OVERRIDES = 'onboarding_item_overrides';
+  const itemOverrides = async () => (await db.get(OVERRIDES)) || {};
+
   async function buildFor(rec, audience) {
     const m = await manual();
     const pk = await packetFor(rec);
@@ -294,7 +300,8 @@ module.exports = function createOnboardingRoutes(deps) {
       customTasks: await customTasks(),
       libraryTrainings: await libraryRows(),
       accountType: await typeOfRec(rec),
-      materialReady: await readyCheck()
+      materialReady: await readyCheck(),
+      itemOverrides: await itemOverrides()
     });
     // Acknowledged documents link their canonical Drive copy.
     track.items.forEach(it => {
@@ -485,6 +492,12 @@ module.exports = function createOnboardingRoutes(deps) {
     if (linked && item.steps[idx] && item.steps[idx].actor === 'NEW_HIRE' && idx === item.steps.findIndex(s => s.actor === 'NEW_HIRE')) {
       return res.status(409).json({ error: 'This step is done by signing the attached document.', code: 'DOCUMENT_SIGN_ROUTE' });
     }
+    // Pay and tax forms are done in Pay Setup, which ticks her step (owner,
+    // 2026-11-18). A "Mark Sent" here would tick it while payroll still has nothing.
+    const pIdx = Number(req.params.index);
+    if (isPaySetupItem(item) && item.steps[pIdx] && item.steps[pIdx].actor === 'NEW_HIRE' && item.steps[pIdx].action === 'SUBMIT') {
+      return res.status(409).json({ error: 'Fill these in Hours & Pay → Pay Setup. This step ticks itself when you do.', code: 'PAY_SETUP_ROUTE' });
+    }
     try {
       rec.items = rec.items || {};
       rec.items[item.id] = Object.assign(rec.items[item.id] || {},
@@ -521,6 +534,9 @@ module.exports = function createOnboardingRoutes(deps) {
   async function doFile(req, res, rec, actor) {
     const item = await itemFor(rec, req.params.itemId);
     if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    if (isPaySetupItem(item) && !packetSync.uploadKindsOf(item).length) {
+      return res.status(409).json({ error: 'Pay and tax forms go in Hours & Pay → Pay Setup. The office files a paper copy from the staff record.', code: 'PAY_SETUP_ROUTE' });
+    }
     if (!req.file) return res.status(400).json({ error: 'Choose a file.', code: 'NO_FILE' });
     const prepared = staffDocs.prepareStaffDocument({
       buffer: req.file.buffer, fileName: req.file.originalname, detectFileType,
@@ -911,6 +927,23 @@ module.exports = function createOnboardingRoutes(deps) {
     }
   }
 
+  // Who has each training on their checklist, and whether they finished it
+  // (owner, 2026-11-18): the office library links each name to that person.
+  async function trainingHolders() {
+    const rows = await all(); const users = await getUsers(); const m = await manual();
+    const [revs, custom, lib, ready, ovr] = await Promise.all([reviews(), customTasks(), libraryRows(), readyCheck(), itemOverrides()]);
+    const out = {};
+    for (const rec of rows) {
+      const u = users.find(x => String(x.id) === String(rec.userId)) || {};
+      if (u.accountStatus === 'inactive') continue;
+      const pk = await packetFor(rec);
+      const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, pk), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: pk.rows, customTasks: custom,
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready, itemOverrides: ovr });
+      for (const mod of t.modules || []) (out[mod.id] = out[mod.id] || []).push({ userId: String(rec.userId), name: rec.userName || u.name || 'Staff member', complete: !!mod.complete });
+    }
+    return out;
+  }
+
   // ---- THE OFFICE ------------------------------------------------------------
   router.get('/api/onboarding/admin/overview', authenticateToken, requireOffice, async (req, res) => {
     const rows = await all();
@@ -922,10 +955,11 @@ module.exports = function createOnboardingRoutes(deps) {
     const custom = await customTasks();
     const lib = await libraryRows();
     const ready = await readyCheck();
+    const ovr = await itemOverrides();
     const people = rows.map(rec => {
       const u = users.find(x => String(x.id) === String(rec.userId)) || {};
       const t = T.buildTrack({ inputs: withPacketFacts(rec.inputs, packets[rec.userId]), record: rec, today: today(), audience: 'office', manualVersion: m.ok ? m.currentVersion : '2.2', moduleReviews: revs, packetRows: packets[rec.userId].rows, customTasks: custom,
-        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready });
+        libraryTrainings: lib, accountType: u.id ? accountTypes.accountTypeOf(u) : null, materialReady: ready, itemOverrides: ovr });
       const current = t.phases.find(p => !p.complete) || null;
       const next = t.items.find(i => i.status !== T.STATUS.COMPLETE && i.status !== T.STATUS.NOT_APPLICABLE && i.next) || null;
       return {
@@ -1143,6 +1177,27 @@ module.exports = function createOnboardingRoutes(deps) {
     await event({ userId: rec.userId, type: 'not_applicable', itemId: item.id, byId: req.user.id, reason });
     return res.json({ ok: true });
   });
+  // Reopen a finished task (owner, 2026-11-18: "these tasks should be able to
+  // be reopened if closed too"). What was recorded moves to the item's
+  // history, never deleted; files stay. A reason is required.
+  router.post('/api/onboarding/admin/people/:userId/items/:itemId/reopen', authenticateToken, requireOffice, async (req, res) => {
+    const rec = await personRecord(req, res); if (!rec) return;
+    const item = await itemFor(rec, req.params.itemId);
+    if (!item) return res.status(404).json({ error: 'Unknown item.', code: 'ITEM_UNKNOWN' });
+    const reason = trim(req.body && req.body.reason, 1000);
+    if (!reason) return res.status(400).json({ error: 'Say why it is being reopened.', code: 'REOPEN_REASON_REQUIRED' });
+    const st = rec.items[item.id] || {};
+    const had = { steps: st.steps || {}, acknowledgments: st.acknowledgments || {}, notApplicable: st.notApplicable || null, returned: st.returned || null };
+    if (!Object.keys(had.steps).length && !Object.keys(had.acknowledgments).length && !had.notApplicable) {
+      return res.status(409).json({ error: 'Nothing has been recorded on this task yet.', code: 'NOTHING_TO_REOPEN' });
+    }
+    rec.items[item.id] = Object.assign(st, { steps: {}, acknowledgments: {}, notApplicable: null, returned: null,
+      reopened: (st.reopened || []).concat([Object.assign({ at: nowIso(), byName: req.user.name || req.user.email, reason }, had)]) });
+    await save(rec);
+    await event({ userId: rec.userId, type: 'reopened', itemId: item.id, byId: req.user.id, byName: req.user.name, reason });
+    await logActivity(req.user.id, req.user.name, 'onboarding_item_reopened', 'onboarding', rec.userId, { itemId: item.id });
+    return res.json({ ok: true });
+  });
   // Filed on her behalf: a copy she signed elsewhere (in Gusto, say) at the
   // version printed on it. An older version reads stale, never complete.
   router.post('/api/onboarding/admin/people/:userId/items/:itemId/acknowledgments/:ackId', authenticateToken, requireOffice, async (req, res) => {
@@ -1230,6 +1285,7 @@ module.exports = function createOnboardingRoutes(deps) {
     const mm = await materialMap(pool.map(x => x.id));
     const mats = await materials();
     const flags = Object.fromEntries(VF.evaluateAll(MODULES, { currentVersion: m.ok ? m.currentVersion : '2.2', reviews: revs, changeLog: m.changeLog }).map(f => [f.moduleId, f]));
+    const holders = await trainingHolders();
     return res.json({
       settings: await settings(),
       manual: { ok: !!m.ok, version: m.ok ? m.currentVersion : null, reason: m.ok ? null : m.reason },
@@ -1254,7 +1310,8 @@ module.exports = function createOnboardingRoutes(deps) {
         // "attach" once something is attached reads as covered.
         nextStep: nextStepFor(x.id, mats, mm.byModule[x.id], !!x.addedByOffice),
         officeNote: ((mats[x.id] || {}).office || {}).note != null ? mats[x.id].office.note : ((LC.entryFor(x.id) || {}).note || ''),
-        officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null
+        officeEditedBy: ((mats[x.id] || {}).office || {}).byName || null,
+        people: holders[x.id] || []
       })),
       groups: LC.GROUPS.concat(['Added by GFC']), nextSteps: LC.NEXT,
       referenceRows: LC.referenceRows(),
@@ -1380,6 +1437,60 @@ module.exports = function createOnboardingRoutes(deps) {
   const officeActor = (req) => ({ id: req.user.id, name: req.user.name || req.user.email });
   // The office edits what an item or a training tells the person to do.
   // Blank goes back to the default wording.
+  // ---- Edit and reorganize built-in tasks (owner, 2026-11-18) -------------
+  const knownItem = async (id) => T.findItem(id) || (await customTasks()).find(t => t.id === id && !t.removedAt) || null;
+  router.put('/api/onboarding/admin/items/:id', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    if (!(await knownItem(id))) return res.status(404).json({ error: 'No such task.', code: 'ITEM_UNKNOWN' });
+    const b = req.body || {};
+    const all = await itemOverrides();
+    const cur = Object.assign({}, all[id] || {});
+    if ('title' in b) { const t = trim(b.title, 200); if (t) cur.title = t; else delete cur.title; }
+    if ('phase' in b) {
+      if (b.phase) {
+        const ch = T.CHAPTERS[String(b.chapter || '')];
+        if (!ch || !ch.PHASES.some(p => p.id === b.phase)) return res.status(400).json({ error: 'Choose a phase of this checklist.', code: 'PHASE_UNKNOWN' });
+        cur.phase = String(b.phase);
+      } else delete cur.phase;
+    }
+    if ('hidden' in b) { if (b.hidden) cur.hidden = true; else delete cur.hidden; }
+    const keys = Object.keys(cur).filter(k => !['byName', 'at'].includes(k));
+    if (keys.length) all[id] = Object.assign(cur, { byName: req.user.name || req.user.email, at: nowIso() }); else delete all[id];
+    await db.set(OVERRIDES, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_item_edited', 'onboarding', id, { fields: Object.keys(b) });
+    return res.json({ ok: true, override: all[id] || null });
+  });
+  router.post('/api/onboarding/admin/items/:id/move', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    const b = req.body || {};
+    const ch = T.CHAPTERS[String(b.chapter || '')];
+    if (!ch) return res.status(400).json({ error: 'Which checklist?', code: 'CHAPTER_UNKNOWN' });
+    if (!['up', 'down'].includes(b.direction)) return res.status(400).json({ error: 'Move up or down.', code: 'DIRECTION_UNKNOWN' });
+    const all = await itemOverrides();
+    const custom = T.customItemsFor(await customTasks(), { chapter: String(b.chapter) }, b.userId ? String(b.userId) : null);
+    const list = T.applyItemOverrides(ch.ITEMS.concat(custom), all, ch.PHASES);
+    const me = list.find(x => x.id === id);
+    if (!me) return res.status(404).json({ error: 'No such task on this checklist.', code: 'ITEM_UNKNOWN' });
+    const inPhase = list.filter(x => x.phase === me.phase);
+    const i = inPhase.findIndex(x => x.id === id);
+    const j = b.direction === 'up' ? i - 1 : i + 1;
+    if (j < 0 || j >= inPhase.length) return res.json({ ok: true, moved: false });
+    [inPhase[i], inPhase[j]] = [inPhase[j], inPhase[i]];
+    const who = { byName: req.user.name || req.user.email, at: nowIso() };
+    inPhase.forEach((x, k) => { all[x.id] = Object.assign({}, all[x.id] || {}, { order: (k + 1) * 10 }, x.id === id ? who : {}); if (!all[x.id].byName) Object.assign(all[x.id], who); });
+    await db.set(OVERRIDES, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_item_moved', 'onboarding', id, { direction: b.direction });
+    return res.json({ ok: true, moved: true });
+  });
+  router.delete('/api/onboarding/admin/items/:id/override', authenticateToken, requireOffice, async (req, res) => {
+    const id = String(req.params.id);
+    const all = await itemOverrides();
+    delete all[id];
+    await db.set(OVERRIDES, all);
+    await logActivity(req.user.id, req.user.name, 'onboarding_item_restored', 'onboarding', id, {});
+    return res.json({ ok: true });
+  });
+
   router.put('/api/onboarding/admin/instructions/:id', authenticateToken, requireOffice, async (req, res) => {
     const id = String(req.params.id);
     if (!T.findItem(id) && !findModule(id) && !(await customTasks()).some(t => t.id === id)) return res.status(404).json({ error: 'No such item or training.', code: 'INSTRUCTIONS_UNKNOWN' });

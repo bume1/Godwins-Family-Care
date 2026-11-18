@@ -176,6 +176,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'onboarding_library_trainings', phi: false, owner: 'Onboarding' },
   // What the office rewrote an item's or a training's instructions to say (2026-11-10).
   { key: 'onboarding_instructions', phi: false, owner: 'Onboarding' },
+  { key: 'onboarding_item_overrides', phi: false, owner: 'onboarding', note: 'the office edits to built-in tasks: title, phase, order, hidden' },
   { key: 'onboarding_settings', phi: false, owner: 'onboarding', note: 'office switches: whether staff see training check questions' },
   { key: 'onboarding_module_reviews', phi: false, owner: 'onboarding', note: 'per module: manual version reviewed against, confirmed manual sections' },
   { key: 'document_links', phi: false, owner: 'onboarding', note: 'which Drive file each SOP, manual, policy and guide opens; the Super Admin\'s choices over the defaults in onboarding/sources.js' },

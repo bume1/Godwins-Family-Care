@@ -630,7 +630,36 @@ const staffWelcomeItem = (ch) => Object.freeze({
   link: { url: '/my#welcome', label: 'Open Welcome Packet' }
 });
 
-function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks, libraryTrainings, accountType, materialReady } = {}) {
+// ---- the office's edits to built-in tasks (owner, 2026-11-18) ----------------
+// "We should be able to edit and reorganize hard-coded onboarding tasks."
+// overrides: { [itemId]: { title?, phase?, order?, hidden? } }. A phase this
+// chapter does not have is ignored; a hidden task leaves the checklist but its
+// recorded steps stay, so restoring it brings them back. Order sorts within a
+// phase; a task with no order keeps the Playbook's.
+function applyItemOverrides(list, overrides, phases) {
+  const ov = overrides || {};
+  const ids = (phases || []).map(p => p.id);
+  return list
+    .filter(it => !(ov[it.id] && ov[it.id].hidden))
+    .map((it, idx) => {
+      const o = ov[it.id];
+      const base = Object.assign({}, it, { _seq: idx });
+      if (!o) return base;
+      if (o.title && String(o.title).trim()) base.title = String(o.title).trim();
+      if (o.phase && ids.includes(o.phase)) base.phase = o.phase;
+      if (Number.isFinite(o.order)) base._order = o.order;
+      base.edited = true;
+      return base;
+    })
+    .sort((a, b) => {
+      const pa = ids.indexOf(a.phase); const pb = ids.indexOf(b.phase);
+      if (pa !== pb) return pa - pb;
+      const oa = Number.isFinite(a._order) ? a._order : a._seq * 10; const ob = Number.isFinite(b._order) ? b._order : b._seq * 10;
+      return oa - ob || a._seq - b._seq;
+    });
+}
+
+function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersion, moduleReviews, legacy, packetRows, customTasks, libraryTrainings, accountType, materialReady, itemOverrides } = {}) {
   const i = normalizeInputs(inputs);
   const ch = chapterOf(i);
   const rec = record || {};
@@ -643,8 +672,17 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const checklist = composeChecklist(i);
   if (ch.CHAPTER.id !== 'A' && Array.isArray(packetRows) && ch.PHASES.length) checklist.unshift(staffWelcomeItem(ch));
   const custom = customItemsFor(customTasks, i, rec.userId);
-  const items = checklist.concat(custom).map(it => {
-    const st = (rec.items || {})[it.id] || null;
+  const items = applyItemOverrides(checklist.concat(custom), itemOverrides, ch.PHASES).map(it => {
+    const st0 = (rec.items || {})[it.id] || null;
+    // Her SUBMIT on a Pay Setup item reads done once Pay Setup is done
+    // (2026-11-18): shown done and never named as her next step.
+    const payEv = (packetEvidence(it, packetRows) || []).filter(r => r.assist);
+    const payDoneHere = payEv.length > 0 && payEv.every(r => r.status === 'complete');
+    let st = st0;
+    if (payDoneHere) {
+      const k = it.steps.findIndex((x, i2) => x.actor === ACTORS.NEW_HIRE && x.action === ACTIONS.SUBMIT && !((st0 || {}).steps || {})[i2]);
+      if (k !== -1) st = Object.assign({}, st0 || {}, { steps: Object.assign({}, (st0 || {}).steps || {}, { [k]: { at: null, byName: 'Pay Setup', filedBy: 'SELF' } }) });
+    }
     const ns = nextStep(it, st);
     // A completed item whose document has expired reads Renewal Due.
     const expiry = R.expiryOf(it.id, st, today || new Date());
@@ -659,7 +697,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
     const packetWaitsOnHer = !!(packet && packet.some(r => !r.assist && r.hers && r.required && ['missing', 'rejected'].includes(r.status)));
     if (expiry && expiry.status === 'EXPIRED' && status === STATUS.COMPLETE) status = STATUS.EXPIRED;
     return {
-      id: it.id, phase: it.phase, title: it.title, ref: it.ref,
+      id: it.id, phase: it.phase, title: it.title, ref: it.ref, edited: !!it.edited, modulesFrom: it.modulesFrom || null,
       status,
       classifications: it.classifications.map(c => ({ phrase: c.phrase, row: c.row, from: c.from, legal: V.isLegalRequirement(c) })),
       classificationNote: it.classificationNote || null,
@@ -777,6 +815,8 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
   const out = {
     chapter: ch.CHAPTER, inputs: i, lanes: lanesOf(i), trainingCourses,
     phases, items, modules, determinations,
+    // Built-in tasks the office took off this chapter's checklist, so they can be restored.
+    hiddenItems: office ? checklist.concat(custom).filter(it => itemOverrides && itemOverrides[it.id] && itemOverrides[it.id].hidden).map(it => ({ id: it.id, title: it.title, phase: it.phase })) : undefined,
     recurring: ch.RECURRING.filter(r => matchesWhen(r.when, i)).map(r => ({
       id: r.id, interval: r.interval, requirement: r.requirement,
       // A row the Playbook does not classify carries none; it is never filled in.
@@ -813,6 +853,7 @@ function buildTrack({ inputs, record, today, audience = 'new_hire', manualVersio
 }
 
 module.exports = {
+  applyItemOverrides,
   ackAction, ackSatisfies, ackStatus, SIGNATURE_METHODS,
   chapterBaseIds,
   STATUS, SERVICE_LINES, normalizeInputs, lanesOf, composeChecklist, findItem,
