@@ -109,3 +109,49 @@ test('a stored choice takes effect when the app starts, before anyone opens the 
   assert.ok(S.PAY_GUIDE.url.includes(NEW));
   S.setOverrides({});
 });
+
+// Staff could not open policy links (2026-11-18): every one was a Private file.
+test('sharing: only "anyone with the link" reads as open; private, domain-only and trashed are flagged', () => {
+  assert.strictEqual(DL.sharingVerdict({ anyoneWithLink: true }).state, 'open');
+  assert.strictEqual(DL.sharingVerdict({ anyoneWithLink: false, people: 1 }).state, 'private');
+  assert.strictEqual(DL.sharingVerdict({ anyoneWithLink: false, domainWithLink: true }).state, 'domain');
+  assert.strictEqual(DL.sharingVerdict({ anyoneWithLink: true, trashed: true }).state, 'trashed');
+  assert.strictEqual(DL.sharingVerdict(null).state, 'unknown');
+});
+
+test('the sharing check reads every linked file, a failed read is never "open", and the worst file decides the row', async (t) => {
+  const store = {};
+  const db = { get: async (k) => store[k] || null, set: async (k, v) => { store[k] = v; } };
+  const handbook = T.ALL_ACKS.find(a => a.id === 'EMPLOYEE_HANDBOOK').driveFileIds;
+  const seen = [];
+  const drive = { getLinkSharing: async (id) => {
+    seen.push(id);
+    if (id === S.SOURCES.TEAM_ROLES.driveFileId) return { anyoneWithLink: false, people: 1 };
+    if (id === S.SOURCES.ADMIN_SOPS_SET2.driveFileId) throw new Error('boom');
+    if (id === handbook[1]) return { anyoneWithLink: false };
+    return { anyoneWithLink: true };
+  } };
+  const app = express(); app.use(express.json());
+  app.use(require('../routes/onboarding')({ db, config: {}, logActivity: async () => {}, getUsers: async () => [ADMIN],
+    authenticateToken: (req, _res, next) => { req.user = ADMIN; next(); }, drive, detectFileType: () => null, uuidv4: () => 'x',
+    sourceLoader: { manualState: async () => ({ ok: false }), checks: async () => ({ ok: true, sops: {}, library: {}, errors: [] }) } }));
+  const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
+  t.after(() => server.close());
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/api/onboarding/admin/document-links/sharing`);
+  const j = await res.json();
+  const by = Object.fromEntries(j.rows.map(r => [r.key, r]));
+  assert.strictEqual(by['source:TEAM_ROLES'].state, 'private');
+  assert.strictEqual(by['source:ADMIN_SOPS_SET2'].state, 'unknown', 'a failed read is not a pass');
+  assert.strictEqual(by['source:ADMIN_SOPS_SET1'].state, 'open');
+  assert.strictEqual(by['policy:EMPLOYEE_HANDBOOK'].state, 'private', 'one private file of two flags the row');
+  assert.strictEqual(by['policy:EMPLOYEE_HANDBOOK'].files, 2);
+  assert.ok(handbook.every(id => seen.includes(id)), 'both Handbook files are checked');
+  assert.strictEqual(new Set(seen).size, seen.length, 'each file is read once');
+});
+
+test('the sharing check says Drive is not connected rather than calling files open', async (t) => {
+  const h = await mount(t);
+  const r = await h.call('GET', '/api/onboarding/admin/document-links/sharing');
+  assert.strictEqual(r.status, 503);
+  assert.strictEqual(r.data.code, 'DOC_LINK_SHARING_UNAVAILABLE');
+});

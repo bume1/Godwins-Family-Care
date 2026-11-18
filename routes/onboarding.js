@@ -1304,6 +1304,16 @@ module.exports = function createOnboardingRoutes(deps) {
     DL.apply(stored);
     return res.json({ canEdit: req.user.role === 'admin', rows: DL.catalog(T.ALL_ACKS, stored) });
   });
+  // Who can open each linked file (2026-11-18). Separate from the list so a
+  // slow Drive never holds the list up. Drive not set up answers 503 rather
+  // than calling every file "open".
+  router.get('/api/onboarding/admin/document-links/sharing', authenticateToken, requireOffice, async (req, res) => {
+    if (!drive || typeof drive.getLinkSharing !== 'function') return res.status(503).json({ error: 'Drive is not connected, so sharing cannot be checked.', code: 'DOC_LINK_SHARING_UNAVAILABLE' });
+    const stored = (await db.get(DL.COLLECTION)) || {};
+    DL.apply(stored);
+    const rows = await DL.checkSharing(DL.catalog(T.ALL_ACKS, stored), (id) => drive.getLinkSharing(id));
+    return res.json({ rows });
+  });
   router.put('/api/onboarding/admin/document-links/:key', authenticateToken, requireOffice, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only the Super Admin changes document links.', code: 'DOC_LINK_SUPER_ADMIN' });
     const key = String(req.params.key || '');

@@ -762,6 +762,26 @@ async function getFileFingerprint(fileId) {
   };
 }
 
+// Who can open a file the app links staff to (2026-11-18): staff reported
+// policy links that "won't open", and every one was a file left Private in
+// Drive. Staff sign in with their own Google accounts, many of them personal
+// Gmail, so only "anyone with the link" reaches all of them. Read as the
+// impersonated owner, so a Private file still answers.
+async function getLinkSharing(fileId) {
+  if (!fileId) throw new Error('No Drive file id given');
+  const drive = await getDriveClient();
+  const f = await drive.files.get({ fileId, fields: 'id, name, trashed', ...ALL_DRIVES });
+  const p = await drive.permissions.list({ fileId, fields: 'permissions(type, role)', ...ALL_DRIVES });
+  const perms = (p.data.permissions || []);
+  return {
+    name: f.data.name || null,
+    trashed: !!f.data.trashed,
+    anyoneWithLink: perms.some(x => x.type === 'anyone'),
+    domainWithLink: perms.some(x => x.type === 'domain'),
+    people: perms.filter(x => x.type === 'user' && x.role !== 'owner').length
+  };
+}
+
 async function downloadFileBuffer(fileId) {
   // Asking Google about `undefined` comes back as "File not found", which reads
   // as a Drive problem when it is actually a row with no file behind it.
@@ -791,6 +811,7 @@ module.exports = {
   uploadCaregiverDocumentFile,
   uploadStaffDocumentFile,
   getFileFingerprint,
+  getLinkSharing,
   listFolderChildren,
   uploadImeCaseFile,
   getSheetsClient,
