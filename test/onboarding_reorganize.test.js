@@ -188,3 +188,17 @@ test('policies are signed in the app from the task, the same signature as My GFC
   const t = T.buildTrack({ inputs: { chapter: 'A' }, record: { userId: 'c1' }, accountType: 'caregiver', packetRows: require('../welcomePacketRepository').buildChecklist({}, [], {}, []) });
   assert.ok(t.items.find(i => i.id === 'A.5.03').packet.every(p => p.signs), 'handbook, privacy and code of conduct are signed forms');
 });
+
+test('every clinician gets the credentialing tasks first set up by hand: Medicare, CAQH, PDMP, BLS, education, I-9 documents', () => {
+  const T = require('../onboarding/track');
+  for (const chapter of ['C', 'E']) {
+    const t = T.buildTrack({ inputs: { chapter, serviceLines: ['PRIVATE_PAY'], credentials: ['FNP'], prescribes: true }, record: { userId: 'n1' }, accountType: 'provider' });
+    const got = (id) => t.items.find(i => i.id === id);
+    for (const id of ['C.5.07', 'C.6.15', 'C.6.16', 'C.6.17', 'C.6.18', 'C.6.19']) assert.ok(got(id), `${chapter} has ${id}`);
+    assert.match(got('C.6.16').description, /proview\.caqh\.org/);
+    assert.ok(got('C.6.18').steps.some(s => s.hers && s.action === 'SUBMIT'));
+  }
+  assert.ok(require('../onboarding/renewals').EXPIRING_ITEMS['C.6.18'], 'the BLS card expiry is tracked');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'onboarding.html'), 'utf8');
+  assert.match(page, /Use Attach Document to Sign above, and they sign it in the app\./, 'an offer letter is signed in the app; paper is the backup');
+});

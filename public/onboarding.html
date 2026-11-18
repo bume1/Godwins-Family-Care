@@ -645,11 +645,15 @@ const ItemDrawer = ({ item, track, base, office, viewerIsSubject, onClose, onCha
                       ? ((item.files || []).length
                           ? <button className="btn sm" style={{ marginTop: 6 }} disabled={busy} onClick={() => doStep(s)}>Mark Signed (Paper Copy On File)</button>
                           : <div style={{ marginTop: 6 }}>
-                              <div className="meta">Attach the document below for them to sign in the app. If they signed on paper, upload the signed copy, then mark it signed.</div>
-                              <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 6 }}>
-                                <i className="ti ti-upload" />Upload Signed Paper Copy
-                                <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
-                              </label>
+                              {/* Signing happens in the app; paper is the backup (owner, 2026-11-18). */}
+                              <div className="meta">Use Attach Document to Sign above, and they sign it in the app.</div>
+                              <details style={{ marginTop: 4 }}>
+                                <summary className="meta" style={{ cursor: 'pointer' }}>Signed on paper instead?</summary>
+                                <label className="btn sm ghost" style={{ cursor: 'pointer', marginTop: 6 }}>
+                                  <i className="ti ti-upload" />Upload Signed Paper Copy
+                                  <input type="file" style={{ display: 'none' }} onChange={e => e.target.files[0] && upload(e.target.files[0])} />
+                                </label>
+                              </details>
                             </div>)
                       : <div className="meta" style={{ marginTop: 6 }}>The office will send this to you to sign here.</div>
                   )}
