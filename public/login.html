@@ -667,6 +667,9 @@
       // `landing`, so it falls back to the same rule.
       const directDestination = (u) => {
         if (!u) return null;
+        // An unsigned offer letter outranks everything, the hub button included
+        // (2026-11-19): the server opens nothing else until it is answered.
+        if (u.landing === '/offer') return u.landing;
         // The sidebar's "Portal Hub" button (owner, 2026-11-09) comes here on
         // purpose, so it stays on the hub rather than bouncing straight back.
         // That is also how someone skips the welcome packet below.

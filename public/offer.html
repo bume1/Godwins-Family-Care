@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Your Offer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
+  <style>
+    /* The look is My GFC's (/my-gfc.js): this page is its front door. */
+    body{margin:0;background:#FAF7F2;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+    .of-steps{list-style:none;margin:6px 0 0;padding:0}
+    .of-steps li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid #ECE4D6}
+    .of-steps li:last-child{border-bottom:0}
+    .of-n{flex:none;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13.5px;background:#F6EFE2;color:#033D50}
+    .of-n.of-now{background:#C9A44A;color:#fff}
+    .of-n.of-done{background:#1d7a5a;color:#fff}
+    .of-steps b{display:block;color:#033D50} .of-steps small{color:#41555f;font-size:13.5px}
+    .of-doc{display:flex;gap:14px;align-items:center;padding:14px;border:1px solid #E1D7C5;border-radius:14px;background:#FFFDF8;margin:12px 0}
+    .of-doc i.ti{font-size:30px;color:#9A7430}
+    .of-acts{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+    .of-welcome{text-align:center;padding:10px 4px 6px}
+    .of-welcome .ti{font-size:44px;color:#C9A44A}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/session-guard.js"></script>
+<script src="/pdf-pages.js"></script>
+<script type="text/babel" src="/welcome-packet-ui.js"></script>
+<script type="text/babel" src="/document-sign-ui.js"></script>
+<script type="text/babel" src="/my-gfc.js"></script>
+<script type="text/babel">
+// ============================================================================
+// THE OFFER LETTER, FIRST (owner, 2026-11-19). A new hire's first screen in
+// My GFC: their offer, opened in the same viewer every document is signed in
+// (GFCDocSign.SignWorkspace). Until they sign or decline it the server opens
+// nothing else, so this page is My GFC's frame with one section and no way
+// out but the offer. Signing takes them straight on to the welcome packet.
+// ============================================================================
+const { Shell, Section, call } = window.MyGFC;
+const TZ = window.GFC_TIME && window.GFC_TIME.PRACTICE_TIMEZONE;
+const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: TZ }) : '');
+const signOut = () => {
+  const t = window.MyGFC.getToken();
+  if (t) fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${t}` } }).catch(() => {});
+  try { localStorage.clear(); } catch (e) { /* private mode */ }
+  window.location.replace('/login');
+};
+
+function Steps({ stage }) {
+  const at = stage === 'signed' ? 2 : 1;
+  const row = (n, title, sub) => (
+    <li key={n}><span className={`of-n${n < at ? ' of-done' : n === at ? ' of-now' : ''}`}>{n < at ? <i className="ti ti-check" /> : n}</span>
+      <div><b>{title}</b><small>{sub}</small></div></li>
+  );
+  return (
+    <ol className="of-steps">
+      {row(1, 'Sign your offer letter', 'Read it in full, then sign with your finger or mouse.')}
+      {row(2, 'Your welcome packet', 'How to reach you, your emergency contact and your availability. About five minutes.')}
+      {row(3, 'Your onboarding checklist', 'Everything else, step by step, in My GFC.')}
+    </ol>
+  );
+}
+
+function App() {
+  const [d, setD] = React.useState(null);
+  const [err, setErr] = React.useState('');
+  const [open, setOpen] = React.useState(false);
+  const [declining, setDeclining] = React.useState(false);
+  const [note, setNote] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [stage, setStage] = React.useState('offer'); // offer | signed | declined
+  const [next, setNext] = React.useState('/my#welcome');
+
+  React.useEffect(() => {
+    if (!window.MyGFC.getToken()) { window.location.replace('/login'); return; }
+    call('/api/my/offer').then(r => {
+      // Nothing waiting on them: the offer page has nothing to do.
+      if (!r.offer || r.offer.status === 'signed') { window.location.replace(r.next || '/my'); return; }
+      setNext(r.next || '/my#welcome');
+      setD(r);
+    }).catch(e => setErr(e.message));
+  }, []);
+
+  const signed = async () => { setOpen(false); setStage('signed'); window.scrollTo(0, 0); };
+  const decline = async () => {
+    setBusy(true); setErr('');
+    try {
+      await call('/api/my/offer/decline', { method: 'POST', body: { note } });
+      setStage('declined'); setDeclining(false);
+      try { localStorage.clear(); } catch (e) { /* private mode */ }
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const first = (d && d.firstName) || '';
+  const sections = [{ id: 'home', label: 'Your Offer', icon: 'ti-file-certificate' }];
+  const hello = stage === 'signed'
+    ? { title: `Welcome to the team${first ? `, ${first}` : ''}`, sub: 'Your offer is signed · Godwins Family Care' }
+    : stage === 'declined'
+      ? { title: 'Thank you for letting us know', sub: 'Godwins Family Care' }
+      : { title: `Welcome${first ? `, ${first}` : ''}`, sub: 'Your offer from Godwins Family Care' };
+
+  return (
+    <Shell sections={sections} phoneTabs={[]} view="home" go={() => {}} name={first || 'New team member'} typeLabel="Your offer"
+      home={null} hideHub hello={hello} firstName={first}
+      footExtra={<div><button onClick={signOut} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>Sign Out</button></div>}>
+      {err && <div className="mg-err">{err}</div>}
+      {!d && !err && stage === 'offer' && <p className="mg-note">Opening your offer…</p>}
+
+      {d && stage === 'offer' && (
+        <>
+          <Section title="Your offer letter" sub="Please read your offer in full. When you are ready, sign it here. Your signed copy is saved to My Documents, where you and the office can open it any time.">
+            <div className="of-doc">
+              <i className="ti ti-file-certificate" />
+              <div className="mg-grow">
+                <b>{d.doc ? d.doc.title : d.offer.title}</b>
+                <small>Sent {fmtDate(d.offer.sentAt)}{d.offer.sentByName ? ` by ${d.offer.sentByName}` : ''}</small>
+              </div>
+              <span className="mg-pill mg-wait">Waiting on you</span>
+            </div>
+            {d.doc && d.doc.note && <div className="mg-note">{d.doc.note}</div>}
+            {!d.doc && <div className="mg-err">Your offer could not be found. Please call the office.</div>}
+            <div className="of-acts">
+              <button className="mg-btn" disabled={!d.doc} onClick={() => setOpen(true)}><i className="ti ti-signature" />Review and Sign</button>
+              {!declining && <button className="mg-btn mg-ghost" onClick={() => setDeclining(true)}>Decline Offer</button>}
+            </div>
+            {declining && (
+              <div style={{ marginTop: 14 }}>
+                <label htmlFor="of-note">Anything you would like us to know? (optional)</label>
+                <textarea id="of-note" rows={3} maxLength={500} value={note} onChange={e => setNote(e.target.value)} placeholder="For example, a question about the terms." />
+                <p className="mg-lead" style={{ marginTop: 8 }}>Declining lets the office know and closes this account. If the terms change, they can send you a new version.</p>
+                <div className="of-acts">
+                  <button className="mg-btn mg-warn" disabled={busy} onClick={decline}>{busy ? 'Sending…' : 'Decline the Offer'}</button>
+                  <button className="mg-btn mg-ghost" disabled={busy} onClick={() => setDeclining(false)}>Keep the Offer</button>
+                </div>
+              </div>
+            )}
+          </Section>
+          <Section title="What happens next"><Steps stage="offer" /></Section>
+        </>
+      )}
+
+      {stage === 'signed' && (
+        <>
+          <Section>
+            <div className="of-welcome">
+              <i className="ti ti-confetti" />
+              <h2 style={{ marginTop: 6 }}>Your offer is signed</h2>
+              <p className="mg-lead" style={{ marginTop: 6 }}>Thank you. We have let the office know, and your signed copy is in My Documents.</p>
+              <a className="mg-btn" href={next}><i className="ti ti-arrow-right" />Continue to Your Welcome Packet</a>
+            </div>
+          </Section>
+          <Section title="What happens next"><Steps stage="signed" /></Section>
+        </>
+      )}
+
+      {stage === 'declined' && (
+        <Section title="Your answer is sent" sub="The office has your answer, and your note if you left one. This account is now closed. If anything changes, they will be in touch.">
+          <a className="mg-btn mg-ghost" href="/login">Close</a>
+        </Section>
+      )}
+
+      {open && d && d.doc && window.GFCDocSign &&
+        <window.GFCDocSign.SignWorkspace doc={d.doc} onDone={signed} onCancel={() => setOpen(false)} />}
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

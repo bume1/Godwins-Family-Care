@@ -1171,6 +1171,152 @@ const CustomTaskList = () => {
   );
 };
 
+// ---- THE OFFER LETTER, FIRST (owner, 2026-11-19) --------------------------------
+// The office sends the offer PDF; the new hire gets one email, chooses a
+// password and signs it before anything else opens. The card shows where it
+// stands and carries the office's three moves: send, resend the link, and
+// send a new version.
+const OFFER_STATUS = { sent: ['p-her', 'Sent, waiting on them'], signed: ['p-COMPLETE', 'Signed'], declined: ['p-RETURNED', 'Declined'] };
+const OfferSendForm = ({ userId, newVersion, onSent, onCancel }) => {
+  const [file, setFile] = useState(null); const [title, setTitle] = useState('Offer letter'); const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const go = async () => {
+    setBusy(true); setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file); fd.append('title', title); fd.append('note', note);
+      if (newVersion) fd.append('newVersion', 'true');
+      const out = await call(`/api/onboarding/admin/people/${encodeURIComponent(userId)}/offer`, { method: 'POST', body: fd });
+      await onSent(out);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="line-card" style={{ marginTop: 10 }}>
+      <label className="f">Offer letter (PDF)</label>
+      <input type="file" accept="application/pdf,.pdf" onChange={e => setFile(e.target.files[0] || null)} />
+      <label className="f">Title they see</label>
+      <input type="text" value={title} maxLength={200} onChange={e => setTitle(e.target.value)} />
+      <label className="f">A note for them (optional)</label>
+      <textarea rows={2} maxLength={1000} value={note} onChange={e => setNote(e.target.value)} placeholder="For example, your start date and who to call with questions." />
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+        <button className="btn sm" disabled={busy || !file || !title.trim()} onClick={go}>{busy ? 'Sending…' : (newVersion ? 'Send New Version' : 'Send Offer')}</button>
+        {onCancel && <button className="btn sm ghost" disabled={busy} onClick={onCancel}>Cancel</button>}
+      </div>
+    </div>
+  );
+};
+const OfferCard = ({ userId, firstName, onChanged }) => {
+  const [o, setO] = useState(undefined); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
+  const [sending, setSending] = useState(false); const [busy, setBusy] = useState(false);
+  const path = `/api/onboarding/admin/people/${encodeURIComponent(userId)}/offer`;
+  const load = useCallback(async () => { try { setO((await call(path)).offer); } catch (e) { setErr(e.message); } }, [path]);
+  useEffect(() => { load(); }, [load]);
+  if (o === undefined && !err) return null;
+  const resend = async () => {
+    setBusy(true); setErr(''); setMsg('');
+    try { const r = await call(`/api/onboarding/admin/people/${encodeURIComponent(userId)}/offer/resend-link`, { method: 'POST' }); setMsg(r.emailed ? 'A new link is on its way to them.' : 'The link could not be emailed. Check their email address.'); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const sent = async (out) => {
+    setSending(false);
+    setMsg(out.channel === 'documents' ? 'Sent to their My Documents to sign.' : (out.emailed ? `Sent. ${firstName || 'They'} will get an email to choose a password and open it.` : 'Saved, but the email did not go. Use Resend Link.'));
+    await load(); if (onChanged) await onChanged();
+  };
+  const [cls, label] = o ? (OFFER_STATUS[o.status] || ['', o.status]) : [];
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="card-h"><h2><i className="ti ti-file-certificate" style={{ color: 'var(--gold)' }} /> Offer Letter</h2>{o && <span className={`pill ${cls}`}>{label}</span>}</div>
+      {!o && !sending && (
+        <>
+          <p style={{ color: 'var(--mut)', margin: '0 0 8px' }}>Send their offer first. They get one email to choose a password, and the offer opens in My GFC to read and sign. Nothing else opens until they sign it.</p>
+          <button className="btn sm" onClick={() => setSending(true)}><i className="ti ti-send" />Send Offer Letter</button>
+        </>
+      )}
+      {o && (
+        <div style={{ fontSize: 14 }}>
+          <div><b>{o.title}</b> · sent {fmtDate(o.sentAt)}{o.sentByName ? ` by ${o.sentByName}` : ''}</div>
+          {o.status === 'signed' && <div style={{ color: 'var(--green)', marginTop: 4 }}>Signed {fmtDate(o.signedAt)}. The signed copy is on the offer task and in their Documents.</div>}
+          {o.status === 'sent' && <div style={{ color: 'var(--mut)', marginTop: 4 }}>{o.gated ? 'Their account opens only the offer until they sign.' : 'Waiting in their My Documents.'}</div>}
+          {o.status === 'declined' && (
+            <div style={{ marginTop: 6 }}>
+              <div style={{ color: 'var(--red)' }}>Declined {fmtDate(o.declinedAt)}. Their account is switched off.</div>
+              <div className="line-card" style={{ marginTop: 6 }}>{o.declineNote ? `Their note: "${o.declineNote}"` : 'They did not leave a note.'}</div>
+            </div>
+          )}
+          {!sending && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+              {o.status === 'sent' && o.gated && <button className="btn sm ghost" disabled={busy} onClick={resend}><i className="ti ti-mail-forward" />Resend Link</button>}
+              <button className="btn sm ghost" onClick={() => setSending(true)}><i className="ti ti-file-upload" />Send New Version</button>
+            </div>
+          )}
+        </div>
+      )}
+      {sending && <OfferSendForm userId={userId} newVersion={!!o} onSent={sent} onCancel={() => setSending(false)} />}
+      {msg && <div className="note" style={{ marginTop: 8 }}>{msg}</div>}
+      {err && <div className="err" style={{ marginTop: 8 }}>{err}</div>}
+    </div>
+  );
+};
+// A new hire from the onboarding screen: their account, then their offer, in
+// one go. The account is made with a random password nobody sees and no
+// welcome email; the offer email is their first contact and sets the password.
+const HIRE_TYPES = [['caregiver', 'Caregiver'], ['rn', 'Registered Nurse'], ['provider', 'Provider (FNP / MD / PA)'], ['lcsw', 'LCSW'], ['lmsw', 'LMSW / Case Manager'],
+  ['coordinator', 'Care Coordinator'], ['manager', 'Manager'], ['liaison', 'Community Care Liaison']];
+const LEVELS = [['sitter', 'Sitter / Companion'], ['pca', 'PCA'], ['cna', 'CNA'], ['lpn', 'LPN']];
+const randomPassword = () => {
+  const a = new Uint8Array(18); (window.crypto || window.msCrypto).getRandomValues(a);
+  return 'Gf1' + Array.from(a, b => b.toString(16).padStart(2, '0')).join('') + 'Z';
+};
+const NewHireForm = ({ onDone, onCancel }) => {
+  const [f, setF] = useState({ name: '', email: '', accountType: 'caregiver', licenseLevel: 'pca', employmentType: 'W2', title: 'Offer letter', note: '' });
+  const [file, setFile] = useState(null); const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const set = (k) => (e) => setF(Object.assign({}, f, { [k]: e.target.value }));
+  const go = async () => {
+    setBusy(true); setErr('');
+    let created = null;
+    try {
+      created = await call('/api/users', { method: 'POST', body: {
+        name: f.name.trim(), email: f.email.trim(), password: randomPassword(), accountType: f.accountType, sendWelcomeEmail: false,
+        licenseLevel: f.accountType === 'caregiver' ? f.licenseLevel : null,
+        employmentType: f.accountType === 'provider' ? f.employmentType : (f.accountType === 'liaison' ? null : 'W2')
+      } });
+      const id = (created && (created.user ? created.user.id : created.id));
+      if (!id) throw new Error('The account was made, but its id did not come back. Open it from People to send the offer.');
+      const fd = new FormData();
+      fd.append('file', file); fd.append('title', f.title); fd.append('note', f.note);
+      const out = await call(`/api/onboarding/admin/people/${encodeURIComponent(id)}/offer`, { method: 'POST', body: fd });
+      await onDone(id, out);
+    } catch (e) { setErr(created ? `${e.message} The account was created: open it below to send the offer.` : e.message); }
+    finally { setBusy(false); }
+  };
+  const ok = f.name.trim() && /\S+@\S+\.\S+/.test(f.email.trim()) && file && f.title.trim();
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="card-h"><h2><i className="ti ti-user-plus" style={{ color: 'var(--gold)' }} /> New Hire</h2></div>
+      <p style={{ color: 'var(--mut)', margin: '0 0 8px' }}>Makes their account and sends their offer letter. They get one email to choose a password; their offer opens in My GFC, and their welcome packet and onboarding follow once they sign.</p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: '0 14px' }}>
+        <div><label className="f">Full name</label><input type="text" value={f.name} onChange={set('name')} autoComplete="off" /></div>
+        <div><label className="f">Email</label><input type="text" value={f.email} onChange={set('email')} autoComplete="off" /></div>
+        <div><label className="f">Role</label><select value={f.accountType} onChange={set('accountType')}>{HIRE_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
+        {f.accountType === 'caregiver' && <div><label className="f">Licence level</label><select value={f.licenseLevel} onChange={set('licenseLevel')}>{LEVELS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>}
+        {f.accountType === 'provider' && <div><label className="f">Employment</label><select value={f.employmentType} onChange={set('employmentType')}><option value="W2">Employed (W-2)</option><option value="1099">Contracted (1099)</option><option value="HYBRID">Both (W-2 and 1099)</option></select></div>}
+      </div>
+      <label className="f">Offer letter (PDF)</label>
+      <input type="file" accept="application/pdf,.pdf" onChange={e => setFile(e.target.files[0] || null)} />
+      <label className="f">Title they see</label>
+      <input type="text" value={f.title} maxLength={200} onChange={set('title')} />
+      <label className="f">A note for them (optional)</label>
+      <textarea rows={2} maxLength={1000} value={f.note} onChange={set('note')} placeholder="For example, your start date and who to call with questions." />
+      {err && <div className="err">{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+        <button className="btn" disabled={busy || !ok} onClick={go}>{busy ? 'Sending…' : 'Create Account and Send Offer'}</button>
+        <button className="btn ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
 const Person = ({ userId, onBack }) => {
   const [data, setData] = useState(null); const [err, setErr] = useState('');
   const [phase, setPhase] = useState(null); const [openItem, setOpenItem] = useState(null); const [tab, setTab] = useState('checklist');
@@ -1212,6 +1358,7 @@ const Person = ({ userId, onBack }) => {
         </div>
       </div>
 
+      <OfferCard userId={userId} firstName={String(t.person.name || '').split(' ')[0]} onChanged={load} />
       {tab === 'checklist' && (
         <div className="card">
           <div className="phases">
@@ -1360,11 +1507,13 @@ const Setup = ({ userId, inputs, onSaved }) => {
 // ---- OFFICE: overview ---------------------------------------------------------
 const Overview = ({ onOpen }) => {
   const [d, setD] = useState(null); const [err, setErr] = useState(''); const [filter, setFilter] = useState('all');
+  const [hiring, setHiring] = useState(false);
   const load = useCallback(async () => { try { setD(await call('/api/onboarding/admin/overview')); } catch (e) { setErr(e.message); } }, []);
   useEffect(() => { load(); }, [load]);
   const start = async (u) => { try { await call(`/api/onboarding/admin/people/${u.userId}/inputs`, { method: 'PUT', body: {} }); onOpen(u.userId, 'setup'); } catch (e) { setErr(e.message); } };
   if (err) return <div className="err">{err}</div>;
   if (!d) return <div className="note">Loading…</div>;
+  const hired = async (id) => { setHiring(false); await load(); onOpen(id); };
   const people = d.people.filter(p => filter === 'all' || (filter === 'office' && p.waitingOnOffice > 0) || (filter === 'returned' && p.returned > 0));
   return (
     <div>
@@ -1377,6 +1526,8 @@ const Overview = ({ onOpen }) => {
       </div>
       {d.counts.modulesFlagged > 0 && <div className="err"><i className="ti ti-alert-triangle" /> {d.counts.modulesFlagged} training module{d.counts.modulesFlagged === 1 ? '' : 's'} flagged by the manual update. Review them in the Training Library.</div>}
       {!d.manual.ok && <div className="note">The Clinical manual could not be read from Drive just now{d.manual.reason ? ` (${d.manual.reason})` : ''}. Training flags use the last known change list.</div>}
+      {!hiring && <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '0 0 10px' }}><button className="btn" onClick={() => setHiring(true)}><i className="ti ti-user-plus" />New Hire</button></div>}
+      {hiring && <NewHireForm onDone={hired} onCancel={() => setHiring(false)} />}
       <div className="card">
         <div className="card-h"><h2>Onboarding Pipeline</h2>
           <div className="tabs">{[['all', `All (${d.people.length})`], ['office', 'Waiting on Office'], ['returned', 'Returned']].map(([k, l]) => <button key={k} className={filter === k ? 'on' : ''} onClick={() => setFilter(k)}>{l}</button>)}</div>

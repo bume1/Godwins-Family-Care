@@ -319,6 +319,9 @@ const NOT_YET_EDITABLE = Object.freeze([
   'care_plan_awaiting_cosign', 'care_plan_awaiting_provider', 'care_plan_provider_cosigned',
   'care_plan_ready',
   'staff_document_sent',
+  // The office's notices about a new hire's offer letter (2026-11-19), written
+  // out like the other staff onboarding notices until those migrate together.
+  'staff_offer_signed', 'staff_offer_declined',
   'referral_accepted', 'referral_completed', 'abnormal_result_waiting',
   'payment_received', 'clinical_enrollment_activated', 'document_shared',
   'account_mfa_reset', 'account_sessions_revoked', 'account_deactivated', 'account_role_changed'

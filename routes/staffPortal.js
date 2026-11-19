@@ -881,7 +881,9 @@ module.exports = function createStaffPortalRoutes(deps) {
     const documentId = `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const docs = (await db.get('caregiver_documents')) || [];
     docs.push(staffDocs.buildStaffDocumentRow({
-      id: documentId, ownerId: me.userId, ownerName: me.name, kind: 'signed_document', fileName, storedName: fileName,
+      // A caregiver's signed offer is filed as their offer letter, so the
+      // welcome packet's offer letter item reads as done (owner, 2026-11-19).
+      id: documentId, ownerId: me.userId, ownerName: me.name, kind: (s.offer && me.audience === 'caregiver') ? 'offer_letter' : 'signed_document', fileName, storedName: fileName,
       mime: 'application/pdf', sizeBytes: built.bytes.length, driveFileId: stored.fileId || stored.id || null, driveUrl: null,
       note: `${s.action === 'sign' ? 'Signed' : 'Acknowledged'}: ${s.title}`, status: 'accepted',
       uploadedById: req.user.id, uploadedByName: printedName, uploadedByOffice: false,
@@ -893,7 +895,12 @@ module.exports = function createStaffPortalRoutes(deps) {
     // An onboarding task that carries this document is done when it is.
     await completeOnboardingTasks(s, me, req.user, signedAt, documentId);
     await logActivity(req.user.id, req.user.name || req.user.email, s.action === 'sign' ? 'document_signed' : 'document_acknowledged', 'staff_document', s.id, { documentId });
-    return res.json({ ok: true, documentId });
+    // Their offer letter (owner, 2026-11-19): signing it opens the rest of the
+    // app and tells the office. `next` is where they go now.
+    let next = null;
+    try { next = await require('./staffOffers').settleOfferOnSign(deps, { userId: me.userId, sendId: s.id, actorId: req.user.id }); }
+    catch (e) { console.error('[OFFER] settling the offer failed:', e.message); }
+    return res.json({ ok: true, documentId, next });
   });
 
   // ---- POLICIES TO SIGN OR ACKNOWLEDGE (owner, 2026-11-15) -------------------
