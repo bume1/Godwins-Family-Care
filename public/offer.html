@@ -137,7 +137,7 @@ function App() {
               <div style={{ marginTop: 14 }}>
                 <label htmlFor="of-note">Anything you would like us to know? (optional)</label>
                 <textarea id="of-note" rows={3} maxLength={500} value={note} onChange={e => setNote(e.target.value)} placeholder="For example, a question about the terms." />
-                <p className="mg-lead" style={{ marginTop: 8 }}>Declining lets the office know and closes this account. If the terms change, they can send you a new version.</p>
+                <p className="mg-lead" style={{ marginTop: 8 }}>We will share your answer, and your note if you leave one, with our team.</p>
                 <div className="of-acts">
                   <button className="mg-btn mg-warn" disabled={busy} onClick={decline}>{busy ? 'Sending…' : 'Decline the Offer'}</button>
                   <button className="mg-btn mg-ghost" disabled={busy} onClick={() => setDeclining(false)}>Keep the Offer</button>
@@ -164,7 +164,7 @@ function App() {
       )}
 
       {stage === 'declined' && (
-        <Section title="Your answer is sent" sub="The office has your answer, and your note if you left one. This account is now closed. If anything changes, they will be in touch.">
+        <Section title="Your answer is sent" sub="Thank you for considering Godwins Family Care. We have shared your answer with our team, and we wish you all the best. If anything changes, we would love to hear from you.">
           <a className="mg-btn mg-ghost" href="/login">Close</a>
         </Section>
       )}
