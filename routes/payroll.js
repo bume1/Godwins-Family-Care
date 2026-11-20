@@ -642,7 +642,7 @@ module.exports = function createPayrollRoutes(deps) {
         runs: runs.map(r => {
           const toPay = (r.workers || []).filter(w => w.pay);
           const p2p = toPay.filter(w => w.channel === 'p2p').length;
-          return { id: r.id, status: r.status, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null,
+          return { id: r.id, status: r.status, voidedAt: r.voidedAt || null, voidReason: r.voidReason || null, source: r.source || 'app', schedule: (r.source || 'app') === 'app' ? runSchedule(r) : null, period: r.period, totals: r.totals, blocked: r.blocked, createdAt: r.createdAt, approvedAt: r.approvedAt || null, paidAt: r.paidAt || null,
             people: toPay.length, markedPaid: toPay.filter(w => (r.payments || {})[w.userId]).length, p2p };
         })
           .sort((a, b) => String(b.period.start).localeCompare(String(a.period.start))),
@@ -1049,7 +1049,7 @@ module.exports = function createPayrollRoutes(deps) {
     const runs = await rows(RUNS);
     const tbl = await activeTables(Number(period.payDate.slice(0, 4)));
     if (!tbl) return { error: `No approved ${period.payDate.slice(0, 4)} tax tables. Approve the federal and Georgia tables under Taxes first.`, code: 'PAYROLL_NO_TABLES' };
-    const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+    const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft' && r.status !== 'void'));
     const schedule = period.schedule || 'staff';
     const people = (await staffPeople()).filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === schedule);
     const run = engine.buildRun({
@@ -1116,7 +1116,7 @@ module.exports = function createPayrollRoutes(deps) {
       office: sheet && sheet.office ? { status: sheet.office.status, note: sheet.office.note, at: sheet.office.at, by: sheet.office.by } : null
     };
   };
-  const paidRuns = async () => (await rows(RUNS)).filter(r => r.status !== 'draft');
+  const paidRuns = async () => (await rows(RUNS)).filter(r => r.status !== 'draft' && r.status !== 'void');
   const userFor = async (id) => (await getUsers()).find(u => u && String(u.id) === String(id)) || null;
 
   // The employee's own: this period and the two before it.
@@ -1129,7 +1129,7 @@ module.exports = function createPayrollRoutes(deps) {
       const cur = tax.periodFor(today(), settings, schedule);
       const periods = [cur];
       for (let k = 0; k < 2; k++) periods.push(tax.periodFor(tax.addDays(periods[periods.length - 1].start, -1), settings, schedule));
-      const runs = await rows(RUNS); const paid = runs.filter(r => r.status !== 'draft');
+      const runs = await rows(RUNS); const paid = runs.filter(r => r.status !== 'draft' && r.status !== 'void');
       const all = await rows(TIMESHEETS);
       const out = [];
       for (const period of periods) {
@@ -1154,7 +1154,7 @@ module.exports = function createPayrollRoutes(deps) {
       const runs = await rows(RUNS);
       if (runs.some(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void')) return res.status(409).json({ error: 'This period is already paid. Tell the office about anything wrong; it is corrected on your next pay.', code: 'TIMESHEET_PAID' });
       const n = ts.normalizeEmployee(req.body); if (n.error) return res.status(400).json(n);
-      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft' && r.status !== 'void'));
       const print = ts.fingerprint(gathered.byUser.get(String(req.user.id)) || []);
       const all = await rows(TIMESHEETS);
       const id = ts.sheetId(schedule, period.start, req.user.id);
@@ -1182,7 +1182,7 @@ module.exports = function createPayrollRoutes(deps) {
         period = tax.periodFor(date, settings, schedule);
       }
       const runs = await rows(RUNS);
-      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft' && r.status !== 'void'));
       const sheets = await sheetsFor(period);
       const people = (await staffPeople()).filter(x => pp.isEmployee(x.profile) && x.profile.status !== 'inactive' && pp.scheduleFor(x.profile) === schedule);
       const out = [];
@@ -1219,7 +1219,7 @@ module.exports = function createPayrollRoutes(deps) {
       const n = ts.normalizeOffice(b); if (n.error) return res.status(400).json(n);
       const runs = await rows(RUNS);
       if (runs.some(r => sameRun(r, period) && r.status !== 'draft' && r.status !== 'void')) return res.status(409).json({ error: 'This period is already paid. A correction goes on the next run as an adjustment.', code: 'TIMESHEET_PAID' });
-      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft'));
+      const gathered = await gatherFor(period, runs.filter(r => r.status !== 'draft' && r.status !== 'void'));
       const items = gathered.byUser.get(String(user.id)) || [];
       const print = ts.fingerprint(items);
       const all = await rows(TIMESHEETS);
@@ -1322,7 +1322,7 @@ module.exports = function createPayrollRoutes(deps) {
         if (cur && inputs(cur) === before) await db.set(RUNS, now.map(r => (r.id === run.id ? run : r)));
       } catch (e) {
         try {
-          const gathered = await gatherFor(run.period, all.filter(r => r.status !== 'draft'));
+          const gathered = await gatherFor(run.period, all.filter(r => r.status !== 'draft' && r.status !== 'void'));
           run.unapprovedTimesheets = await unapprovedFor(run.period, run.workers, gathered);
         } catch (_) { /* keep the stored list */ }
       }
@@ -1539,6 +1539,82 @@ module.exports = function createPayrollRoutes(deps) {
     } catch (e) { console.error('Payroll approve error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
+  // Reopen (owner, 2026-11-20): an approved run nobody has been paid from yet
+  // goes back to a draft, so a mistake caught before payday (taxes entered by
+  // hand, a W-4 signed after drafting) is fixed in the run itself instead of
+  // on the next one. Super Admin only, a reason required, and refused the
+  // moment any payment is marked: a marked payment has a receipt and a stub,
+  // and money already sent is corrected on the next run.
+  router.post('/api/payroll/admin/runs/:id/reopen', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      const run = runs[i];
+      if (run.source === 'gusto') return res.status(409).json({ error: 'This run was paid through Gusto and imported. It cannot be reopened.', code: 'RUN_REOPEN_GUSTO' });
+      if (run.status === 'draft') return res.status(409).json({ error: 'This run is already a draft.', code: 'RUN_REOPEN_DRAFT' });
+      if (run.status !== 'approved') return res.status(409).json({ error: 'A paid run cannot be reopened. Correct it on the next run.', code: 'RUN_REOPEN_PAID' });
+      const marked = Object.keys(run.payments || {});
+      if (marked.length) return res.status(409).json({ error: `${marked.length} ${marked.length === 1 ? 'payment is' : 'payments are'} already marked paid on this run. Once money is sent, correct it on the next run.`, code: 'RUN_REOPEN_PAYMENTS' });
+      const reason = String((req.body || {}).reason || '').trim().slice(0, 300);
+      if (!reason) return res.status(400).json({ error: 'Say why you are reopening it.', code: 'RUN_REOPEN_REASON' });
+      const at = nowIso();
+      const by = req.user.name || req.user.email;
+      const reopened = { ...run, status: 'draft', approvedAt: null, approvedBy: null, payments: {}, liabilities: null, timesheetOverride: null,
+        reopenHistory: [...(run.reopenHistory || []), { at, by, reason, approvedAt: run.approvedAt || null, approvedBy: run.approvedBy || null, netCents: run.totals ? run.totals.netCents : null }] };
+      runs[i] = reopened;
+      await db.set(RUNS, runs);
+      // The hours approval locked come unlocked, so the next approval locks them again.
+      const logs = await rows('time_logs');
+      let unlocked = 0;
+      for (const l of logs) if (l && l.payroll_run_id === run.id) { delete l.payroll_run_id; delete l.payroll_locked_at; unlocked++; }
+      if (unlocked) await db.set('time_logs', logs);
+      await logActivity(req.user.id, req.user.name, 'payroll_run_reopened', 'payroll_run', run.id, { period: run.period && run.period.start, approvedBy: run.approvedBy || null });
+      // QuickBooks posts the run's journal once, at the first approval, and
+      // never again for the same run, so a journal already posted is named
+      // for the Super Admin to fix by hand.
+      const qbo = ((await db.get('qbo_sync_log')) || []).find(l => l && l.eventKey === `run:${run.id}` && l.status === 'ok') || null;
+      res.json({ run: reopened, timeLogsUnlocked: unlocked, quickbooksJournal: qbo ? { qboId: qbo.qboId, at: qbo.at } : null });
+    } catch (e) { console.error('Payroll reopen error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
+  // Void (owner, 2026-11-20): an approved or paid run is set aside, never
+  // deleted. It stays on the list marked VOID with who, when and why, and it
+  // stops counting everywhere a paid run counts: year to date, tax deposits,
+  // quarterly and year-end totals, and the hours it paid, which can be paid
+  // again on a new run for the period. Its pay stubs stay listed, marked
+  // voided. Money already sent is not pulled back by this; that is the
+  // Super Admin's to recover or record.
+  router.post('/api/payroll/admin/runs/:id/void', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const runs = await rows(RUNS);
+      const i = runs.findIndex(r => r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Run not found.' });
+      const run = runs[i];
+      if (run.source === 'gusto') return res.status(409).json({ error: 'This run was paid through Gusto and imported. Void it in Gusto.', code: 'RUN_VOID_GUSTO' });
+      if (run.status === 'void') return res.status(409).json({ error: 'This run is already voided.', code: 'RUN_VOID_ALREADY' });
+      if (run.status === 'draft') return res.status(409).json({ error: 'A draft is deleted, not voided.', code: 'RUN_VOID_DRAFT' });
+      const reason = String((req.body || {}).reason || '').trim().slice(0, 500);
+      if (!reason) return res.status(400).json({ error: 'Say why you are voiding it.', code: 'RUN_VOID_REASON' });
+      const at = nowIso();
+      const by = req.user.name || req.user.email;
+      const marked = Object.keys(run.payments || {}).length;
+      runs[i] = { ...run, status: 'void', voidedAt: at, voidedBy: by, voidReason: reason, statusBeforeVoid: run.status };
+      await db.set(RUNS, runs);
+      const logs = await rows('time_logs');
+      let unlocked = 0;
+      for (const l of logs) if (l && l.payroll_run_id === run.id) { delete l.payroll_run_id; delete l.payroll_locked_at; unlocked++; }
+      if (unlocked) await db.set('time_logs', logs);
+      const stubs = await rows(PAYSTUBS);
+      let stubsMarked = 0;
+      for (const s of stubs) if (s && s.runId === run.id && !s.voidedAt) { s.voidedAt = at; s.voidReason = reason; stubsMarked++; }
+      if (stubsMarked) await db.set(PAYSTUBS, stubs);
+      await logActivity(req.user.id, req.user.name, 'payroll_run_voided', 'payroll_run', run.id, { period: run.period && run.period.start, was: run.status, paymentsMarked: marked, reason });
+      const qbo = ((await db.get('qbo_sync_log')) || []).find(l => l && l.eventKey === `run:${run.id}` && l.status === 'ok') || null;
+      res.json({ run: runs[i], timeLogsUnlocked: unlocked, stubsMarked, paymentsMarked: marked, quickbooksJournal: qbo ? { qboId: qbo.qboId, at: qbo.at } : null });
+    } catch (e) { console.error('Payroll void error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
+
   // Each worker's stub: a PDF filed in their role folder, a row in
   // staff_paystubs (the store My GFC already lists), and a link-only email.
   // opts.notify false: past pay dates imported from Gusto get stubs without
@@ -1653,7 +1729,7 @@ module.exports = function createPayrollRoutes(deps) {
       const existing = await rows(RUNS);
       // An app run already covering the same person and pay date would mean
       // paying twice; that pay date is left out and named.
-      const appPaid = new Set(existing.filter(r => r.source !== 'gusto' && r.status !== 'draft').flatMap(r => (r.workers || []).filter(w => w.pay).map(w => `${w.userId}|${r.period.payDate}`)));
+      const appPaid = new Set(existing.filter(r => r.source !== 'gusto' && r.status !== 'draft' && r.status !== 'void').flatMap(r => (r.workers || []).filter(w => w.pay).map(w => `${w.userId}|${r.period.payDate}`)));
       const clashes = [];
       for (const r of built.runs) {
         r.workers = r.workers.filter(w => { const clash = appPaid.has(`${w.userId}|${r.period.payDate}`); if (clash) clashes.push(`${w.name}, pay date ${r.period.payDate}`); return !clash; });
@@ -1700,6 +1776,7 @@ module.exports = function createPayrollRoutes(deps) {
     const run = (await rows(RUNS)).find(r => r.id === req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found.' });
     if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+    if (run.status === 'void') return res.status(409).json({ error: 'This payroll is voided.', code: 'RUN_VOIDED' });
     const all = await readProfiles();
     const users = await getUsers();
     const sheet = run.workers.filter(w => w.pay).map(w => {
@@ -1719,6 +1796,7 @@ module.exports = function createPayrollRoutes(deps) {
     const i = runs.findIndex(r => r.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: 'Run not found.' });
     if (runs[i].status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+    if (runs[i].status === 'void') return res.status(409).json({ error: 'This payroll is voided.', code: 'RUN_VOIDED' });
     const w = runs[i].workers.find(x => x.userId === String(req.params.userId) && x.pay);
     if (!w) return res.status(404).json({ error: 'Nobody by that id is paid in this run.' });
     const conf = str((req.body || {}).confirmation, 80);
@@ -1789,6 +1867,7 @@ module.exports = function createPayrollRoutes(deps) {
       const run = (await rows(RUNS)).find(r => r.id === req.params.id);
       if (!run) return res.status(404).json({ error: 'Run not found.' });
       if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+      if (run.status === 'void') return res.status(409).json({ error: 'This payroll is voided.', code: 'RUN_VOIDED' });
       const paid = Object.keys(run.payments || {});
       if (!paid.length) return res.status(409).json({ error: 'Nobody on this payroll is marked paid yet. Stubs go out as each payment is marked.', code: 'STUBS_NONE_PAID' });
       const report = await writeStubs(run, await readSettings(), { only: paid, notify: false });
@@ -2189,7 +2268,7 @@ module.exports = function createPayrollRoutes(deps) {
         const label = tax.PAY_SCHEDULES[schedule].label;
         const period = tax.periodFor(tax.addDays(tax.periodFor(today, settings, schedule).start, -1), settings, schedule);
         const runs = await rows(RUNS);
-        const existing = runs.find(r => sameRun(r, period));
+        const existing = runs.find(r => sameRun(r, period) && r.status !== 'void');
         if (existing && existing.status !== 'draft') { out.push({ schedule, summary: 'already approved', period }); continue; }
         if (!existing && (await rows(DELETED_DRAFTS)).some(x => wasDeleted(x, period))) { out.push({ schedule, summary: 'draft deleted by the Super Admin', period }); continue; }
         const d = await draftFor(period, settings, existing ? existing.adjustments || [] : [], existing ? existing.channels : null, existing ? existing.manualTaxes : null);

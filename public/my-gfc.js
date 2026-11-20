@@ -420,7 +420,7 @@ function PayStubs({ stubs, onError }) {
     <div className="mg-row" key={p.id}>
       <i className="ti ti-receipt mg-big" />
       <div className="mg-grow">
-        <b>{p.payDate > todayYmd() ? 'Payday' : 'Paid'} {fmtDay(p.payDate)} · {usd(p.net)} net</b>
+        <b>{p.voidedAt ? 'Voided: ' : ''}{p.payDate > todayYmd() ? 'Payday' : 'Paid'} {fmtDay(p.payDate)} · {usd(p.net)} net</b>
         <small>{fmtDay(p.periodStart)} – {fmtDay(p.periodEnd)} · {usd(p.gross)} gross{p.hours != null ? ` · ${p.hours} hours` : ''}</small>
       </div>
       {p.hasPdf && <button className="mg-btn mg-ghost mg-sm" onClick={() => openFile(`/api/my/paystubs/${p.id}/file`, `Pay stub ${p.payDate}.pdf`).catch(e => onError(e.message))}>Open</button>}

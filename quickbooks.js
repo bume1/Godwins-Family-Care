@@ -250,7 +250,7 @@ function createQbo({ db, env = process.env, fetchImpl = fetch, uuid, logActivity
   const runApproved = (run) => once(`run:${run.id}`, 'Payroll journal', async (rid) => (await api('POST', 'journalentry', journalForRun(run, await accountIds()), rid)).JournalEntry);
   const workerPaid = (run, w) => once(`pay:${run.id}:${w.userId}`, 'Net pay', async (rid) => (await api('POST', 'purchase', purchaseForPay(run, w, await accountIds()), rid)).Purchase);
   const taxPaid = (pay) => once(`tax:${pay.id}`, 'Tax deposit', async (rid) => {
-    const runs = getRuns ? (await getRuns()).filter(r => r.status !== 'draft') : [];
+    const runs = getRuns ? (await getRuns()).filter(r => r.status !== 'draft' && r.status !== 'void') : [];
     return (await api('POST', 'purchase', purchaseForTax(pay, taxSplit(pay, runs), await accountIds()), rid)).Purchase;
   });
   const contractorPaid = (inv) => once(`contractor:${inv.id}`, 'Contractor payment', async (rid) => {

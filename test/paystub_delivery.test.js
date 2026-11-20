@@ -316,6 +316,6 @@ test('a Gusto check pay date sent by Zelle or Cash App is corrected openly on th
 
 test('a Gusto pay date shows as paid through Gusto, with no Payment Sheet to mark paid', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'payroll.html'), 'utf8');
-  assert.match(src, /r\.run\.status !== 'draft' && r\.run\.source !== 'gusto'\) call\(`\/api\/payroll\/admin\/runs\/\$\{enc\(id\)\}\/payment-sheet`\)/, 'no Payment Sheet for a Gusto run');
+  assert.match(src, /r\.run\.status !== 'draft' && r\.run\.status !== 'void' && r\.run\.source !== 'gusto'\) call\(`\/api\/payroll\/admin\/runs\/\$\{enc\(id\)\}\/payment-sheet`\)/, 'no Payment Sheet for a Gusto run, or a voided one');
   assert.match(src, /run\.source === 'gusto' \? 'Paid through Gusto and imported from its payroll journal\.'/, 'never "Approved by undefined"');
 });

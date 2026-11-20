@@ -559,7 +559,7 @@ module.exports = function createStaffPortalRoutes(deps) {
     const mine = ((await db.get(PAYSTUBS)) || []).filter(x => String(x.userId) === String(req.user.id))
       .sort((a, b) => String(b.payDate).localeCompare(String(a.payDate)))
       .map(x => ({ id: x.id, payDate: x.payDate, periodStart: x.periodStart, periodEnd: x.periodEnd,
-        gross: x.gross, net: x.net, hours: x.hours, hasPdf: !!x.driveFileId || (!!x.runId && !!regeneratePayStub) }));
+        gross: x.gross, net: x.net, hours: x.hours, voidedAt: x.voidedAt || null, hasPdf: !!x.driveFileId || (!!x.runId && !!regeneratePayStub) }));
     return res.json({ paystubs: mine });
   });
   router.get('/api/my/paystubs/:id/file', authenticateToken, requireStaff, async (req, res) => {

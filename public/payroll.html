@@ -115,7 +115,7 @@ const Warn = ({ children }) => <div className="rounded-lg border border-amber-20
 let STATE_NAMES = {};
 const stName = (c) => STATE_NAMES[c] || c;
 const statesGaFirst = () => ['GA', ...Object.keys(STATE_NAMES).filter(c => c !== 'GA').sort((a, b) => stName(a).localeCompare(stName(b)))];
-const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700' };
+const STATUS_CHIP = { draft: 'bg-stone-100 text-stone-600', approved: 'bg-amber-50 text-amber-800', paid: 'bg-emerald-50 text-emerald-700', void: 'bg-red-50 text-red-700' };
 // How this payroll is sent (owner, 2026-11-13): the Super Admin's choice on the
 // draft, Direct deposit or P2P from GFC's Cash App, with a per-person
 // override. Employees never choose it. The stubs say which.
@@ -224,7 +224,8 @@ const RunDetail = ({ id, onBack, reload }) => {
   const load = useCallback(() => call(`/api/payroll/admin/runs/${enc(id)}`).then(r => {
     setRun(r.run);
     // A Gusto pay date was paid through Gusto: there is nothing to send or mark paid here.
-    if (r.run.status !== 'draft' && r.run.source !== 'gusto') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
+    if (r.run.status !== 'draft' && r.run.status !== 'void' && r.run.source !== 'gusto') call(`/api/payroll/admin/runs/${enc(id)}/payment-sheet`).then(setSheet).catch(e => setErr(e.message));
+    else setSheet(null);
   }).catch(e => setErr(e.message)), [id]);
   useEffect(() => { load(); }, [load]);
   const act = async (fn, ok) => { setBusy(true); setErr(''); setMsg(''); try { await fn(); setMsg(ok); await load(); reload(); } catch (e) { setErr(e.message + (e.data && e.data.blocked ? ` ${e.data.blocked.map(b => `${b.name}: ${b.missing.join(', ')}`).join('; ')}` : '')); } setBusy(false); };
@@ -312,6 +313,27 @@ const RunDetail = ({ id, onBack, reload }) => {
             </div>
           </div>
         )}
+        {SUPER && run.status === 'approved' && run.source !== 'gusto' && Object.keys(run.payments || {}).length === 0 && (
+          <div className="mt-4 flex gap-2">
+            <button className="btn ghost" disabled={busy} onClick={() => {
+              const reason = window.prompt('Reopen this payroll as a draft? Nobody has been marked paid yet. Its hours unlock, and you approve it again when it is right. Why are you reopening it?');
+              if (!reason || !reason.trim()) return;
+              act(() => post(`/api/payroll/admin/runs/${enc(id)}/reopen`, { reason }).then(r => { if (r && r.quickbooksJournal) window.alert(`QuickBooks already has this run's journal entry (${r.quickbooksJournal.qboId || 'id not recorded'}). It will not post again, so correct that entry in QuickBooks by hand after you approve.`); return r; }), 'Reopened as a draft. Fix it, then approve it again.');
+            }}>Reopen Payroll</button>
+          </div>
+        )}
+        {SUPER && (run.status === 'approved' || run.status === 'paid') && run.source !== 'gusto' && (
+          <div className="mt-2 flex gap-2">
+            <button className="btn ghost !text-red-700" disabled={busy} onClick={() => {
+              const marked = Object.keys(run.payments || {}).length;
+              const reason = window.prompt(`Void this payroll? It stays on the list marked VOID with your note, and stops counting toward year to date and tax totals. Its hours can be paid on a new run.${marked ? ` ${marked} payment(s) are already marked paid: voiding does not pull that money back.` : ''} Why are you voiding it?`);
+              if (!reason || !reason.trim()) return;
+              act(() => post(`/api/payroll/admin/runs/${enc(id)}/void`, { reason }).then(r => { if (r && r.quickbooksJournal) window.alert(`QuickBooks already has this run's journal entry (${r.quickbooksJournal.qboId || 'id not recorded'}). Void or reverse it in QuickBooks by hand.`); return r; }), 'Voided. It stays on record with your note. Draft the period again to pay it correctly.');
+            }}>Void Payroll</button>
+          </div>
+        )}
+        {run.status === 'void' && <Warn><b>Voided</b> {day(String(run.voidedAt).slice(0, 10))} by {run.voidedBy}: {run.voidReason}</Warn>}
+        {(run.reopenHistory || []).length > 0 && <p className="text-[12.5px] text-stone-500 mt-2">Reopened {run.reopenHistory.map(h => `${day(h.at.slice(0, 10))} by ${h.by}: ${h.reason}`).join('; ')}.</p>}
       </Card>
       {sheet && (
         <Card title="Payment Sheet" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
@@ -596,6 +618,7 @@ const Runs = ({ data, reload }) => {
           <span className="text-right"><b>{usd(r.totals.netCents)}</b> net <span className={`chip ${STATUS_CHIP[r.status]}`}>{r.status.toUpperCase()}</span>
             {r.p2p > 0 && <span className="chip ml-1">{r.p2p === r.people ? 'P2P' : `P2P · ${r.p2p} of ${r.people}`}</span>}
             {r.source === 'gusto' && <span className="chip ml-1">GUSTO</span>}
+            {r.status === 'void' && <div className="text-[12px] text-red-700">Voided: {r.voidReason}</div>}
             {r.status === 'approved' && r.people > 0 && <div className="text-[12px] text-amber-800">{r.markedPaid} of {r.people} marked paid. Open it and mark each payment on the Payment Sheet.</div>}</span>
         </button>
       ))}
