@@ -96,7 +96,7 @@ const call = async (path, opts = {}) => {
 };
 const post = (p, b) => call(p, { method: 'POST', body: JSON.stringify(b || {}) });
 const del = (p) => call(p, { method: 'DELETE' });
-const ADJ_LABEL = { bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction' };
+const ADJ_LABEL = { bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction', overpayment: 'Overpayment recovered (after tax)' };
 const put = (p, b) => call(p, { method: 'PUT', body: JSON.stringify(b || {}) });
 const enc = encodeURIComponent;
 const usd = (c) => (c === null || c === undefined ? '—' : `$${(Number(c) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`);
@@ -288,7 +288,7 @@ const RunDetail = ({ id, onBack, reload }) => {
           <div className="mt-4 grid gap-3">
             <div className="flex flex-wrap gap-2 items-end">
               <select className="inp !w-48" value={adj.userId} onChange={e => setAdj({ ...adj, userId: e.target.value })}><option value="">Person…</option>{run.workers.map(w => <option key={w.userId} value={w.userId}>{w.name}</option>)}</select>
-              <select className="inp !w-44" value={adj.type} onChange={e => setAdj({ ...adj, type: e.target.value })}><option value="bonus">Bonus</option><option value="reimbursement">Reimbursement (not taxed)</option><option value="correction">Correction</option></select>
+              <select className="inp !w-44" value={adj.type} onChange={e => setAdj({ ...adj, type: e.target.value })}><option value="bonus">Bonus</option><option value="reimbursement">Reimbursement (not taxed)</option><option value="correction">Correction</option><option value="overpayment">Overpayment recovered (after tax)</option></select>
               <input className="inp !w-28" placeholder="$" value={adj.amount} onChange={e => setAdj({ ...adj, amount: e.target.value })} />
               <input className="inp !w-56" placeholder="What it is for" value={adj.note} onChange={e => setAdj({ ...adj, note: e.target.value })} />
               <button className="btn ghost" disabled={busy || !adj.userId || !adj.amount} onClick={() => act(() => post(`/api/payroll/admin/runs/${enc(id)}/adjustments`, adj), 'Added.')}>Add Line</button>
@@ -346,7 +346,7 @@ const RunDetail = ({ id, onBack, reload }) => {
 };
 const Copy = ({ text }) => <button className="btn ghost !py-0.5 !px-2 !text-[11px]" onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(text))}>Copy</button>;
 const PaymentRow = ({ runId, s, onDone, p2pAccount }) => {
-  const [conf, setConf] = useState(''); const [full, setFull] = useState({}); const [err, setErr] = useState('');
+  const [conf, setConf] = useState(''); const [sent, setSent] = useState(''); const [full, setFull] = useState({}); const [err, setErr] = useState('');
   const reveal = (field) => post(`/api/payroll/admin/people/${enc(s.userId)}/reveal`, { field }).then(r => setFull(f => ({ ...f, [field]: r.value }))).catch(e => setErr(e.message));
   return (
     <div className="flex flex-wrap justify-between gap-3 py-2 border-b border-stone-100">
@@ -360,9 +360,11 @@ const PaymentRow = ({ runId, s, onDone, p2pAccount }) => {
         </div>
         {err && <div className="text-red-700 text-[12px]">{err}</div>}
       </div>
-      {s.paid ? <span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span> : !SUPER ? <span className="text-[12.5px] text-stone-500">Not paid yet</span> : (
+      {s.paid ? <div className="flex gap-2 items-center"><span className="chip bg-emerald-50 text-emerald-700">PAID · {s.paid.confirmation}</span>
+          <button className="btn ghost !py-1" onClick={() => download(`/api/payroll/admin/runs/${enc(runId)}/stubs/${enc(s.userId)}.pdf`, `Pay stub - ${s.name}.pdf`, setErr)}>Print Stub</button></div> : !SUPER ? <span className="text-[12.5px] text-stone-500">Not paid yet</span> : (
         <div className="flex gap-2"><input className="inp !w-44" placeholder="Receipt #" title="The PNC or Cash App receipt number. It prints on their pay stub." value={conf} onChange={e => setConf(e.target.value)} />
-          <button className="btn" disabled={!conf.trim()} onClick={() => post(`/api/payroll/admin/runs/${enc(runId)}/payments/${enc(s.userId)}`, { confirmation: conf }).then(onDone).catch(e => setErr(e.message))}>Mark Paid</button></div>
+          <input className="inp !w-32" placeholder="Amount sent" title="Only if you sent a different amount than this net pay. It prints on their stub." value={sent} onChange={e => setSent(e.target.value)} />
+          <button className="btn" disabled={!conf.trim()} onClick={() => post(`/api/payroll/admin/runs/${enc(runId)}/payments/${enc(s.userId)}`, sent.trim() ? { confirmation: conf, sentAmount: sent } : { confirmation: conf }).then(onDone).catch(e => setErr(e.message))}>Mark Paid</button></div>
       )}
     </div>
   );

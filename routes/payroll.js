@@ -1462,7 +1462,7 @@ module.exports = function createPayrollRoutes(deps) {
     if (i === -1) return res.status(404).json({ error: 'Run not found.' });
     if (runs[i].status !== 'draft') return res.status(409).json({ error: 'An approved run is locked. Add the correction to the next run.', code: 'RUN_LOCKED' });
     const b = req.body || {};
-    if (!engine.ADJUSTMENT_TYPES[b.type]) return res.status(400).json({ error: 'Bonus, reimbursement or correction.', code: 'ADJ_TYPE' });
+    if (!engine.ADJUSTMENT_TYPES[b.type]) return res.status(400).json({ error: 'Bonus, reimbursement, correction or overpayment recovered.', code: 'ADJ_TYPE' });
     const cents = b.type === 'correction' ? Math.round(Number(b.amount) * 100) : toCents(b.amount);
     if (!Number.isFinite(cents) || cents === 0) return res.status(400).json({ error: 'Give an amount.', code: 'ADJ_AMOUNT' });
     const note = str(b.note, 300);
@@ -1640,7 +1640,7 @@ module.exports = function createPayrollRoutes(deps) {
       accountLast4: w.imported || method !== 'direct_deposit' ? null : paid && paid.accountLast4 ? paid.accountLast4 : p.payMethod ? p.payMethod.accountLast4 : null,
       p2pAccount: method === 'p2p' ? (settings.p2pAccount || '$GodwinsFamilyCare') : null,
       workState: (w.imported && w.imported.workState) || p.workState || 'GA', paidThrough: w.imported ? w.imported.from : null,
-      payment: fix ? { confirmation: fix.receipt || null, at: fix.sentOn ? `${fix.sentOn}T12:00:00Z` : null } : paid ? { confirmation: paid.confirmation, at: paid.at } : null,
+      payment: fix ? { confirmation: fix.receipt || null, at: fix.sentOn ? `${fix.sentOn}T12:00:00Z` : null } : paid ? { confirmation: paid.confirmation, at: paid.at, sentCents: Number.isFinite(paid.sentCents) ? paid.sentCents : null } : null,
       correction: fix ? { recordedAs: fix.recordedAs, at: fix.at } : null
     };
   };
@@ -1703,6 +1703,27 @@ module.exports = function createPayrollRoutes(deps) {
     await db.set(PAYSTUBS, stubs);
     return report;
   };
+
+  // One person's stub, to print or hand over (owner, 2026-11-20). Drawn from
+  // the run as it stands, the same way the filed copy is.
+  router.get('/api/payroll/admin/runs/:id/stubs/:userId.pdf', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const allRuns = await rows(RUNS);
+      const run = allRuns.find(r => r && r.id === req.params.id);
+      if (!run) return res.status(404).json({ error: 'Run not found.' });
+      if (run.status === 'draft') return res.status(409).json({ error: 'Approve the run first.', code: 'RUN_NOT_APPROVED' });
+      if (run.status === 'void') return res.status(409).json({ error: 'This payroll is voided. Print the stub from the run that replaced it.', code: 'RUN_VOIDED' });
+      const w = (run.workers || []).find(x => String(x.userId) === String(req.params.userId) && x.pay);
+      if (!w) return res.status(404).json({ error: 'Nobody by that id is paid in this run.' });
+      const settings = await readSettings();
+      const snap = stubSnapshot(run, w, settings, (await readProfiles())[w.userId] || {}, await rows(CORRECTIONS));
+      const buf = await stubPdf(run, w, ytdAsOf(allRuns, run), settings, snap);
+      await logActivity(req.user.id, req.user.name, 'paystub_printed', 'payroll_run', run.id, { userId: w.userId });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', `Pay stub ${run.period.payDate} - ${w.name}.pdf`));
+      res.send(buf);
+    } catch (e) { console.error('Print stub error:', e); res.status(500).json({ error: 'Server error' }); }
+  });
 
   // ---- import past pay dates from Gusto ------------------------------------------------
   // The owner pastes Gusto's Payroll Journal CSV. preview: what would be
@@ -1803,7 +1824,18 @@ module.exports = function createPayrollRoutes(deps) {
     if (!conf) return res.status(400).json({ error: 'Paste the confirmation number: the PNC or Cash App transaction number, or the check number.', code: 'PAYMENT_CONFIRMATION' });
     const prof = (await readProfiles())[w.userId] || {};
     const method = w.channel === 'p2p' ? 'p2p' : prof.payMethod ? prof.payMethod.method : (w.payMethod || null);
-    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name, method, accountLast4: method === 'direct_deposit' && prof.payMethod ? prof.payMethod.accountLast4 || null : null } };
+    // What was actually sent, when it was not this run's net (owner,
+    // 2026-11-20: a check sent before the run was corrected). Printed on the
+    // stub so it says what happened; the difference is recovered on a later
+    // run as an overpayment line.
+    const sentRaw = (req.body || {}).sentAmount;
+    let sentCents = null;
+    if (sentRaw !== undefined && sentRaw !== null && String(sentRaw).trim() !== '') {
+      sentCents = toCents(sentRaw);
+      if (sentCents === null) return res.status(400).json({ error: 'Enter the amount sent in dollars.', code: 'PAYMENT_SENT_AMOUNT' });
+      if (sentCents === w.pay.netCents) sentCents = null;
+    }
+    runs[i].payments = { ...(runs[i].payments || {}), [w.userId]: { confirmation: conf, at: nowIso(), by: req.user.name, method, sentCents, accountLast4: method === 'direct_deposit' && prof.payMethod ? prof.payMethod.accountLast4 || null : null } };
     // Paid only when every worker has a confirmation.
     const everyone = runs[i].workers.filter(x => x.pay).every(x => runs[i].payments[x.userId]);
     if (everyone && runs[i].status !== 'paid') { runs[i].status = 'paid'; runs[i].paidAt = nowIso(); }

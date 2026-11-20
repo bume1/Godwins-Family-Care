@@ -28,7 +28,10 @@ const profiles = require('./payrollProfiles');
 
 const MAX_ITEM_MINUTES = 16 * 60;   // a single stamp longer than this is a mistake, not a shift
 const RUN_STATUSES = Object.freeze(['draft', 'approved', 'paid', 'void']);
-const ADJUSTMENT_TYPES = Object.freeze({ bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction to an earlier period' });
+const ADJUSTMENT_TYPES = Object.freeze({ bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction to an earlier period', overpayment: 'Overpayment recovered (after tax)' });
+// Taken from net pay after taxes, never from gross: an overpaid paycheck is
+// money advanced, not wages, so it changes no tax (owner, 2026-11-20).
+const AFTER_TAX_TYPES = new Set(['overpayment']);
 
 const minutesBetween = (a, b) => {
   const m = Math.round((Date.parse(b) - Date.parse(a)) / 60000);
@@ -205,7 +208,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
     const salaried = profile && profile.payType === 'salary';
     if (!items.length && !adj.length && !salaried) continue;
     const { lines, missingRate } = earningsFor(profile, items, perYear);
-    for (const a of adj.filter(x => x.type !== 'reimbursement')) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
+    for (const a of adj.filter(x => x.type !== 'reimbursement' && !AFTER_TAX_TYPES.has(x.type))) lines.push({ code: a.type, label: ADJUSTMENT_TYPES[a.type] || a.type, amountCents: a.amountCents, note: a.note || '' });
     const reimbursementsCents = adj.filter(x => x.type === 'reimbursement').reduce((s, a) => s + a.amountCents, 0);
     const channel = channelOf(channels, uid);
     const missing = profiles.missingForPay(profile, { p2p: channel === 'p2p' });
@@ -252,6 +255,12 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
         tables, perYear, sutaRatePct: stRate, workState: ws, stateCert: profile.stateCert
       });
     }
+    const after = adj.filter(x => AFTER_TAX_TYPES.has(x.type));
+    if (w.pay && after.length) {
+      const deductions = after.map(a => ({ code: a.type, label: ADJUSTMENT_TYPES[a.type], amountCents: a.amountCents, note: a.note || '' }));
+      const deductionsCents = deductions.reduce((s, d) => s + d.amountCents, 0);
+      w.pay = { ...w.pay, deductions, deductionsCents, netCents: w.pay.netCents - deductionsCents };
+    }
     workers.push(w);
   }
   workers.sort((a, b) => a.name.localeCompare(b.name));
@@ -274,8 +283,8 @@ function ytdFrom(runs, { year, beforePayDate }) {
     if (beforePayDate && r.period.payDate >= beforePayDate) continue;
     for (const w of r.workers || []) {
       if (!w.pay) continue;
-      const y = out.get(w.userId) || { grossCents: 0, netCents: 0, taxes: { federal: 0, socialSecurity: 0, medicare: 0, georgia: 0, state: 0 }, earnings: {}, reimbursementsCents: 0 };
-      y.grossCents += w.pay.grossCents; y.netCents += w.pay.netCents; y.reimbursementsCents += w.pay.reimbursementsCents || 0;
+      const y = out.get(w.userId) || { grossCents: 0, netCents: 0, taxes: { federal: 0, socialSecurity: 0, medicare: 0, georgia: 0, state: 0 }, earnings: {}, reimbursementsCents: 0, deductionsCents: 0 };
+      y.grossCents += w.pay.grossCents; y.netCents += w.pay.netCents; y.reimbursementsCents += w.pay.reimbursementsCents || 0; y.deductionsCents += w.pay.deductionsCents || 0;
       for (const k of Object.keys(y.taxes)) y.taxes[k] += w.pay.taxes[k] || 0;
       for (const e of w.earnings || []) y.earnings[e.code] = (y.earnings[e.code] || 0) + e.amountCents;
       out.set(w.userId, y);

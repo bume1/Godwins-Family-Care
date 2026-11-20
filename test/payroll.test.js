@@ -898,3 +898,47 @@ test('a paid run can be voided with a note: it stays on record, stops counting, 
   assert.notEqual(r.body.run.id, id);
   assert.ok(r.body.run.workers.find(x => x.userId === 'cg1' && x.pay), 'her hours are on the new draft');
 });
+
+test('overpaid: the stub records the amount sent, prints on demand, and next run takes it back after tax', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  const before = r.body.run.workers.find(x => x.userId === 'cg1').pay;
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.body.run.status, 'approved');
+  r = await req(own.app, 'GET', `/api/payroll/admin/runs/${id}/stubs/cg1.pdf`);
+  assert.equal(r.status, 200, 'an approved run prints before payment too');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/payments/cg1`, { confirmation: 'PNC9', sentAmount: 'abc' });
+  assert.equal(r.body.code, 'PAYMENT_SENT_AMOUNT');
+  const sent = before.netCents + 5000;
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/payments/cg1`, { confirmation: 'PNC9', sentAmount: (sent / 100).toFixed(2) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(store.get('payroll_runs').find(x => x.id === id).payments.cg1.sentCents, sent);
+  assert.equal((await req(me.app, 'GET', `/api/payroll/admin/runs/${id}/stubs/cg1.pdf`)).status >= 400, true, 'admin only');
+  r = await req(own.app, 'GET', `/api/payroll/admin/runs/${id}/stubs/cg1.pdf`);
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 200));
+  // The sent-amount note on the stub itself.
+  const pdfGen = require('../pdf-generator');
+  const paidRun = store.get('payroll_runs').find(x => x.id === id);
+  const pw = paidRun.workers.find(x => x.userId === 'cg1');
+  const buf = await pdfGen.generatePayStubPDF({ run: paidRun, worker: { ...pw, pay: { ...pw.pay, deductions: [{ code: 'overpayment', label: 'Overpayment recovered (after tax)', amountCents: 5000, note: '' }], deductionsCents: 5000 } }, ytd: null, payment: { confirmation: 'PNC9', at: '2026-11-20T12:00:00Z', sentCents: sent } });
+  assert.ok(Buffer.isBuffer(buf) && buf.length > 500);
+  // Next run: an after-tax recovery lowers net only.
+  store.set('time_logs', [...store.get('time_logs'), log('b', '2026-11-09', 480)]);
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-09', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+  const id2 = r.body.run.id;
+  const plain = r.body.run.workers.find(x => x.userId === 'cg1').pay;
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id2}/adjustments`, { userId: 'cg1', type: 'overpayment', amount: '50', note: 'Overpaid Nov 2' });
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+  const w = r.body.run.workers.find(x => x.userId === 'cg1').pay;
+  assert.equal(w.grossCents, plain.grossCents, 'gross unchanged');
+  assert.deepEqual(w.taxes, plain.taxes, 'taxes unchanged');
+  assert.equal(w.netCents, plain.netCents - 5000, 'net lower by the overpayment');
+  assert.equal(w.deductionsCents, 5000);
+});
