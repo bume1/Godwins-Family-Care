@@ -1298,15 +1298,34 @@ module.exports = function createPayrollRoutes(deps) {
   });
 
   router.get('/api/payroll/admin/runs/:id', authenticateToken, requirePayrollPreparer, async (req, res) => {
-    const run = (await rows(RUNS)).find(r => r.id === req.params.id);
+    const all = await rows(RUNS);
+    let run = all.find(r => r.id === req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found.' });
-    // A draft's timesheet warning is read now, not when it was built, so a
-    // timesheet approved since then no longer shows (owner, 2026-11-14).
-    if (run.status === 'draft' && run.period) {
+    // A draft is figured again each time it is opened (owner report,
+    // 2026-11-20: an employee signed her W-4 after the draft was made, and
+    // the draft still read her as missing it). Approving already figures the
+    // draft afresh, so this shows exactly what Approve will pay: the latest
+    // paperwork, hours, timesheet approvals, adjustments, channels and
+    // hand-entered taxes. If it cannot be figured (no tax tables), the stored
+    // draft is shown, with its timesheet warning read now.
+    if (run.status === 'draft' && run.period && run.source !== 'gusto') {
       try {
-        const gathered = await gatherFor(run.period, (await rows(RUNS)).filter(r => r.status !== 'draft'));
-        run.unapprovedTimesheets = await unapprovedFor(run.period, run.workers, gathered);
-      } catch (e) { /* keep the stored list */ }
+        const d = await draftFor(run.period, await readSettings(), run.adjustments || [], run.channels, run.manualTaxes);
+        if (d.error) throw new Error(d.error);
+        const inputs = (r) => JSON.stringify([r.status, r.adjustments || [], r.channels || null, r.manualTaxes || null]);
+        const before = inputs(run);
+        run = { ...run, ...d.run, id: run.id, status: 'draft', adjustments: run.adjustments || [], createdAt: run.createdAt, createdBy: run.createdBy, refreshedAt: nowIso() };
+        // Saved so the run list matches, unless the draft changed while it
+        // was being figured (then the next open figures it again).
+        const now = await rows(RUNS);
+        const cur = now.find(r => r.id === run.id);
+        if (cur && inputs(cur) === before) await db.set(RUNS, now.map(r => (r.id === run.id ? run : r)));
+      } catch (e) {
+        try {
+          const gathered = await gatherFor(run.period, all.filter(r => r.status !== 'draft'));
+          run.unapprovedTimesheets = await unapprovedFor(run.period, run.workers, gathered);
+        } catch (_) { /* keep the stored list */ }
+      }
     }
     // A Gusto run: the payment correction in force for each person, and their
     // other Gusto paydays, so one correction can cover several.

@@ -789,3 +789,28 @@ test('a draft can be deleted by the Super Admin; an approved run cannot; the aut
   assert.equal(r.body.code, 'RUN_LOCKED');
   assert.equal(store.get('payroll_runs').length, 1);
 });
+
+// Owner report, 2026-11-20: an employee signed her W-4 in Pay Setup after the
+// draft was made, and the draft still read her as missing it. A draft is now
+// figured again when it is opened, so it shows what Approve will pay.
+test('a draft opened after the W-4 is signed shows the W-4, not the snapshot from before', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  const { w4, ...noW4 } = cgProfile;
+  store.set('payroll_profiles', { cg1: { ...noW4, w4: null } });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  let w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.ok(w.missing.includes('W-4') && !w.pay, 'drafted before her W-4');
+  // She signs her W-4 in Pay Setup.
+  store.set('payroll_profiles', { cg1: cgProfile });
+  r = await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`);
+  w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.ok(!w.missing.includes('W-4'), JSON.stringify(w.missing));
+  assert.ok(w.pay && w.pay.taxes, 'her withholding is figured');
+  assert.ok(!r.body.run.blocked.some(b => b.userId === 'cg1'));
+  assert.ok(!store.get('payroll_runs').find(x => x.id === id).workers.find(x => x.userId === 'cg1').missing.includes('W-4'), 'and the saved draft matches, so the run list agrees');
+});
