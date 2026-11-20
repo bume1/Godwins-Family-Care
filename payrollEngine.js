@@ -27,7 +27,7 @@ const { stateName, employeePrograms } = require('./payrollTaxTables');
 const profiles = require('./payrollProfiles');
 
 const MAX_ITEM_MINUTES = 16 * 60;   // a single stamp longer than this is a mistake, not a shift
-const RUN_STATUSES = Object.freeze(['draft', 'approved', 'paid']);
+const RUN_STATUSES = Object.freeze(['draft', 'approved', 'paid', 'void']);
 const ADJUSTMENT_TYPES = Object.freeze({ bonus: 'Bonus', reimbursement: 'Reimbursement (not taxed)', correction: 'Correction to an earlier period' });
 
 const minutesBetween = (a, b) => {
@@ -270,7 +270,7 @@ function buildRun({ period, settings, people, gathered, ytdByUser, tables, adjus
 function ytdFrom(runs, { year, beforePayDate }) {
   const out = new Map();
   for (const r of runs || []) {
-    if (!r || r.status === 'draft' || !r.period || !String(r.period.payDate).startsWith(String(year))) continue;
+    if (!r || r.status === 'draft' || r.status === 'void' || !r.period || !String(r.period.payDate).startsWith(String(year))) continue;
     if (beforePayDate && r.period.payDate >= beforePayDate) continue;
     for (const w of r.workers || []) {
       if (!w.pay) continue;
@@ -287,7 +287,7 @@ function ytdFrom(runs, { year, beforePayDate }) {
 /** Every hour item already paid by an approved run. */
 function paidRefsFrom(runs) {
   const s = new Set();
-  for (const r of runs || []) if (r && r.status !== 'draft') for (const w of r.workers || []) for (const ref of w.refs || []) s.add(ref);
+  for (const r of runs || []) if (r && r.status !== 'draft' && r.status !== 'void') for (const w of r.workers || []) for (const ref of w.refs || []) s.add(ref);
   return s;
 }
 

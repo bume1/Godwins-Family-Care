@@ -132,13 +132,13 @@ function filings(year) {
 const stateOf = (w) => (w.pay && w.pay.workState) || w.workState || (w.imported && w.imported.workState) || 'GA';
 
 function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents, stateWageBases }) {
-  const inQ = (runs || []).filter(r => r && r.status !== 'draft' && r.period && r.period.payDate.startsWith(String(year)) && quarterOf(r.period.payDate) === Number(quarter))
+  const inQ = (runs || []).filter(r => r && r.status !== 'draft' && r.status !== 'void' && r.period && r.period.payDate.startsWith(String(year)) && quarterOf(r.period.payDate) === Number(quarter))
     .sort((a, b) => a.period.payDate.localeCompare(b.period.payDate));
   const people = new Set();
   let wages = 0, fedWh = 0, ssWages = 0, medWages = 0, addlMedWages = 0, gaWh = 0;
   const months = {};
   const ytdBefore = new Map();
-  for (const r of (runs || []).filter(x => x && x.status !== 'draft' && x.period && x.period.payDate.startsWith(String(year)) && quarterOf(x.period.payDate) < Number(quarter))) {
+  for (const r of (runs || []).filter(x => x && x.status !== 'draft' && x.status !== 'void' && x.period && x.period.payDate.startsWith(String(year)) && quarterOf(x.period.payDate) < Number(quarter))) {
     for (const w of r.workers || []) if (w.pay) ytdBefore.set(w.userId, (ytdBefore.get(w.userId) || 0) + w.pay.grossCents);
   }
   const ytd = new Map(ytdBefore);
@@ -195,7 +195,7 @@ function quarterSummary(runs, { year, quarter, fed, sutaWageBaseCents, stateWage
  */
 function yearEnd(runs, contractorPayments, { year, fed, incomeTaxStates }) {
   const w2 = new Map();
-  const yr = (runs || []).filter(r => r && r.status !== 'draft' && r.period && r.period.payDate.startsWith(String(year)))
+  const yr = (runs || []).filter(r => r && r.status !== 'draft' && r.status !== 'void' && r.period && r.period.payDate.startsWith(String(year)))
     .sort((a, b) => a.period.payDate.localeCompare(b.period.payDate));
   for (const r of yr) for (const w of r.workers || []) {
     if (!w.pay) continue;

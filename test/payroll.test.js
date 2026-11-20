@@ -789,3 +789,112 @@ test('a draft can be deleted by the Super Admin; an approved run cannot; the aut
   assert.equal(r.body.code, 'RUN_LOCKED');
   assert.equal(store.get('payroll_runs').length, 1);
 });
+
+// Owner report, 2026-11-20: an employee signed her W-4 in Pay Setup after the
+// draft was made, and the draft still read her as missing it. A draft is now
+// figured again when it is opened, so it shows what Approve will pay.
+test('a draft opened after the W-4 is signed shows the W-4, not the snapshot from before', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  const { w4, ...noW4 } = cgProfile;
+  store.set('payroll_profiles', { cg1: { ...noW4, w4: null } });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  let w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.ok(w.missing.includes('W-4') && !w.pay, 'drafted before her W-4');
+  // She signs her W-4 in Pay Setup.
+  store.set('payroll_profiles', { cg1: cgProfile });
+  r = await req(own.app, 'GET', `/api/payroll/admin/runs/${id}`);
+  w = r.body.run.workers.find(x => x.userId === 'cg1');
+  assert.ok(!w.missing.includes('W-4'), JSON.stringify(w.missing));
+  assert.ok(w.pay && w.pay.taxes, 'her withholding is figured');
+  assert.ok(!r.body.run.blocked.some(b => b.userId === 'cg1'));
+  assert.ok(!store.get('payroll_runs').find(x => x.id === id).workers.find(x => x.userId === 'cg1').missing.includes('W-4'), 'and the saved draft matches, so the run list agrees');
+});
+
+test('an approved run nobody has been paid from can be reopened by the Super Admin, with a reason', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  const figured = r.body.run.workers.find(x => x.userId === 'cg1').pay.taxes;
+  // Taxes typed in by hand, $0 federal and state, then approved: the mistake.
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { federal: '0', socialSecurity: '1', medicare: '1', stateTax: '0', reason: 'typed in' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.body.run && r.body.run.status, 'approved', JSON.stringify(r.body).slice(0, 300)); assert.equal(r.body.run.status, 'approved');
+  assert.ok(store.get('time_logs')[0].payroll_run_id, 'approval locked the hours');
+  assert.equal((await req(me.app, 'POST', `/api/payroll/admin/runs/${id}/reopen`, { reason: 'x' })).status >= 400, true, 'not anyone but the Super Admin');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/reopen`, {});
+  assert.equal(r.body.code, 'RUN_REOPEN_REASON');
+  assert.equal(store.get('payroll_runs').find(x => x.id === id).status, 'approved', 'a refusal changes nothing');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/reopen`, { reason: 'Taxes entered by hand by mistake' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const stored = store.get('payroll_runs').find(x => x.id === id);
+  assert.equal(stored.status, 'draft');
+  assert.equal(stored.approvedAt, null);
+  assert.equal(stored.reopenHistory.length, 1);
+  assert.equal(stored.reopenHistory[0].reason, 'Taxes entered by hand by mistake');
+  assert.ok(!store.get('time_logs')[0].payroll_run_id, 'the hours unlock');
+  assert.equal(r.body.timeLogsUnlocked, 1);
+  // Now fixable: clear the hand-entered taxes and approve again from her W-4.
+  r = await req(own.app, 'PUT', `/api/payroll/admin/runs/${id}/manual-taxes/cg1`, { clear: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.body.run && r.body.run.status, 'approved', JSON.stringify(r.body).slice(0, 300)); assert.equal(r.body.run.status, 'approved');
+  assert.deepEqual(r.body.run.workers.find(x => x.userId === 'cg1').pay.taxes, figured, 'taxes are figured from the W-4 again');
+  assert.ok(store.get('time_logs')[0].payroll_run_id, 'and the hours lock again');
+  // Once a payment is marked, it stays approved.
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/payments/cg1`, { confirmation: 'PNC123' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/reopen`, { reason: 'again' });
+  assert.ok(['RUN_REOPEN_PAYMENTS', 'RUN_REOPEN_PAID'].includes(r.body.code), JSON.stringify(r.body));
+  assert.notEqual(store.get('payroll_runs').find(x => x.id === id).status, 'draft');
+});
+
+test('a paid run can be voided with a note: it stays on record, stops counting, and its hours can be paid again', async () => {
+  const store = new Map();
+  store.set('time_logs', [log('a', '2026-11-02', 480)]);
+  store.set('payroll_settings', { gaSutaRatePct: 2.7, schedules: { caregivers: { frequency: 'weekly', anchor: '2026-11-02', payDateOffsetDays: 5 } } });
+  store.set('payroll_profiles', { cg1: cgProfile });
+  store.set('payroll_tax_tables', T.seedRows([], { uuid: () => Math.random().toString(36), at: 'x' }).map(t => ({ ...t, status: 'active', approvedAt: 'x' })));
+  const own = harness('own', store); const me = harness('cg1', store);
+  let r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  const id = r.body.run.id;
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/void`, { reason: 'x' });
+  assert.equal(r.body.code, 'RUN_VOID_DRAFT', 'a draft is deleted, not voided');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/approve`, { timesheetReason: 'test' });
+  assert.equal(r.body.run && r.body.run.status, 'approved', JSON.stringify(r.body).slice(0, 300));
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/payments/cg1`, { confirmation: 'PNC123' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(store.get('payroll_runs').find(x => x.id === id).status, 'paid');
+  assert.equal(engine.ytdFrom(store.get('payroll_runs'), { year: '2026' }).size, 1, 'counts while paid');
+  assert.equal((await req(me.app, 'POST', `/api/payroll/admin/runs/${id}/void`, { reason: 'x' })).status >= 400, true, 'Super Admin only');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/void`, {});
+  assert.equal(r.body.code, 'RUN_VOID_REASON');
+  r = await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/void`, { reason: 'Withholding was entered as $0 by mistake' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const stored = store.get('payroll_runs').find(x => x.id === id);
+  assert.equal(stored.status, 'void');
+  assert.equal(stored.statusBeforeVoid, 'paid');
+  assert.equal(stored.voidReason, 'Withholding was entered as $0 by mistake');
+  assert.ok(stored.voidedBy && stored.voidedAt);
+  assert.ok(stored.workers.length && stored.payments.cg1, 'the record is kept whole');
+  assert.equal(engine.ytdFrom(store.get('payroll_runs'), { year: '2026' }).size, 0, 'a voided run is not year to date');
+  assert.ok(!store.get('time_logs')[0].payroll_run_id, 'the hours unlock');
+  assert.ok((await req(own.app, 'GET', '/api/payroll/admin/overview')).body.runs.some(x => x.id === id && x.status === 'void' && x.voidReason), 'still on the list, marked void');
+  assert.equal((await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/payments/cg1`, { confirmation: 'again' })).body.code, 'RUN_VOIDED');
+  assert.equal((await req(own.app, 'POST', `/api/payroll/admin/runs/${id}/void`, { reason: 'again' })).body.code, 'RUN_VOID_ALREADY');
+  // The period can be drafted and paid again, and the hours are on it.
+  r = await req(own.app, 'POST', '/api/payroll/admin/runs', { periodStart: '2026-11-02', schedule: 'caregivers' });
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 300));
+  assert.notEqual(r.body.run.id, id);
+  assert.ok(r.body.run.workers.find(x => x.userId === 'cg1' && x.pay), 'her hours are on the new draft');
+});
