@@ -2804,10 +2804,11 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       const tlShown = tl.filter(([, k]) => k !== 'state' || (p.taxes || {}).state || (y.taxes || {}).state);
       table('TAXES WITHHELD', tlShown.map(([label, k]) => ({ label, cells: [usd(p.taxes[k]), usd((y.taxes || {})[k] || 0)] })), [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       const ytdTax = Object.values(y.taxes || {}).reduce((a, v) => a + v, 0);
+      if ((p.deductions || []).length) table('DEDUCTIONS AFTER TAX', p.deductions.map(dd => ({ label: dd.label + (dd.note ? ` · ${dd.note}` : ''), cells: [usd(dd.amountCents)] })), [['CURRENT', 410, 70]]);
       table('TOTALS', [
         { label: 'Gross pay', cells: [usd(p.grossCents), usd(y.grossCents)] },
         { label: 'Taxes withheld', cells: [usd(p.taxCents), usd(ytdTax)] },
-        { label: 'Deductions', cells: [usd(0), usd(0)] },
+        { label: 'Deductions after tax', cells: [usd(p.deductionsCents || 0), usd(y.deductionsCents || 0)] },
         { label: 'Net pay', bold: true, cells: [usd(p.netCents), usd(y.netCents)] }
       ], [['CURRENT', 410, 70], ['YEAR TO DATE', 486, 70]]);
       doc.moveTo(L, y0).lineTo(R, y0).lineWidth(0.8).strokeColor(GOLD).stroke();
@@ -2825,7 +2826,12 @@ async function generatePayStubPDF({ run, worker, ytd, employerEin, ssnLast4, acc
       const line = correction
         ? `Payment: ${how}${receipt}. Payroll run in ${paidThrough || 'Gusto'}, which recorded it as ${(PAID_BY[correction.recordedAs] || (correction.recordedAs === 'direct_deposit' ? 'Direct deposit' : 'another method')).toLowerCase().replace(/^paper/, 'a paper')}; corrected by the office on ${fixedOn}.`
         : `Payment: ${paidThrough && !payMethod ? `recorded in ${paidThrough}` : how}${paidThrough ? ` (paid through ${paidThrough})` : ''}${receipt}`;
-      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(line, L, y0, { width: R - L });
+      const sentNote = payment && Number.isFinite(payment.sentCents) && payment.sentCents !== p.netCents
+        ? (payment.sentCents > p.netCents
+          ? ` Amount sent: ${usd(payment.sentCents)}, which is ${usd(payment.sentCents - p.netCents)} more than this net pay. The difference will be taken from a later paycheck.`
+          : ` Amount sent: ${usd(payment.sentCents)}, which is ${usd(p.netCents - payment.sentCents)} less than this net pay. The difference will be paid on a later paycheck.`)
+        : '';
+      doc.fillColor(INK).font('Helvetica').fontSize(8.5).text(line + sentNote, L, y0, { width: R - L });
       doc.fillColor(MUTED).fontSize(7.5).text(`Questions about your pay: ${ORG.email} · ${ORG.phone}`, L, y0 + 16);
       doc.page.margins.bottom = 0;   // the footer sits below the margin
       doc.moveTo(L, 742).lineTo(R, 742).lineWidth(0.5).strokeColor('#BBBBBB').stroke();
