@@ -172,6 +172,13 @@
   function fmtClock(hhmm) {
     return T ? T.fmtClock(hhmm) : String(hhmm === null || hhmm === undefined ? '' : hhmm);
   }
+  // A bare calendar date ("2026-12-01") read at midday UTC so it lands on the
+  // same day in Eastern.
+  function fmtPlainDate(ymd) {
+    var v = String(ymd || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || !T) return v;
+    return T.fmtDate(v + 'T12:00:00Z');
+  }
   function titleize(s) { return String(s || '').replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -511,11 +518,21 @@
 
     if (state.availability.length) {
       html += '<div class="gcard"><h3>Submitted</h3>' + state.availability.map(function (a) {
+        // Who, when and what, on every row (owner report, 2026-11-20): the
+        // list used to show only a start date and the hours, so a submission
+        // carried no name, no submitted time, no note and no days off.
         return '<div class="grow" style="display:block">' +
-          '<div class="gwhen">From ' + esc(a.effectiveFrom) + '</div>' +
-          '<div class="gmu">' + (a.windows || []).map(function (w) {
+          '<div class="gwhen">' + (a.caregiverName ? esc(a.caregiverName) + ' · ' : '') +
+            'Starts ' + esc(fmtPlainDate(a.effectiveFrom)) + '</div>' +
+          '<div class="gmu">' + ((a.windows || []).length ? a.windows.map(function (w) {
             return esc(w.day + ' ' + fmtClock(w.start) + '–' + fmtClock(w.end));
-          }).join(' · ') + '</div>' +
+          }).join(' · ') : 'No days or hours given') + '</div>' +
+          '<div class="gmu">Submitted ' + (a.submittedAt ? esc(fmtWhen(a.submittedAt)) : 'date not recorded') +
+            (a.reviewedAt ? ' · Reviewed by ' + esc(a.reviewedByName || 'the office') : '') + '</div>' +
+          (a.note ? '<div class="gmu">Note: ' + esc(a.note) + '</div>' : '') +
+          ((a.blackoutDates || []).length
+            ? '<div class="gmu">Unavailable: ' + esc(a.blackoutDates.map(fmtPlainDate).join(', ')) + '</div>'
+            : '') +
           // Recorded by the office rather than typed by the caregiver. Said
           // plainly, because a caregiver reading back hours they did not enter
           // has to know where they came from to correct a mishearing.

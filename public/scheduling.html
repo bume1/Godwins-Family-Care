@@ -1832,8 +1832,9 @@ const App = () => {
               : availability.map(a => (
                 <div className="row" style={{ display: 'block' }} key={a.id}>
                   <div>
-                    <b>{a.caregiverName}</b>
-                    <span className="mu"> · from {a.effectiveFrom}</span>
+                    <b>{a.caregiverName || 'Unknown staff member'}</b>
+                    {a.licenseLevel && <span className="mu"> · {a.licenseLevel}</span>}
+                    <span className="mu"> · starts {fmtPlainDate(a.effectiveFrom)}</span>
                     {' '}<span className={`chip ${a.status === 'reviewed' ? 'confirmed' : 'open'}`}>{titleize(a.status)}</span>
                     {/* Which row to schedule from. Availability is append-only,
                         so an older submission sitting above a newer one in the
@@ -1841,14 +1842,23 @@ const App = () => {
                         been replaced. */}
                     {' '}<span className={`chip ${a.current ? 'confirmed' : ''}`}>{a.current ? 'In force' : 'Superseded'}</span>
                   </div>
-                  <div className="mu">{(a.windows || []).map(w => `${w.day} ${fmtClock(w.start)}–${fmtClock(w.end)}`).join(' · ')}</div>
+                  <div className="mu">{(a.windows || []).length
+                    ? a.windows.map(w => `${w.day} ${fmtClock(w.start)}–${fmtClock(w.end)}`).join(' · ')
+                    : 'No days or hours given'}</div>
+                  {/* When it came in and who checked it. Without these, two
+                      submissions from the same person read the same. */}
+                  <div className="mu">
+                    Submitted {a.submittedAt ? fmtWhen(a.submittedAt) : 'date not recorded'}
+                    {a.reviewedAt ? ` · Reviewed by ${a.reviewedByName || 'the office'} ${fmtWhen(a.reviewedAt)}` : ''}
+                  </div>
+                  {a.note && <div className="mu">Note: {a.note}</div>}
                   {/* "The caregiver said this" and "the office recorded it for
                       them" are different facts, and the office reading this
                       list needs to know which it is looking at. */}
                   {a.enteredOnBehalf && (
                     <div className="mu">Recorded by {a.enteredByName || 'the office'}{a.entryNote ? ` — ${a.entryNote}` : ''}</div>
                   )}
-                  {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.join(', ')}</div>}
+                  {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.map(fmtPlainDate).join(', ')}</div>}
                   {a.status !== 'reviewed' && (
                     <div className="btns">
                       <button className="btn ghost" onClick={async () => {

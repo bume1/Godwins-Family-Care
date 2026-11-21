@@ -459,9 +459,25 @@ module.exports = function createSchedulingRoutes(deps) {
         const key = String(r.caregiver_id);
         if (!newestPerCaregiver.has(key)) newestPerCaregiver.set(key, r.id);
       }
+      // WHO SUBMITTED IT, read fresh from the roster (owner report,
+      // 2026-11-20). The row keeps the name as it was at submission, and an
+      // older row can carry none at all, which left the office list showing a
+      // submission with nobody's name on it. The roster's current name and
+      // licence level win; the stored copy is the fallback, then the email.
+      let roster = [];
+      try { roster = (await getUsers()) || []; } catch (e) { roster = []; }
+      const byId = new Map(roster.filter(u => u && u.id).map(u => [String(u.id), u]));
+      const withPerson = (r) => {
+        const out = publicAvailability(r);
+        const u = byId.get(String(r.caregiver_id));
+        out.caregiverName = (u && u.name) || r.caregiver_name || (u && u.email) || 'Unknown staff member';
+        out.licenseLevel = (u && u.licenseLevel) || r.license_level || null;
+        out.role = (u && u.role) || null;
+        return out;
+      };
       res.json({
         availability: mine.slice(0, 200).map(r => ({
-          ...publicAvailability(r),
+          ...withPerson(r),
           current: newestPerCaregiver.get(String(r.caregiver_id)) === r.id
         })),
         // THE FLOORS ARE SERVED, NOT RESTATED. Both screens printed "at least 30
