@@ -201,6 +201,14 @@
           }
         } catch (e) { /* not JSON */ }
       }
+      // An unsigned offer letter comes first (owner, 2026-11-19): any page a
+      // new hire reaches before signing it sends them to it.
+      if (res.status === 409 && window.location.pathname !== '/offer') {
+        try {
+          const data = await res.clone().json();
+          if (data && data.code === 'OFFER_PENDING') window.location.replace('/offer');
+        } catch (e) { /* not JSON */ }
+      }
     }
     return res;
   };

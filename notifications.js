@@ -1287,6 +1287,48 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- A new hire answered their offer letter (owner, 2026-11-19) ----------
+  // To the office. The decline note is theirs to the office, so it rides here.
+  async function staffOfferSigned({ user, staffName, title, ctaUrl, actorId }) {
+    try {
+      return { notified: await send({
+        type: 'staff_offer_signed', user,
+        subject: `Offer signed: ${staffName}`,
+        headline: 'An offer letter was signed',
+        paragraphs: [
+          `${staffName} signed "${title}".`,
+          'The signed copy is filed on their record, and they are moving on to their welcome packet and onboarding.'
+        ],
+        ctaUrl, ctaLabel: 'Open Staff Onboarding',
+        relatedEntityId: `offersigned:${staffName}:${title}:${distinctMoment()}`, relatedEntityType: 'onboarding',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[OFFER] signed notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+  async function staffOfferDeclined({ user, staffName, title, note, ctaUrl, actorId }) {
+    try {
+      return { notified: await send({
+        type: 'staff_offer_declined', user,
+        subject: `Offer declined: ${staffName}`,
+        headline: 'An offer letter was declined',
+        paragraphs: [
+          `${staffName} declined "${title}".`,
+          note ? `Their note: "${note}"` : 'They did not leave a note.',
+          'Their account is switched off. To try again with new terms, send a new version from Staff Onboarding.'
+        ],
+        ctaUrl, ctaLabel: 'Open Staff Onboarding',
+        relatedEntityId: `offerdeclined:${staffName}:${title}:${distinctMoment()}`, relatedEntityType: 'onboarding',
+        actorId, phi: false
+      }) ? 1 : 0 };
+    } catch (e) {
+      console.error('[OFFER] declined notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 2. The office sent an item back -------------------------------------
   // THE REASON IS THE WHOLE POINT OF THIS NOTICE. The route requires one and
   // was storing it where only a screen could show it.
@@ -2188,7 +2230,7 @@ function createNotifier(deps) {
     // clinical to-dos
     taskAssigned, taskDueToday, taskOverdue, taskCompleted,
     // staff onboarding and credentialing (2026-11-09)
-    staffDocumentSent, staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
+    staffDocumentSent, staffOfferSigned, staffOfferDeclined, staffOnboardingStarted, staffOnboardingReturned, staffItemSubmitted,
     staffOnboardingDigest, staffCredentialExpiring, staffOnboardingWeekly,
     // gaps closed by the 2026-11-09 notification audit
     caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,

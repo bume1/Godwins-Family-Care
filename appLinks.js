@@ -49,6 +49,7 @@ const PATHS = Object.freeze({
   LOGIN: '/login',
   // Pay stubs, pay setup and tax forms live in My GFC's Hours & Pay section.
   // A caregiver's My GFC is the caregiver app (2026-11-08).
+  OFFER: '/offer',                          // a new hire's offer letter; nothing else opens until it is signed (2026-11-19)
   STAFF_WELCOME: '/my#welcome',            // a staff member's welcome packet; login opens it until signed
   MY_PAY: '/my#hours',
   MY_DOCUMENTS: '/my#documents',

@@ -593,7 +593,9 @@ function LiaisonClients() {
 const PORTAL_HUB = '/login?hub=1';
 // `tag` names the area under the logo; the Admin Hub uses this same frame
 // (owner, 2026-11-09) and passes its own.
-function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra, tag = 'My GFC' }) {
+// `hideHub` drops the Portal Hub button: the offer letter page (2026-11-19)
+// is the only thing a new hire can open until they sign.
+function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, subtitle, firstName, banner, children, footExtra, hideHub = false, hello, tag = 'My GFC' }) {
   const isHome = view === 'home';
   return (
     <div className="mygfc">
@@ -605,7 +607,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
             {sections.map(s => (
               <button key={s.id} className={view === s.id ? 'mg-on' : ''} onClick={() => go(s.id)}><i className={`ti ${s.icon}`} />{s.label}{s.count > 0 && <span className="mg-pill mg-wait" style={{ marginLeft: 'auto' }}>{s.count}</span>}</button>
             ))}
-            <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>
+            {!hideHub && <button onClick={() => { window.location.href = PORTAL_HUB; }}><i className="ti ti-layout-grid" />Portal Hub</button>}
           </nav>
           <div className="mg-foot">
             <b>{name}</b>{typeLabel}
@@ -621,7 +623,7 @@ function Shell({ sections, phoneTabs, view, go, name, typeLabel, home, title, su
           {banner}
           <div className="mg-body">
             {isHome
-              ? <div className="mg-hello"><h1>Hi, {firstName}</h1><p>{typeLabel} · Godwins Family Care</p></div>
+              ? <div className="mg-hello"><h1>{(hello && hello.title) || `Hi, ${firstName}`}</h1><p>{(hello && hello.sub) || `${typeLabel} · Godwins Family Care`}</p></div>
               : (title && <div className="mg-ptitle"><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>)}
             {children}
           </div>

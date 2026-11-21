@@ -100,6 +100,8 @@ const clinicalNotes = require('./clinicalNotes');     // the shared, versioned c
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
 const insurance = require('./insuranceEligibility');
 const phoneLogin = require('./phoneLogin');           // sign in with a phone number, hear by text (owner, 2026-11-18)
+const staffOffers = require('./staffOffers'); // the offer letter as the first onboarding step (2026-11-19)
+const staffOfferRoutes = require('./routes/staffOffers');
 const passwordSetLinks = require('./passwordSetLinks'); // self-service "choose a new password" links (2026-11-17) // ONE payer vocabulary, verification, the claim gate (B1)
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
                                                       // packet (4.12). Pure — the clock is passed in.
@@ -2589,6 +2591,14 @@ const authenticateToken = async (req, res, next) => {
       }
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
+      // THE OFFER COMES FIRST (owner, 2026-11-19). Until a new hire signs or
+      // declines their offer letter, it is the only thing they can open:
+      // enforced here, so no page can skip it. "View as" is exempt, so the
+      // Super Admin can still look at what the person sees.
+      if (staffOffers.offerPending(freshUser) && !impersonation.isActingAs(sess.row)
+        && !staffOffers.pathAllowedWhilePending(req.originalUrl, freshUser)) {
+        return res.status(409).json({ error: 'Please read and sign your offer letter first.', code: 'OFFER_PENDING' });
+      }
       // Defense in depth: a session for an MFA-required role is only ever
       // issued after the code verifies (finishLogin), but the role can be
       // widened after login — an admin promoting a caregiver to clinician
@@ -3243,7 +3253,14 @@ app.use(staffPortalRoutes({ db, logActivity, getUsers, authenticateToken, uuidv4
   notify: () => notify, getAppBaseUrl,
   // Wrapped: the payroll router is built further down this file. Draws a pay
   // stub from its run when the Drive copy cannot be read.
-  regeneratePayStub: (row) => payrollRouter.stubPdfForRow(row) }));
+  regeneratePayStub: (row) => payrollRouter.stubPdfForRow(row), invalidateUsersCache }));
+// The offer letter, first (owner, 2026-11-19): the office sends it, the new
+// hire signs it before anything else opens.
+app.use(staffOfferRoutes({ db, config, logActivity, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  drive: googledrive, detectFileType: (buf) => detectFileType(buf), sessions,
+  defaultChapterFor: onboardingRoutes.defaultChapterFor,
+  // Read lazily: both are declared further down this file.
+  notify: () => notify, getAppBaseUrl, issueOfferLink: (u) => issueOfferLink(u) }));
 // Payroll (owner, 2026-11-08; spec v2). Each person's pay setup, staff clock,
 // contractor invoices and tax forms are /api/my/* in My GFC's Hours & Pay;
 // approved runs write into the same staff_paystubs store the Apps Script
@@ -4270,6 +4287,9 @@ app.post('/api/auth/login', async (req, res) => {
     // next sign-in brings them back to it until it is signed. Caregivers have
     // their own packet in the caregiver app, which already opens on it.
     if (await staffWelcomePending(user)) userResponse.landing = appLinks.PATHS.STAFF_WELCOME;
+    // An unsigned offer letter comes before everything, the welcome packet
+    // included (owner, 2026-11-19).
+    if (staffOffers.offerPending(user)) userResponse.landing = appLinks.PATHS.OFFER;
     // Include client-specific fields
     if (user.role === config.ROLES.CLIENT) {
       userResponse.practiceName = user.practiceName;
@@ -4822,6 +4842,33 @@ async function issuePasswordSetLink(user, purpose, typed) {
   return { record, channel, ok: true };
 }
 
+// An offer letter's link (owner, 2026-11-19): the new hire's first email from
+// us. One button: choose a password, which signs them in onto the offer.
+// Sent straight out, never queued: it carries a one-time sign-in link.
+async function issueOfferLink(user) {
+  try {
+    const { token, record } = passwordSetLinks.buildLink({ userId: user.id, purpose: 'offer' });
+    const links = (await db.get(PASSWORD_SET_LINKS)) || [];
+    await db.set(PASSWORD_SET_LINKS, passwordSetLinks.addLink(links, record));
+    const url = `${await getAppBaseUrl()}/password-reset-${token}`;
+    const name = (user.preferredName || user.name || 'there').split(' ')[0];
+    const paragraphs = [
+      `We are delighted to offer you a place on the ${config.BRAND.COMPANY_NAME} team.`,
+      'Your offer letter is ready to read and sign in My GFC, our staff portal. Use the button below to choose your password. Your offer opens straight after.',
+      'Once you sign, you will go on to your welcome packet and the rest of your onboarding.',
+      `The link works once and expires in 7 days. Questions about your offer? Call us on ${consentText.ORG.phone}.`
+    ];
+    const htmlBody = emailTemplates.renderGfcEmail({ greeting: name, headline: 'Your offer is ready', paragraphs, ctaUrl: url, ctaLabel: 'Review Your Offer' }).html;
+    const text = `Hi ${name},\n\n${paragraphs.join('\n\n')}\n\n${url}`;
+    const sent = await sendEmail(user.email, `Your offer from ${config.BRAND.COMPANY_NAME}`, text, { htmlBody });
+    await logActivity('system', 'System', 'offer_link_sent', 'user', user.id, {});
+    return { ok: !!(sent && sent.success), channel: 'email', record, error: sent && !sent.success ? (sent.error || sent.reason || null) : null };
+  } catch (e) {
+    console.error('[OFFER] offer email failed:', e.message);
+    return { ok: false, channel: 'email', error: e.message };
+  }
+}
+
 // The welcome text for someone who signs in by phone: a 24-hour link to
 // choose their own password (the office purpose), never a password.
 async function sendPhoneWelcome(user) {
@@ -4947,6 +4994,16 @@ app.post('/api/auth/reset-password', async (req, res) => {
     await sessions.revokeAllForUser(users[idx].id, 'password_reset_by_link');
     await logActivity(users[idx].id, users[idx].name || users[idx].email, 'password_reset_by_link', 'user', users[idx].id, { purpose: found.record.purpose });
     sendPasswordChangedEmail(users[idx]).catch(err => console.error('Password changed email failed (non-fatal):', err.message));
+    // An offer letter's link (owner, 2026-11-19) signs them in straight onto
+    // their offer, through finishLogin like every other sign-in, so a role
+    // that needs two-step sign-in still gets its MFA step.
+    if (found.record.purpose === 'offer') {
+      const user = users[idx];
+      const userResponse = loginProfileFor(user);
+      userResponse.landing = staffOffers.offerPending(user) ? appLinks.PATHS.OFFER : (accountTypes.landingFor(user) || appLinks.PATHS.LOGIN);
+      const signIn = await finishLogin({ user, req, surface: 'unified', userResponse });
+      return res.json({ message: 'Your password is set.', signIn });
+    }
     res.json({ message: 'Your password has been changed. Sign in with your new password.' });
   } catch (error) {
     console.error('Reset password error:', error);
@@ -4969,7 +5026,7 @@ app.get('/api/auth/password-reset-link/:token', async (req, res) => {
         const u = (await getUsers()).find(x => x.id === found.record.userId);
         if (!u) return res.status(404).json({ error: 'Invalid or expired reset link.' });
         return res.json({ mode: 'set_password', firstName: (u.preferredName || u.name || '').split(' ')[0] || null,
-          minLength: config.MIN_PASSWORD_LENGTH });
+          minLength: config.MIN_PASSWORD_LENGTH, purpose: found.record.purpose === 'offer' ? 'offer' : null });
       }
     }
     const links = (await db.get('password_reset_links')) || [];
@@ -33529,6 +33586,11 @@ app.get('/my', (req, res) => {
 
 app.get('/onboarding', (req, res) => {
   res.sendFile(__dirname + '/public/onboarding.html');
+});
+
+// A new hire's offer letter (2026-11-19). The page is public; its routes are not.
+app.get('/offer', (req, res) => {
+  res.sendFile(__dirname + '/public/offer.html');
 });
 
 app.get('/clinical', (req, res) => {

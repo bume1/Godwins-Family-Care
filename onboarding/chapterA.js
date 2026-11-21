@@ -94,7 +94,10 @@ const ITEMS = Object.freeze([
   // ---- A.5 · Offer and Employment Documentation ----------------------------
   { id: 'A.5.01', phase: 'A.5', title: 'Offer letter and employment agreement', ref: P('A.5'),
     packet: ['offer_letter'],
-    steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED)],
+    // She signs it in the app (owner, 2026-11-19: the offer is the first step
+    // for all staff, caregivers included). The packet upload stays the paper
+    // backup.
+    steps: [step(A.EXECUTIVE_DIRECTOR, X.EXECUTE, STATED), step(A.NEW_HIRE, X.SIGN, INFERRED)],
     classifications: [], classificationNote: NO_A2_ROW },
   { id: 'A.5.02', guide: PAY_GUIDE, link: { label: 'Open Pay Setup', url: '/caregiver#hours' }, phase: 'A.5', title: 'Employment and tax documentation', ref: P('A.5'),
     // W-4, I-9 and direct deposit are filled in Pay Setup, which payroll reads
