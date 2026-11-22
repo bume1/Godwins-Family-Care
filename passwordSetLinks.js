@@ -17,7 +17,8 @@
 //     the database does not hold a working link.
 //   - One use. A used, expired or superseded link is refused by name.
 //   - A new link supersedes the person's earlier unused ones.
-//   - A self-service link lasts 1 hour; an admin-sent one 24 hours.
+//   - A self-service link lasts 1 hour; an admin-sent one 24 hours; an offer
+//     letter's 7 days.
 //   - At most 3 self-service links per person per hour, so the form cannot be
 //     used to flood someone's inbox. Over the limit, the reply is the same
 //     generic sentence and nothing is sent.
@@ -30,8 +31,13 @@ const crypto = require('crypto');
 
 const SELF_SERVICE_TTL_MS = 60 * 60 * 1000;
 const ADMIN_TTL_MS = 24 * 60 * 60 * 1000;
+// An offer letter's link (owner, 2026-11-19): a new hire may not open the
+// email the same day, so it lasts a week. Using it sets their password AND
+// signs them in, straight onto the offer.
+const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_SELF_SERVICE_PER_HOUR = 3;
-const PURPOSES = Object.freeze(['self_service', 'admin']);
+const PURPOSES = Object.freeze(['self_service', 'admin', 'offer']);
+const TTL_BY_PURPOSE = Object.freeze({ self_service: SELF_SERVICE_TTL_MS, admin: ADMIN_TTL_MS, offer: OFFER_TTL_MS });
 
 const hashToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 
@@ -42,7 +48,7 @@ function buildLink({ userId, purpose, now = new Date(), randomBytes = crypto.ran
   const p = PURPOSES.includes(purpose) ? purpose : 'self_service';
   const token = randomBytes(32).toString('hex');
   const at = new Date(now);
-  const ttl = p === 'admin' ? ADMIN_TTL_MS : SELF_SERVICE_TTL_MS;
+  const ttl = TTL_BY_PURPOSE[p];
   return {
     token,
     record: {
@@ -103,7 +109,7 @@ function passwordProblem(password, { minLength, regex }) {
 }
 
 module.exports = {
-  SELF_SERVICE_TTL_MS, ADMIN_TTL_MS, MAX_SELF_SERVICE_PER_HOUR, PURPOSES,
+  SELF_SERVICE_TTL_MS, ADMIN_TTL_MS, OFFER_TTL_MS, MAX_SELF_SERVICE_PER_HOUR, PURPOSES,
   hashToken, buildLink, addLink, recentSelfServiceCount, overSelfServiceLimit,
   findLink, markUsed, passwordProblem
 };
