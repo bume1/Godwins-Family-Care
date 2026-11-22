@@ -128,9 +128,16 @@ test('the screen is told it may edit but not sign', () => {
 });
 
 test("a coordinator's encounter files under the visit's clinician, not the practice default", () => {
+  // The encounter is opened by ONE helper since 2026-11-22 (shared with the
+  // orders-only visit); the rule moved there, and the note route hands it the
+  // appointment.
   const i = serverCode.indexOf("app.post('/api/clinical/patients/:clientId/notes'");
   const body = serverCode.slice(i, i + 6000);
-  assert.match(body, /if \(coordinator && appointment && appointment\.pc_aid\) encounter\.provider_id = String\(appointment\.pc_aid\)/);
+  assert.match(body, /await createAppEncounter\(\{\s*emr, client, req, actor, appointment,/);
+  const h = serverCode.indexOf('const createAppEncounter = async');
+  assert.ok(h > 0, 'the shared encounter helper exists');
+  const helper = serverCode.slice(h, serverCode.indexOf('\n};\n', h));
+  assert.match(helper, /if \(coordinator && appointment && appointment\.pc_aid\) encounter\.provider_id = String\(appointment\.pc_aid\)/);
 });
 
 test('care coordinators sit on the client record and share the case manager scope', () => {

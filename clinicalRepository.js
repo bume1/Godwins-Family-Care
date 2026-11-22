@@ -1203,6 +1203,18 @@ const buildEncounterDiagnoses = (list) => {
   if (out.filter(x => x.primary).length > 1) out.forEach((x, i) => { x.primary = i === out.findIndex(y => y.primary); });
   return { diagnoses: out };
 };
+// A diagnosis picked inside the order form (2026-11-22) is ADDED to the
+// visit's list, never a replacement: the existing codes, their order and the
+// primary stay as they are. Returns the merged list and which codes are new.
+const mergeOrderDiagnoses = (existing, added) => {
+  const cur = Array.isArray(existing) ? existing.filter(Boolean) : [];
+  const extra = (Array.isArray(added) ? added : []).filter(Boolean)
+    .map(d => ({ code: d.code, description: d.description, source: d.source, primary: false }));
+  const built = buildEncounterDiagnoses([...cur, ...extra]);
+  if (built.error) return built;
+  const had = new Set(cur.map(d => normalizeIcd10(d.code)));
+  return { diagnoses: built.diagnoses, added: built.diagnoses.filter(d => !had.has(d.code)).map(d => d.code) };
+};
 // Every service must link to ≥1 diagnosis ON THIS ENCOUNTER (spec §2.3).
 const buildEncounterServices = (list, diagnoses) => {
   if (!Array.isArray(list)) return { error: 'services must be an array', code: 'SVC_INVALID' };
@@ -3053,7 +3065,7 @@ module.exports = {
   ATTESTATION_TEXT,
   buildAttestation,
   isEncounterClosed,
-  buildAddendum, emrFailureResponse,
+  buildAddendum, emrFailureResponse, mergeOrderDiagnoses,
   deriveEncounterState,
   RX_ROUTES,
   RX_KINDS,

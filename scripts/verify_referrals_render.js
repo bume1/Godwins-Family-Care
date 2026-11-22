@@ -23,6 +23,8 @@
 //      diagnoses and asks for after-signing, every form carries one submit
 //      key, Referrals opens on a referral, and a view-only viewer gets no
 //      button.
+//   F. New Orders-Only Visit is offered and posts; a diagnosis picked in the
+//      order form is sent as addDiagnoses; a signed visit offers no picker.
 //
 // The API is stubbed; orders are built by the REAL orderRequisitions module and
 // what each viewer may do comes from the REAL clinicalRoles module, the way the
@@ -133,6 +135,7 @@ const placementFor = (viewer, targets) => ({
   canOrderDirect: roles.can(viewer, roles.CAPABILITIES.ORDER_DIRECT),
   canRefer: roles.canRefer(viewer, 'internal') || roles.canRefer(viewer, 'external'),
   requireStandingOrder: !roles.can(viewer, roles.CAPABILITIES.ORDER_DIRECT), linked: true,
+  canCreateOrdersOnly: roles.canClinicalWrite(viewer), canAddDiagnoses: roles.canClinicalWrite(viewer), todaysOrdersOnly: null,
   targets, defaultEncounterUuid: targets.length ? targets[0].encounterUuid : null, emptyReason: targets.length ? null : 'NO_VISITS',
   orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, documentOrderTypes: orderReq.DOCUMENT_ORDER_TYPES
 });
@@ -187,6 +190,7 @@ const run = async (viewer, startPath, scenario) => {
       ...(PLACEMENT ? { placement: PLACEMENT(viewer) } : {})
     });
     if (p.endsWith('/results')) return json({ results: [RESULT] });
+    if (p === '/api/clinical/codes/search') return json({ results: [{ code: 'R05.9', description: 'Cough, unspecified', source: 'openemr' }] });
     if (p.endsWith('/encounters/e-1')) return json(ENCOUNTER(viewer));
     if (p.endsWith('/encounters')) return json({ linked: true, encounters: [{ encounterUuid: 'e-1', date: '2026-10-12', reason: 'Follow-up', state: 'open' }] });
     if (p === '/api/clinical/inbox') return json({
@@ -381,11 +385,43 @@ const run = async (viewer, startPath, scenario) => {
     await page.waitForSelector('text=Referred to Courtney Hale inside the team', { timeout: 15000 });
     ok('E11 a view-only viewer reads the orders and is offered no New Order', await page.locator('button:has-text("New Order")').count() === 0);
   });
-  PLACEMENT = (viewer) => placementFor(viewer, []);
+  PLACEMENT = (viewer) => ({ ...placementFor(viewer, []), canCreateOrdersOnly: false });
   await run(PROVIDER, '/clinical', async (page) => {
     await openOrders(page);
     await page.locator('button:text-is("+ New Order")').first().click();
-    ok('E12 with no visit yet, it says to start one', /No visit on this chart yet\. An order belongs to a visit/.test(await page.locator('body').innerText()));
+    ok('E12 with no visit and no way to open one, it says to start one', /No visit on this chart yet\. An order belongs to a visit/.test(await page.locator('body').innerText()));
+  });
+
+  // ── F. An orders-only visit, and a diagnosis picked in the form (2026-11-22)
+  console.log('\nF. orders-only visits and picking a diagnosis in the order form');
+  PLACEMENT = (viewer) => placementFor(viewer, []);
+  await run(PROVIDER, '/clinical', async (page, posted) => {
+    await openOrders(page);
+    await page.locator('button:text-is("+ New Order")').first().click();
+    const sel = page.locator('select').filter({ has: page.locator('option[value="__orders_only__"]') }).first();
+    ok('F1 with no visit, New Orders-Only Visit is offered and chosen', await sel.count() === 1 && await sel.inputValue() === '__orders_only__');
+    ok('F2 it says what an orders-only visit is', /holds orders only\. It has no note to write/.test(await page.locator('body').innerText()));
+    await page.locator('button:text-is("Open Orders-Only Visit")').first().click();
+    await page.waitForTimeout(300);
+    ok('F3 Open Orders-Only Visit posts to the orders-only route', posted.some(x => x.path === `/api/clinical/patients/${PATIENT.id}/encounters/orders-only` && x.method === 'POST'), JSON.stringify(posted));
+  });
+  PLACEMENT = (viewer) => placementFor(viewer, TWO_VISITS);
+  await run(PROVIDER, '/clinical', async (page, posted) => {
+    await openOrders(page);
+    await page.locator('button:text-is("+ New Order")').first().click();
+    const sel = page.locator('select').filter({ has: page.locator('option[value="e-2"]') }).first();
+    ok('F4 the new orders-only option sits beside the visits', await sel.locator('option[value="__orders_only__"]').count() === 1);
+    await page.locator('button:text-is("+ Add Diagnosis")').first().click();
+    await page.locator('button', { hasText: 'Cough, unspecified' }).first().click();
+    ok('F5 a picked diagnosis shows as a new, selected chip', await page.locator('button.chip:text-is("R05.9 · New")').count() === 1);
+    await page.locator('label:has-text("Tests / studies") textarea, :text("Tests / studies") + textarea').first().fill('Chest X-ray');
+    await page.locator('button:text-is("Record Order")').first().click();
+    await page.waitForTimeout(300);
+    const o = posted.find(x => /\/encounters\/e-1\/orders$/.test(x.path));
+    ok('F6 the order carries it as addDiagnoses and links it', !!o && JSON.stringify((o.body.addDiagnoses || []).map(d => d.code)) === '["R05.9"]' && o.body.diagnosisCodes.includes('R05.9'), JSON.stringify(o && o.body));
+    await page.locator('button:text-is("+ New Order")').first().click();
+    await page.locator('select').filter({ has: page.locator('option[value="e-2"]') }).first().selectOption('e-2');
+    ok('F7 a signed visit offers no diagnosis picker', await page.locator('button:text-is("+ Add Diagnosis")').count() === 0);
   });
 
   console.log(`\n${pass} passed, ${fails.length} failed`);
