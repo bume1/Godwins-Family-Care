@@ -107,3 +107,17 @@ test('the page is only a frame around the sections the server sends', () => {
   // The decks and brochure ship in the image; .dockerignore drops PDFs by default.
   assert.match(read('.dockerignore'), /^!sales-portal\/files\/\*\.pdf$/m);
 });
+
+test('the brochure in outgoing emails is a public app link, never a ticketed one', () => {
+  const T = 'SECRET_TICKET';
+  const html = sp.renderDoc('script', T, { baseUrl: 'https://app.godwinsfamilycarellc.com/' });
+  const links = [...html.matchAll(/href="([^"]*brochure[^"]*)"/gi)].map(m => m[1]);
+  assert.ok(links.length >= 6, 'every facility email keeps its brochure link');
+  for (const l of links) assert.strictEqual(l, 'https://app.godwinsfamilycarellc.com/brochure.pdf');
+  // The ticket must not ride inside an email body a liaison copies out.
+  for (const body of html.matchAll(/<div class="email-body">([\s\S]*?)<\/div>\s*<\/div>/g)) {
+    assert.ok(!body[1].includes(T), 'session ticket found in an email body');
+  }
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /app\.get\('\/brochure\.pdf', \(req, res\)/, 'the brochure route takes no login');
+});

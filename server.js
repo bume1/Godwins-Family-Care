@@ -33808,7 +33808,7 @@ app.get('/sales/doc/:id', requireSalesTicket, async (req, res) => {
       const feed = await salesEmailFeed.templates(req.query.drafts === '1' ? 'all' : 'Active');
       return res.type('html').send(salesPortal.renderEmails(feed, req.salesTicket));
     }
-    const html = salesPortal.renderDoc(req.params.id, req.salesTicket);
+    const html = salesPortal.renderDoc(req.params.id, req.salesTicket, { baseUrl: await getAppBaseUrl() });
     if (html == null) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such Sales Portal page.</p>');
     return res.type('html').send(html);
   } catch (e) {
@@ -33821,6 +33821,13 @@ app.get('/sales/files/:name', requireSalesTicket, (req, res) => {
   if (!p) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such file.</p>');
   res.type(salesPortal.FILES[req.params.name].type);
   return res.sendFile(p);
+});
+
+// The brochure is public marketing material, linked from emails sent to
+// people outside GFC, so it needs no login.
+app.get('/brochure.pdf', (req, res) => {
+  res.type('application/pdf');
+  return res.sendFile(salesPortal.filePath('gfc-brochure.pdf'));
 });
 
 // Admin hub login endpoint (same as regular admin login)

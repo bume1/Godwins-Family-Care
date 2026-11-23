@@ -61,7 +61,11 @@ const FILES = Object.freeze({
   'gfcfamilydeckv2.html': { type: 'text/html; charset=utf-8', was: '/gfcfamilydeckv2.html' },
   'gfcltcdeckv2.html': { type: 'text/html; charset=utf-8', was: '/gfcltcdeckv2.html' },
   'gfcsocialservicesdeck.html': { type: 'text/html; charset=utf-8', was: '/gfcsocialservicesdeck.html' },
-  'gfc-brochure.pdf': { type: 'application/pdf', was: 'https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf' }
+  // The brochure is marketing material handed to people outside GFC (it rides
+  // in the facility follow-up emails), so it is PUBLIC: no login, no ticket.
+  // A ticketed link pasted into an email would leak the session ticket and
+  // stop working for the person who received it.
+  'gfc-brochure.pdf': { type: 'application/pdf', was: 'https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf', publicPath: '/brochure.pdf' }
 });
 
 const OLD_SITE = /^https?:\/\/(www\.)?godwinsfamilycarellc\.com(\/|$)/i;
@@ -91,7 +95,8 @@ const q = (s) => encodeURIComponent(s);
 // activity for the app's idle timer, which runs in the /sales page around it.
 const ACTIVITY_SHIM = '<script>(function(){var t=0;function a(){var n=Date.now();if(n-t<4000)return;t=n;try{window.top.dispatchEvent(new Event("pointerdown"));}catch(e){}}["pointerdown","keydown","scroll","touchstart"].forEach(function(e){window.addEventListener(e,a,{passive:true});});})();</script>';
 
-function rewrite(html, ticket) {
+function rewrite(html, ticket, opts) {
+  const base = String((opts && opts.baseUrl) || '').replace(/\/+$/, '');
   const T = q(ticket);
   const doc = (id, extra) => `/sales/doc/${id}?${extra ? extra + '&' : ''}ticket=${T}`;
   let out = String(html);
@@ -118,7 +123,8 @@ function rewrite(html, ticket) {
   // Decks and the brochure, moved off the old website.
   for (const [name, f] of Object.entries(FILES)) {
     const was = f.was.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`href="${was}"`, 'g'), `href="/sales/files/${name}?ticket=${T}"`);
+    const to = f.publicPath ? `${base}${f.publicPath}` : `/sales/files/${name}?ticket=${T}`;
+    out = out.replace(new RegExp(`href="${was}"`, 'g'), `href="${to}"`);
   }
 
   out = out.replace(/<\/body>/i, ACTIVITY_SHIM + '</body>');
@@ -130,9 +136,9 @@ function readDoc(id) {
   return fs.readFileSync(path.join(ROOT, 'docs', `${id}.html`), 'utf8');
 }
 
-function renderDoc(id, ticket) {
+function renderDoc(id, ticket, opts) {
   const html = readDoc(id);
-  return html == null ? null : rewrite(html, ticket);
+  return html == null ? null : rewrite(html, ticket, opts);
 }
 
 function filePath(name) {

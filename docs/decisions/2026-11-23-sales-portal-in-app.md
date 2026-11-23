@@ -30,3 +30,7 @@
 - `test/sales_portal.test.js` 7/7; full suite 4048/4051, the 2 failures are the payroll timesheet tests that fail on main too.
 - Real server, real liaison login, every section rendered in Chromium with no page errors. Coordinator refused (403). Ticket refused after sign-out (401). Brochure served as PDF.
 - Not proven from the sandbox: the live Apps Script and Leaflet/CDN calls (the sandbox blocks them; the map fell back to its built-in copy).
+
+## Follow-up: the brochure link in outgoing emails
+
+The six facility follow-up emails in the Script section link to the brochure. After the port those links pointed at the login-only `/sales/files/gfc-brochure.pdf?ticket=…`, which would have put the liaison's session ticket into an email and given the recipient a link that does not open. The brochure is public marketing material, so it is now served without a login at `/brochure.pdf`, and the email bodies carry the absolute app link (`<app base URL>/brochure.pdf`). The decks stay behind the ticket. Test: "the brochure in outgoing emails is a public app link, never a ticketed one".
