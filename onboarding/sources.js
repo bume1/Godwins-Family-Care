@@ -168,6 +168,16 @@ const RAW_SOURCES = Object.freeze({
     folder: '01 Company / Policies & Procedures / Current',
     transcribedFromVersion: '1.0'
   }),
+  // Running staff onboarding, for the office (owner, 2026-11-19).
+  ADMIN_SOPS_SET7: Object.freeze({
+    key: 'ADMIN_SOPS_SET7',
+    title: 'Administrative SOPs Set 7: Running Staff Onboarding',
+    docNumber: 'GFC-ADMIN-SOP-S7',
+    driveFileId: '1uRHBtPz6EmQyRBx8siBpIr-zi_qC4WSA',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    folder: '01 Company / Policies & Procedures / Current',
+    transcribedFromVersion: '1.0'
+  }),
   STAFF_PAY_GUIDE: Object.freeze({
     key: 'STAFF_PAY_GUIDE',
     title: 'Staff Guide: Setting Up Your Pay',
