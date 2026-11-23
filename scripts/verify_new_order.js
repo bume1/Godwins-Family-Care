@@ -42,7 +42,7 @@ require.cache['__memdb__'] = { id: '__memdb__', filename: '__memdb__', loaded: t
 const rows = (k) => STORE.get(k) || [];
 
 // ---- a fake OpenEMR ---------------------------------------------------------
-const EMR = { seq: 500, orders: [], charges: [], documents: [], soap: new Map() };
+const EMR = { seq: 500, orders: [], charges: [], documents: [], soap: new Map(), encounters: [] };
 const openemr = require(path.join(__dirname, '..', 'openemr.js'));
 openemr.isConfigured = () => true;
 openemr.forActor = () => new Proxy({}, {
@@ -54,6 +54,13 @@ openemr.forActor = () => new Proxy({}, {
         const e = new Error('Sign in to OpenEMR to continue.'); e.code = 'EMR_NOT_CONNECTED'; e.status = 409; throw e;
       };
       // A slow filing, so a double click lands while the first save is running.
+      // Opening an encounter. One patient's sign-in has lapsed.
+      case 'createEncounter': return async (puuid, fields) => {
+        if (puuid === 'uuid-lapsed') { const e = new Error('Sign in to OpenEMR to continue.'); e.code = 'EMR_NOT_CONNECTED'; e.status = 409; throw e; }
+        const eid = String(++EMR.seq); EMR.encounters.push({ puuid, eid, euuid: `enc-${eid}`, ...fields }); return { euuid: `enc-${eid}`, eid };
+      };
+      // The coding queue degrades to the app's own records.
+      case 'getAllEncounters': return async () => { throw new Error('FHIR encounter feed not stubbed'); };
       case 'postOrder': return async (puuid, euuid, payload) => { await new Promise(r => setTimeout(r, 300)); const id = String(++EMR.seq); EMR.orders.push({ id, euuid, payload }); return { procedure_order_id: id }; };
       case 'postCharge': return async (puuid, euuid, p) => { EMR.charges.push({ euuid, ...p }); return { id: String(++EMR.seq) }; };
       case 'addSoapNote': return async (puuid, euuid, note) => { const sid = String(++EMR.seq); EMR.soap.set(sid, { id: sid, euuid, ...note }); return { sid }; };
@@ -96,6 +103,8 @@ const PATIENT = {
   openEmrFacilityId: '5', intake: { dob: '1948-03-11' }
 };
 const BARE = { ...PATIENT, id: 'c_bare', email: 'c_bare@example.test', slug: 'order-bare', openEmrPatientId: 'uuid-bare' };
+const LAPSED = { ...PATIENT, id: 'c_lapsed', email: 'c_lapsed@example.test', slug: 'order-lapsed', openEmrPatientId: 'uuid-lapsed' };
+const TODAY = require(path.join(__dirname, '..', 'public', 'gfc-time.js')).zonedParts(new Date()).isoDate;
 
 const visit = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
 const billing = (euuid, date, dx, extra = {}) => ({
@@ -111,7 +120,7 @@ const attest = (euuid, signedAt, codes) => ({
 
 (async () => {
   const hash = await bcrypt.hash(PW, 4);
-  STORE.set('users', [PATIENT, BARE, FNP, FNP2, RN, VIEW].map(u => ({ ...u, password: hash })));
+  STORE.set('users', [PATIENT, BARE, LAPSED, FNP, FNP2, RN, VIEW].map(u => ({ ...u, password: hash })));
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   STORE.set('encounter_billing', [
     billing('enc-draft', '2026-11-05', ['I10']),
@@ -208,6 +217,46 @@ const attest = (euuid, signedAt, codes) => ({
   check('a lapsed OpenEMR sign-in answers as itself, not as a server error', r.status === 409 && r.body.code === 'EMR_NOT_CONNECTED', r.body);
   r = await call('POST', `${P}/encounters/enc-draft/orders`, tok.fnp, lab('key-10'));
   check('the key is released after a refusal, so the next submit works', r.status === 200 && !r.body.duplicate, r.body);
+
+  console.log('\n── 6. An orders-only visit, like a standard practice (2026-11-22) ──');
+  const B = `/api/clinical/patients/${BARE.id}`;
+  r = await call('GET', `${B}/orders`, tok.fnp);
+  check('a patient with no visit is offered an orders-only visit', r.status === 200 && r.body.placement.canCreateOrdersOnly === true && r.body.placement.todaysOrdersOnly === null, r.body && r.body.placement);
+  r = await call('POST', `${B}/encounters/orders-only`, tok.view);
+  check('a view-only viewer cannot open one', r.status === 403, r.body);
+  r = await call('POST', `${B}/encounters/orders-only`, tok.fnp);
+  const oo = r.body && r.body.encounterUuid;
+  check('it opens an encounter in OpenEMR for today', r.status === 200 && r.body.reused === false && EMR.encounters.some(e => e.euuid === oo && e.date === TODAY && /^Orders only/.test(e.reason)), r.body);
+  const ooRec = () => rows('encounter_billing').find(x => x.encounterUuid === oo);
+  check('the app records it as an orders-only visit with no note', ooRec() && ooRec().ordersOnly === true && !ooRec().note && ooRec().date === TODAY, ooRec());
+  r = await call('POST', `${B}/encounters/orders-only`, tok.fnp);
+  check('asking again the same day reuses it', r.status === 200 && r.body.reused === true && r.body.encounterUuid === oo && rows('encounter_billing').filter(x => x.clientId === BARE.id).length === 1, r.body);
+  r = await call('GET', `${B}/orders`, tok.fnp);
+  const ooT = r.body && r.body.placement.targets.find(t => t.encounterUuid === oo);
+  check('it is offered as "Orders only", and as today\'s', ooT && ooT.visitLabel === 'Orders only' && ooT.ordersOnly === true && r.body.placement.todaysOrdersOnly === oo, r.body && r.body.placement);
+  r = await call('POST', `${B}/encounters/${oo}/orders`, tok.fnp, lab('key-oo', { diagnosisCodes: ['R05.9'], addDiagnoses: [{ code: 'R05.9', description: 'Cough, unspecified' }] }));
+  check('an order is placed on it with a diagnosis picked in the order form', r.status === 200 && r.body.order && JSON.stringify(r.body.order.diagnosisCodes) === '["R05.9"]', r.body);
+  check('the picked diagnosis is now on the visit, as its primary', ooRec().diagnoses.length === 1 && ooRec().diagnoses[0].code === 'R05.9' && ooRec().diagnoses[0].primary === true, ooRec().diagnoses);
+  r = await call('GET', '/api/clinical/inbox', tok.fnp);
+  check('it never asks to be signed', r.status === 200 && !(r.body.items || []).some(i => i.encounterUuid === oo && i.kind === 'encounter_unsigned'), (r.body.items || []).map(i => [i.kind, i.encounterUuid]));
+  r = await call('GET', '/api/clinical/encounters/queue?state=open', tok.fnp);
+  check('it is not in the open coding queue', r.status === 200 && !(r.body.encounters || r.body.rows || []).some(x => x.encounterUuid === oo) && (r.body.encounters || r.body.rows || []).some(x => x.encounterUuid === 'enc-draft'), r.body && Object.keys(r.body));
+  r = await call('GET', '/api/clinical/encounters/queue?state=all', tok.fnp);
+  check('it still lists under All', r.status === 200 && (r.body.encounters || r.body.rows || []).some(x => x.encounterUuid === oo));
+  r = await call('POST', `/api/clinical/patients/${LAPSED.id}/encounters/orders-only`, tok.fnp);
+  check('a lapsed OpenEMR sign-in says so', r.status === 409 && r.body.code === 'EMR_NOT_CONNECTED', r.body);
+
+  console.log('\n── 7. A diagnosis added with an order is added, never a replacement ──');
+  const draftBefore = JSON.parse(JSON.stringify(billingRow('enc-draft')));
+  r = await call('POST', `${P}/encounters/enc-draft/orders`, tok.fnp, lab('key-bad-dx', { diagnosisCodes: ['I10'], addDiagnoses: [{ code: 'NOTACODE' }] }));
+  check('a malformed code is refused and nothing changes', r.status === 400 && r.body.code === 'DX_BAD_CODE' && JSON.stringify(billingRow('enc-draft').diagnoses) === JSON.stringify(draftBefore.diagnoses), r.body);
+  r = await call('POST', `${P}/encounters/enc-draft/orders`, tok.fnp, lab('key-add-dx', { diagnosisCodes: ['E11.9'], addDiagnoses: [{ code: 'E11.9', description: 'Type 2 diabetes' }] }));
+  const after2 = billingRow('enc-draft');
+  check('the new code is appended after the existing one', r.status === 200 && JSON.stringify(after2.diagnoses.map(d => d.code)) === '["I10","E11.9"]', after2.diagnoses);
+  check('the existing primary and the services are untouched', after2.diagnoses[0].primary === true && after2.diagnoses[1].primary === false && JSON.stringify(after2.services) === JSON.stringify(draftBefore.services));
+  check('the rendering clinician is not rewritten', JSON.stringify(after2.renderingProvider) === JSON.stringify(draftBefore.renderingProvider));
+  r = await call('POST', `${P}/encounters/enc-latest/orders`, tok.fnp, lab('key-signed-dx', { afterSigning: true, diagnosisCodes: ['I10'], addDiagnoses: [{ code: 'R05.9' }] }));
+  check('a signed visit takes no new diagnosis', r.status === 400 && r.body.code === 'ORDER_DX_NOT_SIGNED' && !billingRow('enc-latest').diagnoses.some(d => d.code === 'R05.9'), r.body);
 
   console.log(`\n${pass}/${pass + fail} checks passed`);
   process.exit(fail ? 1 : 0);

@@ -467,7 +467,10 @@ test('every order is anchored to an encounter — there is no patient-scoped ord
   for (const l of orderRoutes) {
     const isExecution = l.includes("encounters/:euuid/orders'");
     const isOnExisting = /orders\/:orderId\//.test(l);
-    assert.ok(isExecution || isOnExisting,
+    // 2026-11-22: opens an ORDERS-ONLY VISIT (an encounter) and places no
+    // order; the order is then placed on that encounter like any other.
+    const opensVisit = l.includes("encounters/orders-only'");
+    assert.ok(isExecution || isOnExisting || opensVisit,
       `an order with no encounter has no clinical context and nothing to bill or audit against: ${l.slice(0, 90)}`);
   }
 });

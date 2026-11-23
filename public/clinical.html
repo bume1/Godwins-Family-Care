@@ -380,6 +380,7 @@
       saveCoding: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
       addRx: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/prescriptions`, { method: 'POST', body: JSON.stringify(body) }),
       addOrder: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/orders`, { method: 'POST', body: JSON.stringify(body) }),
+      createOrdersOnlyVisit: (id) => authedFetch(`/api/clinical/patients/${id}/encounters/orders-only`, { method: 'POST', body: '{}' }),
       // Session 4.8 — "what may I actually act on". The server answers with the
       // protocol's permitted tests and the intersection with my credential
       // ceiling, so the form never computes either.
@@ -2595,10 +2596,27 @@
         if (!open || !canOrderStanding) return;
         api.myStandingOrders().then(r => setStandingOrders((r && r.standingOrders) || [])).catch(() => setStandingOrders([]));
       }, [open, canOrderStanding]);
+      const [opening, setOpening] = useState(false);
       if (!placement || !placement.canPlace) return null;
       const targets = placement.targets || [];
-      const chosen = targets.find(t => t.encounterUuid === (euuid || placement.defaultEncounterUuid)) || null;
+      // An orders-only visit for today (2026-11-22) is offered whenever none is
+      // open yet: when there is no visit at all, and when no visit fits.
+      const NEW_ORDERS_ONLY = '__orders_only__';
+      const canOpenOrdersOnly = !!placement.canCreateOrdersOnly && !placement.todaysOrdersOnly;
+      const pick = euuid || placement.defaultEncounterUuid || (canOpenOrdersOnly ? NEW_ORDERS_ONLY : '');
+      const chosen = targets.find(t => t.encounterUuid === pick) || null;
       const label = presetType === 'referral' ? 'New Referral' : 'New Order';
+      const openOrdersOnly = () => {
+        setOpening(true); setMsg(null);
+        api.createOrdersOnlyVisit(patient.id)
+          .then(r => {
+            setEuuid(r.encounterUuid);
+            if ((r.warnings || []).length) setMsg({ ok: true, text: r.message, warnings: r.warnings });
+            if (onPlaced) onPlaced();
+          })
+          .catch(e => setMsg({ ok: false, text: (e && e.message) || 'The orders-only visit did not open.' }))
+          .finally(() => setOpening(false));
+      };
       const save = (f) => {
         if (!chosen) return Promise.resolve(null);
         setBusy(true); setMsg(null);
@@ -2631,30 +2649,38 @@
                   {(msg.warnings || []).map((w, i) => <div key={i} className="text-amber-800 mt-1">{w}</div>)}
                 </div>
               )}
-              {open && !targets.length && (
+              {open && !targets.length && !canOpenOrdersOnly && (
                 <p className="text-[12.5px] text-stone-600">
                   {placement.emptyReason === 'NOT_LINKED'
                     ? 'Link this patient to OpenEMR first. An order is filed on a visit in their chart.'
                     : 'No visit on this chart yet. An order belongs to a visit: use Start Visit at the top of the chart, then place it here.'}
                 </p>
               )}
-              {open && targets.length > 0 && (
+              {open && (targets.length > 0 || canOpenOrdersOnly) && (
                 <>
                   <Field label="Add To Visit">
-                    <select className="inp" value={chosen ? chosen.encounterUuid : ''} onChange={e => { setEuuid(e.target.value); setEnrollmentWarning(null); }}>
+                    <select className="inp" value={chosen ? chosen.encounterUuid : (pick === NEW_ORDERS_ONLY ? NEW_ORDERS_ONLY : '')} onChange={e => { setEuuid(e.target.value); setEnrollmentWarning(null); }}>
                       {targets.map(t => (
                         <option key={t.encounterUuid} value={t.encounterUuid}>
                           {[t.date ? fmtDate(t.date) : 'Undated', t.visitLabel || t.reason || 'Visit', t.signed ? 'Signed' : 'Draft'].join(' · ')}
                         </option>
                       ))}
+                      {canOpenOrdersOnly && <option value={NEW_ORDERS_ONLY}>+ New Orders-Only Visit (Today)</option>}
                     </select>
                   </Field>
+                  {pick === NEW_ORDERS_ONLY && !chosen && (
+                    <div className="grid gap-2">
+                      <p className="text-[12px] text-stone-600">Opens a short visit for today that holds orders only. It has no note to write and nothing to sign unless you add one.</p>
+                      <div><button className="btn !py-1.5" disabled={opening} onClick={openOrdersOnly}>{opening ? 'Opening…' : 'Open Orders-Only Visit'}</button></div>
+                    </div>
+                  )}
                   {chosen && chosen.afterSigning && (
                     <p className="text-[12px] text-amber-800">This visit is signed. The order is added to the note as an addendum and can use only the diagnoses the visit was signed with.</p>
                   )}
                   {chosen && (
                     <OrderForm key={`${chosen.encounterUuid}|${formKey}`} clientId={patient.id}
                       diagnoses={chosen.diagnoses || []} diagnosesLocked={!!chosen.afterSigning}
+                      canAddDx={!!placement.canAddDiagnoses && !chosen.afterSigning}
                       types={placement.orderTypes} priorities={placement.orderPriorities} docTypes={placement.documentOrderTypes}
                       standingOrders={standingOrders} requireStandingOrder={!!placement.requireStandingOrder}
                       enrollmentWarning={enrollmentWarning} initialType={presetType} busy={busy} onSave={save} />
@@ -7680,7 +7706,13 @@
       try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) { /* fall through */ }
       return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
     };
-    const OrderForm = ({ clientId, diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning, initialType, diagnosesLocked, dxNotice }) => {
+    const OrderForm = ({ clientId, diagnoses: savedDiagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning, initialType, diagnosesLocked, dxNotice, canAddDx }) => {
+      // A diagnosis can be picked right here on a draft visit (2026-11-22). It
+      // is ADDED to the visit with the order, never saved on its own.
+      const [newDx, setNewDx] = useState([]);
+      const [showDxPicker, setShowDxPicker] = useState(false);
+      const diagnoses = [...(savedDiagnoses || []), ...newDx.filter(n => !(savedDiagnoses || []).some(d => d.code === n.code))];
+      const isNewDx = (code) => newDx.some(n => n.code === code) && !(savedDiagnoses || []).some(d => d.code === code);
       // A REFERRAL is decided by where it goes (owner, 2026-10-12): any licensed
       // role refers within the team, a provider or an LCSW refers out. Someone
       // with no direct ordering authority still refers, with no protocol.
@@ -7782,11 +7814,25 @@
             )
             : <Field label="Tests / studies (one per line)"><textarea className="inp" rows={2} value={f.tests} onChange={e => setF({ ...f, tests: e.target.value })} /></Field>}
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">Linked dx:
-            {diagnoses.length === 0 && <span className="text-amber-700">{diagnosesLocked ? 'this visit was signed with no diagnoses, so no order can be added to it' : 'add a diagnosis to the visit and save the coding first'}</span>}
+            {diagnoses.length === 0 && <span className="text-amber-700">{diagnosesLocked ? 'this visit was signed with no diagnoses, so no order can be added to it' : canAddDx ? 'add a diagnosis for this order' : 'add a diagnosis to the visit and save the coding first'}</span>}
             {diagnoses.map(d => (
-              <button key={d.code} type="button" className={`chip border ${f.diagnosisCodes.includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => toggleDx(d.code)}>{d.code}</button>
+              <button key={d.code} type="button" className={`chip border ${f.diagnosisCodes.includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => toggleDx(d.code)}>{d.code}{isNewDx(d.code) ? ' · New' : ''}</button>
             ))}
+            {canAddDx && !diagnosesLocked && (
+              <button type="button" className="chip border border-dashed bg-white text-primary border-stone-300" onClick={() => setShowDxPicker(v => !v)}>{showDxPicker ? 'Close' : '+ Add Diagnosis'}</button>
+            )}
           </div>
+          {canAddDx && !diagnosesLocked && showDxPicker && (
+            <div className="grid gap-1">
+              <CodePicker set="ICD10" clientId={clientId} exclude={diagnoses.map(d => d.code)}
+                onPick={(r) => {
+                  setNewDx(p => p.some(x => x.code === r.code) ? p : [...p, { code: r.code, description: r.description || r.label || '', source: r.source }]);
+                  setF(p => ({ ...p, diagnosisCodes: p.diagnosisCodes.includes(r.code) ? p.diagnosisCodes : [...p.diagnosisCodes, r.code] }));
+                  setShowDxPicker(false);
+                }} />
+              <p className="text-[11px] text-stone-500">A diagnosis picked here is added to this visit when the order is recorded.</p>
+            </div>
+          )}
           {dxNotice && <p className="text-[11px] text-amber-700">{dxNotice}</p>}
           <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
           {enrollmentWarning && (
@@ -7810,7 +7856,8 @@
                   : !f.tests.trim())}
               onClick={() => {
                 const base = isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) };
-                const body = { ...base, idempotencyKey: submitKeyRef.current };
+                const adding = newDx.filter(n => isNewDx(n.code) && f.diagnosisCodes.includes(n.code));
+                const body = { ...base, idempotencyKey: submitKeyRef.current, ...(adding.length ? { addDiagnoses: adding } : {}) };
                 onSave(enrollmentWarning ? { ...body, enrollmentAcknowledgment: { acknowledged: ack.acknowledged, reason: ack.reason.trim() } } : body);
               }}>
               {busy ? 'Recording…' : f.orderType === 'referral' ? (f.destination === 'internal' ? 'Send Referral' : 'Record Referral') : f.orderType === 'dme' ? 'Record Written Order' : 'Record Order'}
@@ -9843,6 +9890,7 @@
                 })}
                 {showOrder && !locked && (canOrderDirect || canOrderStanding || canRefer) &&
                   <OrderForm clientId={patient.id} diagnoses={d.record.diagnoses || []} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                    canAddDx={!dirty}
                     dxNotice={diagnoses.some(x => !(d.record.diagnoses || []).some(y => y.code === x.code)) ? 'Save the coding first. Diagnoses added since the last save can\'t be linked to an order yet.' : ''}
                     docTypes={d.documentOrderTypes}
                     standingOrders={standingOrders} requireStandingOrder={!canOrderDirect} enrollmentWarning={orderEnrollmentWarning}

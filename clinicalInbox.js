@@ -196,6 +196,9 @@ const buildInbox = ({
     if (r.coSignStatus === 'pending') continue;          // already listed above
     if (attByUuid.has(String(r.encounterUuid))) continue; // signed
     if (r.noteStatus === 'voided') continue;              // a discarded draft waits on nobody
+    // An orders-only visit (2026-11-22) holds orders, not a note: there is
+    // nothing to sign. Once somebody writes a note on it, it is a visit again.
+    if (r.ordersOnly === true && !r.note) continue;
     const renderedById = r.renderingProvider && r.renderingProvider.id;
     const isMine = !!v.id && !!renderedById && String(v.id) === String(renderedById);
     items.push(item({

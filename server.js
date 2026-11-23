@@ -14650,6 +14650,37 @@ const noteView = async (ctx, extra = {}) => {
 };
 
 // ── First save: the encounter, the narrative and revision 1, in one action ──
+// ── ONE way the app opens an encounter in OpenEMR ──────────────────────────
+// Shared by the first Save Draft of a note and by an orders-only visit, so the
+// facility, place of service, billing entity and provider rules cannot drift
+// between them. Returns the encounter, what was resolved, and the warnings.
+const createAppEncounter = async ({ emr, client, req, actor, appointment = null, visit = null, reasonFor, date }) => {
+  const place = await resolveFacilityForVisit(emr, client,
+    appointment ? clinicalRepo.decodeAppointmentNotes(appointment.pc_hometext).location : null, visit);
+  const reason = reasonFor(place.visitLabel);
+  const encounter = {
+    date, reason: `${reason} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250), class_code: 'HH',
+    billing_note: `Rendering clinician is set at signing. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500)
+  };
+  if (place.facilityId) encounter.facility_id = place.facilityId;
+  if (place.posCode) encounter.pos_code = place.posCode;
+  const bill = await resolveBillingForVisit(emr);
+  if (bill.facilityId) encounter.billing_facility = bill.facilityId;
+  // A care coordinator has no provider id of their own: the encounter files
+  // under the clinician the visit is booked with, who will sign it.
+  const coordinator = clinicalRoles.isCoordinator(req.user);
+  if (coordinator && appointment && appointment.pc_aid) encounter.provider_id = String(appointment.pc_aid);
+  const enc = await emr.createEncounter(client.openEmrPatientId, encounter);
+  const encounterUuid = (enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id)) || null;
+  const warnings = [];
+  if (place.warning) warnings.push(place.warning);
+  if (bill.warning) warnings.push(bill.warning);
+  if (coordinator) {
+    if (!encounter.provider_id) warnings.push(COORDINATOR_NO_APPOINTMENT_WARNING);
+  } else if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
+  return { place, reason, date, encounter, enc, encounterUuid, warnings };
+};
+
 app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -14686,32 +14717,13 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     const carry = await applyCarryRequest(emr, client, note, body, null);
     if (carry.error) return res.status(carry.status).json({ error: carry.error, code: carry.code });
 
-    const place = await resolveFacilityForVisit(emr, client,
-      appointment ? clinicalRepo.decodeAppointmentNotes(appointment.pc_hometext).location : null, note.visit || null);
-    const reason = noteReason(note, place.visitLabel);
-    const date = note.visitDate || (appointment && appointment.pc_eventDate) || practiceToday();
-    const encounter = {
-      date, reason: `${reason} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250), class_code: 'HH',
-      billing_note: `Rendering clinician is set at signing. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500)
-    };
-    if (place.facilityId) encounter.facility_id = place.facilityId;
-    if (place.posCode) encounter.pos_code = place.posCode;
-    const bill = await resolveBillingForVisit(emr);
-    if (bill.facilityId) encounter.billing_facility = bill.facilityId;
-    // A care coordinator has no provider id of their own: the encounter files
-    // under the clinician the visit is booked with, who will sign it.
-    const coordinator = clinicalRoles.isCoordinator(req.user);
-    if (coordinator && appointment && appointment.pc_aid) encounter.provider_id = String(appointment.pc_aid);
-    const enc = await emr.createEncounter(puuid, encounter);
-    const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
+    const made = await createAppEncounter({
+      emr, client, req, actor, appointment, visit: note.visit || null,
+      reasonFor: (visitLabel) => noteReason(note, visitLabel),
+      date: note.visitDate || (appointment && appointment.pc_eventDate) || practiceToday()
+    });
+    const { place, reason, date, enc, encounterUuid, warnings } = made;
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id. Your note is kept as a draft on this device.' });
-
-    const warnings = [];
-    if (place.warning) warnings.push(place.warning);
-    if (bill.warning) warnings.push(bill.warning);
-    if (coordinator) {
-      if (!encounter.provider_id) warnings.push(COORDINATOR_NO_APPOINTMENT_WARNING);
-    } else if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     const payer = await getPayerCredentialing();
     const rows = await loadRows('encounter_billing');
     const record = clinicalRepo.buildEncounterBillingRecord({
@@ -15945,9 +15957,25 @@ const orderPlacementFor = async (client) => {
   const [records, attestations] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
   return orderReq.orderPlacementTargets({
     records, attestations, clientId: client.id,
-    labelFor: (r) => { const t = apptTypes.typeByKey(r.visit && r.visit.appointmentType); return t ? t.label : null; }
+    labelFor: (r) => {
+      if (r.ordersOnly && !r.note) return ORDERS_ONLY_REASON;
+      const t = apptTypes.typeByKey(r.visit && r.visit.appointmentType); return t ? t.label : null;
+    }
   });
 };
+// ── An orders-only visit (owner, 2026-11-22) ────────────────────────────────
+// "Like a standard practice": an order needs a visit, and when there is none
+// that fits, the chart opens a short ORDERS-ONLY one for today. It is the app's
+// visit record with `ordersOnly: true` and no note, over a plain OpenEMR
+// encounter. It is not a visit type (it bills nothing and has no place of its
+// own), it never asks to be signed while it has no note, and one per patient
+// per Georgia day is reused rather than stacked.
+const ORDERS_ONLY_REASON = 'Orders only';
+const isOpenOrdersOnly = (r) => !!r && r.ordersOnly === true && !r.note &&
+  String(r.noteStatus || '') !== clinicalNotes.NOTE_STATUS.VOIDED;
+const todaysOrdersOnlyVisit = (records, attestations, clientId, today) => (records || []).find(r =>
+  r && r.clientId === clientId && isOpenOrdersOnly(r) && String(r.date || '').slice(0, 10) === today &&
+  !(attestations || []).some(a => a && a.encounterUuid === r.encounterUuid && a.signedAt)) || null;
 // Who may place SOMETHING from the chart — the same three doors the route
 // checks (direct, under a protocol, a referral), so the button is never shown
 // to someone the route will refuse.
@@ -15961,6 +15989,47 @@ const canPlaceOrders = (user) => {
 // A double click or a retry while the first save is still running. One server
 // process; the stored key covers everything after the first save lands.
 const orderSubmitsInFlight = new Set();
+
+app.post('/api/clinical/patients/:clientId/encounters/orders-only', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    if (!canPlaceOrders(req.user)) {
+      return res.status(403).json({ error: 'Your clinical role does not place orders or referrals, so it does not open an orders-only visit.', code: 'ORDERS_NOT_PERMITTED' });
+    }
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found', code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    const today = practiceToday();
+    const [rows0, attestations] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+    const existing = todaysOrdersOnlyVisit(rows0, attestations, client.id, today);
+    if (existing) {
+      return res.json({ message: "Using today's orders-only visit.", encounterUuid: existing.encounterUuid, reused: true, warnings: [] });
+    }
+    const emr = openemr.forActor(req.user);
+    const actor = actorFromReq(req);
+    const made = await createAppEncounter({ emr, client, req, actor, visit: null, reasonFor: () => ORDERS_ONLY_REASON, date: today });
+    if (!made.encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id, so no visit was opened.', code: 'EMR_NO_ENCOUNTER_ID' });
+    const payer = await getPayerCredentialing();
+    const record = clinicalRepo.buildEncounterBillingRecord({
+      id: uuidv4(), clientId: client.id, puuid: client.openEmrPatientId, encounterUuid: made.encounterUuid, encounterEid: made.enc.eid,
+      reason: ORDERS_ONLY_REASON, date: today, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: null, visit: made.place.visit
+    });
+    record.ordersOnly = true;
+    record.posMissingReason = made.place.posCode ? null : (made.place.billingWarning || made.place.error || 'No place of service could be derived.');
+    // Read fresh: the OpenEMR call above is long enough for another save to land.
+    const rows = await loadRows('encounter_billing');
+    rows.push(record);
+    await db.set('encounter_billing', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'orders_only_visit_created', 'client', client.id, {
+      encounterUuid: made.encounterUuid, date: today
+    });
+    res.json({ message: 'Opened an orders-only visit for today.', encounterUuid: made.encounterUuid, reused: false, warnings: made.warnings });
+  } catch (error) {
+    console.error('Orders-only visit error:', error);
+    const f = clinicalRepo.emrFailureResponse(error) ||
+      { status: 500, body: { error: `The orders-only visit did not open: ${error.message}`, code: 'ORDERS_ONLY_FAILED' } };
+    res.status(f.status).json(f.body);
+  }
+});
 
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalWrite, async (req, res) => {
   let inFlightKey = null;
@@ -16032,6 +16101,25 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     if (afterSigning) {
       const gate = orderReq.afterSigningGate({ targets: (await orderPlacementFor(ctx.client)).targets, encounterUuid: ctx.encounterUuid });
       if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+    }
+    // ── A diagnosis picked inside the order form (owner, 2026-11-22) ──────
+    // ADDED to this draft visit's list, never a replacement (the coding PUT
+    // replaces both lists and resets the rendering provider, so it is not
+    // reused here). It lands only if the order does: the record is saved with
+    // the order below. A signed visit takes no new diagnosis.
+    const addDiagnoses = Array.isArray(placing.addDiagnoses) ? placing.addDiagnoses.filter(Boolean) : [];
+    let addedDiagnosisCodes = [];
+    if (addDiagnoses.length) {
+      if (afterSigning) {
+        return res.status(400).json({ error: 'This visit is signed, so a new diagnosis cannot be added to it. Open an orders-only visit for today instead.', code: 'ORDER_DX_NOT_SIGNED' });
+      }
+      const merged = clinicalRepo.mergeOrderDiagnoses(ctx.record.diagnoses, addDiagnoses);
+      if (merged.error) return res.status(400).json({ error: merged.error, code: merged.code });
+      addedDiagnosisCodes = merged.added;
+      if (addedDiagnosisCodes.length) {
+        ctx.record.diagnoses = merged.diagnoses;
+        ctx.record.updatedAt = new Date().toISOString();
+      }
     }
     // WHO or WHERE is resolved HERE, from ids, never from names typed in the
     // body: a colleague must be a real, active, licensed team member, and a saved
@@ -16261,7 +16349,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       orderReference: built.order.orderReference,
       medicareEnrollmentAcknowledged: !!built.order.medicareEnrollmentAcknowledgment,
       afterSigning: !!orderAddendum,
-      addendumId: orderAddendum ? orderAddendum.id : null
+      addendumId: orderAddendum ? orderAddendum.id : null,
+      diagnosesAddedToVisit: addedDiagnosisCodes
     });
     res.json({
       message: orderAddendum
@@ -16357,6 +16446,15 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
           requireStandingOrder: !clinicalRoles.can(req.user, C.ORDER_DIRECT),
           linked: !!client.openEmrPatientId,
           ...p,
+          // An orders-only visit can be opened by anyone who may place
+          // something, once the patient is in OpenEMR.
+          canCreateOrdersOnly: canPlaceOrders(req.user) && !!client.openEmrPatientId,
+          canAddDiagnoses: clinicalRoles.canClinicalWrite(req.user),
+          todaysOrdersOnly: await (async () => {
+            const [recs, atts] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+            const t = todaysOrdersOnlyVisit(recs, atts, client.id, practiceToday());
+            return t ? t.encounterUuid : null;
+          })(),
           emptyReason: client.openEmrPatientId ? p.emptyReason : 'NOT_LINKED',
           orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES,
           documentOrderTypes: orderReq.DOCUMENT_ORDER_TYPES
@@ -21660,8 +21758,11 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
     const awaiting = (r) => r.billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
     // A deleted (voided) encounter was never a visit: it listed as "Not coded".
     const voided = new Set(records.filter(r => r && r.noteStatus === 'voided').map(r => String(r.encounterUuid)));
+    // An orders-only visit with no note is not a visit waiting to be coded or
+    // signed (2026-11-22). It still lists under All.
+    const ordersOnly = new Set(records.filter(isOpenOrdersOnly).map(r => String(r.encounterUuid)));
     const filtered = rows.filter(r => !voided.has(String(r.encounterUuid))).filter(r => filter === 'all' ? true
-      : filter === 'open' ? (r.state !== 'signed' || awaiting(r))
+      : filter === 'open' ? ((r.state !== 'signed' && !ordersOnly.has(String(r.encounterUuid))) || awaiting(r))
       : filter === 'awaiting_billing' ? awaiting(r)
       : r.state === filter)
       .sort((a, b) => filter === 'awaiting_billing'

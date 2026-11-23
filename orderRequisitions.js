@@ -1107,6 +1107,7 @@ const orderPlacementTargets = ({ records, attestations, clientId, labelFor }) =>
     signedAt: att ? att.signedAt : null,
     signedByName: att && att.signedBy ? att.signedBy.name || null : null,
     afterSigning: !!att,
+    ordersOnly: r.ordersOnly === true && !r.note,
     diagnoses: (att ? signedDiagnoses(r, att) : (r.diagnoses || []))
       .filter(d => d && d.code).map(d => ({ code: d.code, description: d.description || '' }))
   });

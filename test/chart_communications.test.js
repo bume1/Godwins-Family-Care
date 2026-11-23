@@ -223,5 +223,5 @@ test('build: the note screen fills in the encounter date and always sends it (ow
   assert.match(page, /const toNote = \(\) => \(\{ \.\.\.\(f\.visitDate \? \{ visitDate: f\.visitDate \} : \{\}\), \.\.\.toNoteBody\(\) \}\);/);
   assert.match(page, /<Field label="Encounter Date">/);
   // The server dates the encounter from the note first.
-  assert.match(serverSrc, /const date = note\.visitDate \|\| \(appointment && appointment\.pc_eventDate\) \|\| practiceToday\(\);/);
+  assert.match(serverSrc, /date: note\.visitDate \|\| \(appointment && appointment\.pc_eventDate\) \|\| practiceToday\(\)/);
 });
