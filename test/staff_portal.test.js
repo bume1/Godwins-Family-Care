@@ -284,13 +284,16 @@ test('a shared file is never streamed by the app: the folder route returns Drive
   assert.ok(!/downloadFileBuffer|res\.send\(/.test(body));
 });
 
-test('a community care liaison lands in My GFC and sees only the enrollment summary of her own clients', async (t) => {
+test('a community care liaison lands on the Portal Hub (My GFC + Sales Portal) and sees only the enrollment summary of her own clients', async (t) => {
   const at = require('../accountTypes');
   const f = at.fieldsFor('liaison');
   assert.strictEqual(f.role, 'liaison');
   assert.strictEqual(f.hasClinicalAccess, false);
-  assert.strictEqual(at.landingFor(f), '/my');
-  assert.deepStrictEqual(at.hubTilesFor(f).map(x => x.id), ['myGfc'], 'the hub offers only My GFC, never the clinical workspace');
+  // The Sales Portal is hers (owner, 2026-11-23), so she lands on the hub
+  // where it sits beside My GFC. With it removed she lands in My GFC as before.
+  assert.strictEqual(at.landingFor(f), null);
+  assert.deepStrictEqual(at.hubTilesFor(f).map(x => x.id), ['myGfc', 'sales'], 'My GFC and the Sales Portal, never the clinical workspace');
+  assert.strictEqual(at.landingFor({ ...f, moduleAccess: { granted: [], removed: ['sales'] } }), '/my');
   assert.ok(require('../config').MFA_REQUIRED_ROLES.includes('liaison'), 'two-step sign-in: they read client names');
   const h = await mount(t);
   h.as(LIAISON);

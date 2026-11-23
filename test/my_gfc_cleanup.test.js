@@ -53,7 +53,8 @@ test('the hub lists what each staff member can open; clients and family get noth
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) assert.deepStrictEqual(ids(t), ['myGfc', 'clinical', 'ime'], t);
   const cg = at.hubTilesFor(Object.assign(at.fieldsFor('caregiver'), { licenseLevel: 'pca' }));
   assert.deepStrictEqual(cg.map(x => [x.id, x.path]), [['myGfc', '/caregiver']]);
-  assert.deepStrictEqual(ids('liaison'), ['myGfc']);
+  // The liaison's Sales Portal (owner, 2026-11-23).
+  assert.deepStrictEqual(ids('liaison'), ['myGfc', 'sales']);
   assert.deepStrictEqual(ids('client'), []);
   assert.deepStrictEqual(ids('family'), []);
 });

@@ -89,6 +89,7 @@ const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and
 const dxSuggestion = require('./dxSuggestion');   // Phase 4.1: diagnosis wording from the note; OpenEMR supplies the codes
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
+const salesPortal = require('./salesPortal');   // the Sales Portal's content, moved off the website (owner, 2026-11-23)
 const userFinancial = require('./userFinancialFields');   // the user fields that move money (owner, 2026-11-03)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
@@ -33660,6 +33661,13 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
   }
 });
 
+// The Sales Portal (owner, 2026-11-23): the Super Admin, managers, the
+// Community Care Liaison, and anyone granted the Sales module.
+const requireSalesPortal = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'sales'))) return next();
+  return res.status(403).json({ error: 'The Sales Portal is for the Community Care Liaison, managers and the Super Admin.', code: 'SALES_PORTAL_ONLY' });
+};
+
 // ============== ADMIN HUB ROUTES ==============
 
 // Admin hub HTML route
@@ -33751,6 +33759,15 @@ app.get('/account', (req, res) => {
 // exists that could.
 app.get('/audit', (req, res) => {
   res.sendFile(__dirname + '/public/audit.html');
+});
+
+// The Sales Portal (owner, 2026-11-23), moved off the public website. Shell
+// is public; GET /api/sales/portal is requireSalesPortal.
+app.get('/sales', (req, res) => {
+  res.sendFile(__dirname + '/public/sales.html');
+});
+app.get('/api/sales/portal', authenticateToken, requireSalesPortal, (req, res) => {
+  res.json(salesPortal.portal());
 });
 
 // Admin hub login endpoint (same as regular admin login)
