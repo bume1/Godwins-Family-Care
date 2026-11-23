@@ -33767,7 +33767,60 @@ app.get('/sales', (req, res) => {
   res.sendFile(__dirname + '/public/sales.html');
 });
 app.get('/api/sales/portal', authenticateToken, requireSalesPortal, (req, res) => {
-  res.json(salesPortal.portal());
+  // The pages open in a frame, which cannot carry the Bearer token, so the
+  // signed-in person gets a ticket naming this session (salesPortal.js).
+  res.json({ ...salesPortal.portal(), ticket: salesPortal.issueTicket(JWT_SECRET, { id: req.user.id, sid: req.session && req.session.id }) });
+});
+
+// A ticket only opens the Sales Portal, and only while the session it names is
+// still live and its owner still has the Sales module.
+const requireSalesTicket = async (req, res, next) => {
+  const deny = (status, msg) => res.status(status).type('html').send(`<!DOCTYPE html><meta charset="utf-8"><p style="font-family:system-ui,sans-serif;padding:24px">${msg} <a href="/sales" target="_top">Open the Sales Portal again</a>.</p>`);
+  const t = salesPortal.readTicket(JWT_SECRET, req.query.ticket);
+  if (!t.ok) return deny(401, 'This Sales Portal link has expired.');
+  try {
+    const sess = await sessions.check(t.sid);
+    if (!sess.ok || sess.row.userId !== t.uid) return deny(401, 'You have been signed out.');
+    const user = (await getUsers()).find(u => u.id === t.uid);
+    if (!user || user.accountStatus === 'inactive') return deny(401, 'You have been signed out.');
+    if (staffOffers.offerPending(user)) return deny(403, 'Please finish your offer letter first.');
+    if (!(user.role === config.ROLES.ADMIN || accountTypes.hasModule(user, 'sales'))) return deny(403, 'The Sales Portal is for the Community Care Liaison, managers and the Super Admin.');
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    req.salesTicket = req.query.ticket;
+    return next();
+  } catch (e) {
+    console.error('Sales portal ticket check failed:', e.message);
+    return deny(500, 'Something went wrong.');
+  }
+};
+
+// The email library reads the sequence engine's Notion feed. The feed URL
+// carries a shared token: read here, never sent to a browser.
+const salesEmailFeed = salesPortal.createFeed({ feedUrl: () => process.env.GFC_TEMPLATE_FEED_URL || '' });
+
+app.get('/sales/doc/emails/preview', requireSalesTicket, async (req, res) => {
+  res.type('html').send(await salesEmailFeed.preview(req.query.id));
+});
+app.get('/sales/doc/:id', requireSalesTicket, async (req, res) => {
+  try {
+    if (req.params.id === 'emails') {
+      const feed = await salesEmailFeed.templates(req.query.drafts === '1' ? 'all' : 'Active');
+      return res.type('html').send(salesPortal.renderEmails(feed, req.salesTicket));
+    }
+    const html = salesPortal.renderDoc(req.params.id, req.salesTicket);
+    if (html == null) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such Sales Portal page.</p>');
+    return res.type('html').send(html);
+  } catch (e) {
+    console.error('Sales portal page failed:', e.message);
+    return res.status(500).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">This page could not be loaded.</p>');
+  }
+});
+app.get('/sales/files/:name', requireSalesTicket, (req, res) => {
+  const p = salesPortal.filePath(req.params.name);
+  if (!p) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such file.</p>');
+  res.type(salesPortal.FILES[req.params.name].type);
+  return res.sendFile(p);
 });
 
 // Admin hub login endpoint (same as regular admin login)

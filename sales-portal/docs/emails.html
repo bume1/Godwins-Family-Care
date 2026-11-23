@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care - Email Copy Library</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #FAF7F2; color: #1a2a32; font-family: 'DM Sans', sans-serif; min-height: 100vh; }
+  .topbar { background: #022a37; color: #fff; padding: 11px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11.5px; letter-spacing: 0.12em; }
+  .topbar span { color: #b9cdd5; text-transform: uppercase; }
+  .topbar a { color: #F5CD85; text-decoration: none; font-weight: 700; text-transform: uppercase; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 44px 32px 90px; }
+
+  .masthead { border-bottom: 1px solid #d8cdb8; padding-bottom: 24px; margin-bottom: 26px; }
+  .eyebrow { font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase; color: #c9a44a; font-weight: 700; margin-bottom: 14px; }
+  h1 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: clamp(32px, 4.4vw, 46px); color: #033D50; line-height: 1.08; margin-bottom: 14px; }
+  h1 em { font-style: italic; color: #a8842f; }
+  .lede { font-size: 16.5px; line-height: 1.7; color: #3c4f58; max-width: 66ch; }
+  .live { display: inline-flex; align-items: center; gap: 9px; margin-top: 18px; font-size: 12.5px; font-weight: 600; color: #1c5b41; }
+  .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #2f9e6b; box-shadow: 0 0 0 3px rgba(47,158,107,.2); }
+  .live.stale { color: #7a4a12; }
+  .live.stale::before { background: #c9a44a; box-shadow: 0 0 0 3px rgba(201,164,74,.22); }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 11px; align-items: center; margin-bottom: 26px; padding: 15px 18px; background: #fff; border: 1px solid #e2dacb; border-radius: 10px; }
+  .filters label { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; color: #7d8c93; }
+  .filters select { font-family: 'DM Sans', sans-serif; font-size: 14px; color: #1a2a32; background: #FAF7F2; border: 1px solid #e2dacb; border-radius: 7px; padding: 8px 13px; cursor: pointer; }
+  .count { margin-left: auto; font-size: 13px; color: #7d8c93; }
+
+  .mail { background: #fff; border: 1px solid #e2dacb; border-radius: 12px; overflow: hidden; margin-bottom: 20px; box-shadow: 0 10px 30px -20px rgba(3,61,80,.4); }
+  .mail[hidden] { display: none; }
+  .mtop { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 13px 22px; background: #f3ece0; border-bottom: 1px solid #e2dacb; }
+  .pill { font-size: 10.5px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; padding: 4px 11px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+  .pill.ed { color: #1a6b52; } .pill.don { color: #1a3d6b; } .pill.well { color: #8a6a12; } .pill.def { color: #7d8c93; }
+  .pill.draft { color: #a8601b; background: rgba(201,164,74,.13); }
+  .who { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 16px; color: #7d8c93; }
+  .mact { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .stat { font-size: 11.5px; color: #7d8c93; white-space: nowrap; }
+  .mini { font-size: 12px; font-weight: 600; color: #033D50; background: #fff; border: 1px solid #d8cdb8; border-radius: 999px; padding: 7px 15px; cursor: pointer; font-family: 'DM Sans', sans-serif; }
+  .mini:hover { background: #f1e2be; }
+
+  .mbody { padding: 24px clamp(18px, 3vw, 32px) 28px; }
+  .lbl { display: block; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #c9a44a; font-weight: 700; margin-bottom: 6px; }
+  .subj { font-size: 16px; font-weight: 600; color: #1a2a32; line-height: 1.4; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #eee6d8; }
+  .mh { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 26px; line-height: 1.2; color: #033D50; margin-bottom: 18px; }
+  .blk { margin: 16px 0; }
+  .blk p { font-size: 16px; line-height: 1.72; color: #3c4f58; margin-bottom: 14px; }
+  .blk table { border-collapse: collapse; width: 100%; }
+  .cta { margin-top: 20px; padding: 17px 20px; background: #FAF7F2; border-left: 3px solid #c9a44a; border-radius: 0 9px 9px 0; }
+  .cta p { font-size: 16px; line-height: 1.7; color: #1a2a32; margin: 0; }
+  .sigline { margin-top: 22px; padding-top: 18px; border-top: 1px solid #eee6d8; font-size: 13px; line-height: 1.6; color: #8a979d; }
+
+  .note { background: #fff; border: 1px solid #e2dacb; border-left: 3px solid #c9a44a; border-radius: 0 11px 11px 0; padding: 22px 25px; margin-bottom: 20px; }
+  .note h3 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 21px; color: #033D50; margin-bottom: 9px; }
+  .note p { font-size: 15.5px; line-height: 1.7; color: #3c4f58; }
+  .note p + p { margin-top: 11px; }
+  .note code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; background: #f3ece0; padding: 2px 6px; border-radius: 4px; color: #033D50; }
+
+  .modal { position: fixed; inset: 0; background: rgba(2,42,55,.74); z-index: 99999; display: none; padding: clamp(10px, 3vw, 40px); }
+  .modal[open] { display: flex; align-items: center; justify-content: center; }
+  .mbox { background: #fff; border-radius: 12px; width: min(760px, 100%); height: min(88vh, 100%); display: flex; flex-direction: column; overflow: hidden; }
+  .mbar { display: flex; align-items: center; gap: 12px; padding: 12px 17px; border-bottom: 1px solid #e2dacb; background: #f3ece0; }
+  .mbar strong { font-size: 14px; color: #033D50; }
+  .mclose { margin-left: auto; background: none; border: none; font-size: 23px; line-height: 1; cursor: pointer; color: #7d8c93; padding: 2px 8px; }
+  .modal iframe { flex: 1; width: 100%; border: none; }
+
+  .foot { border-top: 1px solid #d8cdb8; margin-top: 40px; padding-top: 22px; font-size: 12.5px; color: #8a979d; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+
+  @media (max-width: 720px) { .count, .mact { margin-left: 0; } .wrap { padding: 32px 20px 70px; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="?gfc_doc=home">&larr;&nbsp;Sales Portal</a>
+  <span>Godwins Family Care &middot; Internal &middot; Confidential</span>
+  <a href="?logout=1">Log&nbsp;out</a>
+</div>
+
+<div class="wrap">
+
+  <div class="masthead">
+    <div class="eyebrow">Sales Portal &middot; Reference</div>
+    <h1>Email Copy <em>Library.</em></h1>
+    <p class="lede">Every automated email the sequence engine sends, exactly as the recipient reads it. The first email changes by facility type and by who the contact is. Follow-ups change by facility type. Know what a facility already received before you walk in.</p>
+    <!--LIVE-->
+  </div>
+
+  <!--BODY-->
+
+  <div class="note" style="margin-top:30px">
+    <h3>Changing the copy</h3>
+    <p>All of this lives in the <strong>Email Templates</strong> database in Notion. Change a subject line or a value prop there and this page updates within five minutes. Nothing to republish.</p>
+    <p>A row set to <strong>Draft</strong> is skipped by the engine, which is how an email is taken out of rotation without breaking anything.</p>
+  </div>
+
+  <div class="foot">
+    <span>Godwins Family Care &middot; Sequence Engine v4</span>
+    <span><!--READ--></span>
+  </div>
+</div>
+
+<div class="modal" id="pModal">
+  <div class="mbox">
+    <div class="mbar">
+      <strong id="pTitle">Preview</strong>
+      <button type="button" class="mclose" id="pClose" aria-label="Close">&times;</button>
+    </div>
+    <iframe id="pFrame" title="Email preview" src="about:blank"></iframe>
+  </div>
+</div>
+
+<script>
+(function () {
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.mail'));
+  var fCamp = document.getElementById('fCamp');
+  var fFac  = document.getElementById('fFac');
+  var cnt   = document.getElementById('tplCount');
+
+  function apply() {
+    var c = fCamp ? fCamp.value : '', f = fFac ? fFac.value : '', shown = 0;
+    cards.forEach(function (el) {
+      var ok = (!c || el.getAttribute('data-campaign') === c) &&
+               (!f || el.getAttribute('data-facility') === f);
+      el.hidden = !ok;
+      if (ok) shown++;
+    });
+    if (cnt) cnt.textContent = shown + (shown === 1 ? ' template' : ' templates');
+  }
+  if (fCamp) fCamp.addEventListener('change', apply);
+  if (fFac)  fFac.addEventListener('change', apply);
+
+  var modal = document.getElementById('pModal');
+  var frame = document.getElementById('pFrame');
+  var title = document.getElementById('pTitle');
+
+  function close() { modal.removeAttribute('open'); frame.src = 'about:blank'; }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.prev') : null;
+    if (b) {
+      if (title) title.textContent = b.getAttribute('data-name') || 'Preview';
+      frame.src = '<!--PREVIEW_BASE-->' + encodeURIComponent(b.getAttribute('data-id'));
+      modal.setAttribute('open', '');
+      return;
+    }
+    if (e.target === modal || e.target.id === 'pClose') close();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+}());
+</script>
+</body>

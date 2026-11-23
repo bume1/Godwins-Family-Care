@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care - Sales Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #FAF7F2; color: #1a2a32; font-family: 'DM Sans', sans-serif; min-height: 100vh; }
+  .topbar { background: #022a37; color: #fff; padding: 11px 20px; display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; letter-spacing: 0.12em; }
+  .topbar span { color: #b9cdd5; text-transform: uppercase; }
+  .topbar a { color: #F5CD85; text-decoration: none; font-weight: 700; text-transform: uppercase; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 32px 80px; }
+  .masthead { border-bottom: 1px solid #d8cdb8; padding-bottom: 24px; margin-bottom: 34px; }
+  .eyebrow { font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: #c9a44a; font-weight: 700; margin-bottom: 12px; }
+  h1 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 44px; color: #033D50; line-height: 1.05; margin-bottom: 10px; }
+  .subt { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 19px; color: #4a5a62; max-width: 620px; }
+  /* ---- Today area ---- */
+  .today { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 40px; align-items: start; }
+  .panel { background: #fff; border: 1px solid #d8cdb8; border-top: 4px solid #033D50; }
+  .panel.gold { border-top-color: #c9a44a; }
+  .panel-head { display:flex; align-items:baseline; gap:10px; padding: 18px 22px 0; }
+  .panel-head h2 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 26px; color: #033D50; flex: 1; }
+  .panel-head .pmeta { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #4a5a62; font-weight: 700; white-space: nowrap; }
+  .panel-body { padding: 12px 22px 20px; font-size: 14px; line-height: 1.6; color: #2c3c44; }
+  .pempty { font-size: 13px; color: #94a3b8; padding: 6px 0 2px; }
+  .pempty.err { color: #b91c1c; }
+  /* brief */
+  #brief h4 { font-family: 'Cormorant Garamond', serif; font-size: 18px; color: #033D50; margin: 12px 0 4px; }
+  #brief h4:first-child { margin-top: 2px; }
+  #brief p { margin: 0 0 10px; }
+  #brief b { color: #033D50; }
+  .brief-foot { border-top: 1px dashed #d8cdb8; margin-top: 10px; padding-top: 9px; font-size: 12px; color: #4a5a62; display:flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .brief-foot a { color: #033D50; font-weight: 700; text-decoration: none; }
+  /* task board */
+  .chips { display:flex; gap:6px; flex-wrap:wrap; padding: 10px 22px 0; }
+  .chip { border:1px solid #d8cdb8; background:#faf7f2; color:#033D50; font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; padding:4px 11px; border-radius:14px; cursor:pointer; }
+  .chip.on { background:#033D50; color:#F5CD85; border-color:#033D50; }
+  .tk-h { font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; font-weight:700; color:#4a5a62; margin:12px 0 4px; display:flex; gap:6px; align-items:center; }
+  .tk-h span { background:#e2e8f0; border-radius:8px; padding:0 6px; font-size:10px; }
+  .tk-h.overdue { color:#b91c1c; } .tk-h.overdue span { background:#fee2e2; }
+  .tk-h.today { color:#b45309; } .tk-h.today span { background:#ffedd5; }
+  .tk-h.done { cursor:pointer; } .tk-h.done em { font-style:normal; font-weight:400; text-transform:none; letter-spacing:0; color:#94a3b8; }
+  .tk { display:flex; gap:9px; align-items:flex-start; padding:7px 2px; border-bottom:1px solid #f0ead9; }
+  .tk-ck { margin-top:3px; cursor:pointer; }
+  .tk-body { flex:1; min-width:0; }
+  .tk-title { font-size:13.5px; font-weight:600; color:#1a2a32; line-height:1.3; }
+  .tk.overdue .tk-title { color:#b91c1c; }
+  .tk.done .tk-title { text-decoration:line-through; opacity:.5; }
+  .tk-meta { font-size:11.5px; color:#4a5a62; margin-top:2px; }
+  .tk-meta b { color:#033D50; }
+  .tk-note { font-size:11px; color:#6b5a33; background:#faf3e2; border-left:2px solid #c9a44a; padding:2px 6px; margin:3px 0; border-radius:0 4px 4px 0; }
+  .tk-lnk { font-size:10.5px; color:#7c3aed; margin-left:6px; text-decoration:none; }
+  .tk-x { border:0; background:none; color:#94a3b8; font-size:16px; cursor:pointer; line-height:1; padding:0 2px; }
+  .tk-x:hover { color:#b91c1c; }
+  .tk-add { display:flex; gap:6px; flex-wrap:wrap; border-top:1px dashed #d8cdb8; margin-top:12px; padding-top:12px; }
+  .tk-add input[type=text] { flex: 1 1 180px; border:1px solid #d8cdb8; background:#faf7f2; padding:7px 10px; font: 13px 'DM Sans',sans-serif; color:#1a2a32; }
+  .tk-add input[type=date], .tk-add select { border:1px solid #d8cdb8; background:#faf7f2; padding:7px 8px; font: 12.5px 'DM Sans',sans-serif; color:#1a2a32; }
+  .tk-add button { border:0; background:#033D50; color:#F5CD85; font: 700 11.5px 'DM Sans',sans-serif; letter-spacing:.12em; text-transform:uppercase; padding:8px 16px; cursor:pointer; }
+  .tk-add button:hover { background:#022a37; }
+  .toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#022a37; color:#fff; font-size:13px; padding:10px 18px; border-radius:6px; opacity:0; pointer-events:none; transition:opacity .25s; z-index:9000; max-width:88vw; }
+  .toast.show { opacity:1; }
+  .toast.err { background:#7f1d1d; }
+  /* cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px; }
+  .card { display: block; text-decoration: none; background: #fff; border: 1px solid #d8cdb8; border-top: 4px solid #c9a44a; padding: 32px 30px; transition: box-shadow .2s, transform .2s; }
+  .card:hover { box-shadow: 0 14px 40px rgba(3,61,80,0.14); transform: translateY(-3px); }
+  .card .num { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 30px; color: #c9a44a; line-height: 1; }
+  .card h2 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 25px; color: #033D50; margin: 10px 0 8px; }
+  .card p { font-size: 14px; color: #4a5a62; line-height: 1.55; }
+  .card .go { margin-top: 16px; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: #033D50; font-weight: 700; }
+  .note { margin-top: 40px; background: #f3ede2; border-left: 4px solid #c9a44a; padding: 16px 20px; font-size: 13px; color: #3a4a52; line-height: 1.6; }
+  .foot { margin-top: 40px; padding-top: 20px; border-top: 1px solid #d8cdb8; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #4a5a62; display: flex; justify-content: space-between; }
+  @media (max-width: 900px) { .today { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .cards { grid-template-columns: 1fr; } h1 { font-size: 34px; } .wrap { padding: 36px 20px 70px; } }
+</style>
+</head>
+<body>
+<style>
+#gfcNavBtn{position:fixed;top:54px;left:14px;z-index:9500;background:#022a37;color:#F5CD85;border:1px solid #c9a44a55;height:42px;border-radius:8px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;font-family:'DM Sans',system-ui,sans-serif;font-weight:700;letter-spacing:.08em;box-shadow:0 2px 10px rgba(2,42,55,.35)}
+#gfcNavBtn:hover{background:#033D50}
+#gfcNavScrim{position:fixed;inset:0;background:rgba(2,42,55,.45);z-index:9600;opacity:0;pointer-events:none;transition:opacity .2s}
+#gfcNav{position:fixed;top:0;left:0;bottom:0;width:min(680px,94vw);background:#022a37;z-index:9700;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;font-family:'DM Sans',system-ui,sans-serif;box-shadow:4px 0 24px rgba(0,0,0,.25)}
+.gfcnav-open #gfcNav{transform:none}
+.gfcnav-open #gfcNavScrim{opacity:1;pointer-events:auto}
+#gfcNav .gn-head{display:flex;align-items:center;gap:6px;padding:12px 14px;border-bottom:1px solid #ffffff1a}
+#gfcNav .gn-tab{background:none;border:1px solid #ffffff2a;color:#dce8ec;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+#gfcNav .gn-tab.on{background:#c9a44a;border-color:#c9a44a;color:#022a37}
+#gfcNav .gn-title{color:#F5CD85;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 2px}
+#gfcNav .gn-full{margin-left:auto;color:#F5CD85;font-size:11.5px;text-decoration:none;letter-spacing:.06em}
+#gfcNav .gn-full:hover{text-decoration:underline}
+#gfcNav .gn-close{background:none;border:0;color:#dce8ec;font-size:22px;cursor:pointer;padding:2px 8px;line-height:1}
+#gfcNav .gn-pane{flex:1;display:none;background:#FAF7F2}
+#gfcNav .gn-pane.on{display:block}
+#gfcNav .gn-pane iframe{width:100%;height:100%;border:0;display:block}
+#gfcNav .gn-foot{padding:9px 14px;font-size:11px;color:#9db6bf;border-top:1px solid #ffffff1a;display:flex;gap:14px;flex-wrap:wrap}
+#gfcNav .gn-foot a{color:#dce8ec;text-decoration:none}
+#gfcNav .gn-foot a:hover{color:#F5CD85}
+@media print{#gfcNav,#gfcNavBtn,#gfcNavScrim{display:none!important}}
+</style>
+<button id="gfcNavBtn" aria-label="Open the task board" title="Task Board">&#9776; Tasks</button>
+<div id="gfcNavScrim"></div>
+<nav id="gfcNav" aria-label="Work tools">
+  <div class="gn-head">
+    <span class="gn-title">Task Board</span>
+    <a class="gn-full" id="gfcNavFull" href="?gfc_doc=tasks">Open full screen &rarr;</a>
+    <button class="gn-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="gn-pane on" data-pane="tasks"><iframe data-src="?gfc_doc=tasks" title="Task Board"></iframe></div>
+  <div class="gn-foot"><a href="?gfc_doc=home">Home</a><a href="?gfc_doc=start">Start Here</a><a href="?gfc_doc=playbook">Playbook</a><a href="?gfc_doc=script">Script</a><a href="?gfc_doc=paysheet">Pay Sheet</a><a href="?gfc_doc=emails">Emails</a></div>
+</nav>
+<script>(function(){var r=document.documentElement,b=document.getElementById('gfcNavBtn'),n=document.getElementById('gfcNav'),s=document.getElementById('gfcNavScrim'),c=n.querySelector('.gn-close'),full=document.getElementById('gfcNavFull');
+if(window.self!==window.top){b.style.display='none';n.style.display='none';s.style.display='none';return;}
+function open(){r.classList.add('gfcnav-open');var f=n.querySelector('.gn-pane iframe');if(f&&!f.src)f.src=f.getAttribute('data-src');}
+function close(){r.classList.remove('gfcnav-open');}
+b.addEventListener('click',open);c.addEventListener('click',close);s.addEventListener('click',close);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+})();</script>
+  <div class="topbar"><span>Godwins Family Care &middot; Sales Portal</span><a href="?logout=1">Log out</a></div>
+  <div class="wrap">
+    <div class="masthead">
+      <div class="eyebrow">Godwins Family Care &middot; Sales Team</div>
+      <h1>Sales Portal</h1>
+      <div class="subt">Today's focus first, then your working resources. Study them before your first dial.</div>
+    </div>
+
+    <div class="panel" style="border-top:3px solid #c9a44a;margin-bottom:18px">
+      <div class="panel-head"><h2>Prospecting Map</h2><span class="pmeta"><a href="?gfc_doc=map" style="color:#033D50;font-weight:700;text-decoration:none">Open full screen &rarr;</a></span></div>
+      <div class="panel-body" style="padding:0">
+        <iframe id="homeMap" title="Prospecting Map" style="width:100%;height:72vh;min-height:520px;border:0;display:block;background:#FAF7F2"></iframe>
+      </div>
+    </div>
+
+    <div class="panel" style="border-top:3px solid #033D50;margin-bottom:18px">
+      <div class="panel-head"><h2>Scoreboard</h2><span class="pmeta" id="sb-meta">this week</span></div>
+      <div class="panel-body">
+        <div id="scoreboard"><div class="pempty">Loading activity...</div></div>
+        <div class="brief-foot">
+          <span>Points coach the work. They are not pay.</span>
+          <a href="https://calendar.google.com/calendar/u/0/appointments/AcZssZ1gYm1iblc5v3hBAeBxEZWzgD1dg0pT54jLH8E=" target="_blank" rel="noopener" style="color:#033D50;font-weight:700;text-decoration:none">Book time with Dr.&nbsp;Ume &rarr;</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="today" style="grid-template-columns:1fr">
+      <div class="panel gold">
+        <div class="panel-head"><h2>Sales Focus</h2><span class="pmeta" id="focus-meta">&nbsp;</span></div>
+        <div class="panel-body">
+          <div id="focus"><div class="pempty">Loading the board...</div></div>
+          <div class="brief-foot"><span>Built live from the sales task board.</span><a href="?gfc_doc=tasks" style="color:#033D50;font-weight:700;text-decoration:none">Open the full board &rarr;</a></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cards">
+      <a class="card" href="?gfc_doc=start" style="border-top-color:#033D50">
+        <div class="num">01</div>
+        <h2>Start Here</h2>
+        <p>New to the team? Six short sections: why we exist, what we sell, who we call, your week, the call, and how you're paid.</p>
+        <div class="go">Begin &rarr;</div>
+      </a>
+      <a class="card" href="?gfc_doc=playbook">
+        <div class="num">02</div>
+        <h2>Liaison Playbook</h2>
+        <p>How the work runs day to day: your people, your systems, the daily loop, your week, and the first ninety days.</p>
+        <div class="go">Open the playbook &rarr;</div>
+      </a>
+      <a class="card" href="?gfc_doc=script">
+        <div class="num">03</div>
+        <h2>Cold Call Script</h2>
+        <p>Talk tracks, decision makers, qualifying questions, and objection handling for every customer vertical: PCH, ILF, SNF, ALF and more.</p>
+        <div class="go">Open the script &rarr;</div>
+      </a>
+      <a class="card" href="?gfc_doc=paysheet">
+        <div class="num">04</div>
+        <h2>Liaison Pay Sheet</h2>
+        <p>What we sell, what a client is worth, the four ways a Community Care Liaison earns, and exactly how you get paid at every step.</p>
+        <div class="go">Open the pay sheet &rarr;</div>
+      </a>
+      <a class="card" href="?gfc_doc=emails">
+        <div class="num">05</div>
+        <h2>Email Copy Library</h2>
+        <p>Every automated email the engine sends, read live from Notion. Know exactly what a facility received before you walk in or pick up the phone.</p>
+        <div class="go">Open the library &rarr;</div>
+      </a>
+    </div>
+    <div class="note"><strong>Confidential.</strong> These materials are for authorized Godwins Family Care sales personnel only. Do not forward, screenshot, or share outside the team.</div>
+    <div class="foot"><span>Godwins Family Care</span><span>Internal &middot; Confidential</span></div>
+  </div>
+  <div id="toast" class="toast"></div>
+
+<script>
+/* Command Center backend — same endpoint the targeting map uses. */
+var CC_URL   = "https://script.google.com/macros/s/AKfycbwcQ557NqBAcUBDQb5H-ZDWp8UhomrxncwjTwMrQywk_J2Oh--8PqKfYEqL9cgyi-9_/exec";
+var CC_TOKEN = "462027f46656479cc2aa494d1c33ff6a29e41e25";
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function todayStr(){ var d=new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
+var toastT=null;
+function toast(m,err){ var t=document.getElementById('toast'); t.textContent=m; t.className='toast show'+(err?' err':''); clearTimeout(toastT); toastT=setTimeout(function(){ t.className='toast'; },3500); }
+function ccCall(body){ body.token=CC_TOKEN; return fetch(CC_URL,{method:'POST',body:JSON.stringify(body)}).then(function(r){return r.text();}).then(function(t){ try{ return JSON.parse(t); }catch(e){ throw new Error('bad response from the Command Center'); } }); }
+
+/* The map is the headline module now. Load it once the page has painted so the
+   scoreboard and focus panels are never waiting on it. */
+(function(){var m=document.getElementById('homeMap'); if(!m) return;
+  var go=function(){ if(!m.src) m.src='?gfc_doc=map&gfc_embed=1'; };
+  if(document.readyState==='complete') setTimeout(go,60); else window.addEventListener('load',function(){setTimeout(go,60);});
+})();
+
+/* ---------- Sales Focus (built from the sales task board, nothing else) ---------- */
+function fmtDue(d){ if(!/^\d{4}-\d{2}-\d{2}$/.test(d||'')) return d||''; var p=d.split('-'); return parseInt(p[1],10)+'/'+parseInt(p[2],10); }
+function loadFocus(){
+  ccCall({action:'task_list'}).then(function(res){
+    if(!res||!res.ok) throw new Error((res&&res.error)||'no response');
+    var td=todayStr(), tasks=res.tasks||[];
+    var over=[], today=[], week=[], byOwner={};
+    var wk=new Date(td+'T00:00:00'); wk.setDate(wk.getDate()+7); wk=wk.toISOString().slice(0,10);
+    tasks.forEach(function(t){ if(t.done) return;
+      byOwner[t.owner||'Unassigned']=(byOwner[t.owner||'Unassigned']||0)+1;
+      if(t.due<td) over.push(t); else if(t.due===td) today.push(t); else if(t.due<=wk) week.push(t); });
+    over.sort(function(a,b){return a.due<b.due?-1:1;}); today.sort(function(a,b){return (a.time||'')<(b.time||'')?-1:1;});
+    var open=over.length+today.length+week.length;
+    document.getElementById('focus-meta').textContent = (over.length+today.length)?((over.length?over.length+' overdue · ':'')+today.length+' due today'):'clear for prospecting';
+    var row=function(t,cls){ return '<div class="tk '+cls+'" style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox" data-uid="'+esc(t.uid)+'" title="Mark done" style="margin-top:4px;width:16px;height:16px;accent-color:#033D50;cursor:pointer"><div class="tk-body"><div class="tk-title">'+esc(t.title)+'</div><div class="tk-meta"><b>'+esc(fmtDue(t.due))+(t.time?' '+esc(t.time):'')+'</b>'+(t.owner?' &middot; '+esc(t.owner):'')+(t.facility?' &middot; '+esc(t.facility):'')+'</div></div></div>'; };
+    var h='';
+    if(over.length){ h+='<div class="tk-h overdue">Overdue <span>'+over.length+'</span></div>'; over.slice(0,5).forEach(function(t){h+=row(t,'overdue');}); if(over.length>5) h+='<div class="pempty">+'+(over.length-5)+' more on the board.</div>'; }
+    if(today.length){ h+='<div class="tk-h today">Due today <span>'+today.length+'</span></div>'; today.slice(0,5).forEach(function(t){h+=row(t,'today');}); }
+    if(!over.length&&!today.length) h+='<div class="pempty">Nothing overdue, nothing due today. Pull fresh leads from the map and prospect.</div>';
+    var own=Object.keys(byOwner).sort().map(function(o){return o+' '+byOwner[o];}).join(' &middot; ');
+    h+='<div class="tk-h" style="margin-top:14px">This week <span>'+week.length+'</span>'+(own?'<em style="font-style:normal;font-weight:400;text-transform:none;letter-spacing:0;color:#94a3b8;margin-left:auto">open: '+own+'</em>':'')+'</div>';
+    if(!over.length&&!today.length&&week.length){ h+=''; week.slice(0,5).forEach(function(t){h+=row(t,'');}); }
+    document.getElementById('focus').innerHTML=h;
+    Array.prototype.forEach.call(document.getElementById('focus').querySelectorAll('input[data-uid]'),function(cb){ cb.addEventListener('change',function(){ if(!cb.checked) return; cb.disabled=true; ccCall({action:'task_done',uid:cb.getAttribute('data-uid'),who:'Portal'}).then(function(r){ if(!r||!r.ok) throw new Error((r&&r.error)||'save failed'); toast('Task closed.'); loadFocus(); }).catch(function(e){ cb.checked=false; cb.disabled=false; toast('Could not close task: '+e.message,true); }); }); });
+  }).catch(function(e){ document.getElementById('focus').innerHTML='<div class="pempty err">Board unavailable: '+esc(e.message)+'</div>'; });
+}
+loadFocus();
+
+/* ---------- Scoreboard: activity by rep, from the prospecting sheet ---------- */
+var CONNECTOR_URL   = "https://script.google.com/macros/s/AKfycbzGTMmVz6O3W06ISQ2BwnYlWCTBe0UFhmS1Jyc2qbVRnF9H3GAcDWM2lttYjoN1c4Hs/exec";
+var CONNECTOR_TOKEN = "18027c1a0dc03a3e10afff3675084313fdcaff6e";
+var PTS = { 'Spoke with decision-maker':2, 'Meeting booked':10, 'Seminar or L&L booked':10 };
+function connGet(params){
+  return new Promise(function(resolve,reject){
+    var cb='gfcsb_'+(window._cbn=(window._cbn||0)+1)+'_'+String(Math.floor(performance.now()));
+    window[cb]=function(resp){ try{delete window[cb];}catch(e){} resolve(resp); };
+    var q='token='+encodeURIComponent(CONNECTOR_TOKEN)+'&callback='+cb+'&_='+String(Math.floor(performance.now()));
+    for(var k in params) q+='&'+k+'='+encodeURIComponent(params[k]);
+    var s=document.createElement('script'); s.src=CONNECTOR_URL+'?'+q;
+    s.onerror=function(){ reject(new Error('could not reach the prospecting sheet')); };
+    document.body.appendChild(s);
+  });
+}
+function weekStart(){ var d=new Date(); var wd=(d.getDay()+6)%7; d.setDate(d.getDate()-wd); d.setHours(0,0,0,0); return d; }
+/* 'YYYY-MM-DD' through new Date() is parsed as UTC, which lands on the previous day
+   in US time zones and silently drops the most recent day's calls. Parse it as local. */
+function parseLocalDate(s){ var m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(s).trim());
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  var d=new Date(s); return isNaN(d)?null:new Date(d.getFullYear(),d.getMonth(),d.getDate()); }
+/* What each logged outcome is worth. Shows in both states, because an empty week
+   is exactly when a rep needs to know what counts. No targets here on purpose. */
+function sbLegend(){
+  var items=[['Call or visit logged','1',0],['Reached the decision-maker','+2',0],['Meeting booked','+10',1],['Seminar or lunch-and-learn booked','+10',1]];
+  return '<div style="margin-top:16px;padding-top:14px;border-top:1px dashed #d8cdb8">'
+   +'<div style="font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:#6b7c85;font-weight:700;margin-bottom:10px">What counts</div>'
+   +'<div style="display:flex;flex-wrap:wrap;gap:8px">'
+   + items.map(function(it){ return '<span style="display:inline-flex;align-items:baseline;gap:7px;border:1px solid '+(it[2]?'#c9a44a':'#e2dacb')+';background:'+(it[2]?'#fffaf0':'#fff')+';padding:6px 11px;border-radius:999px;font-size:12.5px;color:#3a4a52">'
+     +'<b style="color:'+(it[2]?'#a8842f':'#033D50')+';font-size:13px">'+it[1]+'</b>'+it[0]+'</span>'; }).join('')
+   +'</div>'
+   +'<div style="margin-top:10px;font-size:12px;color:#6b7c85">One booked meeting is worth ten dials. Dials still count, and they are how you get the meeting.</div>'
+   +'</div>';
+}
+function loadScoreboard(){
+  connGet({}).then(function(resp){
+    if(!resp||!resp.ok) throw new Error((resp&&resp.error)||'no response');
+    var rows = resp.rows||resp.homes||resp.data||[];
+    var ws = weekStart(), people = {};
+    function bucket(n){ if(!people[n]) people[n]={touches:0,dm:0,meet:0,sem:0,pts:0}; return people[n]; }
+    rows.forEach(function(r){
+      var c = r.cells || r.c || r;
+      var who = String(c['Contacted By']||'').trim();
+      if(!who) return;
+      var ds = String(c['Date Contacted']||'').trim();
+      if(!ds) return;
+      var d = parseLocalDate(ds); if(!d || d < ws) return;
+      var res = String(c['Result']||'').trim();
+      var p = bucket(who);
+      p.touches++;
+      if(res==='Spoke with decision-maker') p.dm++;
+      if(res==='Meeting booked') p.meet++;
+      if(res==='Seminar or L&L booked') p.sem++;
+      p.pts += (PTS[res]||0) + 1;
+    });
+    var names = Object.keys(people).sort(function(a,b){ return people[b].pts-people[a].pts; });
+    if(!names.length){ document.getElementById('scoreboard').innerHTML='<div class="pempty">No calls logged yet this week. Log outcomes on the map and this fills in.</div>'+sbLegend(); document.getElementById('sb-meta').textContent='week of '+(ws.getMonth()+1)+'/'+ws.getDate(); return; }
+    var h='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">';
+    names.forEach(function(n,i){
+      var p=people[n];
+      h+='<div style="border:1px solid #d8cdb8;border-top:3px solid '+(i===0?'#c9a44a':'#033D50')+';background:#fff;padding:14px 16px">'
+       +'<div style="font-family:\'Cormorant Garamond\',serif;font-size:21px;color:#033D50">'+esc(n)+'</div>'
+       +'<div style="font-size:30px;font-weight:700;color:#c9a44a;line-height:1.1;margin:4px 0 10px">'+p.pts+'<span style="font-size:11px;color:#6b7c85;letter-spacing:.16em;text-transform:uppercase;font-weight:700"> pts</span></div>'
+       +'<div style="font-size:12.5px;color:#3a4a52;line-height:1.9">'
+       +'Touches <b>'+p.touches+'</b><br>Decision-maker convos <b>'+p.dm+'</b><br>Meetings booked <b>'+p.meet+'</b><br>Seminars / L&amp;L booked <b>'+p.sem+'</b>'
+       +'</div></div>';
+    });
+    h+='</div>'+sbLegend();
+    document.getElementById('scoreboard').innerHTML=h;
+    document.getElementById('sb-meta').textContent='week of '+(ws.getMonth()+1)+'/'+ws.getDate();
+  }).catch(function(e){
+    document.getElementById('scoreboard').innerHTML='<div class="pempty err">Activity unavailable: '+esc(e.message)+'</div>';
+  });
+}
+loadScoreboard();
+
+</script>
+</body>
+</html>
+
