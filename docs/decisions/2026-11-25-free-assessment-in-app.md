@@ -19,3 +19,27 @@
 ## Open for the owner
 - Point the website's "Free assessment" button at `https://app.godwinsfamilycarellc.com/assessment`. Then retire the WordPress form and its Apps Script.
 - **Automated eligibility checks are not built.** GFC has an Availity Essentials portal account, not API access. Checks stay manual.
+
+## Update, same day: every kind of patient (owner)
+
+The screen covered home care only. The owner asked that it screen primary care
+and psychiatric patients too, and patients seen in our clinics or by video, not
+only homebound ones.
+
+- "What kind of care" is now pick-all: Home care, Primary care, Mental health /
+  psychiatry, Not sure yet. Primary care or psychiatry asks where they want to
+  be seen (at home, at one of our clinics, by video, no preference).
+- Coverage is in the family's words (Original Medicare, Medicare Advantage,
+  Medigap, Medicaid, dual, Medicaid waiver for home care, employer or private
+  insurance, Marketplace, TRICARE, VA, long-term care insurance, paying
+  privately, no insurance, not sure) plus an optional plan name. Each answer
+  maps onto the intake's insuranceTypes at load, checked; TRICARE, no insurance
+  and not sure map to none and stay on the lead.
+- These three lists live in assessmentRequests.js and the page reads them from
+  GET /api/assessment/options, so the form cannot offer what the server refuses.
+- Two-person assist is only asked when home care is on the table.
+- New fit flags: home care with no payer that covers it (Medicare and health
+  plans do not), medical care with no insurance named, and bed-bound but asking
+  for clinic visits. Bed-bound for a house call is not flagged.
+- Primary care and psychiatry both convert to the clinical line (IHPC); with
+  home care, BOTH.

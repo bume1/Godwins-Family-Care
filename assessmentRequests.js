@@ -10,7 +10,8 @@
 //
 // SHORT ON PURPOSE (owner, 2026-11-25): "only ask what's absolutely
 // necessary... boom, boom, boom, submit." Who is asking, who the care is
-// for, where they live, what they want, how it is paid for, and a few fit
+// for, where they live, what they want (home care, primary care, psychiatry;
+// at home, in a clinic or by video), how it is paid for, and a few fit
 // questions (bed-bound, two-person assist, memory). Everything else is asked
 // at intake, after the office has called.
 //
@@ -19,29 +20,72 @@
 // and when it is a fit they convert it into a client at intake_pending.
 // ============================================================================
 
-// The answers use the intake's own option catalogs (public/intake-fields.js),
-// so a converted lead carries straight across. A second copy of the options
+// Most answers use the intake's own option catalogs (public/intake-fields.js),
+// so a converted lead carries straight across. A second copy of those options
 // is how the two start to differ.
 const IF = require('./public/intake-fields.js');
-const OPTIONS = Object.freeze({
+const OPTIONS_FROM_INTAKE = {
   relationship: IF.OPTIONS.contactRelationship,
   usState: IF.OPTIONS.usState,
-  servicePath: IF.OPTIONS.servicePath,
-  insuranceTypes: IF.OPTIONS.insuranceTypes,
   medicaidWaiver: IF.OPTIONS.medicaidWaiver,
   ambulation: IF.OPTIONS.adlWalking,
   twoPersonAssist: IF.OPTIONS.twoPersonAssist,
   cognitionLevel: IF.OPTIONS.cognitionLevel,
   urgency: IF.OPTIONS.urgency
-});
-for (const [k, v] of Object.entries(OPTIONS)) {
+};
+for (const [k, v] of Object.entries(OPTIONS_FROM_INTAKE)) {
   if (!Array.isArray(v) || !v.length) throw new Error(`assessmentRequests: intake-fields has no option list for ${k}`);
 }
+
+// THE SCREEN COVERS EVERY KIND OF PATIENT, NOT ONLY HOME CARE (owner,
+// 2026-11-25): home care, primary care and psychiatric care, seen at home, in
+// one of our clinics or by video. The intake's servicePath only knows "Home
+// Care / In-Home Primary Care / Both", so these three lists are declared here,
+// each answer MAPPED onto the intake's own vocabulary for conversion. The
+// mapping is checked at load, so a renamed intake option fails loudly.
+const HOME_CARE = 'Home care';
+const PRIMARY_CARE = 'Primary care';
+const PSYCH = 'Mental health / psychiatry';
+const CARE_TYPES = Object.freeze([HOME_CARE, PRIMARY_CARE, PSYCH, 'Not sure yet']);
+const MEDICAL_TYPES = Object.freeze([PRIMARY_CARE, PSYCH]);
+// Where a medical or psychiatric visit would happen. Not asked for home care,
+// which is always at home.
+const VISIT_SETTINGS = Object.freeze(['At home', 'At one of our clinics', 'By video', 'No preference']);
+
+// Coverage in the words a family uses, each mapped to the intake's
+// insuranceTypes (null = the intake has no matching box; the answer stays on
+// the lead for the office to read).
+const COVERAGE_TO_INTAKE = Object.freeze({
+  'Original Medicare': 'Medicare Part A & B',
+  'Medicare Advantage': 'Medicare Advantage',
+  'Medicare supplement (Medigap)': 'Medicare Part A & B',
+  'Medicaid': 'Medicaid',
+  'Both Medicare and Medicaid': 'Dual eligible',
+  'Medicaid waiver for home care': 'Medicaid',
+  'Employer or private health insurance': 'Commercial insurance',
+  'Marketplace plan (Healthcare.gov)': 'Commercial insurance',
+  'TRICARE': null,
+  'VA benefits': 'VA benefits',
+  'Long-term care insurance': 'Long-term care insurance',
+  'Paying privately': 'Private pay only',
+  'No insurance': null,
+  'Not sure': null
+});
+const COVERAGE = Object.freeze(Object.keys(COVERAGE_TO_INTAKE));
+for (const [k, v] of Object.entries(COVERAGE_TO_INTAKE)) {
+  if (v !== null && !IF.OPTIONS.insuranceTypes.includes(v)) throw new Error(`assessmentRequests: coverage "${k}" maps to "${v}", which is not an intake insuranceTypes option`);
+}
+// The answers that mean Medicaid, so the waiver question applies.
+const MEDICAID_TYPES = Object.freeze(['Medicaid', 'Both Medicare and Medicaid', 'Medicaid waiver for home care']);
+// What actually pays for non-medical home care. Medicare and ordinary health
+// plans do not, which is the most common reason a home care lead falls through.
+const PAYS_HOME_CARE = Object.freeze(['Medicaid', 'Both Medicare and Medicaid', 'Medicaid waiver for home care', 'VA benefits', 'Long-term care insurance', 'Paying privately']);
+const NO_COVERAGE_NAMED = Object.freeze(['No insurance', 'Not sure']);
+
+const OPTIONS = Object.freeze({ ...OPTIONS_FROM_INTAKE, careTypes: CARE_TYPES, visitSetting: VISIT_SETTINGS, coverage: COVERAGE });
 // Who is filling it in. Not an intake question (the intake is always the
-// client's own record), so it is the one list declared here.
+// client's own record), so it is declared here too.
 const WHO = Object.freeze(['client', 'family']);
-// The insurance answers that mean Medicaid, so the waiver question applies.
-const MEDICAID_TYPES = Object.freeze(['Medicaid', 'Dual eligible']);
 
 // Where the office is with a lead. A lead is never deleted; "not a fit" and
 // "converted" are where it ends.
@@ -129,24 +173,39 @@ function normalizeAssessment(body, { today } = {}) {
   if (phone && !phoneOk(phone)) return fail('phone', 'ASSESSMENT_PHONE', 'Enter a 10-digit phone number.');
   if (!email && !phone) return fail('phone', 'ASSESSMENT_CONTACT_REQUIRED', 'Give us a phone number or an email address so we can reach you.');
 
-  const servicePath = pickOne(b, 'servicePath', OPTIONS.servicePath, fail, true, 'Choose the kind of care you are interested in.');
-  if (servicePath.error) return servicePath.error;
-  const insurance = pickMany(b, 'insuranceTypes', OPTIONS.insuranceTypes, fail);
-  if (insurance.error) return insurance.error;
-  if (!insurance.value.length) return fail('insuranceTypes', 'ASSESSMENT_REQUIRED', 'Choose how care would be paid for. Pick "Private pay only" if there is no coverage.');
+  // What they want. More than one is fine: home care plus a doctor is common.
+  const care = pickMany(b, 'careTypes', CARE_TYPES, fail);
+  if (care.error) return care.error;
+  if (!care.value.length) return fail('careTypes', 'ASSESSMENT_REQUIRED', 'Choose the kind of care you are interested in. Pick "Not sure yet" if you are not sure.');
+  const wantsHomeCare = care.value.includes(HOME_CARE) || care.value.includes('Not sure yet');
+  const wantsMedical = care.value.some(t => MEDICAL_TYPES.includes(t));
+  let visitSetting = '';
+  if (wantsMedical) {
+    const v = pickOne(b, 'visitSetting', VISIT_SETTINGS, fail, true, 'Tell us where you would like to be seen.');
+    if (v.error) return v.error;
+    visitSetting = v.value;
+  }
+
+  const coverage = pickMany(b, 'coverage', COVERAGE, fail);
+  if (coverage.error) return coverage.error;
+  if (!coverage.value.length) return fail('coverage', 'ASSESSMENT_REQUIRED', 'Choose how care would be paid for. Pick "Not sure" if you do not know.');
   let medicaidWaiver = '';
-  if (insurance.value.some(t => MEDICAID_TYPES.includes(t))) {
+  if (coverage.value.some(t => MEDICAID_TYPES.includes(t))) {
     const w = pickOne(b, 'medicaidWaiver', OPTIONS.medicaidWaiver, fail, false);
     if (w.error) return w.error;
     medicaidWaiver = w.value;
   }
+  const planName = clean(b.planName, 120);
 
+  // Fit questions. Two-person assist is a home care staffing question, so it
+  // is only asked when home care is on the table.
   const fit = {};
-  for (const [key, missing] of [
-    ['ambulation', 'Tell us how they get around.'],
-    ['twoPersonAssist', 'Tell us whether moving them takes two people.'],
-    ['cognitionLevel', 'Tell us about any memory or thinking concerns.']
+  for (const [key, missing, ask] of [
+    ['ambulation', 'Tell us how they get around.', true],
+    ['twoPersonAssist', 'Tell us whether moving them takes two people.', wantsHomeCare],
+    ['cognitionLevel', 'Tell us about any memory or thinking concerns.', true]
   ]) {
+    if (!ask) continue;
     const r = pickOne(b, key, OPTIONS[key], fail, true, missing);
     if (r.error) return r.error;
     fit[key] = r.value;
@@ -159,8 +218,8 @@ function normalizeAssessment(body, { today } = {}) {
       who,
       client: { firstName: clientFirst, lastName: clientLast, dob, address: { line1, city, state: state.value, zip: zip.slice(0, 5) } },
       submitter: { firstName: submitterFirst, lastName: submitterLast, isClient, relationship, email, phone },
-      care: { servicePath: servicePath.value },
-      coverage: { insuranceTypes: insurance.value, medicaidWaiver },
+      care: { careTypes: care.value, visitSetting },
+      coverage: { types: coverage.value, planName, medicaidWaiver },
       fit,
       schedule: { urgency: urgency.value },
       familyNote: cleanText(b.notes, 1000)
@@ -168,16 +227,26 @@ function normalizeAssessment(body, { today } = {}) {
   };
 }
 
-// Answers that usually mean GFC cannot safely staff the case, flagged for the
-// office to look at on the call. A flag never declines anyone: a family may
-// have a second person in the home, and that is a conversation.
+// Answers that usually mean a lead will not work out, flagged for the office
+// to look at on the call. A flag never declines anyone: a family may have a
+// second person in the home or savings to pay privately, and that is a
+// conversation.
 function fitFlags(row) {
   const f = row.fit || {};
+  const types = (row.care && row.care.careTypes) || [];
+  const cov = (row.coverage && row.coverage.types) || [];
+  const homeCare = types.includes(HOME_CARE);
+  const medical = types.some(t => MEDICAL_TYPES.includes(t));
   const out = [];
-  if (f.ambulation === 'Bed-bound') out.push('Bed-bound');
+  if (f.ambulation === 'Bed-bound') {
+    if (homeCare) out.push('Bed-bound');
+    else if (row.care.visitSetting === 'At one of our clinics') out.push('Bed-bound but asked for clinic visits');
+  }
   if (f.twoPersonAssist === 'Yes routinely') out.push('Needs two-person assist');
   else if (f.twoPersonAssist === 'Sometimes') out.push('Sometimes needs two-person assist');
   if (f.cognitionLevel === 'Significant') out.push('Significant memory concerns');
+  if (homeCare && !cov.some(c => PAYS_HOME_CARE.includes(c))) out.push('Home care, but no way to pay for it named (Medicare and health plans do not cover it)');
+  if (medical && cov.every(c => NO_COVERAGE_NAMED.includes(c))) out.push('Medical care, but no insurance named');
   return out;
 }
 
@@ -231,13 +300,16 @@ function applyUpdate(row, { status, note }, { at, by }) {
   return next;
 }
 
-// The free assessment's answer about what service they want, mapped to the
-// service line the intake starts on. "Not sure" leaves it unset, as a sign-up
-// does, so the intake's own first step asks.
-function serviceLineFor(servicePath) {
-  if (servicePath === 'In-Home Primary Care') return 'IHPC';
-  if (servicePath === 'Both') return 'BOTH';
-  if (servicePath === 'Home Care') return 'PHC';
+// What they asked for, mapped to the service line the intake starts on.
+// Primary care and psychiatry are both the clinical line. "Not sure yet" on
+// its own leaves it unset, as a sign-up does, so the intake's first step asks.
+function serviceLineFor(careTypes) {
+  const t = Array.isArray(careTypes) ? careTypes : [];
+  const home = t.includes(HOME_CARE);
+  const medical = t.some(x => MEDICAL_TYPES.includes(x));
+  if (home && medical) return 'BOTH';
+  if (home) return 'PHC';
+  if (medical) return 'IHPC';
   return null;
 }
 
@@ -261,8 +333,14 @@ function intakeFor(row) {
   // is the primary contact.
   if (s.isClient) put(out, 'phone', s.phone);
   else out.primaryContact = { name: submitterName(row), relationship: s.relationship || '', phone: s.phone || '', email: s.email || '', preferredChannel: '' };
-  put(out, 'insuranceTypes', row.coverage.insuranceTypes);
+  const cov = row.coverage.types || [];
+  put(out, 'insuranceTypes', [...new Set(cov.map(c => COVERAGE_TO_INTAKE[c]).filter(Boolean))]);
   if (row.coverage.medicaidWaiver) out.medicaid = { waiver: row.coverage.medicaidWaiver };
+  // The plan name lands on the plan it most likely belongs to.
+  if (row.coverage.planName) {
+    if (cov.includes('Medicare Advantage')) out.medicare = { advantagePlan: row.coverage.planName };
+    else if (cov.some(c => COVERAGE_TO_INTAKE[c] === 'Commercial insurance')) out.commercial = { planName: row.coverage.planName };
+  }
   out.adl = {};
   put(out.adl, 'ambulation', row.fit.ambulation);
   if (!Object.keys(out.adl).length) delete out.adl;
@@ -284,7 +362,7 @@ function staffRow(row) {
 }
 
 module.exports = {
-  OPTIONS, STATUSES, OPEN_STATUSES, SETTABLE_STATUSES,
+  OPTIONS, COVERAGE_TO_INTAKE, STATUSES, OPEN_STATUSES, SETTABLE_STATUSES,
   normalizeAssessment, buildRow, sortForQueue, checkUpdate, applyUpdate,
   serviceLineFor, intakeFor, fitFlags, staffRow, clientName, submitterName
 };

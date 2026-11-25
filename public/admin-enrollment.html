@@ -438,8 +438,10 @@
           {line('Date of birth', r.client.dob)}
           {line('Address', [a.line1, a.city, `${a.state || ''} ${a.zip || ''}`.trim()].filter(Boolean).join(', '))}
           {line('Filled out by', r.submitter.isClient ? 'the client' : [r.submitterName, r.submitter.relationship].filter(Boolean).join(', '))}
-          {line('Wants', r.care.servicePath)}
-          {line('Coverage', r.coverage.insuranceTypes)}
+          {line('Wants', r.care.careTypes)}
+          {line('Where', r.care.visitSetting)}
+          {line('Coverage', r.coverage.types)}
+          {line('Plan name', r.coverage.planName)}
           {line('Medicaid waiver', r.coverage.medicaidWaiver)}
           {line('Gets around', r.fit.ambulation)}
           {line('Two-person assist', r.fit.twoPersonAssist)}
@@ -494,7 +496,7 @@
                       <div className="font-semibold text-primary-500">{r.clientName} <span className="chip" style={{ marginLeft: 6 }}>{r.statusLabel}</span>{r.schedule.urgency ? <span className="text-sm font-normal text-gray-500"> · {r.schedule.urgency}</span> : null}</div>
                       <div className="text-sm text-gray-600">{r.submitter.isClient ? 'Asked for themselves' : `Asked by ${r.submitterName}`}{[r.submitter.phone, r.submitter.email].filter(Boolean).length ? ` · ${[r.submitter.phone, r.submitter.email].filter(Boolean).join(' · ')}` : ''}</div>
                       <div className="text-xs text-gray-500">Received {fmtWhen(r.createdAt)}</div>
-                      <div className="text-sm text-gray-700">{[r.care.servicePath, (r.coverage.insuranceTypes || []).join(', '), r.client.address && r.client.address.zip].filter(Boolean).join(' · ')}</div>
+                      <div className="text-sm text-gray-700">{[(r.care.careTypes || []).join(', ') + (r.care.visitSetting ? ` (${r.care.visitSetting.toLowerCase()})` : ''), (r.coverage.types || []).join(', '), r.client.address && r.client.address.zip].filter(Boolean).join(' · ')}</div>
                       {r.fitFlags && r.fitFlags.length > 0 && <div className="text-sm text-amber-700">Check fit: {r.fitFlags.join(', ')}</div>}
                     </div>
                     <button className="btn btn-ghost" onClick={() => setOpen({ ...open, [r.id]: !open[r.id] })}>{open[r.id] ? 'Hide Details' : 'Show Details'}</button>

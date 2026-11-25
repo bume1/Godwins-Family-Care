@@ -18,22 +18,28 @@ const pick = (k) => A.OPTIONS[k][0];
 const base = (o) => Object.assign({
   who: 'family', clientFirst: 'Ann', clientLast: 'Lee', dob: '1940-03-02', addressLine1: '1 Main St', city: 'Marietta', state: 'GA', zip: '30060',
   submitterFirst: 'Bo', submitterLast: 'Lee', relationship: pick('relationship'), phone: '(404) 555-0100',
-  servicePath: 'Home Care', insuranceTypes: ['Long-term care insurance'], ambulation: 'Uses walker / cane', twoPersonAssist: 'No', cognitionLevel: 'Mild'
+  careTypes: ['Home care'], coverage: ['Long-term care insurance'], ambulation: 'Uses walker / cane', twoPersonAssist: 'No', cognitionLevel: 'Mild'
 }, o || {});
 const norm = (o) => A.normalizeAssessment(base(o), { today: TODAY });
 
-test('the form stays short: nine option questions, all from the intake catalogs', () => {
-  assert.ok(Object.keys(A.OPTIONS).length <= 9, 'the owner asked for only what is absolutely necessary');
+test('the form stays short, and its lists are the intake catalogs or map onto them', () => {
+  assert.ok(Object.keys(A.OPTIONS).length <= 10, 'the owner asked for only what is absolutely necessary');
+  const own = ['careTypes', 'visitSetting', 'coverage'];
   for (const [k, list] of Object.entries(A.OPTIONS)) {
     assert.ok(Array.isArray(list) && list.length, k);
-    assert.ok(Object.values(IF.OPTIONS).includes(list), `${k} must be the intake-fields catalog itself`);
+    if (!own.includes(k)) assert.ok(Object.values(IF.OPTIONS).includes(list), `${k} must be the intake-fields catalog itself`);
   }
+  // Every coverage answer maps to an intake insurance box, or deliberately to none.
+  assert.deepEqual(Object.keys(A.COVERAGE_TO_INTAKE), A.OPTIONS.coverage);
+  for (const v of Object.values(A.COVERAGE_TO_INTAKE)) assert.ok(v === null || IF.OPTIONS.insuranceTypes.includes(v), v);
   assert.ok(!/const\s+OPTIONS\s*=/.test(strip(page)), 'the public page names no option list of its own');
-  assert.ok(page.includes('/intake-fields.js'));
-  // The screening answers the owner named must be on offer.
+  assert.ok(page.includes("/api/assessment/options"), 'the page reads its lists from the server');
+  // The owner's screening scope: every kind of patient, every place they are seen.
+  for (const t of ['Home care', 'Primary care', 'Mental health / psychiatry']) assert.ok(A.OPTIONS.careTypes.includes(t), t);
+  for (const t of ['At home', 'At one of our clinics', 'By video']) assert.ok(A.OPTIONS.visitSetting.includes(t), t);
+  for (const t of ['Original Medicare', 'Medicare Advantage', 'Medicaid', 'Medicaid waiver for home care', 'Employer or private health insurance', 'TRICARE', 'VA benefits', 'Long-term care insurance', 'Paying privately']) assert.ok(A.OPTIONS.coverage.includes(t), t);
   assert.ok(A.OPTIONS.ambulation.includes('Bed-bound'));
   assert.ok(A.OPTIONS.twoPersonAssist.includes('Yes routinely'));
-  for (const t of ['Medicare Part A & B', 'Medicaid', 'Long-term care insurance', 'Private pay only']) assert.ok(A.OPTIONS.insuranceTypes.includes(t), t);
 });
 
 test('the required answers, each refused naming its field', () => {
@@ -41,11 +47,20 @@ test('the required answers, each refused naming its field', () => {
   const cases = [[{ who: '' }, 'who'], [{ clientFirst: '' }, 'clientFirst'], [{ clientLast: ' ' }, 'clientLast'], [{ dob: '' }, 'dob'],
     [{ dob: '2027-01-01' }, 'dob'], [{ dob: '1940-13-40' }, 'dob'], [{ addressLine1: '' }, 'addressLine1'], [{ city: '' }, 'city'], [{ state: '' }, 'state'],
     [{ zip: '300' }, 'zip'], [{ submitterFirst: '' }, 'submitterFirst'], [{ relationship: '' }, 'relationship'], [{ phone: '' }, 'phone'],
-    [{ phone: '555' }, 'phone'], [{ email: 'nope' }, 'email'], [{ servicePath: '' }, 'servicePath'], [{ insuranceTypes: [] }, 'insuranceTypes'],
+    [{ phone: '555' }, 'phone'], [{ email: 'nope' }, 'email'], [{ careTypes: [] }, 'careTypes'], [{ coverage: [] }, 'coverage'],
     [{ ambulation: '' }, 'ambulation'], [{ twoPersonAssist: '' }, 'twoPersonAssist'], [{ cognitionLevel: '' }, 'cognitionLevel']];
   for (const [over, field] of cases) assert.equal(norm(over).field, field, JSON.stringify(over));
   assert.ok(norm({ phone: '', email: 'bo@example.test' }).value, 'an email alone is a way to reach them');
   assert.ok(norm({ urgency: '' }).value, 'how soon is optional');
+});
+
+test('medical and psychiatric leads say where they want to be seen; two-person assist is only a home care question', () => {
+  assert.equal(norm({ careTypes: ['Primary care'] }).field, 'visitSetting');
+  const clinic = norm({ careTypes: ['Mental health / psychiatry'], visitSetting: 'At one of our clinics', twoPersonAssist: '' }).value;
+  assert.equal(clinic.care.visitSetting, 'At one of our clinics');
+  assert.ok(!('twoPersonAssist' in clinic.fit), 'not asked of a clinic patient');
+  assert.equal(norm({ careTypes: ['Home care'], visitSetting: 'By video' }).value.care.visitSetting, '', 'home care is always at home');
+  assert.equal(norm({ careTypes: ['Home care', 'Primary care'], visitSetting: 'At home', twoPersonAssist: '' }).field, 'twoPersonAssist');
 });
 
 test('a client filling it in for themselves is not asked their name twice', () => {
@@ -58,15 +73,15 @@ test('a client filling it in for themselves is not asked their name twice', () =
 test('an answer that was never on the list is refused by name, never dropped', () => {
   const r = norm({ urgency: 'Yesterday' });
   assert.equal(r.code, 'ASSESSMENT_BAD_OPTION'); assert.equal(r.field, 'urgency');
-  assert.equal(norm({ insuranceTypes: ['Medicaid', 'Lottery'] }).field, 'insuranceTypes');
+  assert.equal(norm({ coverage: ['Medicaid', 'Lottery'] }).field, 'coverage');
   assert.equal(norm({ state: 'ZZ' }).field, 'state');
-  assert.deepEqual(norm({ insuranceTypes: ['Medicaid', 'Medicaid'] }).value.coverage.insuranceTypes, ['Medicaid']);
+  assert.deepEqual(norm({ coverage: ['Medicaid', 'Medicaid'] }).value.coverage.types, ['Medicaid']);
 });
 
 test('the waiver question only counts for Medicaid', () => {
-  assert.equal(norm({ insuranceTypes: ['Medicaid'], medicaidWaiver: 'CCSP' }).value.coverage.medicaidWaiver, 'CCSP');
-  assert.equal(norm({ insuranceTypes: ['Medicare Part A & B'], medicaidWaiver: 'CCSP' }).value.coverage.medicaidWaiver, '');
-  assert.equal(norm({ insuranceTypes: ['Medicaid'], medicaidWaiver: 'Made up' }).field, 'medicaidWaiver');
+  assert.equal(norm({ coverage: ['Medicaid waiver for home care'], medicaidWaiver: 'CCSP' }).value.coverage.medicaidWaiver, 'CCSP');
+  assert.equal(norm({ coverage: ['Original Medicare'], medicaidWaiver: 'CCSP' }).value.coverage.medicaidWaiver, '');
+  assert.equal(norm({ coverage: ['Medicaid'], medicaidWaiver: 'Made up' }).field, 'medicaidWaiver');
 });
 
 test('fit flags point the office at a hard case, and never decline anyone', () => {
@@ -77,6 +92,13 @@ test('fit flags point the office at a hard case, and never decline anyone', () =
   const r = row({ ambulation: 'Bed-bound' });
   assert.equal(r.status, 'new', 'a flag does not change the status');
   assert.deepEqual(A.staffRow(r).fitFlags, ['Bed-bound']);
+  // Bed-bound is fine for a house call, and a reason to call about a clinic visit.
+  assert.deepEqual(A.fitFlags(row({ careTypes: ['Primary care'], visitSetting: 'At home', ambulation: 'Bed-bound', coverage: ['Original Medicare'] })), []);
+  assert.deepEqual(A.fitFlags(row({ careTypes: ['Primary care'], visitSetting: 'At one of our clinics', ambulation: 'Bed-bound', coverage: ['Original Medicare'] })), ['Bed-bound but asked for clinic visits']);
+  // The commonest dead end: home care with only Medicare or a health plan.
+  assert.match(A.fitFlags(row({ coverage: ['Original Medicare', 'Employer or private health insurance'] })).join(), /Home care, but no way to pay/);
+  assert.deepEqual(A.fitFlags(row({ coverage: ['Original Medicare', 'Paying privately'] })), []);
+  assert.deepEqual(A.fitFlags(row({ careTypes: ['Mental health / psychiatry'], visitSetting: 'By video', coverage: ['Not sure'] })), ['Medical care, but no insurance named']);
 });
 
 test('a stored row starts new, keeps a history, and staff never see the hashed address', () => {
@@ -112,16 +134,17 @@ test('working a request: status or note, a reason for "not a fit", nothing after
 });
 
 test('service line follows what they asked for, and "not sure" leaves it for the intake to ask', () => {
-  assert.equal(A.serviceLineFor('Home Care'), 'PHC');
-  assert.equal(A.serviceLineFor('In-Home Primary Care'), 'IHPC');
-  assert.equal(A.serviceLineFor('Both'), 'BOTH');
-  assert.equal(A.serviceLineFor('Not sure'), null);
-  assert.equal(A.serviceLineFor(''), null);
-  for (const v of ['Home Care', 'In-Home Primary Care', 'Both']) assert.ok(A.OPTIONS.servicePath.includes(v), `${v} is still a servicePath option`);
+  assert.equal(A.serviceLineFor(['Home care']), 'PHC');
+  assert.equal(A.serviceLineFor(['Primary care']), 'IHPC');
+  assert.equal(A.serviceLineFor(['Mental health / psychiatry']), 'IHPC', 'psychiatry is the clinical line');
+  assert.equal(A.serviceLineFor(['Home care', 'Mental health / psychiatry']), 'BOTH');
+  assert.equal(A.serviceLineFor(['Not sure yet']), null);
+  assert.equal(A.serviceLineFor([]), null);
+  assert.ok(/serviceLineFor\(row\.care\.careTypes\)/.test(server), 'conversion reads the care types');
 });
 
 test('converting pre-fills only paths the intake declares, so the family is not asked twice', () => {
-  const v = norm({ insuranceTypes: ['Medicaid'], medicaidWaiver: 'CCSP', urgency: 'Immediately', notes: 'Falls at night' }).value;
+  const v = norm({ coverage: ['Medicaid', 'Medicare Advantage', 'TRICARE'], planName: 'Sample Advantage Plan', medicaidWaiver: 'CCSP', urgency: 'Immediately', notes: 'Falls at night' }).value;
   const intake = A.intakeFor(A.buildRow({ id: 'a9', value: v, at: 't' }));
   const flat = (o, p = '') => Object.entries(o).flatMap(([k, x]) => (x && typeof x === 'object' && !Array.isArray(x) ? flat(x, `${p}${k}.`) : [`${p}${k}`]));
   // The name pair and the provenance markers are written the way a self
@@ -130,6 +153,8 @@ test('converting pre-fills only paths the intake declares, so the family is not 
   assert.deepEqual(flat(intake).filter(p => !notAnswers.has(p) && !IF.isEditablePath(p)), []);
   assert.equal(intake.dob, '1940-03-02'); assert.equal(intake.address.zip, '30060');
   assert.equal(intake.primaryContact.name, 'Bo Lee'); assert.equal(intake.medicaid.waiver, 'CCSP');
+  assert.deepEqual(intake.insuranceTypes, ['Medicaid', 'Medicare Advantage'], 'mapped to intake boxes; TRICARE has none');
+  assert.equal(intake.medicare.advantagePlan, 'Sample Advantage Plan');
   assert.equal(intake.adl.ambulation, 'Uses walker / cane'); assert.equal(intake.situation.mainReason, 'Falls at night');
   const self = A.intakeFor(A.buildRow({ id: 'a10', value: norm({ who: 'client' }).value, at: 't' }));
   assert.ok(!('primaryContact' in self), 'a client asking for themselves is not their own family contact');

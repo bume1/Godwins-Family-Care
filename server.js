@@ -4420,6 +4420,11 @@ app.post('/api/auth/self-signup', async (req, res) => {
 const assessmentLimited = signups.makeLimiter({ max: 5, windowMs: 3600 * 1000 });
 const ASSESSMENT_DONE = 'Thank you. We have your free assessment and someone from our office will call you within one business day.';
 
+// The answer lists the public form offers. Served rather than restated in the
+// page, so the form cannot offer a choice the server then refuses. No PHI.
+app.get('/api/assessment/options', (req, res) => {
+  res.json({ options: assessments.OPTIONS });
+});
 app.post('/api/assessment', async (req, res) => {
   try {
     const b = req.body || {};
@@ -23158,7 +23163,7 @@ app.post('/api/gfc/admin/assessments/:id/convert', authenticateToken, requireEnr
       slug: await generateClientUserSlug(clientName),
       source: 'free_assessment', assessmentRequestId: row.id,
       enrollmentStatus: 'intake_pending',
-      serviceLine: assessments.serviceLineFor(row.care.servicePath),
+      serviceLine: assessments.serviceLineFor(row.care.careTypes),
       phone: intake.phone || null,
       careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] },
       intake,
