@@ -43,6 +43,8 @@ const PHI_PREFIXES = Object.freeze([
   '/v',
   // The clinic iPad's veteran sign-in: a name and phone number tied to an exam.
   '/api/veterans',
+  // The website's free assessment: a family describing someone's care needs.
+  '/api/assessment',
   // The IME record analyzer: a veteran's claim file and what was read from it.
   '/api/ime',
   // Staff onboarding and credentialing. Not PATIENT data, so the collection

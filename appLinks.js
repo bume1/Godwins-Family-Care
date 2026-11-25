@@ -45,6 +45,8 @@ const PATHS = Object.freeze({
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.
   ENROLLMENT: '/admin/enrollment',
+  ASSESSMENTS: '/clients?tab=assessments',  // the free-assessment queue (2026-11-25)
+  FREE_ASSESSMENT: '/assessment',           // the public free-assessment form
   MESSAGES: '/messages',                    // managers + care coordinators (owner, 2026-10-15)
   LOGIN: '/login',
   // Pay stubs, pay setup and tax forms live in My GFC's Hours & Pay section.

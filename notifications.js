@@ -1713,6 +1713,40 @@ function createNotifier(deps) {
   // ---- A7. A self sign-up confirmed their email ---------------------------
   // The signer is told "our office will review your account and email you
   // when it is ready". Nothing told the office, so nothing happened next.
+  // The website's free assessment (owner, 2026-11-25). A family has asked for
+  // help; the office calls them back. On a transport outside the BAA the
+  // notice says only that one arrived, because the name of the person who
+  // needs care, next to the word "care", is PHI.
+  async function freeAssessmentReceived({ assessmentId, clientName, submitterName, urgency, ctaUrl }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const detail = transportAllowsDetail();
+      const urgent = urgency === 'Immediately';
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'free_assessment_received', user: u,
+          subject: urgent ? 'A new free assessment (they need help now)' : 'A new free assessment came in',
+          headline: 'A new free assessment came in',
+          paragraphs: detail
+            ? [`${submitterName || 'Someone'} asked for a free assessment for ${clientName || 'a loved one'}${urgency ? `. Timing: ${urgency.toLowerCase()}` : ''}.`,
+               'It is waiting in the Assessments queue on the Clients page. Call them back and mark it contacted.']
+            : [`Someone asked for a free assessment${urgent ? ' and needs help right away' : ''}.`,
+               'Open the Assessments queue on the Clients page to see it.'],
+          ctaUrl, ctaLabel: 'Open the assessment',
+          relatedEntityId: `assessment:${assessmentId || 'unknown'}`, relatedEntityType: 'assessment',
+          actorId: 'free_assessment', phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[ASSESSMENT] office notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   async function selfSignupVerified({ name, email, accountTypeLabel, signupId, ctaUrl, actorId }) {
     try {
       const office = await staffRecipients();
@@ -2235,7 +2269,7 @@ function createNotifier(deps) {
     // gaps closed by the 2026-11-09 notification audit
     caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,
     clientDocumentRemoved, contractorInvoiceDecided,
-    passwordResetRequested, selfSignupVerified, familyInviteRequested, feedbackSubmitted,
+    passwordResetRequested, selfSignupVerified, freeAssessmentReceived, familyInviteRequested, feedbackSubmitted,
     // tier 2 of the same audit: somebody blocked or affected and not told
     shiftCancelled, caregiverVisitCancelled, shiftClaimDeclined, coverageRequested,
     timeLogChanged, carePlanAwaitingCoSign, carePlanAwaitingProviderCoSign,
