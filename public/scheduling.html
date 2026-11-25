@@ -987,8 +987,10 @@ const AddTimeEntry = ({ roster, onAdded, setErr, setOk }) => {
   );
 };
 
-const TimeLogRow = ({ l, onEdit, onRequest, pendingRequest }) => {
+const TimeLogRow = ({ l, onEdit, onRequest, onRemove, pendingRequest }) => {
   const [open, setOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeReason, setRemoveReason] = useState('');
   const [clockInAt, setClockInAt] = useState(toEasternInput(l.clockInAt));
   const [clockOutAt, setClockOutAt] = useState(toEasternInput(l.clockOutAt));
   const [reason, setReason] = useState('');
@@ -1030,6 +1032,23 @@ const TimeLogRow = ({ l, onEdit, onRequest, pendingRequest }) => {
       {act && !(onRequest && !onEdit && pendingRequest) && (
         <div className="btns">
           <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : (onEdit ? 'Correct Times' : 'Request Correction')}</button>
+          {onRemove && !pendingRequest && <button className="btn ghost" onClick={() => setRemoving(!removing)}>{removing ? 'Keep These Hours' : 'Remove Hours'}</button>}
+        </div>
+      )}
+      {/* Takes the whole entry off the record, so payroll stops counting it.
+          For a clock-in that should not exist at all; a wrong time is
+          corrected instead. */}
+      {onRemove && removing && (
+        <div style={{ marginTop: 10 }}>
+          <label>Why are these hours being removed? (required)</label>
+          <input value={removeReason} onChange={e => setRemoveReason(e.target.value)} placeholder="Clock was left running; the real hours were entered separately" />
+          <div className="btns">
+            <button className="btn" disabled={!removeReason.trim()} onClick={async () => {
+              const done = await onRemove(l.id, removeReason);
+              if (done !== false) { setRemoving(false); setRemoveReason(''); }
+            }}>Remove From Payroll</button>
+          </div>
+          <p className="mu" style={{ marginTop: 8 }}>The entry stops counting toward payroll and billing. The removed hours, your name and the reason are kept in the activity log, and the caregiver is told.</p>
         </div>
       )}
       {act && open && (
@@ -1443,6 +1462,15 @@ const App = () => {
       setOk('Correction saved and written to the activity log.');
       await refresh();
     } catch (e) { setErr(e.message); }
+  };
+
+  const removeLog = async (id, reason) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/scheduling/time-logs/${id}/remove`, { method: 'POST', body: JSON.stringify({ reason }) });
+      setOk('Hours removed. They no longer count toward payroll.');
+      await refresh();
+    } catch (e) { setErr(e.message); return false; }
   };
 
   const requestAdjustment = async (id, body) => {
@@ -1980,6 +2008,7 @@ const App = () => {
                 ? <Empty icon="clock-off">Nothing logged in this range.</Empty>
                 : timeLogs.map(l => <TimeLogRow key={l.id} l={l}
                     onEdit={access.managePay ? editLog : null}
+                    onRemove={access.managePay ? removeLog : null}
                     onRequest={!access.managePay && access.manageSchedule ? requestAdjustment : null}
                     pendingRequest={adjustments.requests.find(r => r.timeLogId === l.id && r.status === 'pending') || null} />)}
             </div>
