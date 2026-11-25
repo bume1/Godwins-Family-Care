@@ -3160,6 +3160,100 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // POST /api/scheduling/time-logs/:id/remove — Super Admin takes hours off
+  // the record (owner, 2026-11-25: "we deleted that, but it doesn't delete
+  // from the payroll log").
+  //
+  // THERE WAS NO WAY TO DO THIS. A time log could be corrected but never
+  // removed, so a clock-in that should not exist at all (a stuck clock, a
+  // duplicate, a visit that did not happen) stayed in `time_logs`, and every
+  // payroll reader kept paying it whatever was done to the shift around it.
+  //
+  // THE ROW LEAVES `time_logs` ENTIRELY and is kept whole in
+  // `time_logs_removed`. Moving it, rather than marking it, is the point: the
+  // payroll export, the payroll run, timesheets, billing and the invoices all
+  // read `time_logs`, and a "removed" flag would have to be honoured by every
+  // one of them, now and in every reader written later. A row that is not
+  // there cannot be paid by a reader that forgot. The archive, the edit trail
+  // and the activity log keep who removed it, when and why.
+  //
+  // Refused, with the reason, where removing would hide money already moved
+  // or work still under way: paid hours (locked, like an edit), hours on an
+  // invoice, a correction still waiting on a decision, and a clock that is
+  // still running on a visit in progress.
+  router.post('/api/scheduling/time-logs/:id/remove', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const reason = String((req.body || {}).reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({ error: 'Say why these hours are being removed.', code: 'REMOVE_REASON_REQUIRED' });
+      }
+      const logs = await readRows('time_logs');
+      const log = logs.find(l => l && l.id === req.params.id);
+      if (!log) return res.status(404).json({ error: 'Time log not found.', code: 'TIME_LOG_NOT_FOUND' });
+
+      if (log.payroll_run_id) {
+        return res.status(409).json({ error: 'These hours were paid in an approved payroll run and are locked. Add a correction to the next payroll run instead.', code: 'TIME_LOG_PAYROLL_LOCKED' });
+      }
+      const invoiced = (await readRows('patient_invoices')).find(inv => inv && inv.status !== 'void' &&
+        (inv.lines || []).some(ln => ln && String(ln.timeLogId) === String(log.id)));
+      if (invoiced) {
+        const num = invoiced.displayNumber || invoiced.number;
+        return res.status(409).json({ error: `These hours are on ${num ? `invoice ${num}` : 'an invoice'}. Void or correct the invoice first.`, code: 'TIME_LOG_INVOICED' });
+      }
+      const pending = (await readRows('time_log_adjustment_requests')).find(r => r && r.time_log_id === log.id && r.status === 'pending');
+      if (pending) {
+        return res.status(409).json({ error: 'A correction to these hours is waiting on a decision. Approve or decline it first.', code: 'ADJUSTMENT_ALREADY_PENDING' });
+      }
+      if (!log.clock_out_at && log.shift_id) {
+        const shift = (await readRows('shifts')).find(s => s && String(s.id) === String(log.shift_id));
+        if (shift && shift.status === 'in_progress') {
+          return res.status(409).json({ error: 'This visit is still under way. End the visit or correct its times instead.', code: 'TIME_LOG_STILL_OPEN' });
+        }
+      }
+
+      const at = nowIso();
+      const byName = req.user.name || req.user.email;
+      const before = { clockInAt: log.clock_in_at, clockOutAt: log.clock_out_at, totalMinutes: log.total_minutes };
+      // Archive FIRST, then take it out of `time_logs`: if anything fails in
+      // between, the worst case is a copy in the archive, never a lost row.
+      const removed = await readRows('time_logs_removed');
+      removed.push({ ...log, removed_at: at, removed_by: req.user.id, removed_by_name: byName, removal_reason: reason.slice(0, 1000) });
+      await db.set('time_logs_removed', removed);
+      const fresh = await readRows('time_logs');
+      await db.set('time_logs', fresh.filter(l => !(l && l.id === log.id)));
+
+      const edits = await readRows('time_log_edits');
+      edits.push({
+        id: uuidv4(), time_log_id: log.id, kind: 'removed', before, after: null,
+        reason: reason.slice(0, 1000), by: req.user.id, by_name: byName, at
+      });
+      await db.set('time_log_edits', edits);
+
+      await logActivity(req.user.id, byName, 'time_log_removed', 'time_log', log.id,
+        { reason, before, caregiverId: log.caregiver_id, shiftId: log.shift_id, clientId: log.client_id });
+
+      // Their timesheet changed; they are told, as they are for an edit.
+      try {
+        const notice = notifier();
+        if (notice) {
+          const who = (await getUsers()).find(u => u && u.id === log.caregiver_id);
+          if (who) {
+            await notice.timeLogChanged({
+              user: who, when: time.fmtDateTime(log.clock_in_at),
+              clientName: log.client_name || null, reason, removed: true,
+              ctaUrl: links.payFor(who), actorId: req.user.id, logId: log.id
+            });
+          }
+        }
+      } catch (e) { console.error('[SHIFT] time-log removal notice failed (non-fatal):', e.message); }
+
+      res.json({ removed: true, timeLogId: log.id, message: 'Hours removed. They no longer count toward payroll.' });
+    } catch (error) {
+      console.error('Time-log remove error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // ---- TIME ADJUSTMENT REQUESTS (owner, 2026-11-03) ------------------------
   // A manager or care coordinator who finds a wrong time log asks for it to be
   // corrected; the Super Admin approves or declines. Approving applies the
