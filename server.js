@@ -18800,7 +18800,9 @@ const homeCareFor = async (clientId, body) => {
   const client = (await getUsers()).find(u => u && u.id === clientId && u.role === config.ROLES.CLIENT);
   if (!client) return { error: 'Client not found', code: 'CLIENT_NOT_FOUND', status: 404 };
   const ra = client.rateAgreement || {};
-  const r = billing.homeCareLines((await db.get('time_logs')) || [], {
+  const schedRepo = require('./schedulingRepository');
+  const shiftIdx = schedRepo.shiftIndex((await db.get('shifts')) || []);
+  const r = billing.homeCareLines(((await db.get('time_logs')) || []).filter(l => !schedRepo.hoursVoidedByCancel(l, shiftIdx)), {
     clientId, from, to, hourlyRate: ra.hourlyRate, dailyMinimumHours: ra.dailyMinimumHours,
     localDate: require('./schedulingRepository').csvLocalDate
   });
@@ -18911,7 +18913,11 @@ const phcHourRows = async (b, users) => {
     rows = r.rows.filter(x => x.serviceDate >= from && x.serviceDate <= to);
     if (!rows.length) return { error: 'No shifts in the file fall between those dates.', code: 'IMPORT_NO_ROWS_IN_RANGE' };
   } else if (b.source === 'app') {
-    rows = phcInvoices.rowsFromTimeLogs((await db.get('time_logs')) || [], { from, to, localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate });
+    // A shift cancelled after it was clocked is not billed (owner, 2026-11-27).
+    const schedRepo = require('./schedulingRepository');
+    const shiftIdx = schedRepo.shiftIndex((await db.get('shifts')) || []);
+    const billable = ((await db.get('time_logs')) || []).filter(l => !schedRepo.hoursVoidedByCancel(l, shiftIdx));
+    rows = phcInvoices.rowsFromTimeLogs(billable, { from, to, localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate });
   } else return { error: 'Say where the hours come from: the app or a file.', code: 'HOURS_SOURCE_REQUIRED' };
   // Clinical clients are never billed here: this is the Private Home Care line.
   const clinicalOnly = new Set(clients.filter(c => String(c.serviceLine || '').toUpperCase() === 'IHPC').map(c => c.id));
