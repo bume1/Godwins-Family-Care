@@ -1810,7 +1810,9 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'payment_sheet_opened', 'payroll_run', run.id, {});
     // How each approved contractor invoice is paid: never a full account number.
     const payTo = (uid) => { const pm = (all[uid] || {}).payMethod || {}; return { method: pm.method || null, bankName: pm.bankName || null, bankCountry: pm.bankCountry || null, swift: pm.swift || null, accountLast4: pm.accountLast4 || null, wiseEmail: pm.wiseEmail || null, abroad: (all[uid] || {}).taxResidence === 'foreign' }; };
-    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), p2pAccount: (await readSettings()).p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved').map(x => ({ ...x, payTo: payTo(x.userId) })) });
+    const settings = await readSettings();
+    const send = tax.sendByDate(run.period.payDate, { skipBankHolidays: settings.skipBankHolidays, detail: true });
+    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: send.date, sendBySkipped: send.skipped, skipBankHolidays: !!settings.skipBankHolidays, p2pAccount: settings.p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved').map(x => ({ ...x, payTo: payTo(x.userId) })) });
   });
   router.post('/api/payroll/admin/runs/:id/payments/:userId', authenticateToken, requireAdmin, async (req, res) => {
     const runs = await rows(RUNS);
@@ -2362,7 +2364,8 @@ module.exports = function createPayrollRoutes(deps) {
     // On the send-by date, any approved run not fully paid.
     'payment-reminder': async () => {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
-      const due = (await rows(RUNS)).filter(r => r.status === 'approved' && tax.sendByDate(r.period.payDate) <= today);
+      const skip = (await readSettings()).skipBankHolidays;
+      const due = (await rows(RUNS)).filter(r => r.status === 'approved' && tax.sendByDate(r.period.payDate, { skipBankHolidays: skip }) <= today);
       for (const r of due) await tellOwner('payroll_payment_reminder', `Send payroll for pay date ${r.period.payDate}`, 'Send the PNC payments, then enter each confirmation number in the app.', `pay:${r.id}:${today}`);
       return { summary: `${due.length} due` };
     },
