@@ -2897,6 +2897,13 @@ const requirePayrollPreparer = (req, res, next) => {
   if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll'))) return next();
   return res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' });
 };
+// Payroll in full (owner, 2026-11-27): the Super Admin, or someone the Super
+// Admin turned "Run payroll in full" on for in the Modules grid. Every payroll
+// route that was the Super Admin's alone uses this gate.
+const requirePayrollRunner = (req, res, next) => {
+  if (req.user && accountTypes.hasFullPayroll(req.user)) return next();
+  return res.status(403).json({ error: 'This payroll step is for the Super Admin or someone given full payroll access.', code: 'PAYROLL_RUNNER_ONLY' });
+};
 
 // Alias for clarity - Super Admin only routes
 const requireSuperAdmin = requireAdmin;
@@ -3279,6 +3286,7 @@ const payrollRouter = payrollRoutes({
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
   requirePayrollPreparer: (req, res, next) => requirePayrollPreparer(req, res, next),
+  requirePayrollRunner: (req, res, next) => requirePayrollRunner(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
   localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate,
   resolvePayRate: (cg, clientId, shift) => caregiverRepo.resolvePayRate(cg, clientId, shift),
@@ -3294,19 +3302,20 @@ const payrollRouter = payrollRoutes({
   qboRetry: () => qbo.retry()
 });
 app.use(payrollRouter);
-// QuickBooks connection, the owner's (Super Admin).
-app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+// QuickBooks connection: the Super Admin's, and anyone with full payroll
+// access (owner, 2026-11-27).
+app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   try { res.json(await qbo.status()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
-app.get('/api/payroll/admin/qbo/connect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.get('/api/payroll/admin/qbo/connect', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   const missing = qbo.missing();
   if (missing.length) return res.status(503).json({ error: `QuickBooks is not set up on the server. Missing: ${missing.join(', ')}.`, code: 'QBO_NOT_CONFIGURED' });
   res.json({ url: await qbo.connectUrl(req.user) });
 });
-app.post('/api/payroll/admin/qbo/retry', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.post('/api/payroll/admin/qbo/retry', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   try { res.json(await qbo.retry()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
-app.post('/api/payroll/admin/qbo/disconnect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.post('/api/payroll/admin/qbo/disconnect', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   await qbo.disconnect(req.user); res.json({ ok: true });
 });
 // Intuit sends the owner back here. The state is single use and was minted for
@@ -5492,15 +5501,23 @@ app.put('/api/users/:userId/modules', authenticateToken, requireAdmin, async (re
     if (!Array.isArray(modules)) return res.status(400).json({ error: 'modules must be a list of module ids.', code: 'MODULES_INVALID' });
     const unknown = modules.filter(id => !accountTypes.MODULE_IDS.includes(String(id)));
     if (unknown.length) return res.status(400).json({ error: `Unknown module: ${unknown.join(', ')}`, code: 'MODULES_UNKNOWN' });
+    const payrollFull = (req.body || {}).payrollFull;
+    if (payrollFull !== undefined && typeof payrollFull !== 'boolean') return res.status(400).json({ error: 'payrollFull must be true or false.', code: 'MODULES_INVALID' });
     const before = accountTypes.moduleAccessOf(target);
-    const next = accountTypes.moduleAccessFromChecks(target, modules);
-    if (next.granted.length || next.removed.length) target.moduleAccess = next;
+    // "Run payroll in full" (owner, 2026-11-27). Left out of the body, it keeps
+    // what the person had; it only ever sticks alongside a Payroll grant.
+    const wantFull = payrollFull === undefined ? before.payrollFull === true : payrollFull;
+    const next = accountTypes.moduleAccessFromChecks(target, modules, { payrollFull: wantFull });
+    if (next.granted.length || next.removed.length || next.payrollFull) target.moduleAccess = next;
     else delete target.moduleAccess;
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'user_modules_changed', 'user', target.id, {
       accountType: type, before, after: next
     });
+    if (!!before.payrollFull !== !!next.payrollFull) {
+      await logActivity(req.user.id, req.user.name || req.user.email, next.payrollFull ? 'payroll_full_access_granted' : 'payroll_full_access_revoked', 'user', target.id, { accountType: type });
+    }
     res.json({ grid: accountTypes.moduleGridFor(target), moduleAccess: next });
   } catch (err) {
     console.error('Module grid save failed:', err.message);

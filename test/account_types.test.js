@@ -173,7 +173,7 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
     else if (r.includes("/api/payroll/admin/timesheets/decide'")) assert.match(r, /authenticateToken, requireTimesheetDecider\b/, r);
     // Contractor invoices: reviewers approve or send back; paying is the Super Admin's.
     else if (r.includes("/api/payroll/admin/contractor-invoices/:id/:action'")) assert.match(r, /authenticateToken, requireInvoiceAction\b/, r);
-    else assert.match(r, /authenticateToken, (requireAdmin|requirePayrollPreparer)\b/, r);
+    else assert.match(r, /authenticateToken, (requirePayrollRunner|requirePayrollPreparer)\b/, r);
   }
   assert.match(routes, /if \(!isPreparer\(req\.user\)\) \{\s*(?:const allRuns = await rows\(RUNS\);\s*)?return res\.json\(\{\s*superAdmin: false, timesheetsOnly: true/, 'a timesheet-only viewer gets no payroll figures');
   // What a preparer must never reach: approving, paying, bank numbers,
@@ -184,9 +184,9 @@ test('the Super Admin has a Payroll tile under Billing; nobody else does', () =>
   for (const tail of superOnly) {
     const line = regs.find(r => r.includes(`/api/payroll/admin${tail.replace(/'$/, '')}'`) || (tail.endsWith("'") && r.includes(`/api/payroll/admin${tail}`)));
     assert.ok(line, tail);
-    assert.match(line, /authenticateToken, requireAdmin\b/, tail);
+    assert.match(line, /authenticateToken, requirePayrollRunner\b/, tail);
   }
-  assert.match(routes, /const requireInvoiceAction = \(req, res, next\) => \{\s*if \(req\.params\.action === 'pay'\) return requireAdmin\(req, res, next\);/, 'paying a contractor stays the Super Admin\'s');
+  assert.match(routes, /const requireInvoiceAction = \(req, res, next\) => \{\s*if \(req\.params\.action === 'pay'\) return requirePayrollRunner\(req, res, next\);/, 'paying a contractor stays the Super Admin\'s');
 });
 
 // ---- Enrollment and Billing for managers and coordinators (owner, 2026-10-15)
