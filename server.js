@@ -39,6 +39,7 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const financeMail = require('./financeMail');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
 // The one answer to "how was this message written" (plain or the six-shape
@@ -68,6 +69,7 @@ const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
 const signups = require('./signupRequests');
+const assessments = require('./assessmentRequests'); // the website's free assessment (owner, 2026-11-25)
 const googleCalendar = require('./googleCalendar');
 const billing = require('./patientBilling');
 const phcInvoices = require('./phcInvoices');   // PHC invoices from approved hours (owner, 2026-11-08)
@@ -827,17 +829,30 @@ const processNotificationQueue = async () => {
 
     const emailPayloads = [];
     const queueIndices = [];
+    const financeCopied = new Set();
     for (const notification of toProcess) {
       const idx = queue.findIndex(n => n.id === notification.id);
       if (idx === -1) continue;
       // Branding belongs to the drain, not to each caller remembering.
       const built = buildQueuedEmail(notification.templateData, appBaseUrl);
+      // Payroll and billing notices copy the finance inbox and take its
+      // replies (owner, 2026-11-27). One copy per notice and subject in a
+      // batch, so a reminder fanned out to several payroll runners does not
+      // land in finance several times.
+      let finance = {};
+      if (financeMail.isFinanceType(notification.type)) {
+        const key = `${notification.type}|${notification.relatedEntityId || ''}|${notification.templateData.subject || ''}`;
+        finance = financeMail.financeOptions();
+        if (financeCopied.has(key)) finance = { replyTo: finance.replyTo };
+        financeCopied.add(key);
+      }
       emailPayloads.push({
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
         text: built.text,
         html: built.html,
-        phi: !!notification.phi
+        phi: !!notification.phi,
+        ...finance
       });
       queueIndices.push(idx);
     }
@@ -4416,6 +4431,55 @@ app.post('/api/auth/self-signup', async (req, res) => {
   } catch (error) {
     console.error('Sign-up error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== FREE ASSESSMENT (owner, 2026-11-25) ==============
+// The website's free assessment, which used to post to an Apps Script that
+// wrote a Google Sheet row and a PDF anyone with the link could open. It now
+// saves here, and the office works it from the Assessments tab on /clients.
+// Public, so it is rate-limited by hashed address and guarded by a hidden
+// field, like a sign-up. See assessmentRequests.js.
+const assessmentLimited = signups.makeLimiter({ max: 5, windowMs: 3600 * 1000 });
+const ASSESSMENT_DONE = 'Thank you. We have your free assessment and someone from our office will call you within one business day.';
+
+// The answer lists the public form offers. Served rather than restated in the
+// page, so the form cannot offer a choice the server then refuses. No PHI.
+app.get('/api/assessment/options', (req, res) => {
+  res.json({ options: assessments.OPTIONS });
+});
+app.post('/api/assessment', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.website) return res.json({ message: ASSESSMENT_DONE }); // honeypot
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (assessmentLimited(ipKey)) return res.status(429).json({ error: 'Too many requests from here. Please try again in an hour, or call the office.', code: 'ASSESSMENT_RATE_LIMITED' });
+    const n = assessments.normalizeAssessment(b, { today: require('./schedulingRepository').csvLocalDate(new Date().toISOString()) });
+    if (n.error) return res.status(400).json(n);
+    const at = new Date().toISOString();
+    const row = assessments.buildRow({ id: uuidv4(), value: n.value, at, ipHash: ipKey });
+    const rows = (await db.get('assessment_requests')) || [];
+    rows.push(row);
+    await db.set('assessment_requests', rows);
+    await logActivity('public', 'Website visitor', 'free_assessment_received', 'assessment', row.id, { urgency: row.schedule.urgency || null });
+    notify.freeAssessmentReceived({
+      assessmentId: row.id, clientName: assessments.clientName(row), submitterName: assessments.submitterName(row),
+      urgency: row.schedule.urgency, ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ASSESSMENTS}`
+    }).catch(err => console.error('Free assessment notice error (non-fatal):', err.message));
+    // A confirmation to the family, with no health information in it.
+    if (row.submitter.email) {
+      const htmlBody = emailTemplates.renderGfcEmail({
+        greeting: row.submitter.firstName,
+        headline: 'We have your free assessment',
+        paragraphs: ['Thank you for reaching out to Godwins Family Care. Someone from our office will call you within one business day to talk through what you need.', 'If it is urgent, call us at the number below.'],
+      }).html;
+      sendEmail(row.submitter.email, 'We have your free assessment', 'Thank you for reaching out to Godwins Family Care. Someone from our office will call you within one business day.', { htmlBody })
+        .catch(err => console.error('Free assessment confirmation error (non-fatal):', err.message));
+    }
+    res.json({ message: ASSESSMENT_DONE, id: row.id });
+  } catch (error) {
+    console.error('Free assessment error:', error);
+    res.status(500).json({ error: 'Something went wrong. Please try again or call the office.' });
   }
 });
 
@@ -18567,7 +18631,7 @@ const notifyStatement = async (clientId, { skipEmails } = {}) => {
         paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
         ctaUrl: r.url, ctaLabel: 'View my statement'
       }).html;
-      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody, ...financeMail.financeOptions() })
         .catch(err => console.error('Statement email error (non-fatal):', err.message));
     }
   } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
@@ -19201,10 +19265,10 @@ app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilli
             `${list.join('; ')}. Total ${total}.`,
             `Questions about these invoices: reply to this email or call ${consentText.ORG.phone || 'our office'}.`
           ];
-          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs }).html;
+          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs, signoff: emailTemplates.FINANCE_SIGNOFF }).html;
           const subject = carrier ? `Godwins Family Care invoices${bt.policyNumber ? `, policy ${bt.policyNumber}` : ''}, ${periodLabel}` : `Your Godwins Family Care invoice, ${periodLabel}`;
           const to = [bt.email, config.ROI_ADMIN_EMAIL].filter((v, k, a) => v && a.findIndex(x => x.toLowerCase() === v.toLowerCase()) === k);
-          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true,
+          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true, ...financeMail.financeOptions(),
             attachments: [{ filename: invoiceRuns.combinedFileName(p.clientName, run.from, run.to), content: pdf, contentType: 'application/pdf' }] });
           if (!r || !r.success) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: `The email did not go: ${(r && (r.error || r.reason)) || 'unknown error'}. Nothing was marked sent.` }); continue; }
           emailedTo = to;
@@ -23098,6 +23162,107 @@ app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireEnrollme
     res.json({ signup: signups.staffRow(rows[idx]), clientId: linkedClientId, userIds: created });
   } catch (error) {
     console.error('Sign-up decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The free-assessment queue (owner, 2026-11-25). Staff read it; an admin, a
+// manager or a care coordinator works it. Converting creates the client at
+// intake_pending, so the enrollment gate, the consents and the intake run.
+app.get('/api/gfc/admin/assessments', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const rows = (await db.get('assessment_requests')) || [];
+    const users = await getUsers();
+    const clients = users.filter(u => u && u.role === config.ROLES.CLIENT);
+    const fold = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[^a-z]/g, '');
+    // Same surname and first name as a client on file: likely a family that
+    // already called, or a client asking for more help.
+    const matchesFor = (r) => clients.filter(c => {
+      const i = c.intake || {};
+      const parts = String(c.name || '').split(' ');
+      return fold(i.lastName || i.clientLast || parts[parts.length - 1]) === fold(r.client.lastName)
+        && fold(i.firstName || i.clientFirst || parts[0]) === fold(r.client.firstName);
+    }).map(c => ({ id: c.id, name: c.name }));
+    res.json({
+      assessments: assessments.sortForQueue(rows.filter(Boolean)).map(r => ({
+        ...assessments.staffRow(r),
+        possibleMatches: assessments.OPEN_STATUSES.includes(r.status) ? matchesFor(r) : []
+      })),
+      statuses: assessments.STATUSES,
+      settable: assessments.SETTABLE_STATUSES,
+      canWork: canManageEnrollment(req.user)
+    });
+  } catch (error) {
+    console.error('Assessments read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/gfc/admin/assessments/:id', authenticateToken, requireEnrollmentManager, async (req, res) => {
+  try {
+    const { status, note } = req.body || {};
+    const rows = (await db.get('assessment_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    const bad = assessments.checkUpdate(row, { status, note });
+    if (bad) return res.status(bad.code === 'ASSESSMENT_NOT_FOUND' ? 404 : bad.code === 'ASSESSMENT_CONVERTED' ? 409 : 400).json(bad);
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    rows[idx] = assessments.applyUpdate(row, { status, note }, { at: new Date().toISOString(), by });
+    await db.set('assessment_requests', rows);
+    // The audit records that it moved, never the note: a note about a family's
+    // situation is PHI and the trail is not a second copy of it.
+    await logActivity(req.user.id, by.name, 'assessment_updated', 'assessment', row.id, { status: rows[idx].status, noteAdded: !!(note && String(note).trim()) });
+    res.json({ assessment: assessments.staffRow(rows[idx]) });
+  } catch (error) {
+    console.error('Assessment update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/assessments/:id/convert', authenticateToken, requireEnrollmentManager, async (req, res) => {
+  try {
+    const rows = (await db.get('assessment_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    if (!row) return res.status(404).json({ error: 'Assessment not found.', code: 'ASSESSMENT_NOT_FOUND' });
+    if (row.status === 'converted') return res.status(409).json({ error: 'This assessment was already converted.', code: 'ASSESSMENT_CONVERTED', clientId: row.clientId });
+    if (row.status === 'not_a_fit') return res.status(409).json({ error: 'This assessment is marked not a fit. Move it back to contacted first.', code: 'ASSESSMENT_NOT_A_FIT' });
+    const at = new Date().toISOString();
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    const users = await getUsers();
+    const cid = uuidv4();
+    const intake = assessments.intakeFor(row);
+    const clientName = assessments.clientName(row);
+    const client = {
+      id: cid,
+      // No login yet: nobody chose a password. The office gives the client or
+      // their family a login from the user form when they are ready.
+      email: familyLinks.placeholderEmailFor('client', cid),
+      name: clientName,
+      password: await bcrypt.hash(uuidv4() + uuidv4(), config.BCRYPT_SALT_ROUNDS),
+      role: config.ROLES.CLIENT,
+      practiceName: clientName,
+      slug: await generateClientUserSlug(clientName),
+      source: 'free_assessment', assessmentRequestId: row.id,
+      enrollmentStatus: 'intake_pending',
+      serviceLine: assessments.serviceLineFor(row.care.careTypes),
+      phone: intake.phone || null,
+      careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] },
+      intake,
+      accountStatus: 'active', hasPortalLogin: false,
+      isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+      createdAt: at
+    };
+    users.push(client);
+    await db.set('users', users);
+    invalidateUsersCache();
+    rows[idx] = { ...assessments.applyUpdate(row, {}, { at, by }), status: 'converted', clientId: cid,
+      statusHistory: [...(row.statusHistory || []), { status: 'converted', at, by }] };
+    await db.set('assessment_requests', rows);
+    await logActivity(req.user.id, by.name, 'assessment_converted', 'assessment', row.id, { clientId: cid });
+    res.json({ assessment: assessments.staffRow(rows[idx]), clientId: cid });
+  } catch (error) {
+    console.error('Assessment convert error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -32543,6 +32708,11 @@ app.get('/changelog', (req, res) => {
 // Password reset link page (public)
 app.get('/signup', (req, res) => {
   res.sendFile(__dirname + '/public/signup.html');
+});
+
+// The website's free assessment (public, 2026-11-25).
+app.get('/assessment', (req, res) => {
+  res.sendFile(__dirname + '/public/assessment.html');
 });
 
 app.get('/password-reset-:token', (req, res) => {

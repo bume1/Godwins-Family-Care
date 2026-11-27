@@ -378,7 +378,7 @@ get_header();
         <div class="gate-sub">Enter the access code from your intake confirmation to continue.</div>
         <label class="fl" for="token-input">Access code</label>
         <input class="token-input" type="text" id="token-input"
-               placeholder="e.g. 5BD7U7bRzFy4" autocomplete="off" autocapitalize="off" spellcheck="false">
+               placeholder="e.g. AB12CD34EF56" autocomplete="off" autocapitalize="off" spellcheck="false">
         <div class="error-inline" id="gate-error"></div>
         <button class="btn-primary" id="token-submit">Continue</button>
       </div>

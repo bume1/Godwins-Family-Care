@@ -64,6 +64,17 @@ const TEAM_SIGNOFF = Object.freeze({
   title: null
 });
 
+// Invoices sign off as the finance lead and point at the finance inbox (owner,
+// 2026-11-27). `email` replaces the support address in the signature, the
+// text half and the footer of that email only; every other notice is unchanged.
+const FINANCE_SIGNOFF = Object.freeze({
+  name:  'Kelvin Ume, BSN, RN',
+  title: null,
+  email: config.ORG_FINANCE_EMAIL
+});
+
+const contactEmail = (signoff) => (signoff && signoff.email) || ORG.email;
+
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -135,7 +146,7 @@ function signatureBlock(signoff) {
 <strong>${esc(s.name)}</strong><br>
 ${titleLine}${esc(ORG.name)}<br>
 O: ${esc(ORG.phone)}<br>
-<a href="mailto:${esc(ORG.email)}" style="color:${PALETTE.navy};">${esc(ORG.email)}</a><br>
+<a href="mailto:${esc(contactEmail(s))}" style="color:${PALETTE.navy};">${esc(contactEmail(s))}</a><br>
 <a href="${ORG.site}" style="color:${PALETTE.navy};">godwinsfamilycarellc.com</a>
 </p>
 <p style="margin:18px 0 0 0;">
@@ -143,13 +154,13 @@ O: ${esc(ORG.phone)}<br>
 </p>`;
 }
 
-function footerBlock(unsubscribeUrl) {
+function footerBlock(unsubscribeUrl, email) {
   const unsub = safeUrl(unsubscribeUrl)
     ? `<p style="font-size:11px;color:${PALETTE.muted};margin:8px 0 0;"><a href="${safeUrl(unsubscribeUrl)}" style="color:${PALETTE.muted};text-decoration:underline;">Unsubscribe from these emails</a></p>`
     : '';
   return `<tr><td style="padding:24px 40px;text-align:center;">
 <p style="font-size:11px;color:${PALETTE.muted};margin:0;line-height:1.6;">
-${esc(ORG.name)} &nbsp;&middot;&nbsp; ${esc(ORG.phone)} &nbsp;&middot;&nbsp; ${esc(ORG.email)}<br>
+${esc(ORG.name)} &nbsp;&middot;&nbsp; ${esc(ORG.phone)} &nbsp;&middot;&nbsp; ${esc(email || ORG.email)}<br>
 ${esc(ORG.address)}
 </p>${unsub}</td></tr>`;
 }
@@ -247,7 +258,7 @@ ${calloutBlock(o.callout, o.calloutLabel)}
 ${ctaButton(o.ctaUrl, o.ctaLabel)}
 ${signatureBlock(o.signoff)}
 </div></td></tr>
-${footerBlock(o.unsubscribeUrl)}
+${footerBlock(o.unsubscribeUrl, contactEmail(o.signoff))}
 </table></td></tr></table>
 </body></html>`;
 
@@ -269,7 +280,7 @@ ${footerBlock(o.unsubscribeUrl)}
     (o.signoff || TEAM_SIGNOFF).name,
     ORG.name,
     `O: ${ORG.phone}`,
-    ORG.email
+    contactEmail(o.signoff)
   );
   if (safeUrl(o.unsubscribeUrl)) {
     textParts.push('', `Unsubscribe: ${safeUrl(o.unsubscribeUrl)}`);
@@ -281,7 +292,7 @@ ${footerBlock(o.unsubscribeUrl)}
 module.exports = {
   renderGfcEmail,
   headerBlock, signatureBlock, footerBlock, ctaButton, calloutBlock, fieldsBlock,
-  PALETTE, ASSETS, ORG, TEAM_SIGNOFF,
+  PALETTE, ASSETS, ORG, TEAM_SIGNOFF, FINANCE_SIGNOFF,
   // exported for tests
   esc, safeUrl
 };
