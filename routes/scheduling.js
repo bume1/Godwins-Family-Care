@@ -1558,7 +1558,12 @@ module.exports = function createSchedulingRoutes(deps) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shifts');
-      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      // A caregiver (or W-2 staff member) never sees a cancelled shift (owner,
+      // 2026-11-27). Their calendar shows confirmed, completed and open work;
+      // a cancelled row is office history, and it stays on the board for the
+      // office. Their hours are unaffected: time logs are their own read.
+      let mine = isScheduleManager(req.user) ? rows
+        : rows.filter(r => r && r.caregiver_id === req.user.id && r.status !== 'cancelled');
       if (req.query.status) mine = mine.filter(r => r.status === String(req.query.status));
       if (req.query.from) mine = mine.filter(r => String(r.start) >= String(req.query.from));
       if (req.query.to) mine = mine.filter(r => String(r.start) <= String(req.query.to));
@@ -1577,7 +1582,11 @@ module.exports = function createSchedulingRoutes(deps) {
       // going to answer 409 is worse than no button, and a caregiver told
       // "too late" needs the office number, not a disabled control.
       const changeRequests = await readRows('shift_change_requests');
-      const page = mine.slice(0, 500).map((r) => {
+      // Capped at 500. A caregiver's calendar needs their newest shifts and
+      // everything ahead, so their cap drops the OLDEST rows; the office board
+      // keeps its existing order.
+      const capped = isScheduleManager(req.user) ? mine.slice(0, 500) : mine.slice(-500);
+      const page = capped.map((r) => {
         const out = publicShift(r);
         out.visitLogFiled = sched.isStaffShift(r) ? null : r.status === 'in_progress'
           ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
