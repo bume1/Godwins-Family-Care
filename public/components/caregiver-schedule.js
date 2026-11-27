@@ -34,7 +34,10 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * WHAT IT RENDERS
  * ─────────────────────────────────────────────────────────────────────────────
- *   · My schedule            — confirmed and in-progress shifts, next first
+ *   · My schedule            — a month calendar of my shifts (confirmed, in
+ *                              progress, completed, offered, claimed) plus the
+ *                              open shifts I can claim. Never a cancelled one.
+ *                              A List view keeps confirmed shifts, next first.
  *   · Offers                 — shifts assigned to me: accept or decline
  *   · Open shifts            — the pool, already filtered server-side to what
  *                              my license level and assignment allow. Claim
@@ -118,7 +121,51 @@
     '@media(max-width:430px){.gfcs .g3{grid-template-columns:repeat(3,minmax(0,1fr))}.gfcs .g3 .gbtn{grid-column:1/-1}}',
     '.gfcs .gtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}',
     '.gfcs .gtab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 14px;font-size:15px;color:var(--navy);cursor:pointer;font-family:inherit}',
-    '.gfcs .gtab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}'
+    '.gfcs .gtab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}',
+    // The month grid (2026-11-27). Colours match the office's scheduling
+    // board, so a status reads the same on both sides.
+    '.gfcs .gviews{display:inline-flex;border:1.5px solid #d8cdb8;border-radius:10px;overflow:hidden;margin-bottom:10px}',
+    '.gfcs .gview{border:0;background:#fff;padding:7px 14px;font-size:14px;font-weight:600;color:var(--navy);cursor:pointer;font-family:inherit}',
+    '.gfcs .gview.on{background:var(--navy);color:var(--gold)}',
+    '.gfcs .gsm{padding:6px 11px;font-size:14px}',
+    '.gfcs .gcalhdr{display:flex;align-items:center;gap:8px;margin-bottom:4px}',
+    '.gfcs .gcaltitle{flex:1 1 auto;margin:0;text-align:center}',
+    '.gfcs .gcal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px}',
+    '.gfcs .gcal.ghead{margin-bottom:3px}',
+    '.gfcs .gdow{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#8a8378;text-align:center}',
+    '.gfcs .gcell{min-height:84px;min-width:0;border:1px solid #e9e3d8;border-radius:8px;padding:3px;background:#fff;overflow:hidden;text-align:left;font-family:inherit;cursor:pointer;display:flex;flex-direction:column;gap:2px;color:inherit}',
+    '.gfcs .gcell.blank{background:transparent;border-color:transparent;cursor:default}',
+    '.gfcs .gcell.today{border-color:var(--goldd);box-shadow:inset 0 0 0 1px var(--goldd)}',
+    '.gfcs .gcell.picked{border-color:var(--navy);box-shadow:inset 0 0 0 2px var(--navy)}',
+    '.gfcs .gdate{font-size:11px;color:#8a8378}',
+    '.gfcs .gshift{display:block;border-radius:4px;font-size:11px;line-height:1.3;padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.gfcs .gwho{opacity:.8}',
+    '.gfcs .gshift.open{background:#fff;color:#6d675d;border:1px dashed #b9ae99}',
+    // An offer waits on the CAREGIVER, a claim on the office: same family of
+    // colour, but the offer carries a solid edge so the two read apart.
+    '.gfcs .gshift.claimed,.gfcs .gshift.offered{background:#fdf3dd;color:#8a6a1e}',
+    '.gfcs .gshift.offered{border:1px solid #d9a93f}',
+    '.gfcs .gshort{display:none}',
+    '.gfcs .gshift.confirmed{background:#eef3f0;color:var(--green)}',
+    '.gfcs .gshift.in_progress{background:var(--navy);color:var(--gold)}',
+    '.gfcs .gshift.completed{background:#e7edf0;color:var(--navy)}',
+    '.gfcs .glegend{display:flex;gap:6px 12px;flex-wrap:wrap;margin-top:10px}',
+    '.gfcs .gkey{border:0;background:none;padding:2px 0;font-size:12.5px;color:var(--mut);cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:5px}',
+    '.gfcs .gkey.off{opacity:.4;text-decoration:line-through}',
+    '.gfcs .gdot{display:inline-block;width:10px;height:10px;border-radius:2px}',
+    '.gfcs .gdot.open{background:#fff;border:1px dashed #b9ae99}',
+    '.gfcs .gdot.claimed{background:#fdf3dd;border:1px solid #e3cf9e}',
+    '.gfcs .gdot.offered{background:#fdf3dd;border:1px solid #d9a93f}',
+    '.gfcs .gdot.confirmed{background:#eef3f0;border:1px solid var(--green)}',
+    '.gfcs .gdot.in_progress{background:var(--navy)}',
+    '.gfcs .gdot.completed{background:#e7edf0;border:1px solid #b9c7cf}',
+    '.gfcs .gchip.gk-offered,.gfcs .gchip.gk-claimed{background:#fdf3dd;color:#8a6a1e}',
+    '.gfcs .gchip.gk-completed{background:#e7edf0;color:var(--navy)}',
+    '.gfcs .gchip.gk-open{background:#fff;color:#6d675d;border:1px dashed #b9ae99}',
+    // On a phone a day is too narrow for names: each shift becomes a coloured
+    // bar with its start time, and the day panel below carries the detail.
+    '@media(max-width:560px){.gfcs .gcell{min-height:58px;padding:2px}.gfcs .gwho,.gfcs .gfull{display:none}.gfcs .gshort{display:inline}.gfcs .gshift{font-size:10px;padding:1px 2px;text-align:center}.gfcs .gdate{font-size:10px}}'
+
   ].join('\n');
 
   function injectCss() {
@@ -255,12 +302,10 @@
     bind(state, root);
   }
 
-  function renderSchedule(state) {
-    var rows = state.mine.filter(function (s) {
-      return s.status === 'confirmed' || s.status === 'in_progress';
-    });
-    if (!rows.length) return '<div class="gempty">No confirmed shifts yet.</div>';
-    return '<div class="gcard"><h3>My schedule</h3>' + rows.map(function (s) {
+  // One confirmed or in-progress shift, with its clock and change controls.
+  // Shared by the list and by the calendar's day panel, so the two can never
+  // offer different buttons for the same shift.
+  function scheduleRow(state, s) {
       var running = s.status === 'in_progress';
       // The clock-in window opens two hours before the start. Shown as a
       // disabled button with the time on it rather than an enabled one that
@@ -316,7 +361,191 @@
           ? '<div class="gwhy">' + esc(s.changeRequestBlockedReason) + '</div>'
           : '') +
       '</div>';
+  }
+
+  // THE SCHEDULE IS A CALENDAR (owner, 2026-11-27): "caregivers see the same
+  // calendar view (scoped to their shifts)". The month grid matches the one
+  // the office uses on the scheduling board; List keeps the old view.
+  function renderSchedule(state) {
+    var view = state.schedView === 'list' ? 'list' : 'calendar';
+    var html = '<div class="gviews">' +
+      '<button class="gview' + (view === 'calendar' ? ' on' : '') + '" data-act="cal-view" data-view="calendar">Calendar</button>' +
+      '<button class="gview' + (view === 'list' ? ' on' : '') + '" data-act="cal-view" data-view="list">List</button>' +
+      '</div>';
+    return html + (view === 'calendar' ? renderCalendar(state) : renderScheduleList(state));
+  }
+
+  function renderScheduleList(state) {
+    var rows = state.mine.filter(function (s) {
+      return s.status === 'confirmed' || s.status === 'in_progress';
+    });
+    if (!rows.length) return '<div class="gempty">No confirmed shifts yet.</div>' + renderMyRequests(state);
+    return '<div class="gcard"><h3>My schedule</h3>' + rows.map(function (s) {
+      return scheduleRow(state, s);
     }).join('') + '</div>' + renderMyRequests(state);
+  }
+
+  // What the calendar shows, and how each status is named. CANCELLED IS NOT
+  // HERE (owner, 2026-11-27): a caregiver never sees a cancelled shift. The
+  // server already leaves them out of a caregiver's list; this is the second
+  // lock, so a cancelled row that somehow arrives still never renders.
+  //
+  // `open` is the open pool as the server filtered it for this caregiver, and
+  // only the shifts they can actually claim. One their licence does not cover
+  // stays greyed on the Open shifts tab with its reason; on a calendar it
+  // would only read as work they could pick up.
+  var CAL_KINDS = [
+    { id: 'confirmed', label: 'Confirmed' },
+    { id: 'in_progress', label: 'In progress' },
+    { id: 'completed', label: 'Completed' },
+    { id: 'offered', label: 'Offered to you' },
+    { id: 'claimed', label: 'Claimed, awaiting approval' },
+    { id: 'open', label: 'Open, you can claim' }
+  ];
+  function calKind(s, fromPool) {
+    if (!s || s.status === 'cancelled') return null;
+    if (fromPool) return s.status === 'open' && s.claimable !== false ? 'open' : null;
+    if (s.status === 'assigned') return 'offered';
+    if (s.status === 'claimed' || s.status === 'confirmed' || s.status === 'in_progress' || s.status === 'completed') return s.status;
+    return null;
+  }
+  function calEntries(state) {
+    var out = [];
+    var seen = {};
+    (state.mine || []).forEach(function (s) {
+      var k = calKind(s, false);
+      if (k) { out.push({ shift: s, kind: k }); seen[s.id] = true; }
+    });
+    (state.open || []).forEach(function (s) {
+      var k = calKind(s, true);
+      if (k && !seen[s.id]) out.push({ shift: s, kind: k });
+    });
+    return out;
+  }
+  // Bucketed by the day it is IN GEORGIA, never the phone's own date: an 8pm
+  // shift must not file under tomorrow for a phone set to another zone. The
+  // scheduling board buckets the same way.
+  function dayKey(iso) {
+    var p = T && T.zonedParts ? T.zonedParts(iso) : null;
+    return p ? p.isoDate : '';
+  }
+  function minutesOf(iso) {
+    var p = T && T.zonedParts ? T.zonedParts(iso) : null;
+    return p ? p.minutesOfDay : 0;
+  }
+  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  // "9a", "2:30p": a phone's day cell is too narrow for "9:00 AM".
+  function shortTime(iso) {
+    var p = T && T.zonedParts ? T.zonedParts(iso) : null;
+    if (!p) return '';
+    var h = p.hour % 12 || 12;
+    return h + (p.minute ? ':' + pad2(p.minute) : '') + (p.hour < 12 ? 'a' : 'p');
+  }
+  function todayParts() {
+    var p = T && T.zonedParts ? T.zonedParts(new Date().toISOString()) : null;
+    if (p) return { year: p.year, month: p.month - 1, key: p.isoDate };
+    var d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth(), key: d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) };
+  }
+  function calCursor(state) {
+    if (!state.cal) {
+      var t = todayParts();
+      state.cal = { year: t.year, month: t.month, day: t.key, hidden: {} };
+    }
+    return state.cal;
+  }
+
+  function renderCalendar(state) {
+    var cal = calCursor(state);
+    var today = todayParts();
+    var entries = calEntries(state).filter(function (e) { return !cal.hidden[e.kind]; });
+    var byDay = {};
+    entries.forEach(function (e) {
+      var k = dayKey(e.shift.start);
+      if (!k) return;
+      (byDay[k] = byDay[k] || []).push(e);
+    });
+    Object.keys(byDay).forEach(function (k) {
+      byDay[k].sort(function (a, b) { return minutesOf(a.shift.start) - minutesOf(b.shift.start); });
+    });
+
+    var monthKey = cal.year + '-' + pad2(cal.month + 1);
+    var inMonth = entries.filter(function (e) { return dayKey(e.shift.start).slice(0, 7) === monthKey; }).length;
+    var lead = new Date(Date.UTC(cal.year, cal.month, 1)).getUTCDay();
+    var days = new Date(Date.UTC(cal.year, cal.month + 1, 0)).getUTCDate();
+    var cells = [];
+    var n;
+    for (n = 0; n < lead; n++) cells.push(null);
+    for (n = 1; n <= days; n++) cells.push(n);
+    while (cells.length % 7 !== 0) cells.push(null);
+
+    var html = '<div class="gcard">' +
+      '<div class="gcalhdr">' +
+        '<button class="gbtn ghost gsm" data-act="cal-prev" aria-label="Previous month">\u2039</button>' +
+        '<h3 class="gcaltitle">' + esc(MONTHS[cal.month] + ' ' + cal.year) + '</h3>' +
+        '<button class="gbtn ghost gsm" data-act="cal-next" aria-label="Next month">\u203A</button>' +
+        '<button class="gbtn ghost gsm" data-act="cal-today">Today</button>' +
+      '</div>' +
+      '<p class="gmu" style="margin:0 0 8px">' + (inMonth
+        ? inMonth + ' shift' + (inMonth > 1 ? 's' : '') + ' this month. Every time is Eastern. Tap a day to see its shifts.'
+        : 'No shifts this month.') + '</p>' +
+      '<div class="gcal ghead">' + DOW.map(function (d) { return '<div class="gdow">' + d + '</div>'; }).join('') + '</div>' +
+      '<div class="gcal">';
+    cells.forEach(function (d, i) {
+      if (d === null) { html += '<div class="gcell blank"></div>'; return; }
+      var key = cal.year + '-' + pad2(cal.month + 1) + '-' + pad2(d);
+      var list = byDay[key] || [];
+      html += '<button class="gcell' + (key === today.key ? ' today' : '') + (key === cal.day ? ' picked' : '') +
+        '" data-act="cal-day" data-day="' + key + '" aria-label="' + esc(MONTHS[cal.month] + ' ' + d + ', ' + list.length + ' shift' + (list.length === 1 ? '' : 's')) + '">' +
+        '<span class="gdate">' + d + '</span>' +
+        list.map(function (e) {
+          return '<span class="gshift ' + e.kind + '">' +
+            '<b class="gfull">' + esc(T ? T.fmtTime(e.shift.start) : '') + '</b>' +
+            '<b class="gshort">' + esc(shortTime(e.shift.start)) + '</b>' +
+            '<span class="gwho"> ' + esc(e.shift.clientName || (e.shift.staffRoleLabel ? e.shift.staffRoleLabel : '')) + '</span>' +
+          '</span>';
+        }).join('') +
+      '</button>';
+    });
+    html += '</div>' +
+      '<div class="glegend">' + CAL_KINDS.map(function (k) {
+        return '<button class="gkey' + (cal.hidden[k.id] ? ' off' : '') + '" data-act="cal-filter" data-kind="' + k.id + '" aria-pressed="' + (cal.hidden[k.id] ? 'false' : 'true') + '">' +
+          '<i class="gdot ' + k.id + '"></i>' + esc(k.label) + '</button>';
+      }).join('') + '</div>' +
+    '</div>';
+
+    // The chosen day, with the same controls the list and the other tabs
+    // offer for each shift: clock in on a confirmed one, accept an offer,
+    // claim an open one. One set of buttons, built by the same functions.
+    var picked = byDay[cal.day] || [];
+    html += '<div class="gcard"><h3>' + esc(cal.day ? fmtPlainDate(cal.day) : 'Pick a day') + '</h3>' +
+      (picked.length ? picked.map(function (e) { return calDetailRow(state, e); }).join('')
+        : '<div class="gmu">Nothing on this day.</div>') +
+    '</div>';
+    return html + renderMyRequests(state);
+  }
+
+  function calDetailRow(state, e) {
+    var s = e.shift;
+    var label = '';
+    for (var i = 0; i < CAL_KINDS.length; i++) if (CAL_KINDS[i].id === e.kind) label = CAL_KINDS[i].label;
+    var tag = '<div class="gmu"><span class="gchip gk-' + e.kind + '">' + esc(label) + '</span></div>';
+    if (e.kind === 'confirmed' || e.kind === 'in_progress') return scheduleRow(state, s);
+    if (e.kind === 'offered') return offerRow(state, s, tag);
+    if (e.kind === 'open') return openRow(s, tag);
+    // Completed, or a claim waiting on the office: nothing to do but read it.
+    return '<div class="grow" style="display:block">' +
+      '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
+      '<div class="gmu">' + esc(whoLine(s)) + '</div>' + tag +
+      (e.kind === 'claimed' ? '<div class="gmu">The office confirms it before it is yours.</div>' : '') +
+    '</div>';
+  }
+
+  function whoLine(s) {
+    return s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '');
   }
 
   // WHERE AN ANSWER IS READ. A declined request carries the office's reason,
@@ -401,11 +630,11 @@
     '</div>';
   }
 
-  function renderOffers(state) {
-    if (!state.offers.length) return '<div class="gempty">No shifts are waiting on your answer.</div>';
-    return '<div class="gcard"><h3>Offered to you</h3>' + state.offers.map(function (s) {
+  // `tag` is the calendar's status chip; the Offers tab passes none.
+  function offerRow(state, s, tag) {
       return '<div class="grow" style="display:block">' +
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
+        (tag || '') +
         '<div class="gmu">' + esc(s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '')) + '</div>' +
         (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
         // An offer at the wrong time is where a change is cheapest to ask
@@ -430,6 +659,12 @@
           ? '<div class="gwhy">' + esc(s.changeRequestBlockedReason) + '</div>'
           : '') +
       '</div>';
+  }
+
+  function renderOffers(state) {
+    if (!state.offers.length) return '<div class="gempty">No shifts are waiting on your answer.</div>';
+    return '<div class="gcard"><h3>Offered to you</h3>' + state.offers.map(function (s) {
+      return offerRow(state, s);
     }).join('') + '</div>';
   }
 
@@ -444,18 +679,11 @@
   // field renders as claimable and is refused at the API, which is the same
   // outcome as today. Reading a missing field as "not claimable" would grey out
   // the entire board on a stale payload.
-  function renderOpen(state) {
-    if (!state.open.length) return '<div class="gempty">No open shifts right now.</div>';
-    var takeable = state.open.filter(function (s) { return s.claimable !== false; }).length;
-    return '<div class="gcard"><h3>Open shifts</h3>' +
-      '<p class="gmu" style="margin-bottom:8px">Claiming submits the shift for approval. The office confirms it before it is yours.' +
-        (takeable < state.open.length
-          ? ' Shifts you are not credentialed for are shown greyed out.'
-          : '') + '</p>' +
-      state.open.map(function (s) {
+  function openRow(s, tag) {
         var can = s.claimable !== false;
         return '<div class="grow' + (can ? '' : ' gblocked') + '" style="display:block">' +
           '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
+          (tag || '') +
           '<div class="gmu">' + esc(s.staffRole ? (s.staffRoleLabel + ' shift' + (s.clientName ? ' · visit: ' + s.clientName : ' · office')) : (s.clientName || '')) +
             (s.levelRequirementLabel ? ' · ' + esc(s.levelRequirementLabel) : '') + '</div>' +
           // Only a rate POSTED on the shift by an admin — identical for everyone
@@ -469,7 +697,17 @@
           '<div class="gbtns"><button class="gbtn gold" data-act="claim" data-id="' + esc(s.id) + '"' +
             (can ? '' : ' disabled aria-disabled="true"') + '>Claim</button></div>' +
         '</div>';
-      }).join('') + '</div>';
+  }
+
+  function renderOpen(state) {
+    if (!state.open.length) return '<div class="gempty">No open shifts right now.</div>';
+    var takeable = state.open.filter(function (s) { return s.claimable !== false; }).length;
+    return '<div class="gcard"><h3>Open shifts</h3>' +
+      '<p class="gmu" style="margin-bottom:8px">Claiming submits the shift for approval. The office confirms it before it is yours.' +
+        (takeable < state.open.length
+          ? ' Shifts you are not credentialed for are shown greyed out.'
+          : '') + '</p>' +
+      state.open.map(function (s) { return openRow(s); }).join('') + '</div>';
   }
 
   function renderAvailability(state) {
@@ -654,6 +892,27 @@
           }
           if (state.onVisitLogRequired) state.onVisitLogRequired(pending || { id: id });
           return;
+        }
+        // Calendar controls. Handled before the shift actions below, which
+        // disable the button and post to the server.
+        if (act === 'cal-view') { state.schedView = btn.getAttribute('data-view'); return render(state); }
+        if (act === 'cal-prev' || act === 'cal-next' || act === 'cal-today') {
+          var c = calCursor(state);
+          var t = todayParts();
+          if (act === 'cal-today') { c.year = t.year; c.month = t.month; }
+          else {
+            var m = c.month + (act === 'cal-next' ? 1 : -1);
+            c.year += Math.floor(m / 12); c.month = ((m % 12) + 12) % 12;
+          }
+          var mk = c.year + '-' + pad2(c.month + 1);
+          c.day = t.key.slice(0, 7) === mk ? t.key : mk + '-01';
+          return render(state);
+        }
+        if (act === 'cal-day') { calCursor(state).day = btn.getAttribute('data-day'); state.asking = null; return render(state); }
+        if (act === 'cal-filter') {
+          var hid = calCursor(state).hidden; var kd = btn.getAttribute('data-kind');
+          hid[kd] = !hid[kd];
+          return render(state);
         }
         if (act === 'ask-change') { state.asking = id; state.error = ''; state.notice = ''; return render(state); }
         if (act === 'cancel-ask') { state.asking = null; return render(state); }
@@ -867,6 +1126,8 @@
       error: '', notice: '',
       mine: [], offers: [], open: [], availability: [], availabilityRules: null, timeLogs: [], totalHours: null,
       asking: null, changeRequests: [],
+      // The Schedule tab opens on the calendar; List is the old view.
+      schedView: 'calendar', cal: null,
       draft: { effectiveFrom: earliest, windows: [{ day: 'Mon', start: '09:00', end: '17:00' }], blackoutDates: [] }
     };
     instances[elementId] = state;

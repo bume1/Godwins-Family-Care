@@ -461,10 +461,57 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
 // ============================================================================
 // Master calendar + lifecycle actions
 // ============================================================================
+// Set a shift's status by hand (owner, 2026-11-27). The buttons below cover
+// the normal path; this is the override for when the record is wrong. The
+// server requires a reason, refuses a holder-only status on a shift nobody
+// holds, and closes a running clock if the visit was under way.
+const SetStatus = ({ s, onDone, onCancel, setErr, setOk }) => {
+  const [to, setTo] = useState('');
+  const [why, setWhy] = useState('');
+  const [busy, setBusy] = useState(false);
+  const needsHolder = to && to !== 'open' && to !== 'cancelled' && !s.caregiverName;
+  const save = async () => {
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      const res = await api(`/api/scheduling/shifts/${s.id}/status`, {
+        method: 'POST', body: JSON.stringify({ status: to, reason: why })
+      });
+      setOk((res && res.message) || 'Status changed.');
+      await onDone();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="note" style={{ margin: '8px 0' }}>
+      <b>Change status by hand</b>
+      <div className="btns">
+        <select value={to} onChange={e => setTo(e.target.value)} style={{ maxWidth: 220 }} aria-label="New status">
+          <option value="">New status…</option>
+          {BOARD_STATUSES.filter(x => x.id !== s.status).map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
+        </select>
+        <input placeholder="Reason (required)" value={why} onChange={e => setWhy(e.target.value)} style={{ maxWidth: 300 }} />
+        <button className="btn" disabled={busy || !to || !why.trim() || needsHolder} onClick={save}>Save Status</button>
+        <button className="btn ghost" onClick={onCancel}>Close</button>
+      </div>
+      <div className="mu" style={{ marginTop: 6 }}>
+        {needsHolder
+          ? 'Nobody holds this shift. Assign someone first, then set this status.'
+          : s.status === 'in_progress' && to
+            ? 'The visit is under way. Saving closes the open clock-in now and keeps the hours worked.'
+            : to === 'completed'
+              ? 'This records the shift as done. It does not add hours; add them in Time Logs if the visit was worked.'
+              : to === 'open' && s.caregiverName
+                ? `${s.caregiverName} is taken off this shift and it goes back to the open pool.`
+                : 'Nobody is emailed. The change and your reason are kept on the shift.'}
+      </div>
+    </div>
+  );
+};
+
 const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleSelect, selectable }) => {
   const [assignee, setAssignee] = useState('');
   const [reason, setReason] = useState('');
   const [editing, setEditing] = useState(false);
+  const [settingStatus, setSettingStatus] = useState(false);
   const eligible = s.staffRole ? (roster.staff || []).filter(p => p.role === s.staffRole) : roster.caregivers.filter(c => {
     if (!s.requiredLicenseLevel) return true;
     const rank = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
@@ -504,10 +551,18 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
         <EditShift s={s} setErr={setErr} setOk={setOk}
           onCancel={() => setEditing(false)}
           onSaved={async () => { setEditing(false); await onEdited(); }} />
-      ) : (s.status !== 'cancelled' && (
+      ) : settingStatus ? (
+        <SetStatus s={s} setErr={setErr} setOk={setOk}
+          onCancel={() => setSettingStatus(false)}
+          onDone={async () => { setSettingStatus(false); await onEdited(); }} />
+      ) : (
         <div className="btns">
-          <button className="btn ghost" onClick={() => setEditing(true)}>Edit Shift</button>
+          {s.status !== 'cancelled' && <button className="btn ghost" onClick={() => setEditing(true)}>Edit Shift</button>}
+          <button className="btn ghost" onClick={() => setSettingStatus(true)}>Change Status</button>
         </div>
+      )}
+      {(s.statusOverrides || []).slice(-1).map(o => (
+        <div key={o.at} className="mu">Status set by hand from {titleize(o.from)} to {titleize(o.to)} by {o.by_name} {fmtWhen(o.at)} — {o.reason}</div>
       ))}
 
       {s.status === 'claimed' && (

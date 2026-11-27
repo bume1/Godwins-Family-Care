@@ -1558,7 +1558,12 @@ module.exports = function createSchedulingRoutes(deps) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shifts');
-      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      // A caregiver (or W-2 staff member) never sees a cancelled shift (owner,
+      // 2026-11-27). Their calendar shows confirmed, completed and open work;
+      // a cancelled row is office history, and it stays on the board for the
+      // office. Their hours are unaffected: time logs are their own read.
+      let mine = isScheduleManager(req.user) ? rows
+        : rows.filter(r => r && r.caregiver_id === req.user.id && r.status !== 'cancelled');
       if (req.query.status) mine = mine.filter(r => r.status === String(req.query.status));
       if (req.query.from) mine = mine.filter(r => String(r.start) >= String(req.query.from));
       if (req.query.to) mine = mine.filter(r => String(r.start) <= String(req.query.to));
@@ -1577,7 +1582,11 @@ module.exports = function createSchedulingRoutes(deps) {
       // going to answer 409 is worse than no button, and a caregiver told
       // "too late" needs the office number, not a disabled control.
       const changeRequests = await readRows('shift_change_requests');
-      const page = mine.slice(0, 500).map((r) => {
+      // Capped at 500. A caregiver's calendar needs their newest shifts and
+      // everything ahead, so their cap drops the OLDEST rows; the office board
+      // keeps its existing order.
+      const capped = isScheduleManager(req.user) ? mine.slice(0, 500) : mine.slice(-500);
+      const page = capped.map((r) => {
         const out = publicShift(r);
         out.visitLogFiled = sched.isStaffShift(r) ? null : r.status === 'in_progress'
           ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
@@ -1598,6 +1607,8 @@ module.exports = function createSchedulingRoutes(deps) {
         // page — an offer takes a time change only, and a form offering
         // "I cannot work this" on an offer would be refused at the API.
         out.changeRequestKinds = askable.ok ? sched.kindsFor(r.status) : [];
+        // The office's own record of a hand-set status. Office-only.
+        if (isScheduleManager(req.user)) out.statusOverrides = r.status_overrides || [];
         const open = sched.findOpenChangeRequest(changeRequests, r.id);
         out.openChangeRequest = open
           ? { id: open.id, kind: open.kind, status: open.status, requestedAt: open.requested_at }
@@ -2110,6 +2121,90 @@ module.exports = function createSchedulingRoutes(deps) {
       });
     } catch (error) {
       console.error('Shift cancel error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/shifts/:id/status — set a shift's status BY HAND
+  // (owner, 2026-11-27: "an option to manually change these shift options, as
+  // an admin or manager"). The lifecycle routes above each check that a move
+  // is legal; this is the office's override for when the record is wrong and
+  // the normal path cannot fix it — a shift cancelled by mistake, a visit that
+  // happened but was never clocked, a completed shift that did not happen.
+  //
+  // What keeps it honest:
+  //   · a reason is required and kept on the row (`status_overrides`), with
+  //     who and when, and the activity log records the move;
+  //   · a status that means somebody holds the shift needs somebody to hold
+  //     it — the override never invents an assignee;
+  //   · leaving `in_progress` closes an open clock-in the same way Ending the
+  //     visit does, so no time log is left running against a shift that is
+  //     no longer under way;
+  //   · moving to `open` releases the holder the normal way, which also lapses
+  //     any pending change request of theirs.
+  // It writes NO hours. Marking a shift completed by hand does not create a
+  // time log; typed-in hours stay an admin's job in Time Logs.
+  router.post('/api/scheduling/shifts/:id/status', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const to = String(body.status || '').trim();
+      const reason = String(body.reason || '').trim();
+      if (!sched.SHIFT_STATUSES.includes(to)) {
+        return res.status(400).json({ error: `"${to}" is not a shift status.`, code: 'UNKNOWN_STATUS' });
+      }
+      if (!reason) return res.status(400).json({ error: 'Say why the status is being changed by hand.', code: 'STATUS_REASON_REQUIRED' });
+
+      const rows = await readRows('shifts');
+      const idx = rows.findIndex(r => r && r.id === req.params.id);
+      if (idx === -1) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
+      const from = rows[idx].status;
+      if (from === to) return res.status(409).json({ error: `That shift is already ${to.replace(/_/g, ' ')}.`, code: 'STATUS_UNCHANGED' });
+      if (to !== 'open' && to !== 'cancelled' && !rows[idx].caregiver_id) {
+        return res.status(409).json({
+          error: `Nobody holds this shift, so it cannot be ${to.replace(/_/g, ' ')}. Assign someone first, then set the status.`,
+          code: 'SHIFT_NEEDS_HOLDER'
+        });
+      }
+
+      // Stop a running clock before the status moves away from it.
+      let endedLog = null;
+      if (from === 'in_progress' && to !== 'in_progress') {
+        endedLog = await endOfficeVisit({ shift: rows[idx], reason, actor: req.user });
+      }
+
+      const after = await readRows('shifts');
+      const i = after.findIndex(r => r && r.id === req.params.id);
+      const row = after[i];
+      row.status = to;
+      const stamp = sched.SHIFT_STATUS_TIMESTAMP[to];
+      if (stamp) row[stamp] = nowIso();
+      if (to === 'cancelled') row.cancel_reason = reason.slice(0, 1000);
+      else if (from === 'cancelled') row.cancel_reason = null;
+      row.status_overrides = (Array.isArray(row.status_overrides) ? row.status_overrides : []).concat([{
+        from, to, reason: reason.slice(0, 1000), at: nowIso(),
+        by_id: req.user.id, by_name: req.user.name || req.user.email
+      }]);
+      after[i] = row;
+      await db.set('shifts', after);
+      if (to === 'open' && row.caregiver_id) await releaseCaregiver(null, row.id, reason);
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'shift_status_override', 'shift', row.id,
+        { role: req.user.role, clientId: row.client_id, caregiverId: row.caregiver_id, from, to });
+
+      const fresh = (await readRows('shifts')).find(r => r && r.id === row.id);
+      const out = publicShift(fresh);
+      out.statusOverrides = fresh.status_overrides || [];
+      res.json({
+        shift: out,
+        timeLog: endedLog ? publicTimeLog(endedLog) : null,
+        message: `Status changed from ${from.replace(/_/g, ' ')} to ${to.replace(/_/g, ' ')}.` +
+          (endedLog ? ` The open clock-in was closed at ${sched.minutesToHours(endedLog.total_minutes)} hours.` : '') +
+          (to === 'completed' && !endedLog ? ' No hours were recorded by this change; add them in Time Logs if the visit was worked.' : '') +
+          (to === 'in_progress' ? ' No clock-in was started.' : '') +
+          ' Nobody was emailed.'
+      });
+    } catch (error) {
+      console.error('Shift status override error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });

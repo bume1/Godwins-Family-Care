@@ -895,7 +895,9 @@ test('a visit log filed while clocked in is attached to that shift, whatever scr
 test('the schedule reports whether the visit log is filed, and only for a running shift', () => {
   const i = routeSrc.indexOf("router.get('/api/scheduling/shifts'");
   assert.ok(i > 0, 'the shift list route exists');
-  const handler = routeSrc.slice(i, i + 2400);
+  // Anchored at both ends (the next route), not a fixed character count: a
+  // comment added to the handler pushed the fact past a 2400-character window.
+  const handler = routeSrc.slice(i, routeSrc.indexOf('router.get(', i + 10));
   assert.match(handler, /visitLogFiled/, 'the list carries the fact the gate reads');
   // The app must not claim a state it cannot observe: a shift that is not
   // running is not "missing" a log, so it reports null rather than false.
