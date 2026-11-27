@@ -2191,6 +2191,7 @@ module.exports = function createSchedulingRoutes(deps) {
       await logActivity(req.user.id, req.user.name || req.user.email, 'shift_status_override', 'shift', row.id,
         { role: req.user.role, clientId: row.client_id, caregiverId: row.caregiver_id, from, to });
 
+      const hadClockedHours = (await readRows('time_logs')).some(l => l && String(l.shift_id) === String(row.id) && l.clock_out_at && !l.ended_by_office);
       const fresh = (await readRows('shifts')).find(r => r && r.id === row.id);
       const out = publicShift(fresh);
       out.statusOverrides = fresh.status_overrides || [];
@@ -2201,6 +2202,8 @@ module.exports = function createSchedulingRoutes(deps) {
           (endedLog ? ` The open clock-in was closed at ${sched.minutesToHours(endedLog.total_minutes)} hours.` : '') +
           (to === 'completed' && !endedLog ? ' No hours were recorded by this change; add them in Time Logs if the visit was worked.' : '') +
           (to === 'in_progress' ? ' No clock-in was started.' : '') +
+          (to === 'cancelled' && !endedLog && hadClockedHours ? ' Its clocked hours no longer count on the payroll report, payroll runs or invoices.' : '') +
+          (from === 'cancelled' && hadClockedHours ? ' Its clocked hours count again on the payroll report, payroll runs and invoices.' : '') +
           ' Nobody was emailed.'
       });
     } catch (error) {
@@ -3602,7 +3605,10 @@ module.exports = function createSchedulingRoutes(deps) {
     // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
     // dropped the last evening of the range and pulled in the evening before
     // it — and then handed the wrong date to the pay period.
+    // A shift cancelled after it was clocked no longer pays (owner, 2026-11-27).
+    const shiftIdx = sched.shiftIndex(shiftRows);
     const logs = allLogs
+      .filter(l => !sched.hoursVoidedByCancel(l, shiftIdx))
       .concat(shiftsWithNoTimeLog(shiftRows, allLogs, SHIFTS_OWED_HOURS).map(s => pseudoLog(s, usersById)))
       .filter(l => {
         const d = sched.exportRowDate(l);
@@ -3706,8 +3712,9 @@ module.exports = function createSchedulingRoutes(deps) {
     };
     const APPROVAL_LABEL = { paid: 'Paid in payroll', approved: 'Approved', changed: 'Changed since approved', waiting: 'Not approved yet' };
 
+    const shiftIdx = sched.shiftIndex(shiftRows);
     const logs = allLogs
-      .filter(l => l && (l.clock_out_at || concluded(l)))
+      .filter(l => l && (l.clock_out_at || concluded(l)) && !sched.hoursVoidedByCancel(l, shiftIdx))
       .concat(shiftsWithNoTimeLog(shiftRows, allLogs, ['completed']).map(s => pseudoLog(s, usersById)))
       .filter(l => {
         // A W-2 staff member's hours (no shift, no client) are payroll, never

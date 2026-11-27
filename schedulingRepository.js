@@ -1719,7 +1719,30 @@ function availabilityVerdict(rows, personId, start, end) {
   return { status: covers ? 'INSIDE' : 'OUTSIDE', submittedAt: current.submitted_at || null };
 }
 
+// ---- HOURS ON A CANCELLED SHIFT -------------------------------------------
+// Owner report, 2026-11-27: a shift taken off the board kept showing on the
+// payroll report, the payroll run and the invoices. Every one of those reads
+// TIME LOGS, never the shift, so a shift set to cancelled by hand (the status
+// override) left its clocked hours paid and billed.
+//
+// A cancelled shift's hours stop counting, with ONE exception: a visit the
+// office ended while it was under way (`ended_by_office`). Those hours were
+// worked and are kept on purpose (see closeOfficeEndedLog, rule 1).
+//
+// `shiftsById` is a Map of shift id -> shift row. Pure.
+function hoursVoidedByCancel(log, shiftsById) {
+  // Hours already paid in an approved run stay on the record; a correction
+  // to paid hours is a line on the next run, never a silent disappearance.
+  if (!log || !log.shift_id || log.ended_by_office || log.payroll_run_id) return false;
+  const s = shiftsById && shiftsById.get(String(log.shift_id));
+  return !!(s && s.status === 'cancelled');
+}
+function shiftIndex(shiftRows) {
+  return new Map((shiftRows || []).filter(r => r && r.id).map(r => [String(r.id), r]));
+}
+
 module.exports = {
+  hoursVoidedByCancel, shiftIndex,
   STAFF_SHIFT_ROLES, staffRoleOf, isStaffShift, staffRoleLabel,
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
   validateAvailability, availabilityCoversShift, availabilityVerdict, AVAILABILITY_CHANGE_LEAD_DAYS,

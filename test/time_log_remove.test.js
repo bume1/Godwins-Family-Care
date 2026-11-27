@@ -185,3 +185,54 @@ test('removed hours are a registered collection, so a data migration carries the
   const keys = (Array.isArray(reg) ? reg : Object.values(reg || {})).map(r => r.key);
   assert.ok(keys.includes('time_logs_removed'));
 });
+
+// ---- A shift cancelled after it was clocked (owner, 2026-11-27) -----------
+// "the fix of payroll changes when shifts deleted or adjusted showing in the
+// report is not fixed." Setting a worked shift to cancelled by hand (the
+// status override) left its clocked hours on every payroll reader.
+
+test('CANCEL: setting a clocked shift to cancelled takes its hours off the report, the run and billing', async (t) => {
+  const h = await mount(t);
+  const r = await h.call('POST', '/api/scheduling/shifts/shift-2/status', { status: 'cancelled', reason: 'Visit did not happen' });
+  assert.strictEqual(r.status, 200, r.text);
+  assert.match(r.json.message, /no longer count/);
+  const rows = await h.report();
+  assert.ok(!rows.some(x => x.timeLogId === 'log-normal'), 'the cancelled shift is not on the report');
+  assert.strictEqual(await h.reportHours(), 183);
+  assert.strictEqual(await h.runMinutes(), 183 * 60, 'the payroll run no longer pays it');
+  const bill = await h.call('GET', '/api/scheduling/billing?from=2026-10-01&to=2026-10-31');
+  assert.strictEqual(bill.status, 200, bill.text);
+  assert.ok(!bill.json.rows.some(x => x.timeLogId === 'log-normal'), 'nor is it billed');
+  // The time log itself is untouched, so setting the shift back restores it.
+  assert.ok(h.store.get('time_logs').some(l => l.id === 'log-normal'));
+  const back = await h.call('POST', '/api/scheduling/shifts/shift-2/status', { status: 'completed', reason: 'It did happen' });
+  assert.strictEqual(back.status, 200, back.text);
+  assert.match(back.json.message, /count again/);
+  assert.strictEqual(await h.reportHours(), 187);
+});
+
+test('CANCEL: a visit the office ended while under way keeps its hours', async (t) => {
+  const ended = { ...NORMAL, ended_by_office: true };
+  const h = await mount(t, { time_logs: [STUCK, ended], shifts: [SHIFTS[0], { ...SHIFTS[1], status: 'cancelled' }] });
+  assert.strictEqual(await h.reportHours(), 187);
+  assert.strictEqual(await h.runMinutes(), 187 * 60);
+});
+
+test('CANCEL: hours already paid in a run stay on the report', async (t) => {
+  const paid = { ...NORMAL, payroll_run_id: 'run-1' };
+  const h = await mount(t, { time_logs: [STUCK, paid], shifts: [SHIFTS[0], { ...SHIFTS[1], status: 'cancelled' }] });
+  assert.ok((await h.report()).some(x => x.timeLogId === 'log-normal'));
+});
+
+test('hoursVoidedByCancel is the one rule, and invoice-run hours use it', () => {
+  const sched = require('../schedulingRepository');
+  const idx = sched.shiftIndex([{ id: 's1', status: 'cancelled' }, { id: 's2', status: 'completed' }]);
+  assert.strictEqual(sched.hoursVoidedByCancel({ shift_id: 's1' }, idx), true);
+  assert.strictEqual(sched.hoursVoidedByCancel({ shift_id: 's2' }, idx), false);
+  assert.strictEqual(sched.hoursVoidedByCancel({ shift_id: 's1', ended_by_office: true }, idx), false);
+  assert.strictEqual(sched.hoursVoidedByCancel({ shift_id: 's1', payroll_run_id: 'r' }, idx), false);
+  assert.strictEqual(sched.hoursVoidedByCancel({ kind: 'staff' }, idx), false);
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  const at = src.indexOf('phcInvoices.rowsFromTimeLogs(');
+  assert.ok(at > 0 && src.slice(at - 600, at).includes('hoursVoidedByCancel'), 'invoice runs filter cancelled-shift hours');
+});

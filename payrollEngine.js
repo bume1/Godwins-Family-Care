@@ -57,6 +57,12 @@ function gatherItems({ period, users, profilesById, timeLogs, shifts, visitTimin
   for (const l of timeLogs || []) {
     if (!l || !l.clock_out_at || !(Number(l.total_minutes) > 0)) continue;
     if (paidRefs && paidRefs.has(`log:${l.id}`)) continue;   // paid already: never looked at again
+    // The shift was cancelled after it was clocked: its hours no longer pay,
+    // unless the office ended it while it was under way (owner, 2026-11-27).
+    if (l.shift_id && !l.ended_by_office) {
+      const s = shiftById.get(String(l.shift_id));
+      if (s && s.status === 'cancelled') continue;
+    }
     const d = localDate(l.clock_in_at);
     if (!inPeriod(d)) continue;
     // W-2 staff clock on the same clock as caregivers (main, 2026-11-08):
