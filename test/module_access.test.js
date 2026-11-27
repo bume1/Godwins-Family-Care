@@ -131,7 +131,8 @@ test('a payroll preparer sees no Super Admin button on the page', () => {
   assert.match(page, /\{SUPER \? <button className="btn gold"[\s\S]{0,1400}?Approve Payroll<\/button>/);
   assert.match(page, /SUPER && <button className="underline" onClick=\{\(\) => reveal\('routing'\)\}>show<\/button>/);
   assert.match(page, /\{SUPER && <GustoImport/);
-  assert.match(read('routes/payroll.js'), /superAdmin: !!req\.user && req\.user\.role === 'admin',/);
+  // A preparer sees no Super Admin button; full payroll access (owner, 2026-11-27) does.
+  assert.match(read('routes/payroll.js'), /superAdmin: isRunner\(req\.user\),/);
 });
 
 // Owner report, 2026-11-13: "employees click the pay setup and don't get

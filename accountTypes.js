@@ -273,7 +273,10 @@ const OFFICE_TYPES = [TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR];
 // Two grants are narrower than the module itself, and the grid says so:
 //   Clinical Workspace — view only; writing follows the clinical licence.
 //   Payroll — prepare only; approving a run and full bank numbers stay with
-//     the Super Admin.
+//     the Super Admin. UNLESS the Super Admin also turns on "Run payroll in
+//     full" for that person (owner, 2026-11-27, for a future financial
+//     manager): then they hold every payroll power the Super Admin holds.
+//     Stored as `moduleAccess.payrollFull: true`, read by hasFullPayroll().
 const AREA_NAMES = Object.freeze({ myGfc: 'My GFC', people: 'People', clients: 'Clients', clinical: 'Clinical', billing: 'Billing', adminCompliance: 'Admin & Compliance' });
 const MODULES = Object.freeze([
   { id: 'myGfc', area: 'myGfc', link: MY_GFC, locked: 'Everyone on the team has My GFC.' },
@@ -325,7 +328,11 @@ function moduleDefault(u, id) {
 function moduleAccessOf(u) {
   const ma = (u && u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {};
   const clean = (v) => [...new Set((Array.isArray(v) ? v : []).map(String))].filter(id => GRANTABLE_MODULES.includes(id));
-  return { granted: clean(ma.granted), removed: clean(ma.removed) };
+  const out = { granted: clean(ma.granted), removed: clean(ma.removed) };
+  // Only a literal true counts, and only alongside a Payroll grant, so a
+  // stray value on the record can never widen anyone.
+  if (ma.payrollFull === true && out.granted.includes('payroll')) out.payrollFull = true;
+  return out;
 }
 
 function hasModule(u, id) {
@@ -343,11 +350,26 @@ function hasModule(u, id) {
 // The ids this person can open, in hub order.
 function modulesFor(u) { return MODULE_IDS.filter(id => hasModule(u, id)); }
 
+// Payroll in full (owner, 2026-11-27): the Super Admin, or a team member the
+// Super Admin granted Payroll AND turned on "Run payroll in full" for. That
+// person approves, pays, reads bank numbers, changes settings and releases
+// year-end forms exactly as the Super Admin does. Every routes/payroll.js
+// gate that was the Super Admin's alone reads this one answer.
+function hasFullPayroll(u) {
+  if (!u || u.accountStatus === 'inactive') return false;
+  const type = accountTypeOf(u);
+  if (type === TYPES.ADMIN) return true;
+  if (!isTeamType(type) || !hasModule(u, 'payroll')) return false;
+  return moduleAccessOf(u).payrollFull === true;
+}
+
 // What a save stores: a grant only where the type does NOT include the module,
 // a removal only where it DOES. Unknown and locked ids are dropped, so a body
 // can never widen the Admin Hub. `checked` is the grid's ticks: an array of
 // module ids the person should have.
-function moduleAccessFromChecks(u, checked) {
+// `opts.payrollFull` is the "Run payroll in full" switch; it is kept only
+// when Payroll itself is granted, so unticking Payroll turns it off too.
+function moduleAccessFromChecks(u, checked, opts = {}) {
   const want = new Set((Array.isArray(checked) ? checked : []).map(String));
   const granted = [], removed = [];
   for (const id of GRANTABLE_MODULES) {
@@ -355,8 +377,13 @@ function moduleAccessFromChecks(u, checked) {
     if (def && !want.has(id)) removed.push(id);
     if (!def && want.has(id)) granted.push(id);
   }
-  return { granted, removed };
+  const out = { granted, removed };
+  if (opts && opts.payrollFull === true && granted.includes('payroll')) out.payrollFull = true;
+  return out;
 }
+
+const FULL_PAYROLL_DESCRIPTION = 'Same payroll access as a Super Admin: approve and pay runs, see full bank numbers, change payroll settings and tax tables, and release year-end forms.';
+const FULL_PAYROLL_NOTE = 'Runs payroll in full, the same as a Super Admin.';
 
 // The grid for one person, for the Edit User form.
 function moduleGridFor(u) {
@@ -370,7 +397,9 @@ function moduleGridFor(u) {
       id: m.id, name: m.link.name, area: AREA_NAMES[m.area], description: m.link.description,
       byRole, has,
       locked: isAdmin ? 'A Super Admin has every module.' : (m.locked || null),
-      note: (!byRole && m.grantNote) || null,
+      note: (m.id === 'payroll' && !isAdmin && hasFullPayroll(u)) ? FULL_PAYROLL_NOTE : ((!byRole && m.grantNote) || null),
+      // The Payroll row carries the "Run payroll in full" switch.
+      ...(m.id === 'payroll' && !isAdmin ? { fullRun: { on: hasFullPayroll(u), label: 'Run payroll in full', description: FULL_PAYROLL_DESCRIPTION } } : {}),
       state: byRole ? (has ? 'role' : 'removed') : (has ? 'granted' : 'off')
     };
   });
@@ -573,7 +602,7 @@ module.exports = {
   CLINICIAN_TYPES, LEGACY_FLAGS,
   fieldsFor, deriveType, accountTypeOf, accountTypeLabel, accessSummaryFor, clinicalRoleNeedsConfirming, managerAccessOf, isConsistent,
   landingFor, hubAreasFor, hubTilesFor, applyAccountTypeMigration,
-  MODULES, MODULE_IDS, GRANTABLE_MODULES, moduleDefault, moduleAccessOf, hasModule, modulesFor, moduleAccessFromChecks, moduleGridFor,
+  MODULES, MODULE_IDS, GRANTABLE_MODULES, moduleDefault, moduleAccessOf, hasModule, modulesFor, moduleAccessFromChecks, moduleGridFor, hasFullPayroll,
   HOME_CARE_OFFICE_TYPES, isHomeCareOffice,
   OFFICE_MANAGEABLE_TYPES, canManageAccountType, checkUserWrite
 };
