@@ -143,6 +143,42 @@ const at = (ymd, hh, mm = 0) => new Date(Date.parse(`${ymd}T${String(hh + 5).pad
   ok('the spreadsheet run starts and reads 9:00 AM to 12:00 PM on 11/6/2026', imp.status === 200 && (imp.body.shifts || []).some(s => s.date === '2026-11-06' && s.start === '9:00 AM' && s.approval === 'file'), imp.body);
   ok('Delete Draft', (await call('DELETE', `/api/gfc/admin/billing-runs/${imp.body.run.id}`, admin)).status === 200);
 
+  console.log('\n--- 9. voiding: anything until it is approved AND sent (owner, 2026-11-27) ---');
+  const stmt = async () => (await call('GET', '/api/gfc/admin/billing-statements', admin)).body.invoices;
+  let v = await call('POST', `/api/gfc/admin/billing-runs/${runId}/void`, admin, {});
+  ok('voiding needs a reason', v.status === 400 && v.body.code === 'RUN_VOID_REASON_REQUIRED', v.body);
+  v = await call('POST', `/api/gfc/admin/billing-runs/${runId}/void`, admin, { reason: 'Wrong period' });
+  ok('a run with a client already sent cannot be voided whole', v.status === 409 && v.body.code === 'RUN_ALREADY_SENT', v.body);
+  v = await call('POST', `/api/gfc/admin/billing-runs/${runId}/void`, admin, { clientId: c2.id, reason: 'Wrong period' });
+  ok('the sent client cannot be voided', v.status === 409 && v.body.code === 'RUN_ALREADY_SENT', v.body);
+  const benOpen = (await stmt()).find(i => i.runId === runId && i.clientId === c2.id);
+  v = await call('POST', `/api/gfc/admin/billing/invoices/${benOpen.id}/void`, admin, { reason: 'x' });
+  ok('a sent home care invoice cannot be voided under Statements either', v.status === 409 && v.body.code === 'INVOICE_ALREADY_SENT', v.body);
+  v = await call('POST', `/api/gfc/admin/billing-runs/${runId}/void`, admin, { clientId: c1.id, reason: 'Hours were wrong' });
+  ok('a client not sent yet is voided', v.status === 200 && v.body.run.status === 'approved', v.body);
+  const adaInvs = (await stmt()).filter(i => i.runId === runId && i.clientId === c1.id);
+  ok('  their invoices are void, with who and why', adaInvs.length >= 2 && adaInvs.every(i => i.status === 'void' && i.voidReason === 'Hours were wrong' && i.voidedBy), adaInvs.map(i => [i.status, i.voidReason]));
+  ok('  they leave the send list and the run total', !(v.body.send || []).some(p => p.clientId === c1.id) && v.body.totalCents === benOpen.totalCents, [v.body.send, v.body.totalCents]);
+  ok('  their PDF is gone', (await call('GET', `/api/gfc/admin/billing-runs/${runId}/clients/${c1.id}/pdf`, admin)).status === 404);
+  const list = (await call('GET', '/api/gfc/admin/billing-runs', admin)).body.runs.find(r => r.id === runId);
+  ok('  the run list shows the live total and one client, all sent', list.totalCents === benOpen.totalCents && list.clientCount === 1 && list.sentCount === 1, list);
+
+  const re = await call('POST', '/api/gfc/admin/billing-runs', admin, { source: 'app', from: days[0], to: days[1] });
+  const reMine = (re.body.shifts || []).filter(s => s.clientName.startsWith('Probe'));
+  ok('a new run bills the voided client\'s hours again; the sent client\'s stay billed', reMine.some(s => s.clientName.startsWith('Probe Ada') && !s.invoiced) && reMine.some(s => s.clientName.startsWith('Probe Ben') && s.date === days[0] && s.invoiced), reMine);
+  const reAp = await call('POST', `/api/gfc/admin/billing-runs/${re.body.run.id}/approve`, admin);
+  ok('  and it approves', reAp.status === 200 && reAp.body.run.status === 'approved', reAp.body);
+  v = await call('POST', `/api/gfc/admin/billing-runs/${re.body.run.id}/void`, admin, { reason: 'Approved by mistake' });
+  ok('an approved run with nothing sent is voided whole', v.status === 200 && v.body.run.status === 'void' && v.body.run.voidReason === 'Approved by mistake' && v.body.run.voidedBy, v.body.run);
+  ok('  every invoice in it is void', (await stmt()).filter(i => i.runId === re.body.run.id).every(i => i.status === 'void'));
+  v = await call('POST', `/api/gfc/admin/billing-runs/${re.body.run.id}/void`, admin, { reason: 'again' });
+  ok('  voiding twice is refused', v.status === 409 && v.body.code === 'RUN_ALREADY_VOID', v.body);
+  v = await call('POST', `/api/gfc/admin/billing-runs/${re.body.run.id}/send`, admin, {});
+  ok('  a void run sends nothing', v.status === 409, v.body);
+  const third = await call('POST', '/api/gfc/admin/billing-runs', admin, { source: 'app', from: days[0], to: days[1] });
+  ok('  its hours are free for another run', (third.body.shifts || []).some(s => s.clientName.startsWith('Probe Ada') && !s.invoiced), third.body.shifts);
+  await call('DELETE', `/api/gfc/admin/billing-runs/${third.body.run.id}`, admin);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

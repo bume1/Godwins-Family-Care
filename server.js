@@ -18945,8 +18945,22 @@ const runSummary = (run) => ({
   id: run.id, status: run.status, source: run.source, from: run.from, to: run.to, fileName: run.fileName || null,
   createdAt: run.createdAt, createdBy: run.createdBy, approvedAt: run.approvedAt || null, approvedBy: run.approvedBy || null,
   invoiceCount: (run.invoiceIds || []).length || (run.lastCount || 0), totalCents: run.totalCents || run.lastTotalCents || 0,
-  sentCount: run.sentCount || 0, clientCount: run.clientCount || 0
+  sentCount: run.sentCount || 0, clientCount: run.clientCount || 0,
+  voidedAt: run.voidedAt || null, voidedBy: run.voidedBy || null, voidReason: run.voidReason || null
 });
+// After any invoice in a run is voided: keep the run's live total and client
+// count true, and mark the run void once every invoice in it is.
+const settleRunAfterVoid = async (run, { by, reason, at } = {}) => {
+  const all = await readInvoices();
+  const ids = new Set(run.invoiceIds || []);
+  const live = all.filter(i => ids.has(i.id) && i.status !== 'void');
+  run.totalCents = live.reduce((a, i) => a + i.totalCents, 0);
+  run.clientCount = new Set(live.map(i => i.clientId)).size;
+  run.sentCount = new Set((run.sends || []).filter(s => live.some(i => i.clientId === s.clientId)).map(s => s.clientId)).size;
+  if (invoiceRuns.allVoid(run, all)) Object.assign(run, { status: 'void', voidedAt: at || new Date().toISOString(), voidedBy: by || null, voidReason: reason || null });
+  await saveBillingRun(run);
+  return run;
+};
 const billingRunView = async (run) => {
   const base = { run: { ...runSummary(run), edits: run.edits || [], adjustments: run.adjustments || [], includeWaiting: run.includeWaiting || null, sends: run.sends || [] } };
   if (run.status === 'draft') {
@@ -18978,7 +18992,7 @@ const billingRunView = async (run) => {
 const loadRun = async (id) => (await readBillingRuns()).find(r => r.id === id && r.status !== 'deleted');
 const draftOnly = (res, run) => {
   if (!run) { res.status(404).json({ error: 'Invoice run not found.', code: 'RUN_NOT_FOUND' }); return false; }
-  if (run.status !== 'draft') { res.status(409).json({ error: 'This run is approved. Its invoices are changed or voided one at a time under Statements.', code: 'RUN_NOT_DRAFT' }); return false; }
+  if (run.status !== 'draft') { res.status(409).json({ error: run.status === 'void' ? 'This run is voided. Start a new run to bill these hours.' : 'This run is approved. Void it (or one client) to change it, as long as it has not been sent.', code: 'RUN_NOT_DRAFT' }); return false; }
   return true;
 };
 const runReply = async (res, run) => res.json(await billingRunView(run));
@@ -19210,6 +19224,31 @@ app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilli
   } catch (e) { console.error('Invoice run send error:', e); res.status(500).json({ error: 'Server error' }); }
 });
 
+// Void an approved run, or one client's invoices in it (owner, 2026-11-27):
+// anything can be voided until it is approved AND sent. A reason is required.
+// The voided invoices free their shifts, so the hours can go on a new run.
+app.post('/api/gfc/admin/billing-runs/:id/void', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    const b = req.body || {};
+    const clientId = b.clientId ? String(b.clientId) : null;
+    const reason = String(b.reason || '').trim().slice(0, invoiceRuns.NOTE_MAX);
+    const all = await readInvoices();
+    const plan = invoiceRuns.voidPlan(run, all, { clientId, reason });
+    if (plan.error) return res.status(plan.code === 'RUN_NOT_FOUND' ? 404 : plan.code === 'RUN_VOID_REASON_REQUIRED' ? 400 : 409).json(plan);
+    const at = new Date().toISOString();
+    for (const id of plan.ids) {
+      const t = billing.transition(all.find(i => i.id === id), 'void', { at, by: req.user, reason });
+      if (t.error) return res.status(409).json(t);   // voidPlan checked every one; this is a backstop
+      await saveInvoice({ ...t.inv, voidedWithRun: !clientId });
+    }
+    await settleRunAfterVoid(run, { by: runWho(req.user), reason, at });
+    await logActivity(req.user.id, req.user.name || req.user.email, clientId ? 'billing_run_client_voided' : 'billing_run_voided', 'billing_run', run.id,
+      { from: run.from, to: run.to, invoices: plan.ids.length, clientId });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run void error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+
 // The invoice itself, as the PDF the carrier or family receives.
 app.get('/api/gfc/admin/billing/invoices/:id/pdf', authenticateToken, requireBilling, async (req, res) => {
   try {
@@ -19313,6 +19352,12 @@ app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requi
     const t = billing.transition(inv, to, { at: new Date().toISOString(), by: req.user, reason: b.reason, method: to === 'paid' ? (b.method === 'stripe' ? null : b.method) : undefined, reference: b.reference });
     if (t.error) return res.status(t.code === 'INVOICE_NOT_FOUND' ? 404 : 409).json(t);
     await saveInvoice(t.inv);
+    // An invoice voided under Statements keeps its run's totals true, and the
+    // run is void once all of its invoices are.
+    if (to === 'void' && t.inv.runId) {
+      const run = await loadRun(t.inv.runId);
+      if (run && run.status === 'approved') await settleRunAfterVoid(run, { by: runWho(req.user), reason: t.inv.voidReason, at: t.inv.voidedAt });
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, `invoice_${req.params.action.replace('-', '_')}`, 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
     // A carrier's invoice is sent to the carrier (the PDF), not announced to the patient.
     if (to === 'open' && billing.patientPays(t.inv)) notifyStatement(t.inv.clientId);
