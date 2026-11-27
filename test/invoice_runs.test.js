@@ -270,3 +270,19 @@ test('SAFETY: the void route checks voidPlan, needs a reason, and settles the ru
   const statements = between(SERVER, "'/api/gfc/admin/billing/invoices/:id/:action'", '\napp.');
   assert.match(statements, /to === 'void' && t\.inv\.runId[\s\S]*settleRunAfterVoid/, 'a single void under Statements keeps the run true');
 });
+
+test('an invoice email signs off as Kelvin Ume, BSN, RN with the finance address, and replies go to finance', () => {
+  const ET = require('../emailTemplates');
+  const r = ET.renderGfcEmail({ headline: 'Your home care invoice', paragraphs: ['Body.'], signoff: ET.FINANCE_SIGNOFF });
+  assert.match(r.html, /<strong>Kelvin Ume, BSN, RN<\/strong>/);
+  assert.ok(!r.html.includes('support@godwinsfamilycarellc.com'), 'no support address in the signature or footer');
+  assert.equal((r.html.match(/finance@godwinsfamilycarellc\.com/g) || []).length, 3, 'signature link, link text, footer');
+  assert.match(r.text, /Kelvin Ume, BSN, RN\n[\s\S]*finance@godwinsfamilycarellc\.com/);
+  // Every other notice is unchanged.
+  const other = ET.renderGfcEmail({ paragraphs: ['Body.'] });
+  assert.match(other.html, /The Godwins Family Care Team/);
+  assert.ok(!other.html.includes('finance@'));
+  const send = between(SERVER, "'/api/gfc/admin/billing-runs/:id/send'", "'/api/gfc/admin/billing/invoices/:id/pdf'");
+  assert.match(send, /signoff: emailTemplates\.FINANCE_SIGNOFF/);
+  assert.match(send, /\.\.\.financeMail\.financeOptions\(\)/, "finance is copied and takes the replies");
+});

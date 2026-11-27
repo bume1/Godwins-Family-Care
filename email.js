@@ -254,8 +254,9 @@ function multipart(subtype, parts) {
   return { headers: [`Content-Type: multipart/${subtype}; boundary="${boundary}"`], body };
 }
 
-function buildMimeMessage({ from, to, replyTo, subject, text, html, attachments }) {
+function buildMimeMessage({ from, to, cc, replyTo, subject, text, html, attachments }) {
   const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  const copies = (Array.isArray(cc) ? cc : [cc]).filter(Boolean);
   const atts = (Array.isArray(attachments) ? attachments : []).filter(a => a && a.filename && a.content);
 
   let root = singlePart('text/plain; charset="UTF-8"', Buffer.from(String(text || ''), 'utf8'));
@@ -277,6 +278,7 @@ function buildMimeMessage({ from, to, replyTo, subject, text, html, attachments 
     `From: ${sanitizeHeader(from)}`,
     `To: ${recipients.map(sanitizeHeader).join(', ')}`
   ];
+  if (copies.length) headers.push(`Cc: ${copies.map(sanitizeHeader).join(', ')}`);
   if (replyTo) headers.push(`Reply-To: ${sanitizeHeader(replyTo)}`);
   headers.push(
     `Subject: ${encodeHeaderValue(subject)}`,
@@ -297,6 +299,7 @@ async function sendViaGmail(payload) {
     from: `${t.fromName} <${t.fromAddress}>`,
     replyTo: payload.replyTo || t.replyToAddress,
     to: payload.to,
+    cc: payload.cc,
     subject: payload.subject,
     text: payload.text,
     html: payload.html,
@@ -320,6 +323,7 @@ async function sendViaResend(payload) {
     text: payload.text
   };
   if (payload.html) body.html = payload.html;
+  if (payload.cc && payload.cc.length) body.cc = payload.cc;
   const replyTo = payload.replyTo || t.replyToAddress;
   if (replyTo) body.replyTo = replyTo;
   if (payload.attachments && payload.attachments.length) {
@@ -387,6 +391,19 @@ function setupHintFor(error) {
 // send to one by forgetting to check (owner, 2026-10-23).
 const isPlaceholderAddress = (a) => /@placeholder\.local\s*>?\s*$/i.test(String(a || '').trim());
 
+// A copy (Cc) never repeats a To address and never goes to a placeholder.
+// Used for the finance inbox on payroll and billing mail (owner, 2026-11-27).
+function copyList(to, cc) {
+  const toSet = new Set((Array.isArray(to) ? to : [to]).map(a => String(a || '').trim().toLowerCase()));
+  const out = [];
+  for (const a of (Array.isArray(cc) ? cc : [cc])) {
+    const e = String(a || '').trim();
+    if (!e || isPlaceholderAddress(e) || toSet.has(e.toLowerCase()) || out.some(x => x.toLowerCase() === e.toLowerCase())) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 async function sendEmail(to, subject, body, options = {}) {
   const list = (Array.isArray(to) ? to : [to]).filter(a => a && !isPlaceholderAddress(a));
   if (!list.length) {
@@ -407,6 +424,7 @@ async function sendEmail(to, subject, body, options = {}) {
 
   const payload = {
     to,
+    cc: copyList(to, options.cc),
     subject,
     text: body,
     replyTo: options.replyTo || null,
@@ -436,6 +454,7 @@ async function sendPerRecipient(payloads) {
       htmlBody: p.html || p.htmlBody,
       attachments: p.attachments,
       replyTo: p.replyTo,
+      cc: p.cc,
       phi: p.phi
     });
     results.push({ email: p.to, ...r });
@@ -502,6 +521,8 @@ async function sendBatchEmails(emailPayloads) {
         text: p.text || p.body || ''
       };
       if (p.html || p.htmlBody) payload.html = p.html || p.htmlBody;
+      const cc = copyList(p.to, p.cc);
+      if (cc.length) payload.cc = cc;
       // The batch path is the one the notification queue actually uses, so
       // omitting it here would drop Reply-To from almost every real send.
       const rt = p.replyTo || t.replyToAddress;
@@ -537,7 +558,7 @@ async function sendBatchEmails(emailPayloads) {
 }
 
 module.exports = {
-  isPlaceholderAddress,
+  isPlaceholderAddress, copyList,
   sendEmail, sendBulkEmail, sendBatchEmails,
   transportStatus, resetTransportCache,
   // exported for tests
