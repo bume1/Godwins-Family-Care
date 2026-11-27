@@ -324,7 +324,10 @@ const NOT_YET_EDITABLE = Object.freeze([
   'staff_offer_signed', 'staff_offer_declined',
   'referral_accepted', 'referral_completed', 'abnormal_result_waiting',
   'payment_received', 'clinical_enrollment_activated', 'document_shared',
-  'account_mfa_reset', 'account_sessions_revoked', 'account_deactivated', 'account_role_changed'
+  'account_mfa_reset', 'account_sessions_revoked', 'account_deactivated', 'account_role_changed',
+  // The office's notice of a new website free assessment (2026-11-25), written
+  // out like the self sign-up notice it sits beside until those migrate together.
+  'free_assessment_received'
 ]);
 
 test('C25 every notice type in notifications.js is either editable or on the list, with nothing stale', () => {

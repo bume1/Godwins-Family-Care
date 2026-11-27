@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Free Care Assessment — Godwins Family Care</title>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
+  <link rel="stylesheet" href="/css/gfc-auth.css">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- The office phone lives in ONE place: ORG in consent-text.js. -->
+  <script src="/consent-text.js"></script>
+</head>
+<body style="margin:0">
+  <div id="root"></div>
+  <script type="text/babel">
+    // The free assessment (owner, 2026-11-25). The website's front door, moved
+    // into the app and saved straight into its database instead of a Google
+    // Sheet. Short on purpose: two screens, mostly one tap per question. It is
+    // a request for a call back, never an account. See assessmentRequests.js.
+    const { useState, useEffect } = React;
+    const OFFICE_PHONE = (window.GFC_CONSENT_TEXT && window.GFC_CONSENT_TEXT.ORG && window.GFC_CONSENT_TEXT.ORG.phone) || '';
+    const STEPS = ['Who and where', 'Care and coverage'];
+    // Which answers bring up a follow-up question. The answer LISTS come from
+    // the server (/api/assessment/options); these are only the triggers.
+    const HOME_CARE = 'Home care';
+    const MEDICAL = ['Primary care', 'Mental health / psychiatry'];
+    const MEDICAID_TYPES = ['Medicaid', 'Both Medicare and Medicaid', 'Medicaid waiver for home care'];
+    const CARE_HINTS = {
+      'Home care': 'Home care (help with bathing, meals, companionship)',
+      'Primary care': 'Primary care (a nurse practitioner for checkups and ongoing health)',
+      'Mental health / psychiatry': 'Mental health or psychiatry (medication management, mood, memory)',
+      'Not sure yet': 'Not sure yet'
+    };
+    // Which step owns each field, so a server refusal can send the person back to it.
+    const FIELD_STEP = {
+      who: 0, clientFirst: 0, clientLast: 0, dob: 0, addressLine1: 0, city: 0, state: 0, zip: 0,
+      submitterFirst: 0, submitterLast: 0, relationship: 0, phone: 0, email: 0,
+      careTypes: 1, visitSetting: 1, coverage: 1, planName: 1, medicaidWaiver: 1, ambulation: 1, twoPersonAssist: 1, cognitionLevel: 1, urgency: 1, notes: 1
+    };
+
+    const Field = ({ label, children, hint }) => (
+      <div><label className="fl">{label}</label>{children}{hint && <div className="hint">{hint}</div>}</div>
+    );
+    // One tap per answer: a row of buttons is faster than a dropdown on a phone.
+    const Tap = ({ label, options, value, onChange, labels }) => (
+      <div>
+        <label className="fl">{label}</label>
+        {(options || []).map(o => (
+          <label key={o} className={`opt ${value === o ? 'on' : ''}`}>
+            <input type="radio" checked={value === o} onChange={() => onChange(o)} />{(labels && labels[o]) || o}
+          </label>
+        ))}
+      </div>
+    );
+    const Checks = ({ label, options, value, onChange, labels }) => (
+      <div>
+        <label className="fl">{label}</label>
+        {(options || []).map(o => (
+          <label key={o} className={`opt ${value.includes(o) ? 'on' : ''}`}>
+            <input type="checkbox" checked={value.includes(o)} onChange={() => onChange(value.includes(o) ? value.filter(x => x !== o) : [...value, o])} />{(labels && labels[o]) || o}
+          </label>
+        ))}
+      </div>
+    );
+
+    const EMPTY = {
+      who: '', clientFirst: '', clientLast: '', dob: '', addressLine1: '', city: '', state: 'GA', zip: '',
+      submitterFirst: '', submitterLast: '', relationship: '', phone: '', email: '',
+      careTypes: [], visitSetting: '', coverage: [], planName: '', medicaidWaiver: '', ambulation: '', twoPersonAssist: '', cognitionLevel: '', urgency: '', notes: '',
+      website: ''
+    };
+
+    const Assessment = () => {
+      const [step, setStep] = useState(0);
+      const [f, setF] = useState(EMPTY);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [done, setDone] = useState('');
+      const [O, setO] = useState(null);
+      useEffect(() => {
+        fetch('/api/assessment/options').then(r => r.json()).then(j => setO(j.options || {}))
+          .catch(() => setErr('We could not load the form. Please refresh, or call us.'));
+      }, []);
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+      const family = f.who === 'family';
+      const onMedicaid = f.coverage.some(t => MEDICAID_TYPES.includes(t));
+      const wantsHomeCare = f.careTypes.includes(HOME_CARE) || f.careTypes.includes('Not sure yet');
+      const wantsMedical = f.careTypes.some(t => MEDICAL.includes(t));
+
+      // A quick check before moving on; the server checks everything again.
+      const stepError = () => {
+        if (step === 0) {
+          if (!f.who) return 'Tell us who is filling this out.';
+          if (!f.clientFirst.trim() || !f.clientLast.trim()) return 'Enter the first and last name of the person who needs care.';
+          if (!f.dob) return 'Enter their date of birth.';
+          if (!f.addressLine1.trim() || !f.city.trim() || !f.state) return 'Enter their street address, city and state.';
+          if (f.zip.replace(/\D/g, '').length !== 5) return 'Enter a 5-digit ZIP code.';
+          if (family && (!f.submitterFirst.trim() || !f.submitterLast.trim())) return 'Enter your first and last name.';
+          if (family && !f.relationship) return 'Choose how you are related to them.';
+          if (!f.phone.trim() && !f.email.trim()) return 'Give us a phone number or an email address so we can reach you.';
+          if (f.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return 'Enter a valid email address.';
+          if (f.phone.trim() && f.phone.replace(/\D/g, '').length < 10) return 'Enter a 10-digit phone number.';
+        }
+        if (step === 1) {
+          if (!f.careTypes.length) return 'Choose the kind of care you are interested in.';
+          if (wantsMedical && !f.visitSetting) return 'Tell us where you would like to be seen.';
+          if (!f.coverage.length) return 'Choose how care would be paid for.';
+          if (!f.ambulation || !f.cognitionLevel || (wantsHomeCare && !f.twoPersonAssist)) return 'Answer the questions about getting around and memory.';
+        }
+        return '';
+      };
+      const next = () => { const e = stepError(); setErr(e); if (!e) { setStep(1); window.scrollTo(0, 0); } };
+      const submit = async () => {
+        const e = stepError(); if (e) { setErr(e); return; }
+        setBusy(true); setErr('');
+        const body = { ...f, medicaidWaiver: onMedicaid ? f.medicaidWaiver : '', visitSetting: wantsMedical ? f.visitSetting : '', twoPersonAssist: wantsHomeCare ? f.twoPersonAssist : '' };
+        try {
+          const r = await fetch('/api/assessment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const j = await r.json();
+          if (!r.ok) {
+            setErr(j.error || 'Something went wrong. Please try again.');
+            if (j.field && FIELD_STEP[j.field] != null) setStep(FIELD_STEP[j.field]);
+          } else setDone(j.message);
+        } catch (_) { setErr('We could not reach the server. Please try again.'); }
+        setBusy(false);
+      };
+
+      if (done) {
+        return (
+          <div>
+            <h1>Thank you</h1>
+            <p className="lead">{done}</p>
+            {OFFICE_PHONE && <p className="lead">If it is urgent, call us at <a href={`tel:${OFFICE_PHONE.replace(/\D/g, '')}`}>{OFFICE_PHONE}</a>.</p>}
+            <a className="btn navy" href="https://godwinsfamilycarellc.com">Back to our website</a>
+          </div>
+        );
+      }
+      if (!O) return <div><h1>Free Care Assessment</h1>{err ? <div className="err">{err}</div> : <p className="lead">Loading…</p>}</div>;
+      return (
+        <div>
+          <h1>Free Care Assessment</h1>
+          <p className="lead">Two quick screens, about two minutes. No cost and no commitment. We will call you to talk it through.</p>
+          <div className="steps" style={{ marginTop: 18 }}>
+            {STEPS.map((s, i) => (
+              <div key={s} className={`st ${i === step ? 'on' : i < step ? 'done' : ''}`}><b>{i < step ? '✓' : i + 1}</b>{s}</div>
+            ))}
+          </div>
+          <div className="card">
+            {step === 0 && (
+              <React.Fragment>
+                <Tap label="Who is filling this out?" options={['client', 'family']} value={f.who} onChange={v => set('who', v)}
+                  labels={{ client: 'I need care for myself', family: 'I am a family member or caregiver' }} />
+                <h2>{family ? 'The person who needs care' : 'About you'}</h2>
+                <Field label="First name"><input type="text" value={f.clientFirst} onChange={e => set('clientFirst', e.target.value)} /></Field>
+                <Field label="Last name"><input type="text" value={f.clientLast} onChange={e => set('clientLast', e.target.value)} /></Field>
+                <Field label="Date of birth"><input type="date" value={f.dob} onChange={e => set('dob', e.target.value)} /></Field>
+                <Field label="Street address"><input type="text" autoComplete="street-address" value={f.addressLine1} onChange={e => set('addressLine1', e.target.value)} /></Field>
+                <Field label="City"><input type="text" autoComplete="address-level2" value={f.city} onChange={e => set('city', e.target.value)} /></Field>
+                <Field label="State">
+                  <select value={f.state} onChange={e => set('state', e.target.value)}>{(O.usState || []).map(o => <option key={o}>{o}</option>)}</select>
+                </Field>
+                <Field label="ZIP code"><input type="text" inputMode="numeric" autoComplete="postal-code" value={f.zip} onChange={e => set('zip', e.target.value)} /></Field>
+                {family && (
+                  <React.Fragment>
+                    <h2>About you</h2>
+                    <Field label="Your first name"><input type="text" autoComplete="given-name" value={f.submitterFirst} onChange={e => set('submitterFirst', e.target.value)} /></Field>
+                    <Field label="Your last name"><input type="text" autoComplete="family-name" value={f.submitterLast} onChange={e => set('submitterLast', e.target.value)} /></Field>
+                    <Tap label="How are you related to them?" options={O.relationship} value={f.relationship} onChange={v => set('relationship', v)} />
+                  </React.Fragment>
+                )}
+                <Field label={family ? 'Your phone' : 'Phone'}><input type="tel" autoComplete="tel" value={f.phone} onChange={e => set('phone', e.target.value)} /></Field>
+                <Field label={family ? 'Your email' : 'Email'} hint="A phone number or an email is enough."><input type="email" autoComplete="email" value={f.email} onChange={e => set('email', e.target.value)} /></Field>
+              </React.Fragment>
+            )}
+            {step === 1 && (
+              <React.Fragment>
+                <Checks label="What kind of care are you interested in? Pick all that apply." options={O.careTypes} labels={CARE_HINTS} value={f.careTypes} onChange={v => set('careTypes', v)} />
+                {wantsMedical && <Tap label="Where would you like to be seen?" options={O.visitSetting} value={f.visitSetting} onChange={v => set('visitSetting', v)} />}
+                <Checks label="How would care be paid for? Pick all that apply." options={O.coverage} value={f.coverage} onChange={v => set('coverage', v)} />
+                <Field label="Insurance plan name (optional)" hint="As it reads on their card. It helps us check coverage before we call."><input type="text" value={f.planName} onChange={e => set('planName', e.target.value)} /></Field>
+                {onMedicaid && <Tap label="Are they on a Medicaid waiver?" options={O.medicaidWaiver} value={f.medicaidWaiver} onChange={v => set('medicaidWaiver', v)} />}
+                <Tap label="How do they get around?" options={O.ambulation} value={f.ambulation} onChange={v => set('ambulation', v)} />
+                {wantsHomeCare && <Tap label="Does moving them (bed, chair, toilet) take two people?" options={O.twoPersonAssist} value={f.twoPersonAssist} onChange={v => set('twoPersonAssist', v)} />}
+                <Tap label="Any memory or thinking concerns?" options={O.cognitionLevel} value={f.cognitionLevel} onChange={v => set('cognitionLevel', v)} />
+                <Tap label="How soon do you need help?" options={O.urgency} value={f.urgency} onChange={v => set('urgency', v)} />
+                <Field label="Anything else we should know? (optional)"><textarea rows={3} value={f.notes} onChange={e => set('notes', e.target.value)} /></Field>
+                <p className="hint" style={{ fontSize: 14, marginTop: 14 }}>By sending this, you agree that Godwins Family Care may call, text or email you about care.</p>
+              </React.Fragment>
+            )}
+            {/* A field people never see. Bots fill it in; the server drops those. */}
+            <div className="hp" aria-hidden="true"><label>Website<input tabIndex={-1} autoComplete="off" value={f.website} onChange={e => set('website', e.target.value)} /></label></div>
+            {err && <div className="err" style={{ marginTop: 14 }}>{err}</div>}
+            <div className="nav2">
+              {step > 0 && <button className="btn line" disabled={busy} onClick={() => { setErr(''); setStep(0); }}>Back</button>}
+              {step === 0 && <button className="btn navy" onClick={next}>Continue</button>}
+              {step === 1 && <button className="btn navy" disabled={busy} onClick={submit}>{busy ? 'Sending…' : 'Send'}</button>}
+            </div>
+          </div>
+          {OFFICE_PHONE && <p className="help">Prefer to talk? <a href={`tel:${OFFICE_PHONE.replace(/\D/g, '')}`}>Call {OFFICE_PHONE}</a></p>}
+        </div>
+      );
+    };
+
+    const App = () => (
+      <div className="ga">
+        <main className="ga-main">
+          <img className="ga-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+          <Assessment />
+        </main>
+        <div className="ga-foot"><p>© 2026 Godwins Family Care LLC</p></div>
+      </div>
+    );
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
