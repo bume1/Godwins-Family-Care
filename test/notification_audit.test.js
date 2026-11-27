@@ -619,8 +619,8 @@ test('the time-log notice is NOT in the shared writer, which would double-send',
   assert.ok(writer !== -1 && writerEnd > writer);
   assert.ok(!/timeLogChanged/.test(s.slice(writer, writerEnd)),
     'an APPROVED adjustment request comes through the same writer and already emails');
-  assert.strictEqual((s.match(/notice\.timeLogChanged\(/g) || []).length, 2,
-    'exactly two call sites: the typed entry and the direct admin correction');
+  assert.strictEqual((s.match(/notice\.timeLogChanged\(/g) || []).length, 3,
+    'exactly three call sites: the typed entry, the direct admin correction and the removal (2026-11-25)');
 });
 
 test('a document share notifies only when it is being shared', () => {

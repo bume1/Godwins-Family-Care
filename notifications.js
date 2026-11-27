@@ -1928,10 +1928,30 @@ function createNotifier(deps) {
   // ---- B4. An admin typed in or corrected somebody's hours ----------------
   // The approval path emails both ways. A direct edit changed what a person's
   // timesheet says about a day they worked and told them nothing.
-  async function timeLogChanged({ user, when, clientName, reason, created, ctaUrl, actorId, logId }) {
+  async function timeLogChanged({ user, when, clientName, reason, created, removed, ctaUrl, actorId, logId }) {
     try {
       if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
       const detail = transportAllowsDetail();
+      // Hours taken off the record entirely (owner, 2026-11-25). Same message
+      // type, its own wording: "corrected" would leave them looking for a
+      // changed time that is not there.
+      if (removed) {
+        return { notified: await send({
+          type: 'time_log_changed', user,
+          subject: 'Hours have been removed from your timesheet',
+          headline: 'Hours have been removed from your timesheet',
+          paragraphs: detail
+            ? [`The office has removed the hours recorded for your ${when} visit${clientName ? ` with ${clientName}` : ''}. They no longer count toward your pay.`,
+               'Check your pay screen, and tell the office straight away if you worked that time.']
+            : ['The office has removed hours from your timesheet. Open your pay screen to check them.',
+               'Tell the office straight away if you worked that time.'],
+          callout: detail ? (reason || null) : null,
+          calloutLabel: detail && reason ? 'Reason given' : null,
+          ctaUrl, ctaLabel: 'Open my hours',
+          relatedEntityId: `tlog:${logId}:removed`, relatedEntityType: 'time_log',
+          actorId, phi: detail
+        }) ? 1 : 0 };
+      }
       return { notified: await send({
         type: 'time_log_changed', user,
         subject: created ? 'Hours have been added to your timesheet' : 'Your recorded hours have been corrected',

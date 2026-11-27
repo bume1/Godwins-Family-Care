@@ -458,6 +458,16 @@ const HoursLine = ({ l, mode, onDone }) => {
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
+  // The Super Admin takes a clock-in off the record entirely (owner,
+  // 2026-11-25), so payroll stops counting it.
+  const remove = async () => {
+    const reason = (window.prompt('Why are these hours being removed? They will stop counting toward payroll, and the employee is told.') || '').trim();
+    if (!reason) return;
+    setBusy(true); setErr('');
+    try { await post(`/api/scheduling/time-logs/${enc(l.timeLogId)}/remove`, { reason }); await onDone('Hours removed. They no longer count toward payroll.'); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
   const decide = async (decision) => {
     const note = decision === 'declined' ? (window.prompt('Why not? They will see this.') || '') : '';
     if (decision === 'declined' && !note.trim()) return;
@@ -471,7 +481,8 @@ const HoursLine = ({ l, mode, onDone }) => {
       <div className="flex flex-wrap justify-between gap-2 items-center">
         <span>{day(l.date)} · {l.source}{l.clockIn ? ` · ${clock(l.clockIn)} to ${clock(l.clockOut)}` : ''}{l.client ? ` · ${l.client}` : ''}{l.edited ? <span className="chip bg-stone-100 text-stone-600 ml-1">EDITED{l.editedBy ? ` BY ${String(l.editedBy).toUpperCase()}` : ''}</span> : null}</span>
         <span className="flex gap-2 items-center"><b>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</b>
-          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}</span>
+          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}
+          {mode === 'direct' && l.editable && l.timeLogId && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" disabled={busy} onClick={remove}>Remove</button>}</span>
       </div>
       {l.edited && l.editReason && <div className="text-stone-500">Changed: {l.editReason}</div>}
       {!l.editable && l.timeLogId && <div className="text-stone-500">Paid and locked. A correction goes on the next payroll.</div>}
