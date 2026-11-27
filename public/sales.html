@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Sales Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/brand/logo-mark-color-transparent.png">
+  <style>
+    /* The Sales Portal (owner, 2026-11-23), moved off the public website.
+       This page is only the frame: the sections are the website's own pages,
+       served by /sales/doc/:id (salesPortal.js) and shown here unchanged. */
+    :root{--navy:#033D50;--gold:#F5CD85;--cream:#FAF7F2;--line:#e5ddcb;--red:#A32D2D}
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%}
+    body{display:flex;flex-direction:column;background:var(--cream);font-family:'DM Sans',system-ui,sans-serif;color:#1a2a32}
+    .sp-tabs{display:flex;gap:2px;overflow-x:auto;background:#022a37;padding:0 10px;flex:none;scrollbar-width:thin}
+    .sp-tabs a{flex:none;color:#b9cdd5;text-decoration:none;font-size:12.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:11px 12px;border-bottom:3px solid transparent;white-space:nowrap}
+    .sp-tabs a:hover{color:#fff}
+    .sp-tabs a.on{color:var(--gold);border-bottom-color:var(--gold)}
+    .sp-frame{flex:1;width:100%;border:0;background:var(--cream);display:block}
+    .sp-msg{margin:30px auto;max-width:560px;padding:14px 16px;border-radius:10px;font-size:15px;line-height:1.5;background:#fff;border:1px solid var(--line)}
+    .sp-msg.err{background:#fdeeee;border-color:#f3c9c9;color:var(--red)}
+  </style>
+</head>
+<body>
+<nav class="sp-tabs" id="spTabs" aria-label="Sales Portal sections"></nav>
+<div class="sp-msg" id="spMsg">Loading the Sales Portal…</div>
+<iframe class="sp-frame" id="spFrame" title="Sales Portal" hidden></iframe>
+<script src="/session-guard.js"></script>
+<script src="/staff-nav.js"></script>
+<script>
+(function () {
+  var TOKEN_KEYS = ['unified_token', 'admin_token', 'portal_token', 'unified_user', 'admin_user', 'portal_user'];
+  function token() {
+    try { return localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token'); } catch (e) { return null; }
+  }
+  var tabs = document.getElementById('spTabs');
+  var frame = document.getElementById('spFrame');
+  var msg = document.getElementById('spMsg');
+  var data = null;
+
+  // The website pages had their own "Log out". Here it signs out of the app.
+  window.gfcSalesSignOut = function () {
+    var t = token();
+    var done = function () {
+      TOKEN_KEYS.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) {} });
+      window.location.replace('/login?reason=signed_out');
+    };
+    if (!t) return done();
+    fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + t } }).then(done, done);
+  };
+
+  function current() {
+    var id = (window.location.hash || '').replace(/^#/, '');
+    var ids = data.docs.map(function (d) { return d.id; });
+    return ids.indexOf(id) >= 0 ? id : 'home';
+  }
+  function show() {
+    if (!data) return;
+    var id = current();
+    Array.prototype.forEach.call(tabs.children, function (a) { a.classList.toggle('on', a.getAttribute('data-id') === id); });
+    var src = '/sales/doc/' + id + '?ticket=' + encodeURIComponent(data.ticket);
+    if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
+    var doc = data.docs.filter(function (d) { return d.id === id; })[0];
+    document.title = 'Godwins Family Care — Sales Portal' + (doc && id !== 'home' ? ' · ' + doc.title : '');
+  }
+  window.addEventListener('hashchange', show);
+
+  fetch('/api/sales/portal', { headers: { Authorization: 'Bearer ' + token() } })
+    .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || 'Could not load the Sales Portal (' + r.status + ').'); return d; }); })
+    .then(function (d) {
+      data = d;
+      tabs.innerHTML = '';
+      d.docs.forEach(function (doc) {
+        var a = document.createElement('a');
+        a.href = '#' + doc.id; a.textContent = doc.title; a.setAttribute('data-id', doc.id);
+        tabs.appendChild(a);
+      });
+      msg.hidden = true; frame.hidden = false;
+      show();
+    })
+    .catch(function (e) { msg.className = 'sp-msg err'; msg.textContent = e.message; });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,2409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care | Partner Outreach Scripts</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #033D50;
+    --navy-mid: #054f67;
+    --navy-light: #0a6e8a;
+    --gold: #F5CD85;
+    --gold-dark: #d4a84b;
+    --gold-muted: #f5e4b8;
+    --cream: #faf7f2;
+    --text: #1a2a32;
+    --text-muted: #5a7080;
+    --white: #ffffff;
+    --border: rgba(3,61,80,0.12);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--cream);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+
+  /* HEADER */
+  .header {
+    background: var(--navy);
+    color: var(--white);
+    padding: 36px 48px 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: '';
+    position: absolute;
+    top: -60px; right: -60px;
+    width: 300px; height: 300px;
+    border-radius: 50%;
+    background: rgba(245,205,133,0.08);
+    pointer-events: none;
+  }
+  .header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .header h1 {
+    font-family: 'Playfair Display', serif;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    line-height: 1.2;
+  }
+  .header h1 span { color: var(--gold); }
+  .header-sub {
+    font-size: 13px;
+    color: rgba(255,255,255,0.6);
+    margin-top: 6px;
+    font-weight: 300;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .header-tag {
+    background: var(--gold);
+    color: var(--navy);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 20px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    align-self: flex-start;
+  }
+
+  /* DIFFERENTIATOR STRIP */
+  .diff-strip {
+    background: var(--navy-mid);
+    color: var(--white);
+    padding: 14px 48px;
+    border-bottom: 2px solid var(--gold);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .diff-strip strong { color: var(--gold); font-weight: 600; }
+
+  /* TIPS BAR */
+  .tips-bar {
+    background: var(--navy);
+    padding: 14px 48px;
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid rgba(245,205,133,0.2);
+  }
+  .tip-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--gold-muted);
+    font-weight: 400;
+  }
+  .tip-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--gold);
+    flex-shrink: 0;
+  }
+
+  /* TAB NAV */
+  .tab-nav-wrap {
+    background: var(--white);
+    border-bottom: 2px solid var(--border);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tab-nav-wrap::-webkit-scrollbar { display: none; }
+  .tab-nav {
+    display: flex;
+    min-width: max-content;
+    padding: 0 32px;
+  }
+  .tab-btn {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 14px 18px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    white-space: nowrap;
+    transition: color 0.2s, border-color 0.2s;
+    letter-spacing: 0.2px;
+  }
+  .tab-btn:hover { color: var(--navy); }
+  .tab-btn.active {
+    color: var(--navy);
+    font-weight: 600;
+    border-bottom-color: var(--gold-dark);
+  }
+  .tab-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--border);
+    font-size: 10px;
+    font-weight: 700;
+    margin-right: 6px;
+    color: var(--text-muted);
+  }
+  .tab-btn.active .tab-num {
+    background: var(--navy);
+    color: var(--gold);
+  }
+
+  /* TAB PANES */
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* MAIN LAYOUT */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 0;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .flow-col {
+    padding: 40px 48px 48px;
+    border-right: 1px solid var(--border);
+  }
+  .sidebar {
+    padding: 40px 28px 48px;
+    background: var(--white);
+  }
+
+  /* PARTNER BADGE */
+  .partner-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--gold-muted);
+    color: var(--navy);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 12px;
+    border-radius: 20px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+  .contact-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 28px;
+  }
+  .contact-tag {
+    background: var(--cream);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-weight: 500;
+  }
+  .contact-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 8px;
+  }
+
+  /* SECTION */
+  .section { margin-bottom: 36px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .step-badge {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: var(--gold);
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-family: 'Playfair Display', serif;
+  }
+  .section h2 {
+    font-family: 'Playfair Display', serif;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--navy);
+    letter-spacing: -0.2px;
+  }
+  .section-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    margin-left: auto;
+  }
+  .tag-open { background: #e8f4f0; color: #1a6b52; }
+  .tag-transfer { background: #e8eef5; color: #1a3d6b; }
+  .tag-qualify { background: #f5ebe0; color: #7a4a1a; }
+  .tag-close { background: #f0e8f5; color: #5a1a7a; }
+  .tag-objection { background: #fde8e8; color: #7a1a1a; }
+  .tag-diff { background: #033D50; color: #F5CD85; }
+
+  /* SCRIPT BLOCK */
+  .script-block {
+    background: var(--navy);
+    color: var(--white);
+    border-radius: 10px;
+    padding: 18px 20px;
+    font-size: 14px;
+    line-height: 1.65;
+    position: relative;
+    margin-bottom: 12px;
+  }
+  .script-block::before {
+    content: '\201C';
+    font-family: 'Playfair Display', serif;
+    font-size: 48px;
+    color: var(--gold);
+    opacity: 0.3;
+    position: absolute;
+    top: -6px; left: 12px;
+    line-height: 1;
+  }
+  .script-block p { padding-top: 14px; }
+  .script-block p + p { padding-top: 0; margin-top: 10px; }
+  .script-block strong { color: var(--gold); }
+
+  /* CONNECTOR */
+  .connector {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 4px 0 12px 16px;
+  }
+  .connector-line {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+  }
+  .connector-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  /* QUESTION LIST */
+  .q-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .q-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    padding: 10px 14px;
+    background: var(--white);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .q-icon {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: var(--gold);
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  /* DIFFERENTIATOR CALLOUT */
+  .diff-callout {
+    background: linear-gradient(135deg, var(--navy) 0%, var(--navy-mid) 100%);
+    border-left: 4px solid var(--gold);
+    color: var(--white);
+    padding: 16px 18px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  .diff-callout-label {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--gold);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .diff-callout strong { color: var(--gold); font-weight: 600; }
+
+  /* OBJECTIONS */
+  .objection-grid { display: flex; flex-direction: column; gap: 14px; }
+  .obj-card {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .obj-header {
+    background: #fde8e8;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #7a1a1a;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .obj-header::before {
+    content: '\2715';
+    font-size: 11px;
+    background: #c0392b;
+    color: white;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .obj-response {
+    background: var(--white);
+    padding: 12px 16px;
+    font-size: 13.5px;
+    color: var(--text);
+    line-height: 1.55;
+    border-top: 1px solid var(--border);
+  }
+  .obj-response em {
+    display: block;
+    font-style: normal;
+    color: var(--navy-light);
+    font-size: 12.5px;
+    font-weight: 500;
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+
+  /* DIVIDER */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 32px 0;
+  }
+
+  /* SIDEBAR */
+  .sidebar-section { margin-bottom: 32px; }
+  .sidebar-section h3 {
+    font-family: 'Playfair Display', serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--navy);
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--gold-muted);
+  }
+
+  /* KEY MESSAGES */
+  .key-msg {
+    background: var(--navy);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .key-msg-inner {
+    padding: 12px 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .key-check {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--gold);
+    color: var(--navy);
+    font-size: 11px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .key-msg p {
+    font-size: 13px;
+    color: var(--white);
+    line-height: 1.5;
+  }
+
+  /* COLLECT */
+  .collect-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .collect-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.45;
+    padding: 8px 10px;
+    background: var(--cream);
+    border-radius: 6px;
+  }
+  .collect-box {
+    width: 16px; height: 16px;
+    border: 2px solid var(--navy);
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  /* TIMELINE */
+  .timeline { display: flex; flex-direction: column; gap: 0; }
+  .timeline-item {
+    display: flex;
+    gap: 14px;
+    position: relative;
+  }
+  .timeline-item:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 36px;
+    bottom: -4px;
+    width: 1px;
+    background: var(--border);
+  }
+  .timeline-dot {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: var(--gold);
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    z-index: 1;
+  }
+  .timeline-content { padding-bottom: 20px; flex: 1; }
+  .timeline-day {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--navy);
+    margin-bottom: 2px;
+  }
+  .timeline-action {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  /* RATE TABLE */
+  .rate-cat {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin: 14px 0 6px;
+  }
+  .rate-cat:first-child { margin-top: 0; }
+  .rate-table {
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .rate-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    gap: 8px;
+  }
+  .rate-row:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .rate-row:nth-child(odd) { background: var(--cream); }
+  .rate-row:nth-child(even) { background: var(--white); }
+  .rate-label { color: var(--text); font-weight: 400; }
+  .rate-price {
+    font-weight: 700;
+    color: var(--navy);
+    font-family: 'Playfair Display', serif;
+    white-space: nowrap;
+  }
+  .rate-quote {
+    font-weight: 600;
+    color: var(--navy-light);
+    font-size: 11.5px;
+    font-family: 'DM Sans', sans-serif;
+    white-space: nowrap;
+  }
+
+  /* EMAIL */
+  .email-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .email-header {
+    background: var(--navy);
+    padding: 12px 16px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+  }
+  .email-header strong { color: var(--gold); }
+  .email-body {
+    padding: 16px;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .email-body p { margin-bottom: 10px; }
+  .email-body p:last-child { margin-bottom: 0; }
+  .email-bullet {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    margin-bottom: 5px;
+  }
+  .email-bullet::before {
+    content: '\2192';
+    color: var(--navy-light);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  /* PRIORITY PILL */
+  .priority-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 12px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 20px;
+  }
+  .priority-1 { background: #e8f4f0; color: #1a6b52; }
+  .priority-2 { background: #e8eef5; color: #1a3d6b; }
+  .priority-3 { background: #f5ebe0; color: #7a4a1a; }
+
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+    .flow-col { padding: 28px 24px; border-right: none; border-bottom: 1px solid var(--border); }
+    .sidebar { padding: 28px 24px; }
+    .tips-bar, .diff-strip { padding: 12px 24px; }
+    .header { padding: 28px 24px; }
+    .tab-nav { padding: 0 16px; }
+  }
+</style>
+</head>
+<body>
+<style>
+#gfcNavBtn{position:fixed;top:54px;left:14px;z-index:9500;background:#022a37;color:#F5CD85;border:1px solid #c9a44a55;height:42px;border-radius:8px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;font-family:'DM Sans',system-ui,sans-serif;font-weight:700;letter-spacing:.08em;box-shadow:0 2px 10px rgba(2,42,55,.35)}
+#gfcNavBtn:hover{background:#033D50}
+#gfcNavScrim{position:fixed;inset:0;background:rgba(2,42,55,.45);z-index:9600;opacity:0;pointer-events:none;transition:opacity .2s}
+#gfcNav{position:fixed;top:0;left:0;bottom:0;width:min(680px,94vw);background:#022a37;z-index:9700;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;font-family:'DM Sans',system-ui,sans-serif;box-shadow:4px 0 24px rgba(0,0,0,.25)}
+.gfcnav-open #gfcNav{transform:none}
+.gfcnav-open #gfcNavScrim{opacity:1;pointer-events:auto}
+#gfcNav .gn-head{display:flex;align-items:center;gap:6px;padding:12px 14px;border-bottom:1px solid #ffffff1a}
+#gfcNav .gn-tab{background:none;border:1px solid #ffffff2a;color:#dce8ec;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+#gfcNav .gn-tab.on{background:#c9a44a;border-color:#c9a44a;color:#022a37}
+#gfcNav .gn-title{color:#F5CD85;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 2px}
+#gfcNav .gn-full{margin-left:auto;color:#F5CD85;font-size:11.5px;text-decoration:none;letter-spacing:.06em}
+#gfcNav .gn-full:hover{text-decoration:underline}
+#gfcNav .gn-close{background:none;border:0;color:#dce8ec;font-size:22px;cursor:pointer;padding:2px 8px;line-height:1}
+#gfcNav .gn-pane{flex:1;display:none;background:#FAF7F2}
+#gfcNav .gn-pane.on{display:block}
+#gfcNav .gn-pane iframe{width:100%;height:100%;border:0;display:block}
+#gfcNav .gn-foot{padding:9px 14px;font-size:11px;color:#9db6bf;border-top:1px solid #ffffff1a;display:flex;gap:14px;flex-wrap:wrap}
+#gfcNav .gn-foot a{color:#dce8ec;text-decoration:none}
+#gfcNav .gn-foot a:hover{color:#F5CD85}
+@media print{#gfcNav,#gfcNavBtn,#gfcNavScrim{display:none!important}}
+</style>
+<button id="gfcNavBtn" aria-label="Open the task board" title="Task Board">&#9776; Tasks</button>
+<div id="gfcNavScrim"></div>
+<nav id="gfcNav" aria-label="Work tools">
+  <div class="gn-head">
+    <span class="gn-title">Task Board</span>
+    <a class="gn-full" id="gfcNavFull" href="?gfc_doc=tasks">Open full screen &rarr;</a>
+    <button class="gn-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="gn-pane on" data-pane="tasks"><iframe data-src="?gfc_doc=tasks" title="Task Board"></iframe></div>
+  <div class="gn-foot"><a href="?gfc_doc=home">Home</a><a href="?gfc_doc=start">Start Here</a><a href="?gfc_doc=playbook">Playbook</a><a href="?gfc_doc=script">Script</a><a href="?gfc_doc=paysheet">Pay Sheet</a><a href="?gfc_doc=emails">Emails</a></div>
+</nav>
+<script>(function(){var r=document.documentElement,b=document.getElementById('gfcNavBtn'),n=document.getElementById('gfcNav'),s=document.getElementById('gfcNavScrim'),c=n.querySelector('.gn-close'),full=document.getElementById('gfcNavFull');
+if(window.self!==window.top){b.style.display='none';n.style.display='none';s.style.display='none';return;}
+function open(){r.classList.add('gfcnav-open');var f=n.querySelector('.gn-pane iframe');if(f&&!f.src)f.src=f.getAttribute('data-src');}
+function close(){r.classList.remove('gfcnav-open');}
+b.addEventListener('click',open);c.addEventListener('click',close);s.addEventListener('click',close);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+})();</script>
+<div style="background:#022a37;color:#fff;padding:11px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;font-family:'DM Sans',sans-serif;font-size:11.5px;letter-spacing:0.12em;position:relative;z-index:3000;"><a href="?gfc_doc=home" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">&larr;&nbsp;Sales Portal</a><span style="color:#b9cdd5;text-transform:uppercase;">Godwins Family Care &middot; Internal &middot; Confidential</span><a href="?logout=1" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">Log&nbsp;out</a></div>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-top">
+    <div>
+      <h1>Godwins Family Care <span>|</span> Partner Outreach Scripts</h1>
+      <p class="header-sub">Partner Pipeline Field Reference &middot; North Atlanta &amp; West Cobb, GA</p>
+    </div>
+    <div class="header-tag">Field Reference</div>
+  </div>
+</div>
+
+<!-- DIFFERENTIATOR STRIP -->
+<div class="diff-strip">
+  <strong>Three pipelines, fully unbundled.</strong> Private home care under our state license. <strong>Concierge in-home primary care</strong> under our FNP licensure, FNP comes to the patient, unhurried visits, ongoing provider relationship, 24/7 team responsiveness. Independent medical evaluations under federal contractor partnerships. Families and partners pick any service alone or layer them. Under our nursing scope, we deliver continuous and extended-shift skilled nursing, the private duty model, broader than home health.
+</div>
+
+<!-- TIPS BAR -->
+<div class="tips-bar">
+  <div class="tip-item"><div class="tip-dot"></div>Be consultative, not salesy</div>
+  <div class="tip-item"><div class="tip-dot"></div>Position as a partner, not a vendor</div>
+  <div class="tip-item"><div class="tip-dot"></div>Lead with clinical oversight</div>
+  <div class="tip-item"><div class="tip-dot"></div>Build relationships over transactions</div>
+</div>
+
+<!-- TAB NAV -->
+<div class="tab-nav-wrap">
+  <div class="tab-nav">
+    <button class="tab-btn active" onclick="switchTab('alf', this)"><span class="tab-num">1</span>Assisted Living (ALF)</button>
+    <button class="tab-btn" onclick="switchTab('pch', this)"><span class="tab-num">2</span>Personal Care Homes (PCH)</button>
+    <button class="tab-btn" onclick="switchTab('ilf', this)"><span class="tab-num">3</span>Independent Living (ILF)</button>
+    <button class="tab-btn" onclick="switchTab('ccrc', this)"><span class="tab-num">4</span>CCRC</button>
+    <button class="tab-btn" onclick="switchTab('adp', this)"><span class="tab-num">5</span>Adult Day Programs</button>
+    <button class="tab-btn" onclick="switchTab('hosp', this)"><span class="tab-num">6</span>Hospital / SNF</button>
+    <button class="tab-btn" onclick="switchTab('cso', this)"><span class="tab-num">7</span>Caregiver Support Orgs</button>
+    <button class="tab-btn" onclick="switchTab('ltc', this)"><span class="tab-num">8</span>LTC Insurance Brokers</button>
+    <button class="tab-btn" onclick="switchTab('fe', this)"><span class="tab-num">9</span>Final Expense Agents</button>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 1: ALF -->
+<!-- ============================================================ -->
+<div class="tab-pane active" id="tab-alf">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-1">&#9679; Priority 2 &middot; Active Pursuit</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Executive Director</span>
+      <span class="contact-tag">Director of Nursing</span>
+      <span class="contact-tag">Social Worker / Care Coordinator</span>
+      <span class="contact-tag">Admissions Director</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization serving North Atlanta, West Cobb, and surrounding areas. We provide private home care alongside continuous and extended-shift skilled nursing for residents who need 1:1 support beyond what facility staffing can offer. <strong>Who might be the best person to speak with about the healthcare needs of your residents? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred to Director / Admissions</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>What sets us apart from a typical home care agency is two things. First, we're physician and FNP-owned, so clinical observation runs through every shift. Second, under our private duty nursing model, we deliver <strong>continuous and extended-shift skilled nursing, the private duty model.</strong> That's a different lane from home health, which is built around short, episodic visits.</p>
+        <p>For your residents, that means we can stage an LPN at the apartment for 8, 12, or 24-hour shifts when the clinical need is there. Behavioral 1:1, post-hospital recovery, complex care, or families who simply want professional eyes around the clock.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters for your facility</span>
+        <strong>Home health</strong> is intermittent. Short visits, a few times per week, episode-based, requires homebound status, time-limited. Once a resident plateaus or finishes the episode, coverage stops.
+        <br><br>
+        <strong>Our nursing scope</strong> covers continuous skilled nursing. No homebound requirement, no 60-day cap, LPN-staffed for as long as the clinical need exists.
+        <br><br>
+        <strong>And a third standalone lane:</strong> Concierge in-home primary care. Our family nurse practitioner delivers unhurried provider visits at the resident's apartment, with an ongoing relationship that complements your facility care. Premium experience, 24/7 team responsiveness, no clinic visits, no wait times. Available alone or layered with personal care, skilled nursing, or both. <strong>Three pipelines, fully unbundled.</strong>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>Do families ever request additional private caregivers, sitters, or skilled nursing for residents?</li>
+        <li><div class="q-icon">?</div>Do you have residents who need ongoing nursing support but don't qualify for, or have exhausted, home health?</li>
+        <li><div class="q-icon">?</div>When residents return from the hospital needing intensive recovery support, how do you bridge that period?</li>
+        <li><div class="q-icon">?</div>Do you ever need overnight supervision or 1:1 sitters?</li>
+        <li><div class="q-icon">?</div>Do you have residents with dementia or behavioral challenges who need specialized 1:1 attention?</li>
+        <li><div class="q-icon">?</div>Who approves outside agencies to work with your residents?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Overflow, Skilled Nursing &amp; Behavioral Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"When a resident needs more support than your team can safely provide, or you're at staffing capacity, <strong>how do you usually handle that?</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then follow with</span></div>
+      <div class="script-block">
+        <p>"We sit in the gap between personal care and home health. We deliver continuous, on-site clinical support for as long as it's needed. Your residents stay in place, your team isn't stretched thin, and the family has someone watching closely."</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then offer</span></div>
+      <div class="script-block">
+        <p>"Do you keep a short list for overflow, behavioral cases, or residents who need ongoing nursing support? <strong>If not, we'd love to be that backup resource.</strong>"</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to stop by briefly, or set up a quick virtual call, to introduce Godwins Family Care and leave information so you have us as a resource when families ask. <strong>What day this week or next works for a quick 10 to 15 minute visit?</strong> Happy to bring coffee."</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"We don't allow outside agencies."</div>
+          <div class="obj-response">Understood. Is that policy across the board, or are there exceptions for residents who need more support than your staffing levels allow? Our scope often complements yours rather than duplicating it. Continuous skilled nursing is something most facilities aren't staffed to provide. We follow your protocols and stay invisible to your team.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Families handle their own caregiver arrangements."</div>
+          <div class="obj-response">That makes sense. Do you have a resource list you provide to families when they ask? We'd love to be included as a vetted, clinician-owned option. Worth noting too: most families don't realize private duty skilled nursing is even available outside home health. Having that option ready to recommend tends to help them.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We're fully staffed and don't need overflow help."</div>
+          <div class="obj-response">Glad to hear it. That probably won't always be the case, holidays, call-outs, unexpected situations. We'd love to be the backup resource when those moments arise.
+            <em>Also worth flagging: we specialize in behavioral and dementia 1:1, plus continuous skilled nursing under our state license. Different lane from typical agencies.</em>
+          </div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We already have preferred agencies."</div>
+          <div class="obj-response">Most preferred lists are either personal care companies or home health agencies. We span both lanes under one state license, which is unusual. Worth having for the cases that fall in between, especially behavioral or skilled nursing 1:1 that current providers may not cover.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"How much do you charge?"</div>
+          <div class="obj-response">Personal care starts at $26/hour. Continuous skilled nursing is quoted by case based on acuity and shift length. Most families pay private, LTC insurance, VA, or Medicaid waiver (Katie Beckett, ICWP). We're working toward Medicaid certification.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, clinical observation built into every shift</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care available standalone, unhurried FNP visits at the apartment, ongoing provider relationship, 24/7 team responsiveness</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous and extended-shift skilled nursing, the private duty model, not the intermittent home health model</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Personal care plus skilled nursing under one license, two lanes most agencies can't span</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Dementia and behavioral specialty, trained in de-escalation and crisis support</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We help residents stay in place longer, that's good for everyone</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Same caregiver every visit, critical for residents with cognitive decline</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We follow your protocols, here to support your team not disrupt it</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers (KB, ICWP) &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Executive Director name &amp; contact</li>
+        <li><div class="collect-box"></div>Admissions / Marketing Director name &amp; email</li>
+        <li><div class="collect-box"></div>Outside caregiver and outside nursing policy</li>
+        <li><div class="collect-box"></div>Overflow or wait-list situations occur?</li>
+        <li><div class="collect-box"></div>Residents with dementia, behavioral, or skilled nursing needs?</li>
+        <li><div class="collect-box"></div>Current preferred agency list / competitors</li>
+        <li><div class="collect-box"></div>Number of residents &amp; specialty units</li>
+        <li><div class="collect-box"></div>Best day/time for in-person visit</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach call</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email intro with facility one-pager</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Days 5&ndash;7</div><div class="timeline-action">In-person visit with printed materials</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">4</div><div class="timeline-content"><div class="timeline-day">Day 14</div><div class="timeline-action">Follow-up call or email check-in</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Relationship touchpoint, check-in, success story, or lunch-and-learn offer</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- TAB 2: PCH -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-pch">
+<div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-1">&#9679; Core Vertical &middot; Primary PHCP Focus</div>
+    <div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Home Owner / Administrator</span>
+      <span class="contact-tag">Director of Nursing</span>
+      <span class="contact-tag">Health &amp; Wellness Director</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization serving North Atlanta, West Cobb, and surrounding areas. We bring <strong>primary and psychiatric care directly into personal care homes</strong>. Our nurse practitioner sees residents right in your home, and we pair that with private 1:1 caregivers when residents need extra support. <strong>Who might be the best person to speak with about your residents' healthcare needs, perhaps the owner, or your director of nursing or health &amp; wellness? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred to Owner / DON</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>Think about what a doctor's appointment costs your home today: arranging transport, pulling a staff member off the floor for half a day, a resident exhausted by the trip, or the appointment just gets missed until something becomes an ER visit.</p>
+        <p><strong>We eliminate that.</strong> Our FNP comes to your home and sees residents where they live: assessments, prescribing in coordination with their PCP, behavioral health and psychiatric medication management, post-hospital follow-up, chronic disease oversight. No van rides, no waiting rooms, no missed follow-ups. That's the headline: <strong>home-based primary &amp; psychiatric care, inside your home.</strong> For a population living with dementia and behavioral needs, the psychiatric side is the one nobody else brings.</p>
+        <p>If it ever comes up that a resident needs more hands than your staffing allows, we are also a licensed home care agency and can supply a caregiver. <strong>Mention it once and move on.</strong> The provider visit is the pitch.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters for personal care homes</span>
+        <strong>The standout for personal care homes is home-based primary &amp; psychiatric care.</strong> Your residents all have doctors, but those doctors are somewhere else. Our FNP brings the provider visit into your home: assessment, prescribing in coordination with their PCP, labs and imaging ordered from the bedside, post-hospital follow-up. No van rides, no waiting rooms, no missed appointments. Home health can't do this: it's intermittent, episode-based, requires homebound status, and ends. A house doctor relationship is what larger facilities have and most personal care homes don't. <strong>We make it available to yours.</strong>
+        <br><br>
+        Layered under it: our <strong>nursing scope</strong> covers continuous and extended-shift skilled nursing with no homebound requirement and no episode cap, plus 1:1 personal care under our own PHCP license.
+        <br><br>
+        <strong>Lead with the provider visit.</strong> Annual wellness visits are the easiest way in, because Medicare covers them in full. Caregiver support comes up later, when a resident's needs outgrow what your staff can cover.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>How do your residents get to their doctor's appointments today, and who loses the day making it happen?</li>
+        <li><div class="q-icon">?</div>Does any provider currently round at your home, or does every medical need mean a trip out?</li>
+        <li><div class="q-icon">?</div>How often does a missed or delayed appointment turn into an ER visit or hospitalization?</li>
+        <li><div class="q-icon">?</div>Any residents trending toward 1:1 needs (dementia behaviors, fall risk, overnight supervision)?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>The Pitch &middot; A House Provider for Your Residents</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"Let me ask the question that matters most: <strong>when one of your residents needs to see their doctor, what does that actually take your home to pull off?</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then the headline</span></div>
+      <div class="script-block">
+        <p>"We flip that. Our nurse practitioner comes to your home and sees residents on-site: regular provider visits, psychiatric and behavioral-health med management, prescribing in coordination with their PCP, labs ordered from the bedside, post-hospital follow-up within days instead of weeks. Your residents get a house provider. Your staff never loses a day to transport again. And problems get caught in your living room, not the emergency room."</p>
+        <p><strong>The easiest place to start:</strong> "If it's simpler to start small, we can begin with annual wellness visits. Medicare covers those in full, so there's no copay for the resident and nothing billed to you. We come to the house, and you can see how we work before anything else."</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Only if they ask for more</span></div>
+      <div class="script-block">
+        <p><strong>Do not lead with these.</strong> Bring one up only if the owner raises the matching problem.</p>
+        <p>They mention a resident outgrowing their staffing. "We're also a licensed home care agency, so we can put a caregiver in under our license, following your house rules."</p>
+        <p>They mention families wanting more oversight. "Our Continuous Care Program is $299 a month flat: camera-based monitoring with a clinician reviewing escalations."</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to stop by, meet you, and see the home, or set up a quick virtual call if that's easier. No agenda, just introducing Godwins so you have a vetted resource before you ever need one. <strong>What day works for a quick 15-minute visit with her?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"Our staff handles everything our residents need."</div>
+          <div class="obj-response">For daily care, absolutely. But your staff can't prescribe, and every doctor or psychiatry visit still costs you transport and a staff member's day. Our NP team handles the medical and behavioral-health side in your home, and our caregivers cover the 1:1 moments (dementia behaviors, overnight wandering, post-hospital recovery) before they become a discharge conversation. One resident kept is one bed's revenue kept.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"What about state rules and liability with outside caregivers?"</div>
+          <div class="obj-response">We operate under our own Georgia PHCP license with full insurance. Every caregiver is background-checked, TB-cleared, and competency-verified, and we follow your house protocols and document every shift. Happy to share our license and certificate of insurance up front.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Our families can't afford extra private care."</div>
+          <div class="obj-response">Families pick the level: a few overnight hours a week, $299/month monitoring, or full 1:1 blocks. It's usually far cheaper than the move to a bigger facility, and long-term care insurance often covers it. We handle the claims process with the family.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We already have an agency we call."</div>
+          <div class="obj-response">Keep them. Most homes keep two vetted resources, because agencies fill up or lack dementia-trained caregivers. What we add is clinical: physician and FNP ownership, skilled nursing scope, and provider visits in your home. That's a different lane than staffing alone.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p><strong>The headline: home-based primary &amp; psychiatric care.</strong> Our NP team sees residents inside the home: medical and behavioral-health med management, no transport, no missed appointments, ER visits caught early</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p><strong>The pairing:</strong> private home care under our own license: 1:1 dementia, fall-risk, and overnight support when the FNP spots a growing need</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We help you keep the resident and the bed longer</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned: clinical oversight, not just staffing</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Our license, our insurance, your house protocols</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Families pay us directly, no billing burden on the home</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Owner name &amp; direct cell</li>
+        <li><div class="collect-box"></div>DON / Health &amp; Wellness Director name</li>
+        <li><div class="collect-box"></div>Bed count &amp; current census</li>
+        <li><div class="collect-box"></div>Outside caregiver policy &amp; house rules</li>
+        <li><div class="collect-box"></div>Residents trending toward 1:1 needs?</li>
+        <li><div class="collect-box"></div>Current agency relationships</li>
+        <li><div class="collect-box"></div>Who do they call for skilled/clinical needs?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach call</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email intro with bed retention &amp; staff relief framing</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Days 5&ndash;7</div><div class="timeline-action">In-person home visit with printed materials</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Touchpoint: check on census, offer FNP visit day</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 2: ILF -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-ilf">
+<div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-2">&#9679; Priority 4 &middot; Accessible Entry</div>
+    <div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag" style="background:#c9a44a; color:#033D50; font-weight:700;">Sales Director &middot; entry point</span>
+      <span class="contact-tag">Executive Director</span>
+      <span class="contact-tag">Wellness Director</span>
+      <span class="contact-tag">Resident Services Coordinator</span>
+    </div>
+    <p style="font-size:12px; color:#5a6a72; margin:6px 0 0;">The Sales Director is usually your way in at an ILF; they own move-ins and resident retention, so frame everything as helping them keep residents longer. The decision maker for care itself is the resident and their financial &amp; medical POA.</p>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization serving North Atlanta, West Cobb, and surrounding areas. We run free educational sessions for residents on planning for long-term care before a health crisis forces the decision. Nothing is sold in the room, it is purely education. <strong>Who handles resident programming or wellness for the community? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred to Wellness / Director</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>Most of your residents will make the biggest care decision of their lives in the week after something goes wrong. A fall, a hospital stay, a diagnosis. By then the options are whatever is available, not whatever is best.</p>
+        <p><strong>We would like to bring your residents a free session on planning for that before it happens.</strong> Dr.&nbsp;Ume presents alongside Corey Rieck of The Long Term Care Planning Group, who covers what long-term care coverage actually pays for and how to activate a policy a family already owns, and Susan Norcom of TruFamily Resources on senior living and placement options. One hour, no products, no sign-up sheet.</p>
+        <p>You get programming your residents genuinely want and a reason for families to feel looked after by your community. We get to be useful before anyone needs us. That is the whole trade.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters for IL residents</span>
+        IL residents who fall, return from surgery, or show early decline often don't qualify for home health (not officially homebound, not "improving" on a clinical track). Even when they do qualify, home health is intermittent: <strong>1-hour visits a few times a week, episode-based, time-limited.</strong>
+        <br><br>
+        Our <strong>nursing scope</strong> covers continuous skilled nursing, no homebound requirement, no episode cap. We can stage an LPN in the apartment for 8 to 24 hours during the recovery window.
+        <br><br>
+        Concierge in-home primary care is available on its own. FNP-led, unhurried provider visits at the resident's apartment with an ongoing care relationship. Same provider every visit, 24/7 team responsiveness, no clinic, no waiting room.
+        <br><br>
+        <strong>None of this is your opening in IL.</strong> Lead with the planning session. This page is what you reach for after a resident or family brings you a real need.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>What does your resident programming calendar look like, and who is responsible for filling it?</strong> That is your opening in IL.</li>
+        <li><div class="q-icon">?</div>Which topics actually draw residents out, and which ones empty the room?</li>
+        <li><div class="q-icon">?</div>Do families come to you with questions about long-term care costs or planning, and where do you send them?</li>
+        <li><div class="q-icon">?</div>Does the resident have a primary care or psychiatric provider actively following them?</li>
+        <li><div class="q-icon">?</div>Do you ever have residents who start declining but aren't ready for assisted living?</li>
+        <li><div class="q-icon">?</div>When a resident returns from the hospital, what bridge support exists?</li>
+        <li><div class="q-icon">?</div>Do residents have adult children managing care from a distance?</li>
+        <li><div class="q-icon">?</div>Do families ever ask you for referrals to outside care agencies?</li>
+        <li><div class="q-icon">?</div>What's your process when a resident can no longer fully manage independently?</li>
+        <li><div class="q-icon">?</div>Do you have a preferred vendor list?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>The Planning Session Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"Can I ask what you currently offer residents on planning ahead for care? <strong>Most communities tell us families only start asking after something has already happened.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then follow with</span></div>
+      <div class="script-block">
+        <p>"That is exactly what the session is for. We walk residents through what long-term care actually costs, what their coverage really pays for, and the handful of things worth putting in place while they are still well. Families leave with answers instead of a brochure."</p>
+        <p>"Afterward, some families ask what support would look like for them specifically. When they do, we can help, because Dr.&nbsp;Ume's practice brings primary and psychiatric care to the apartment and we staff caregivers when someone needs hands-on help. <strong>But that is a conversation they start, not one we open with.</strong>"</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to come by, meet you briefly, and learn more about your community, or do a short virtual call if that's easier. No agenda, just introducing Godwins so you have a trusted resource when a resident or family needs it. <strong>What day works for a quick 15-minute conversation?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"Our residents are independent. They don't need home care."</div>
+          <div class="obj-response">Right, and we're built to protect that independence. After a fall, surgery, or early cognitive change, having a clinical option that doesn't mean an immediate move keeps them in place. Continuous skilled nursing during the recovery window, or our Continuous Care Program for monitoring, both extend IL tenure without replacing your model.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We don't get involved in outside services."</div>
+          <div class="obj-response">Completely fine. We'd just love to be included on any resource list you share with families when they ask. Families always ask. Having a vetted, physician-owned option ready to recommend reflects well on your community.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"If residents need care, they move to our assisted living section."</div>
+          <div class="obj-response">For some residents, that makes sense. For others, our continuous skilled nursing during a recovery window or our Continuous Care Program can extend independent living by months. We complement your care continuum rather than competing with your AL wing.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"What's the difference between you and a home health agency?"</div>
+          <div class="obj-response">Different lane. Home health is intermittent, episode-based, and requires homebound status. Our nursing scope covers continuous and extended-shift skilled nursing, no homebound requirement, no 60-day cap. For an IL resident recovering from surgery or managing early decline, that's often the only realistic option that doesn't force an AL move.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We extend independent living tenure, financial win for your community</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, clinical credibility families and residents trust</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care, unhurried FNP visits, ongoing provider relationship, premium and convenient, 24/7 team responsiveness</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Personal care, continuous skilled nursing, concierge in-home primary care, and Continuous Care Program monitoring, all unbundled under one organization</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Bridge gap between independence and AL without forcing premature transitions</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous Care Program is $299/month flat, ideal for distance caregivers</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Same caregiver, same routine, stability matters for aging residents</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Wellness Director name &amp; contact</li>
+        <li><div class="collect-box"></div>Resource list shared with families?</li>
+        <li><div class="collect-box"></div>How often residents return from hospitalization?</li>
+        <li><div class="collect-box"></div>Outside caregiver and outside nursing policy</li>
+        <li><div class="collect-box"></div>Number of independent living residents</li>
+        <li><div class="collect-box"></div>Distance caregivers in your community?</li>
+        <li><div class="collect-box"></div>On-site AL or memory care wing?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach call</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email intro with resident retention framing</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Days 5&ndash;7</div><div class="timeline-action">In-person visit with printed materials</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Touchpoint, newsletter, success story, wellness event offer</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 3: CCRC -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-ccrc">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-3">&#9679; Priority 6 &middot; Highest Single-Partner Potential</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Director of Resident Services</span>
+      <span class="contact-tag">Independent Living Director</span>
+      <span class="contact-tag">Campus Social Work Team</span>
+      <span class="contact-tag">Executive Director</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization in North Atlanta and West Cobb. We partner with continuing care communities to provide layered support across multiple levels: independent living, assisted living, post-hospital transitions, and continuous skilled nursing in place. <strong>Who might be the best person to speak with about your residents' care needs across your levels of living? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred &middot; Multi-Level Pitch</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>What makes a CCRC partnership uniquely valuable is the breadth of needs we can match. In your IL wing, we extend tenure with personal care, our Continuous Care Program for monitoring, or skilled nursing during a recovery window. In AL, we provide overflow and behavioral 1:1.</p>
+        <p>For post-hospitalization, we deploy <strong>continuous skilled nursing, the private duty model.</strong> That's broader than what home health can deliver, no homebound requirement, no episode cap, LPN-staffed for as long as the clinical need exists.</p>
+        <p>One relationship, multiple referral streams. And because we're physician and FNP-owned, our documentation matches the standard your team expects.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters across your campus</span>
+        Most outside agencies are <strong>either personal care OR home health.</strong> Personal care can't deliver clinical scope. Home health is intermittent, episode-based, and requires homebound status, which most CCRC residents aren't.
+        <br><br>
+        We're <strong>state-licensed</strong> to deliver both personal care AND continuous skilled nursing under one organization.
+        <br><br>
+        <strong>Plus a third standalone lane:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the resident's apartment, available across IL, AL, or skilled nursing units. A premium medical relationship that complements your campus care. Same provider every visit, 24/7 team responsiveness. Available alone or layered. <strong>Three pipelines, fully unbundled, all from one partner relationship.</strong>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>How many levels of care does your campus offer? IL, AL, memory care, skilled nursing?</li>
+        <li><div class="q-icon">?</div>Do families request outside support at any level, or does that go through your social work team?</li>
+        <li><div class="q-icon">?</div>When an IL resident starts declining, what's your protocol before transitioning them to AL?</li>
+        <li><div class="q-icon">?</div>Do you have an AL or memory care overflow situation, residents who need more 1:1 than you can staff?</li>
+        <li><div class="q-icon">?</div>Does your social work team maintain a preferred outside provider list?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Campus Partnership Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"A partnership with us is really one relationship that covers multiple cases across your campus. We protect your IL residents' independence, we're your overflow resource in AL, and we handle the behavioral, dementia, and skilled nursing cases that need more than your staffing can provide. <strong>What would be most useful to your team right now?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to come by and meet you, or start with a virtual call if that's easier. If it makes sense, she can briefly meet your social work or admissions team at the same time. Understanding your campus structure helps us serve your residents better. <strong>Do you have 20 to 30 minutes this week or next?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"We have an internal care team for all levels."</div>
+          <div class="obj-response">A real strength of the CCRC model. Even the most comprehensive communities have situations where a resident needs more 1:1 intensity than staffing ratios allow, especially behavioral, dementia, or continuous skilled nursing during a recovery window. We're the specialized resource for those cases, not a replacement for your team.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We already work with preferred agencies."</div>
+          <div class="obj-response">Most CCRCs do. Most preferred lists are either personal care companies or home health agencies. We span both lanes under our state license, which is unusual. Worth being on the list for the cases your current providers can't cover, especially behavioral and continuous skilled nursing.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Our social work team manages all outside referrals."</div>
+          <div class="obj-response">Perfect, that's exactly who we'd want to connect with. They're making the recommendations families rely on, and we'd love to be on their trusted list. Would it be possible to include them in our introductory visit?</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>One partnership, multiple referral streams across the full campus</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care across IL, AL, and skilled nursing units, unhurried FNP visits, 24/7 team responsiveness, separable from other services</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>IL retention plus AL overflow plus skilled nursing post-hospital plus behavioral specialty, all from one organization</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous skilled nursing, broader than home health</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous Care Program for IL residents whose families want monitoring without full in-home staffing</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, documentation quality matches CCRC standards</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We protect campus reputation by communicating before things escalate</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Levels of care on campus (IL / AL / MC / SNF)</li>
+        <li><div class="collect-box"></div>Social work team lead name &amp; contact</li>
+        <li><div class="collect-box"></div>Admissions / Resident Services Director</li>
+        <li><div class="collect-box"></div>Current preferred outside agency list</li>
+        <li><div class="collect-box"></div>Total resident census by level</li>
+        <li><div class="collect-box"></div>Policy on outside caregivers and outside nursing at each level</li>
+        <li><div class="collect-box"></div>Primary pain point, IL decline or AL overflow?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach, aim for Resident Services or Social Work</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email intro with multi-level partnership framing</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Week 2</div><div class="timeline-action">In-person visit, request multi-dept introduction</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Relationship touchpoint across multiple contacts on campus</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 4: Adult Day Programs -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-adp">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-2">&#9679; Priority 5 &middot; Warm Population, Easy Conversation</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Program Director</span>
+      <span class="contact-tag">Social Worker / Case Manager</span>
+      <span class="contact-tag">Care Coordinator</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization in North Atlanta and West Cobb. We work alongside adult day programs to provide home care coverage during the hours families need support: evenings, weekends, program closures, and sick days. We also offer a Continuous Care Program for monitoring between visits. <strong>Who might be the best person to speak with about your participants' care needs and family support? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred to Program Director</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>Your program does important work, and the care need doesn't stop when participants go home. Families struggle with evenings, weekends, holidays, and the days their loved one can't make it in. <strong>We're the home care piece that makes your program's work sustainable for families.</strong></p>
+        <p>We're physician and FNP-owned, so our caregivers observe and communicate changes the same way your team does. Families get a consistent clinical approach in your program and at home.</p>
+        <p>Our Continuous Care Program adds a monitoring layer between visits, $299/month flat, hybrid camera-and-video. For families who can't always be home but want consistent eyes on their loved one, it's a meaningful add-on.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters for your participants</span>
+        Many of your participants don't qualify for home health (not homebound, not on a recovery track) but still need <strong>more than basic companionship at home.</strong> Standard agencies are either personal care only or skilled-only.
+        <br><br>
+        Under our <strong>state license</strong>, we deliver personal care, continuous skilled nursing when needed, and our Continuous Care Program monitoring layer, all under one organization.
+        <br><br>
+        <strong>Plus a third standalone lane:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the participant's home, with an ongoing care relationship. A premium choice for families who want a clinician who knows their loved one deeply. Same provider every visit, 24/7 team responsiveness. Available alone or layered. <strong>Three pipelines, fully unbundled.</strong>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>Do families ever struggle to find coverage when your program is closed or a participant can't attend?</li>
+        <li><div class="q-icon">?</div>Do you maintain a referral list of home care agencies you recommend to families?</li>
+        <li><div class="q-icon">?</div>Are there participants whose families you worry about outside of program hours?</li>
+        <li><div class="q-icon">?</div>Do you ever have participants discharged from hospital who need home support before returning?</li>
+        <li><div class="q-icon">?</div>What's your biggest challenge in supporting families beyond program hours?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Care Continuity Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"We think of ourselves as the extension of your program into the home. The families you're serving are already engaged in structured care. They understand the value, they're already paying for it. <strong>Having a trusted home care partner you can recommend makes your program even more valuable to them.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then offer</span></div>
+      <div class="script-block">
+        <p>"Where appropriate, we add our Continuous Care Program for between-visit monitoring. <strong>It's the kind of layered support that prevents crises and keeps families calm.</strong> We'll keep you informed on how participants are doing at home, mood, health changes, anything that affects how they show up at your program. That communication loop benefits everyone."</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to visit your program, see what you do, and talk through how we might work together for the families you serve. A virtual call works too if that's easier. <strong>Would you have 15 to 20 minutes for a visit this week or next?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"We already refer families to a home care agency."</div>
+          <div class="obj-response">We'd love to be an additional option, especially for families with dementia or behavioral complexity. Our nursing scope means we bring continuous skilled nursing and a monitoring program most agencies don't offer. Families do better with options when one provider isn't always available.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We don't get involved in outside services."</div>
+          <div class="obj-response">Totally understood. Even a simple resource sheet you share with families when they ask would be helpful, not a formal partnership, just a trusted name they can call. We'd be honored to be on that list.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Our participants' families handle their own care arrangements."</div>
+          <div class="obj-response">They do, but they also look to you for guidance. When a family is overwhelmed and asks who you trust, having an answer ready is a service to them. We make that easy for you.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We're the home care extension of their program, same clinical lens at home</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care, FNP visits the participant at home, ongoing care relationship, 24/7 team responsiveness, available standalone</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We cover the hours their program can't, evenings, weekends, closures</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous Care Program adds between-visit monitoring, $299/month flat</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous skilled nursing for participants who need more than personal care</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We communicate back to the program, real care team loop</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, clinical credibility families trust</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Program Director name &amp; contact</li>
+        <li><div class="collect-box"></div>Number of participants enrolled</li>
+        <li><div class="collect-box"></div>Days / hours program operates</li>
+        <li><div class="collect-box"></div>Do they have a home care referral list?</li>
+        <li><div class="collect-box"></div>Biggest family gap, evenings, weekends, holidays?</li>
+        <li><div class="collect-box"></div>Dementia or behavioral population served?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach call</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email intro, care continuity framing</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Week 2</div><div class="timeline-action">In-person program visit</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Check-in, offer participant updates or care coordination loop</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 5: Hospital / SNF -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-hosp">
+<div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-1">&#9679; Priority 1 &middot; Fastest Conversion</div>
+    <div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfacilitydeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Facility Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Hospital Discharge Planner</span>
+      <span class="contact-tag">Hospital Social Worker</span>
+      <span class="contact-tag">SNF Care Coordinator</span>
+      <span class="contact-tag">SNF Social Worker</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call &middot; Gatekeeper</h2><span class="section-tag tag-open">Gatekeeper</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization serving North Atlanta and West Cobb. We provide skilled nursing and home care for patients transitioning out of the hospital or SNF. Importantly, we work under licensed under Georgia's PHCP nursing scope to deliver private duty skilled nursing, which means we can staff <strong>continuous and extended-shift LPN coverage at home, the private duty model, alongside personal care.</strong> <strong>Who might be the best person to speak with about home-based clinical support for patients after discharge, perhaps your discharge planning or social work team? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Transferred to Discharge Planner / Social Worker</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>I know your job well. You're under pressure to place patients safely and quickly. We make that easier in a specific way.</p>
+        <p>We're not home health, and we're not just personal care. <strong>We're licensed under Georgia license to deliver private duty skilled nursing, which lets us deliver continuous skilled nursing, the private duty model, alongside personal care under one organization.</strong></p>
+        <p>That matters because some of your highest-readmission-risk patients fall into a gap. They need more than a 1-hour intermittent home health visit, but they don't qualify for home health, or they've exhausted their episode, or they're not officially homebound. <strong>We pick up where home health stops.</strong></p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">The discharge gap, plain English</span>
+        <strong>Home health:</strong> Intermittent visits, typically 1 hour a few times per week. Episode-based (60-day cap, must show improvement). Patient must be homebound. Discharged when goals met or plateau hit.
+        <br><br>
+        <strong>Our private duty nursing model:</strong> Continuous and extended-shift skilled nursing. 8, 12, or 24-hour LPN shifts at home. No homebound requirement, no 60-day cap. Supports ongoing complex needs, not just recovery episodes. Private pay, LTC insurance, VA, Medicaid waivers.
+        <br><br>
+        <strong>Plus a third standalone lane:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the patient's home with an ongoing care relationship, 24/7 team responsiveness. Premium clinical continuity for patients whose families want a provider who knows them, not a rotating clinic schedule. Available alone, no commitment to home care or skilled nursing required.
+        <br><br>
+        For your high-risk discharges, three pipelines fully unbundled is the difference between a safe transition and a 30-day readmission.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>Do you discharge patients who need ongoing skilled nursing but don't qualify for, or have exhausted, home health?</li>
+        <li><div class="q-icon">?</div>Do you have patients who need behavioral or dementia 1:1 support at home that home health can't safely staff?</li>
+        <li><div class="q-icon">?</div>How do you currently bridge patients with cognitive decline being discharged to home?</li>
+        <li><div class="q-icon">?</div>Is 30-day readmission risk something you're actively trying to reduce?</li>
+        <li><div class="q-icon">?</div>Do you maintain a preferred provider list for personal care and private duty nursing?</li>
+        <li><div class="q-icon">?</div>What documentation or credentialing do you need to add a provider?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>The Readmission Reduction Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"The patients most at risk of readmission are the ones going home without adequate support, post-stroke, post-surgical, complex behavioral, cognitive decline. Home health can give them 1-hour visits a few times a week. <strong>We can stage an LPN at the home for 8, 12, or 24 hours when the clinical need is there.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then add</span></div>
+      <div class="script-block">
+        <p>"Separately, our concierge in-home primary care pipeline. <strong>FNP-led, unhurried visits at the patient's home, ongoing provider relationship, 24/7 team responsiveness.</strong> Premium clinical continuity for high-risk discharges. For patients whose families want a provider who actually knows them, not a rotating clinic schedule. Available alone or layered with skilled nursing."</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then follow with</span></div>
+      <div class="script-block">
+        <p>"Our Continuous Care Program is the bridge piece for patients who don't need hands-on coverage but do need consistent monitoring. Camera-based activity tracking plus scheduled video visits, $299/month flat. <strong>Families catch decline before it becomes another ER visit.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Close the loop</span></div>
+      <div class="script-block">
+        <p>"When you discharge a patient and you're not sure they have the right support in place, <strong>that's the moment we want to be your call.</strong> We move fast, we document well, and our physician oversight means you're referring to someone who speaks the same clinical language you do."</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close &middot; Get on the Preferred List</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"What would it take to be added to your preferred provider list? I can send our PHCP license, insurance certificates, credentialing documentation, and a one-page overview today, and Dr. Ume would love to do a brief virtual introduction with your team. <strong>Who do I need to connect with to make that happen?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"What's the difference between you and a home health agency?"</div>
+          <div class="obj-response">Different lane. Home health is intermittent visit-based, episode-based, and requires homebound status. We deliver continuous and extended-shift skilled nursing under our nursing scope. No homebound requirement, no 60-day cap. Two valid models, but the gap between them is where readmissions happen. We sit in that gap.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We already have a preferred provider list."</div>
+          <div class="obj-response">Most lists are home health agencies plus personal care companies. We bridge both lanes under one state license, which is unusual. Worth being on the list for the cases that fall in the gap, especially behavioral, dementia, and continuous skilled nursing.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We don't refer, we let families choose their own agency."</div>
+          <div class="obj-response">Understood. Families always ask for guidance. Having a trusted, vetted name ready when a family looks to you for direction is a service to them. We'd just ask to be the name you can confidently suggest.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"How quickly can you actually start?"</div>
+          <div class="obj-response">Typically within 7 to 10 days for standard cases. For urgent post-discharge situations, we'll work with you to move as fast as possible. We know discharge timelines don't wait. Our goal is to make you look good to families and your administration.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Do you take Medicaid?"</div>
+          <div class="obj-response">Medicaid certification is in process. Currently we accept private pay, LTC insurance, VA, and Medicaid waivers (Katie Beckett, ICWP with certification). We handle LTC claims end-to-end. We'll let you know as soon as Medicaid certification is complete.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>PHCP-licensed, continuous and extended-shift skilled nursing, private duty model</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care, premium clinical continuity for high-risk discharges, ongoing FNP relationship at home, 24/7 team responsiveness</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Different lane from home health, broader scope, no homebound or episode limit</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, clinical documentation discharge planners trust</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We catch the readmission risk patients home health can't fully cover</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We start within 7 to 10 days, urgency is standard</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous Care Program for monitoring layer, $299/month</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We coordinate with the medical team end-to-end</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers (KB, ICWP) &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Discharge planner / social worker name &amp; direct contact</li>
+        <li><div class="collect-box"></div>Process for getting on preferred provider list</li>
+        <li><div class="collect-box"></div>Credentialing / documentation requirements</li>
+        <li><div class="collect-box"></div>Volume of patients discharged to home monthly</li>
+        <li><div class="collect-box"></div>Primary diagnoses driving home care need</li>
+        <li><div class="collect-box"></div>Awareness of PHCP scope vs home health distinction?</li>
+        <li><div class="collect-box"></div>Do they track 30-day readmission rates?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach, ask for discharge planner directly</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email with PHCP license, credentialing docs, one-page overview</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Week 2</div><div class="timeline-action">In-person or Zoom to complete preferred provider application</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Monthly</div><div class="timeline-action">Check-in, success story, Medicaid certification update</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Post-Visit Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Home-based support for those you serve at [Facility / Organization Name]</div>
+        <div class="email-body">
+          <p>Hi [Contact Name],</p>
+          <p>Thank you for your time; it was a pleasure connecting and learning more about [Facility / Organization Name]. I&#39;d love to help support the residents and families you serve with quality home-based providers, and share more about how <strong>Godwins Family Care</strong> can help where standard home care falls short. Here&#39;s what we offer:</p>
+          <div class="email-bullet"><strong>Concierge In-Home Medical Care</strong> &mdash; Full clinical assessments at home, with the ability to order labs, imaging, prescriptions, and coordinate care with their clinical team and yours.</div>
+          <div class="email-bullet"><strong>Skilled Nursing + Personal Care</strong> &mdash; Licensed LPN visits, extended shifts, and ADL/IADL support for residents who need consistent hands-on care.</div>
+          <div class="email-bullet"><strong>Case Management</strong> &mdash; LMSW-led psychosocial support, family communication, and care coordination for complex social or behavioral cases.</div>
+          <div class="email-bullet"><strong>Student Clinical Placement Pilot</strong> &mdash; Supervised nursing students available for additional companionship, sitter coverage, and personal care support while gaining educational enrichment, given Georgia&#39;s severe caregiver and nursing shortage.</div>
+          <div class="email-bullet"><strong>Continuous Care Program</strong> &mdash; Hybrid virtual monitoring and scheduled care visits for families who want to stay connected and ensure their loved one is safe, even when they can&#39;t be there in person or can&#39;t afford 24/7 in-home care.</div>
+          <p>You can also learn more via our brochure: <a href="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/Brochures_v7051126.pdf">Godwins Family Care Brochure</a>.</p>
+          <p>Dr. Ume would love to find a time to connect further or stop by, whichever is easiest. Just let me know what&#39;s convenient for you.</p>
+          <p>Warmly,<br>[Name], on behalf of Dr. Bianca Ume<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; admin@godwinsfamilycarellc.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 6: Caregiver Support Orgs -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-cso">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcsocialservicesdeck.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Social Services Referral deck</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-3">&#9679; Priority 7 &middot; Trust-Based, Slow Burn</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Program Director</span>
+      <span class="contact-tag">Group Facilitator</span>
+      <span class="contact-tag">Nonprofit Program Manager</span>
+      <span class="contact-tag">Faith-Based Caregiver Ministry Lead</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call</h2><span class="section-tag tag-open">Softer Tone</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization in North Atlanta and West Cobb. We work with caregiver support organizations because the families in your groups are often the same families who eventually need professional care, and we want to be the trusted name they already know when that moment comes. <strong>Who might be the best person to speak with about being a care resource for your families, perhaps your program director or facilitator? Would they have a few minutes for a brief call?</strong></p>
+      <div style="margin-top:12px; padding:12px 16px; background:#FDF6E7; border-left:3px solid #c9a44a; font-size:12.5px; line-height:1.55; color:#3a4a52;"><strong style="color:#033D50;">Reading the conversation.</strong> Your initial goal for every cold call is identifying the right person (the individual who handles the patient or resident's care, and/or the final decision maker or Power of Attorney for the resident), their availability, and an immediate opportunity to qualify the lead and share how Godwins Family Care can solve their healthcare problem. Two paths, both unhurried: <strong>(1)</strong> If the person you reach can speak to resident care, warmly ask whether they have a few minutes now, or a better time, for Dr.&nbsp;Ume to connect and discuss further, and be sure to share the highest-value points about GFC. <strong>(2)</strong> If they are not the decision maker, thank them, take the name and best contact for whoever is (ideally a decision maker below), and let them know you will follow up directly to find a time that works for them and Dr.&nbsp;Ume. Healthcare requires an incredibly high level of sophistication; <strong>never</strong> present as demanding or pushy. Patience, credibility, and respect for their resident, patient, and facility needs are what earn these relationships.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>If Connected to Program Lead</h2><span class="section-tag tag-transfer">Decision Maker</span></div>
+      <div class="script-block">
+        <p>No pitch, genuinely just want to be a resource your families can call when they hit a wall. We could offer a free educational session on something practical: dementia care, caregiver burnout, or what's actually available outside home health.</p>
+        <p>Most families don't know there's a third option (private duty skilled nursing under our our nursing scope) until someone tells them. <strong>Whatever's most useful to your group.</strong></p>
+        <p>The families in your group are doing hard work. When they're ready for help, we want to be the name they trust because they already know us.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">What most caregiver families don't know</span>
+        Most families think their options are <strong>"home health"</strong> (intermittent visits, requires homebound) or <strong>"home care"</strong> (personal care only, no clinical scope). They miss the middle.
+        <br><br>
+        Under our <strong>state license</strong>, we deliver continuous skilled nursing alongside personal care under one organization. That's often the answer when a family caregiver hits the wall and home health isn't an option.
+        <br><br>
+        <strong>And a third option most families don't know exists:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the patient's home with an ongoing care relationship, 24/7 team responsiveness, a premium medical experience without the clinic. Available alone, no commitment to home care or nursing required. Educating your group that this third pipeline exists, separate from home care and separate from home health, is meaningful regardless of whether they ever call us.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>Do your group members ever ask for home care or skilled nursing recommendations?</li>
+        <li><div class="q-icon">?</div>Do you have a resource list you share with caregivers when they need outside help?</li>
+        <li><div class="q-icon">?</div>Are there educational topics your group would benefit from?</li>
+        <li><div class="q-icon">?</div>What's the most common pain point you hear from the caregivers in your group?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Value Exchange Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"We'd love to offer your group a free educational session, no pitch, no sales. Something practical, like how to navigate dementia behavioral changes at home, or the difference between home health and private duty skilled nursing (most families don't know). <strong>Would that be something your group would find valuable?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for Relationship</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Could we start simply, by being included on any resource list you share with members? And Dr. Ume would love to explore a future educational session or guest speaker spot, in person or virtual, if that might be a fit for your group. <strong>What's the best way to stay in touch with you?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"We don't endorse specific businesses to our members."</div>
+          <div class="obj-response">Completely understood, and we'd never ask you to endorse us. Being included on a general resource list, or simply being available when a member asks a facilitator for a recommendation, is all we'd ask. No endorsement required.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Our members are in the middle of caregiving. They're not looking to hire."</div>
+          <div class="obj-response">Right now, true. Burnout is real, and most family caregivers eventually reach a point where they need help. Being a familiar, trusted name before that moment means they'll call us first when they're ready. We're playing a long game here.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"We don't really have the bandwidth to coordinate guest speakers."</div>
+          <div class="obj-response">No coordination needed from your side. We handle everything. You just introduce us to the group. Even a 10-minute spot at an existing meeting would be meaningful.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We're a community resource first, not a sales pitch</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care available standalone, premium clinical relationship with 24/7 team responsiveness, most families don't know this option exists</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, clinical credibility families trust before they call</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Free educational sessions, including topics families don't know to ask about</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We span personal care + skilled nursing + monitoring under one license</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Long game: families referred from support groups are high-trust, fast-converting clients</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We support caregiver burnout relief, respite, supplemental, and full care options</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Educational Session Topics</h3>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Dementia Behavioral Changes at Home</span></div>
+        <div class="rate-row"><span class="rate-label">The "It's Time for Help" Conversation</span></div>
+        <div class="rate-row"><span class="rate-label">Home Health vs Private Duty Skilled Nursing: What Families Actually Have Access To</span></div>
+        <div class="rate-row"><span class="rate-label">Caregiver Burnout, Signs &amp; Options</span></div>
+        <div class="rate-row"><span class="rate-label">Navigating LTC Insurance for Home Care</span></div>
+        <div class="rate-row"><span class="rate-label">When Home Care vs SNF is the Right Call</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:8px;">All sessions: 15&ndash;30 min &middot; No pitch &middot; Physician-led</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Program Director / Facilitator name &amp; contact</li>
+        <li><div class="collect-box"></div>Group size and meeting frequency</li>
+        <li><div class="collect-box"></div>Affiliated organization (nonprofit, faith-based, hospital)?</li>
+        <li><div class="collect-box"></div>Do they maintain a resource list for families?</li>
+        <li><div class="collect-box"></div>Most common caregiver pain point in the group</li>
+        <li><div class="collect-box"></div>Open to guest speaker / educational session?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach, lead with community resource angle</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email with educational session offer + resource sheet</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Month 1</div><div class="timeline-action">Offer to attend a group meeting or speak briefly</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Quarterly</div><div class="timeline-action">Touchpoint, new educational topic, seasonal tip sheet</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Intro Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> A Free Resource for Your Caregiver Group, no pitch</div>
+        <div class="email-body">
+          <p>Hi [Name],</p>
+          <p>I wanted to introduce Godwins Family Care, a physician and FNP-owned healthcare organization serving families in North Atlanta and West Cobb. We work with caregiver support groups because the families you serve are often the ones who eventually need what we provide.</p>
+          <p>I'd love to be a resource you can share, and we're happy to offer a free educational session for your group on any of these:</p>
+          <div class="email-bullet">Dementia behavioral changes at home</div>
+          <div class="email-bullet">Caregiver burnout, signs and options</div>
+          <div class="email-bullet">Home health, private duty skilled nursing, and concierge in-home primary care, what families actually have access to</div>
+          <div class="email-bullet">Navigating LTC insurance for home care</div>
+          <p>No pitch, no sales. Just useful information from a clinical team that works with these families every day.</p>
+          <p>Warmly,<br>[Name]<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; godwinsfamilycarellc@gmail.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 7: LTC Insurance Brokers -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-ltc">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcltcdeckv2.html" target="_blank" rel="noopener" style="color:#0f6cbd;">LTC Insurer Partnership deck</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-1">&#9679; Priority 3 &middot; Highest Client LTV</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Independent LTC Broker</span>
+      <span class="contact-tag">Agency Principal</span>
+      <span class="contact-tag">Financial Advisor with LTC Specialization</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call</h2><span class="section-tag tag-open">Peer to Peer</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization in North Atlanta and West Cobb, and we work specifically with LTC insurance clients. Our model is built for it. We deliver personal care, continuous skilled nursing under our PHCP nursing scope, and a hybrid monitoring program, all under one organization, all with clean LTC claims documentation. <strong>Do you have a few minutes now, or is there a better time I can call back to talk about how we might be a resource when your clients' policies activate?</strong></p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>Core Pitch &middot; Protect Their Book of Business</h2><span class="section-tag tag-transfer">Value Prop</span></div>
+      <div class="script-block">
+        <p>When a client activates their LTC policy and you refer them to a home care agency, your professional reputation rides on that referral. If the agency is unreliable, claims are sloppy, or they can't actually deliver the level of care the policy will pay for, the client calls you. <strong>We protect your reputation in two ways.</strong></p>
+        <p>First, we run a clean operation. Documentation is clinical-grade because we're physician and FNP-owned. Second, our scope is broader than typical agencies.</p>
+        <p><strong>Most agencies are either personal care or home health.</strong> We span both under our state license, plus continuous skilled nursing, plus our Continuous Care Program. That means your client's policy benefits stretch further with one provider relationship instead of two. Your client gets continuous skilled nursing, private duty, when they need it, without switching agencies.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why this matters for LTC benefit dollars</span>
+        LTC policies typically pay for both personal care AND skilled nursing. Most agencies only deliver one or the other. Clients end up with two provider relationships, two sets of claims, two contact points.
+        <br><br>
+        Under our <strong>state license</strong>, we deliver both lanes under one organization. <strong>One claim stream, one care team, one point of accountability</strong>, plus continuous skilled nursing, the private duty model, that broadens what your client's benefit dollars can cover.
+        <br><br>
+        <strong>Plus a third standalone lane:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the client's home with an ongoing care relationship, 24/7 team responsiveness. A premium medical experience your LTC clients can choose alongside or separate from their home care benefits. Available alone or layered. <strong>Three pipelines, fully unbundled.</strong>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>When a client's LTC policy activates, do you have a home care agency you refer them to?</li>
+        <li><div class="q-icon">?</div>Have you had clients where the agency referral didn't go well, and it reflected back on you?</li>
+        <li><div class="q-icon">?</div>Do your clients ever ask for home care recommendations before their policy activates?</li>
+        <li><div class="q-icon">?</div>Are most of your clients in the North Atlanta corridor?</li>
+        <li><div class="q-icon">?</div>What carriers do you primarily work with? Genworth, Mutual of Omaha, John Hancock?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Preferred Provider Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"We're actively paneling with Genworth, Mutual of Omaha, Northwestern Mutual, John Hancock, and Transamerica. We handle the claims process end-to-end. Your client doesn't have to figure that out, and neither do you. <strong>One call to us and we take it from there.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Worth flagging</span></div>
+      <div class="script-block">
+        <p>"Our Continuous Care Program is $299/month flat, hybrid camera-and-video monitoring. <strong>It's a way to stretch LTC benefit dollars</strong>, less staffing cost while still keeping clinical eyes on the client."</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close &middot; Preferred Provider Relationship</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to set up a 20-minute call to walk you through our clinical documentation process and claims handling. <strong>If it makes sense, we can formalize a preferred provider relationship</strong>, which just means you have a trusted, vetted agency ready when your clients need it. Does that make sense to explore?"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"What's different about you vs other agencies?"</div>
+          <div class="obj-response">Most agencies are either personal care OR home health. We're licensed for both lanes, plus continuous skilled nursing (private duty model), plus our Continuous Care Program. One agency, full continuum, cleaner claims, no switching providers as the client's needs evolve.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"I already have a preferred agency."</div>
+          <div class="obj-response">Most brokers do. We'd ask you to consider us as backup for when your primary is at capacity, or for clients with dementia, behavioral complexity, or skilled nursing needs that personal-care-only agencies can't cover. Worth having for the cases where your current provider isn't the right fit.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"My clients are across a wide geography."</div>
+          <div class="obj-response">Understood. We're focused on North Atlanta and West Cobb, so for clients in that corridor, we're your local, physician-owned option. We'd handle anyone in our service area and refer out for others.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"I don't really want to be in the middle of care recommendations."</div>
+          <div class="obj-response">You wouldn't be. We handle everything once you make the introduction. One call, one handoff. The client gets taken care of, and you're the person who made a great recommendation.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"Are you paneled with my carriers?"</div>
+          <div class="obj-response">Actively paneling with Genworth, Mutual of Omaha, Northwestern Mutual, John Hancock, and Transamerica. If you work with a different carrier, let us know. We may be able to credential or already have a path in progress.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Personal care, skilled nursing, concierge in-home primary care, and monitoring under one license, fully unbundled</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care unbundled, FNP-led, unhurried visits, 24/7 team responsiveness, premium standalone option</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, documentation quality LTC carriers respect</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous skilled nursing, broader than home health, broader than most personal care agencies</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We handle claims end-to-end, broker out of the billing loop</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Proactive benefit tracking, families know before they hit limits</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Continuous Care Program adds monitoring layer, $299/month flat</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>LTC clients are highest-LTV, longest-tenure, we prioritize them</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>LTC Carrier Paneling Status</h3>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Genworth</span><span class="rate-quote">In Process</span></div>
+        <div class="rate-row"><span class="rate-label">Mutual of Omaha</span><span class="rate-quote">In Process</span></div>
+        <div class="rate-row"><span class="rate-label">Northwestern Mutual</span><span class="rate-quote">In Process</span></div>
+        <div class="rate-row"><span class="rate-label">John Hancock</span><span class="rate-quote">In Process</span></div>
+        <div class="rate-row"><span class="rate-label">Transamerica</span><span class="rate-quote">In Process</span></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Broker name, agency, and direct contact</li>
+        <li><div class="collect-box"></div>Primary carriers they work with</li>
+        <li><div class="collect-box"></div>Do they have a preferred home care agency currently?</li>
+        <li><div class="collect-box"></div>Volume, how many LTC policy activations per year?</li>
+        <li><div class="collect-box"></div>Geographic concentration of book of business</li>
+        <li><div class="collect-box"></div>Open to private duty skilled nursing as a benefit lever?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach, peer-to-peer professional tone</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email with carrier paneling status + claims process overview</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Week 2</div><div class="timeline-action">20-min Zoom or coffee, formalize preferred provider discussion</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Quarterly</div><div class="timeline-action">Paneling update, carrier news, client success story</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Intro Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> Physician and FNP-Owned Home Care for Your LTC Clients</div>
+        <div class="email-body">
+          <p>Hi [Name],</p>
+          <p>I wanted to introduce Godwins Family Care, a physician and FNP-owned healthcare organization in North Atlanta and West Cobb. Built specifically to serve LTC insurance clients well.</p>
+          <p>What's different about us:</p>
+          <div class="email-bullet">Personal care, continuous skilled nursing, concierge in-home primary care (FNP-led unhurried visits, 24/7 team responsiveness), and our hybrid monitoring program (Continuous Care Program, $299/month), all unbundled under one organization</div>
+          <div class="email-bullet">Clinical documentation that satisfies carrier requirements</div>
+          <div class="email-bullet">We handle claims end-to-end (Genworth, Mutual of Omaha, Northwestern Mutual, John Hancock, Transamerica)</div>
+          <div class="email-bullet">Proactive benefit tracking so clients aren't caught off guard</div>
+          <p>Most agencies are either personal care or home health. We span both lanes plus continuous skilled nursing under one license, which often means LTC benefits stretch further for your clients without switching providers.</p>
+          <p>Happy to connect for 20 minutes to discuss a preferred provider relationship.</p>
+          <p>Warmly,<br>[Name]<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; godwinsfamilycarellc@gmail.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TAB 8: Final Expense Agents -->
+<!-- ============================================================ -->
+<div class="tab-pane" id="tab-fe">
+<div style="margin:0 0 18px; padding:10px 14px; background:#FDF6E7; border:1px dashed #c9a44a; font-size:12.5px; color:#033D50;"><strong>&#128206; Vertical demo deck:</strong> <a href="/gfcfamilydeckv2.html" target="_blank" rel="noopener" style="color:#0f6cbd;">Family deck (for shared clients)</a> &middot; present at the first in-person meeting</div>
+    <div class="main">
+  <div class="flow-col">
+    <div class="priority-pill priority-3">&#9679; Priority 8 &middot; Large Demographic Reach, Long Pipeline</div>
+    <div style="margin:0 0 18px; padding:12px 16px; background:#033D50; color:#fff; font-size:12.5px; line-height:1.55; border-left:4px solid #c9a44a;">
+      <strong style="color:#F5CD85; letter-spacing:0.08em; text-transform:uppercase; font-size:10.5px; display:block; margin-bottom:4px;">Sell Both Arms: Every Vertical, Every Call</strong>
+      <strong>Home-Based Primary &amp; Psychiatric Care</strong> (NP-led provider visits that come to the client: assessment, prescribing coordination, behavioral-health med management) <strong>+ Private Home Care</strong> (1:1 caregivers, skilled nursing, monitoring). The provider catches the change early; the caregivers cover the need it creates. <strong>And underneath both arms: care coordination is embedded in every Godwins service at no added cost.</strong> Documentation shared with family and providers, proactive escalation when something changes, with LMSW-led case management available as an add-on for complex situations. Lead with whichever pain this vertical feels, but always present both arms and the coordination underneath them.
+    </div>
+    <div class="contact-label">Ideal Contacts</div>
+    <div class="contact-row">
+      <span class="contact-tag">Independent Final Expense Agent</span>
+      <span class="contact-tag">Agency Owner / Principal</span>
+      <span class="contact-tag">Field Agent (Senior Market)</span>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">1</div><h2>Opening Call</h2><span class="section-tag tag-open">Warm Peer Tone</span></div>
+      <div class="script-block">
+        <p>Hi, this is [Name], calling on behalf of Dr. Bianca Ume at Godwins Family Care. We're a physician and FNP-owned healthcare organization in North Atlanta and West Cobb. I'm reaching out because you and I are serving the same families: elderly adults and their adult children planning ahead. <strong>I'd love to explore whether a cross-referral relationship might make sense for both of us.</strong></p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">2</div><h2>Core Pitch &middot; Add Value to Their Client Relationship</h2><span class="section-tag tag-transfer">Value Prop</span></div>
+      <div class="script-block">
+        <p>You've already built financial trust with your clients. They've invited you into conversations about their end-of-life planning. <strong>When those same clients or their families start asking about home care, who do they call?</strong></p>
+        <p>If you can point them to a trusted, physician-owned organization that covers the full continuum (personal care, continuous skilled nursing, monitoring), that strengthens your relationship with them. You become the person who thought of everything.</p>
+        <p>And we'd return the favor. When our clients are in care and families ask about end-of-life financial planning, we'd be glad to refer them to you.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">D</div><h2>Service Line vs Standard Home Health</h2><span class="section-tag tag-diff">Differentiator</span></div>
+      <div class="diff-callout">
+        <span class="diff-callout-label">Why your referral lands well</span>
+        Most families think their care options are "home health" (intermittent visits, requires homebound) or "home care" (companions only). They miss the middle.
+        <br><br>
+        Under our <strong>state license</strong>, we deliver personal care, continuous skilled nursing the private duty model, and our Continuous Care Program for monitoring, all under one organization.
+        <br><br>
+        <strong>Plus a fourth standalone lane:</strong> Concierge in-home primary care. FNP-led, unhurried provider visits at the client's home with an ongoing care relationship, 24/7 team responsiveness. A premium medical experience clients can choose without any home care commitment. When your client's family realizes you pointed them to a fully unbundled physician-owned option, your relationship deepens.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">3</div><h2>Qualifying Questions</h2><span class="section-tag tag-qualify">Discover Fit</span></div>
+      <ul class="q-list">
+        <li><div class="q-icon">?</div><strong>Does the resident/patient even have a primary care or psychiatric provider actively following them?</strong> If not, that is the opening.</li>
+        
+        <li><div class="q-icon">?</div>Do your clients or their families ever ask about home care or elder care planning during your conversations?</li>
+        <li><div class="q-icon">?</div>Do you currently refer clients to any home care agencies or elder care resources?</li>
+        <li><div class="q-icon">?</div>Is most of your book of business in the North Atlanta corridor?</li>
+        <li><div class="q-icon">?</div>Do you work with adult children who are managing a parent's affairs?</li>
+        <li><div class="q-icon">?</div>Would a mutual referral relationship add value for your clients?</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">4</div><h2>Cross-Referral Pitch</h2><span class="section-tag tag-open">Core Script</span></div>
+      <div class="script-block">
+        <p>"We both serve the same demographic, and neither of us competes with the other. The families planning ahead with you are the same ones who will eventually need home care. <strong>Let's make sure they know both of us before they need us.</strong>"</p>
+      </div>
+      <div class="connector"><div class="connector-line"></div><span class="connector-label">Then offer</span></div>
+      <div class="script-block">
+        <p>"When your clients ask about care options, which they will, you'd have a physician-owned organization you trust ready to recommend, with the full continuum under one roof. And when our families ask about end-of-life financial planning, we'd send them straight to you. <strong>Does a mutual referral arrangement make sense to explore?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">5</div><h2>Close for a Meeting</h2><span class="section-tag tag-close">Next Step</span></div>
+      <div class="script-block">
+        <p>"Dr. Ume would love to meet you for coffee or a quick virtual call, learn more about your book of business, share what Godwins does, and see if there's a natural referral flow we can build together. <strong>Would 20 to 30 minutes work this week?</strong>"</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div class="section-header"><div class="step-badge">!</div><h2>Handling Objections</h2><span class="section-tag tag-objection">Stay Ready</span></div>
+      <div class="objection-grid">
+        <div class="obj-card">
+          <div class="obj-header">"My clients don't ask about home care."</div>
+          <div class="obj-response">They may not use those words. When you're in a home talking to an elderly client or their adult child, care needs often come up. Having a trusted resource ready elevates your value to them beyond the policy. Small thing that makes a big impression.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"I don't do referral arrangements."</div>
+          <div class="obj-response">Totally fair. We're not looking for a formal arrangement. Just love to be the name you have in your back pocket when a client asks. No strings, no expectation. We'd do the same for you.</div>
+        </div>
+        <div class="obj-card">
+          <div class="obj-header">"I'm not sure my clients are in your area."</div>
+          <div class="obj-response">We serve North Atlanta, West Cobb, and surrounding areas. If any of your clients fall in that corridor, we're a natural fit. Even a few families a year adds up to a meaningful relationship.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3>Key Messages</h3>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Same demographic, zero competition, natural cross-referral fit</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Concierge in-home primary care standalone, unhurried FNP visits, ongoing relationship, 24/7 team responsiveness, premium add for clients planning ahead</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>A trusted home care referral strengthens their existing client relationship</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Physician and FNP-owned, the kind of referral they're proud to make</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We span personal care + skilled nursing + monitoring under one license, families get the full continuum from one call</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>We refer back, we serve their exact demographic every day</p></div></div>
+      <div class="key-msg"><div class="key-msg-inner"><div class="key-check">&#10003;</div><p>Large book = significant referral volume over time</p></div></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Service Rates</h3>
+      <div class="rate-cat">Track A &middot; Personal Care</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">A1 Essential ADL</span><span class="rate-price">$26/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A2 Comprehensive</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A3 IADL-Forward</span><span class="rate-price">$30/hr</span></div>
+        <div class="rate-row"><span class="rate-label">A4 Behavioral &amp; Cognitive</span><span class="rate-price">$34/hr</span></div>
+      </div>
+      <div class="rate-cat">Track B &middot; Skilled Nursing</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">B1 Skilled Nursing Visits (LPN)</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">B2 Continuous Skilled Care</span><span class="rate-quote">Custom quote</span></div>
+      </div>
+      <div class="rate-cat">Track B3 &middot; Concierge In-Home Primary Care (FNP)</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Concierge home visits, unhurried</span><span class="rate-quote">Custom quote</span></div>
+        <div class="rate-row"><span class="rate-label">Ongoing provider relationship &amp; 24/7 responsiveness</span><span class="rate-quote">Included</span></div>
+      </div>
+      <div class="rate-cat">Continuous Care Program</div>
+      <div class="rate-table">
+        <div class="rate-row"><span class="rate-label">Hybrid Monitoring (base)</span><span class="rate-price">$299/mo</span></div>
+        <div class="rate-row"><span class="rate-label">Video Check-Ins (add-on)</span><span class="rate-price">$45/3 visits</span></div>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-muted);margin-top:10px;">Private pay &middot; LTC insurance &middot; VA &middot; Medicaid waivers &middot; Medicaid certification pending</p>
+    </div>
+    <div class="sidebar-section">
+      <h3>Information to Collect</h3>
+      <ul class="collect-list">
+        <li><div class="collect-box"></div>Agent name, agency, and direct contact</li>
+        <li><div class="collect-box"></div>Primary geographic concentration of book</li>
+        <li><div class="collect-box"></div>Do they serve adult children or primarily the elderly directly?</li>
+        <li><div class="collect-box"></div>Do clients or families ask about care resources?</li>
+        <li><div class="collect-box"></div>Open to informal cross-referral relationship?</li>
+        <li><div class="collect-box"></div>Current referral relationships with other elder care providers?</li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <h3>Follow-Up Cadence</h3>
+      <div class="timeline">
+        <div class="timeline-item"><div class="timeline-dot">1</div><div class="timeline-content"><div class="timeline-day">Day 1</div><div class="timeline-action">Initial outreach, peer-to-peer, same demographic angle</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">2</div><div class="timeline-content"><div class="timeline-day">Days 2&ndash;3</div><div class="timeline-action">Email with cross-referral framing + one-page overview</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">3</div><div class="timeline-content"><div class="timeline-day">Week 2</div><div class="timeline-action">Coffee or call to explore mutual referral flow</div></div></div>
+        <div class="timeline-item"><div class="timeline-dot">&infin;</div><div class="timeline-content"><div class="timeline-day">Quarterly</div><div class="timeline-action">Touchpoint, referral check-in, mutual update</div></div></div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Intro Email</h3>
+      <div class="email-card">
+        <div class="email-header"><strong>Subject:</strong> We Serve the Same Families, Let's Talk | Godwins Family Care</div>
+        <div class="email-body">
+          <p>Hi [Name],</p>
+          <p>I'm reaching out because your clients and ours are the same people: elderly adults and their families planning ahead. As a physician and FNP-owned healthcare organization in North Atlanta and West Cobb, we work with families navigating care decisions every day.</p>
+          <p>Our scope spans personal care, continuous skilled nursing, concierge in-home primary care (FNP-led unhurried visits with 24/7 team responsiveness), and our Continuous Care Program for hybrid monitoring, all available standalone or layered. When your clients ask about care options (and they do), you'd have a physician-owned organization you trust ready to recommend. When our clients ask about end-of-life financial planning, we'd send them straight to you.</p>
+          <p>No formal arrangement required, just two trusted businesses serving the same community. I'd love to connect for 20 minutes.</p>
+          <p>Warmly,<br>[Name]<br><strong>Godwins Family Care</strong><br>(404) 913-6705 &middot; godwinsfamilycarellc@gmail.com</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+function switchTab(id, btn) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  btn.classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+</script>
+
+</body>
+</html>
+

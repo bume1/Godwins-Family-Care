@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Godwins Family Care · Community Care Liaison Playbook</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { --navy:#033D50; --deep:#022a37; --gold:#c9a44a; --goldlt:#F5CD85; --bg:#FAF7F2; --ink:#1a2a32; --muted:#4a5a62; --line:#d8cdb8; --card:#ffffff; --rust:#A8402A; }
+  body { background: var(--bg); color: var(--ink); font-family: 'DM Sans', sans-serif; line-height: 1.6; }
+  .topbar { background: var(--deep); color: #fff; padding: 11px 20px; display: flex; justify-content: space-between; font-size: 11.5px; letter-spacing: 0.12em; }
+  .topbar span { color: #b9cdd5; text-transform: uppercase; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 52px 32px 90px; }
+  .masthead { border-bottom: 1px solid var(--line); padding-bottom: 26px; margin-bottom: 34px; }
+  .eyebrow { font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--gold); font-weight: 700; margin-bottom: 12px; }
+  h1 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 42px; color: var(--navy); line-height: 1.08; margin-bottom: 10px; }
+  .subt { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 19px; color: var(--muted); max-width: 640px; }
+  .tag { display:inline-block; margin-top:14px; font-size:10.5px; letter-spacing:.18em; text-transform:uppercase; font-weight:700; color:var(--navy); background:#eee4cf; padding:4px 10px; border-radius:3px; }
+  .sec { margin: 42px 0 0; }
+  .sec-head { display:flex; align-items:baseline; gap:12px; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:16px; }
+  .sec-num { font-family:'Cormorant Garamond', serif; font-style:italic; font-size:26px; color:var(--gold); line-height:1; }
+  h2 { font-family:'Cormorant Garamond', serif; font-weight:500; font-size:27px; color:var(--navy); flex:1; }
+  .why { font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); font-weight:700; }
+  p { font-size:14.5px; color:#2c3c44; margin-bottom:12px; }
+  .lede { font-size:15.5px; }
+  .callout { background:#f3ede2; border-left:4px solid var(--gold); padding:14px 18px; font-size:13.5px; color:#3a4a52; margin:16px 0; }
+  .gate { background:#fdf0ee; border-left:4px solid var(--rust); padding:14px 18px; font-size:13.5px; color:#5a2c22; margin:16px 0; }
+  table { width:100%; border-collapse:collapse; margin:14px 0 18px; background:var(--card); font-size:13.5px; }
+  th { background:var(--navy); color:#fff; text-align:left; padding:9px 12px; font-size:11px; letter-spacing:.1em; text-transform:uppercase; }
+  td { border:1px solid var(--line); padding:9px 12px; vertical-align:top; color:#2c3c44; }
+  td b { color:var(--navy); }
+  ol.steps { counter-reset: step; list-style:none; margin:14px 0 18px; }
+  ol.steps li { position:relative; padding:12px 16px 12px 52px; background:var(--card); border:1px solid var(--line); border-top:none; font-size:14px; }
+  ol.steps li:first-child { border-top:1px solid var(--line); }
+  ol.steps li::before { counter-increment: step; content: counter(step); position:absolute; left:16px; top:12px; width:24px; height:24px; border-radius:50%; background:var(--navy); color:var(--goldlt); font-weight:700; font-size:12.5px; display:flex; align-items:center; justify-content:center; }
+  ul.plain { margin:8px 0 14px 18px; font-size:14px; color:#2c3c44; }
+  ul.plain li { margin-bottom:7px; }
+  .phase { background:var(--card); border:1px solid var(--line); border-top:4px solid var(--navy); margin:20px 0; }
+  .phase.p2 { border-top-color:var(--gold); }
+  .phase.p3 { border-top-color:var(--rust); }
+  .phase-head { padding:16px 22px 4px; display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .phase-head .days { font-family:'Cormorant Garamond', serif; font-style:italic; font-size:24px; color:var(--gold); }
+  .phase-head h3 { font-family:'Cormorant Garamond', serif; font-weight:500; font-size:23px; color:var(--navy); }
+  .phase-body { padding: 6px 22px 18px; }
+  .phase-body h4 { font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); font-weight:700; margin:12px 0 6px; }
+  .done { border-top:1px dashed var(--line); margin-top:12px; padding-top:10px; }
+  .done li { list-style:none; padding-left:24px; position:relative; font-size:13.5px; margin-bottom:6px; color:#2c3c44; }
+  .done li::before { content:"✓"; position:absolute; left:2px; color:var(--gold); font-weight:700; }
+  .foot { margin-top:56px; padding-top:18px; border-top:1px solid var(--line); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); display:flex; justify-content:space-between; }
+  @media (max-width:640px){ h1{font-size:33px;} .wrap{padding:36px 20px 70px;} }
+  @media print { .topbar{display:none;} body{background:#fff;} .wrap{padding:0;} }
+</style>
+</head>
+<body>
+<style>
+#gfcNavBtn{position:fixed;top:54px;left:14px;z-index:9500;background:#022a37;color:#F5CD85;border:1px solid #c9a44a55;height:42px;border-radius:8px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;font-family:'DM Sans',system-ui,sans-serif;font-weight:700;letter-spacing:.08em;box-shadow:0 2px 10px rgba(2,42,55,.35)}
+#gfcNavBtn:hover{background:#033D50}
+#gfcNavScrim{position:fixed;inset:0;background:rgba(2,42,55,.45);z-index:9600;opacity:0;pointer-events:none;transition:opacity .2s}
+#gfcNav{position:fixed;top:0;left:0;bottom:0;width:min(680px,94vw);background:#022a37;z-index:9700;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;font-family:'DM Sans',system-ui,sans-serif;box-shadow:4px 0 24px rgba(0,0,0,.25)}
+.gfcnav-open #gfcNav{transform:none}
+.gfcnav-open #gfcNavScrim{opacity:1;pointer-events:auto}
+#gfcNav .gn-head{display:flex;align-items:center;gap:6px;padding:12px 14px;border-bottom:1px solid #ffffff1a}
+#gfcNav .gn-tab{background:none;border:1px solid #ffffff2a;color:#dce8ec;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+#gfcNav .gn-tab.on{background:#c9a44a;border-color:#c9a44a;color:#022a37}
+#gfcNav .gn-title{color:#F5CD85;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 2px}
+#gfcNav .gn-full{margin-left:auto;color:#F5CD85;font-size:11.5px;text-decoration:none;letter-spacing:.06em}
+#gfcNav .gn-full:hover{text-decoration:underline}
+#gfcNav .gn-close{background:none;border:0;color:#dce8ec;font-size:22px;cursor:pointer;padding:2px 8px;line-height:1}
+#gfcNav .gn-pane{flex:1;display:none;background:#FAF7F2}
+#gfcNav .gn-pane.on{display:block}
+#gfcNav .gn-pane iframe{width:100%;height:100%;border:0;display:block}
+#gfcNav .gn-foot{padding:9px 14px;font-size:11px;color:#9db6bf;border-top:1px solid #ffffff1a;display:flex;gap:14px;flex-wrap:wrap}
+#gfcNav .gn-foot a{color:#dce8ec;text-decoration:none}
+#gfcNav .gn-foot a:hover{color:#F5CD85}
+@media print{#gfcNav,#gfcNavBtn,#gfcNavScrim{display:none!important}}
+</style>
+<button id="gfcNavBtn" aria-label="Open the task board" title="Task Board">&#9776; Tasks</button>
+<div id="gfcNavScrim"></div>
+<nav id="gfcNav" aria-label="Work tools">
+  <div class="gn-head">
+    <span class="gn-title">Task Board</span>
+    <a class="gn-full" id="gfcNavFull" href="?gfc_doc=tasks">Open full screen &rarr;</a>
+    <button class="gn-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="gn-pane on" data-pane="tasks"><iframe data-src="?gfc_doc=tasks" title="Task Board"></iframe></div>
+  <div class="gn-foot"><a href="?gfc_doc=home">Home</a><a href="?gfc_doc=start">Start Here</a><a href="?gfc_doc=playbook">Playbook</a><a href="?gfc_doc=script">Script</a><a href="?gfc_doc=paysheet">Pay Sheet</a><a href="?gfc_doc=emails">Emails</a></div>
+</nav>
+<script>(function(){var r=document.documentElement,b=document.getElementById('gfcNavBtn'),n=document.getElementById('gfcNav'),s=document.getElementById('gfcNavScrim'),c=n.querySelector('.gn-close'),full=document.getElementById('gfcNavFull');
+if(window.self!==window.top){b.style.display='none';n.style.display='none';s.style.display='none';return;}
+function open(){r.classList.add('gfcnav-open');var f=n.querySelector('.gn-pane iframe');if(f&&!f.src)f.src=f.getAttribute('data-src');}
+function close(){r.classList.remove('gfcnav-open');}
+b.addEventListener('click',open);c.addEventListener('click',close);s.addEventListener('click',close);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+})();</script>
+<div class="topbar"><a href="?gfc_doc=home" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">&larr;&nbsp;Sales Portal</a><span>Godwins Family Care &middot; Internal &middot; Confidential</span><a href="?logout=1" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">Log&nbsp;out</a></div>
+<div class="wrap">
+
+  <div class="masthead">
+    <div class="eyebrow">Godwins Family Care · Growth Team</div>
+    <h1>Community Care Liaison<br>Playbook</h1>
+    <div class="subt">How the work runs day to day, and what the first ninety days are for. The sales portal teaches the sell — scripts, pay sheet, targeting map. This document is everything around it: your systems, your daily loop, your expectations, and the arc from first dial to owning your book.</div>
+    <span class="tag">v2.3 · August 2026 · Day-to-Day Operations</span>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">1</span><h2>Your People and Your Line</h2><span class="why">Who to reach, and how</span></div>
+    <table>
+      <tr><th>Person</th><th>Role</th><th>When you go to them</th></tr>
+      <tr><td><b>Dr. Bianca Ume</b></td><td>Owner &amp; Executive Director. Your manager, and the on-the-ground lead in Georgia.</td><td>Hours approval, live-deal coaching, training, escalations, and coordinating every on-site step you book: demos, assessments, starts of care.</td></tr>
+      <tr><td><b>Kate David</b></td><td>Executive Assistant &amp; Interim Clinical Care Coordinator.</td><td>Scheduling support and any questions or concerns along the way.</td></tr>
+      <tr><td><b>GFC clinicians &amp; caregivers</b></td><td>Delivery team.</td><td>They run every on-site step you book: demos, assessments, starts of care.</td></tr>
+    </table>
+    <p>Team communication runs through the GFC work line: <b>470-913-6705</b>. When you need Dr. Ume immediately, her direct work line is <b>470-279-5158</b>. Save both. Once your own extension is live, your outbound calls show the business number and callbacks reach GFC, not your personal phone. Until then, coordinate dialing with Dr. Ume.</p>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">2</span><h2>Your Systems</h2><span class="why">Five tools, one rule each</span></div>
+    <p>Access arrives by separate emails. Flag Dr. Ume if anything is missing. All GFC business runs on GFC systems only; personal email, phone, and messaging apps never carry client or company information.</p>
+    <table>
+      <tr><th>System</th><th>What it's for</th><th>Your rule</th></tr>
+      <tr><td><b>Google Workspace</b></td><td>Your @godwinsfamilycarellc.com email, calendar, and Drive.</td><td>Every external message comes from this address, with your issued signature block.</td></tr>
+      <tr><td><b>Quo (VoIP phone)</b></td><td>Your extension on the GFC business line.</td><td>All prospect and family calls run through it. Test both directions before your first dial.</td></tr>
+      <tr><td><b>Rippling</b></td><td>Payroll and time management (Hubstaff may be added).</td><td>Log every approved hour here, contemporaneously. Not by text, not by email. Unlogged hours are unpayable, and your timesheet is the backbone of your W2 status.</td></tr>
+      <tr><td><b>Sales Portal</b></td><td>Scripts, pay sheet, and the live targeting map. Your working home for the first 30 days.</td><td>Study all three docs before your first dial. Never share the password or forward materials.</td></tr>
+      <tr><td><b>Notion (CRM)</b></td><td>The system of record: Partners, Contacts, pipeline, and Sales Tasks.</td><td>If it isn't documented here or in the map, it didn't happen — and it can't pay you.</td></tr>
+    </table>
+    <div class="callout"><strong>The Tasks panel is your queue.</strong> Inside the targeting map, the ☑ Tasks button opens your follow-ups. Every task carries an owner (you, Kate, or Dr. Ume), mirrors to Notion Sales Tasks and the GFC Sales calendar, and sends an email notification when assigned or updated. "Mine only" filters to your queue; ticking Done closes the task everywhere. Work it every session — nothing you owe lives in your head or an inbox.</div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">3</span><h2>The Daily Loop</h2><span class="why">Every working session</span></div>
+    <ol class="steps">
+      <li><b>Open the targeting map and pick your name.</b> Every call you log stamps your name to the record. That stamp is your attribution evidence; without it, your accounts and your commissions have no trail.</li>
+      <li><b>Work your Tasks panel first, then new leads.</b> Overdue and today's follow-ups before fresh dials. Filter the map to uncontacted facilities when prospecting.</li>
+      <li><b>Call using the script for that vertical.</b> The Cold Call Script doc carries the talk track, decision-maker path, qualifying questions, and objection handling for every facility type. Fast lane: PCH and SNF discharge desks. Trust lane: ALF and ILF. The win condition is the booked meeting, demo, or lunch-and-learn.</li>
+      <li><b>Log every touch the same day.</b> Result, notes, meeting date, follow-up. The server confirms each save. Your notes also feed the email engine's personalization, so the better the note, the better every automated touch that follows.</li>
+      <li><b>Confirmed interest? Send to Notion.</b> Use the row's one-time <b>Send to Notion</b> button: pick the pipeline stage, keep the default follow-up task (3 business days) unless there's a reason not to. That creates the linked Partner and Contact records. From then on your map edits sync to Notion automatically and the contact enters the sequence engine.</li>
+      <li><b>Book the meeting; loop in Dr. Ume.</b> You earn the meeting or demo; Dr. Ume coordinates everything on-site in Georgia. Prep tailored materials and join virtually where possible.</li>
+      <li><b>Family consult → book the assessment.</b> Use your own booking page for video consults. You answer questions and schedule the in-home assessment; a GFC clinician performs it and closes the plan of care. Always.</li>
+      <li><b>Stay close after the start of care.</b> Regular account reviews, quick resolution of service concerns with Dr. Ume, and growing referral volume from accounts that already know you. This is the part of the job that builds your residual income.</li>
+      <li><b>Close the loop before you log off.</b> Tasks updated, hours logged in Rippling, tomorrow's follow-ups visible in the panel.</li>
+    </ol>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">4</span><h2>Your Week</h2><span class="why">Where approved hours go</span></div>
+    <p>You work six to twelve pre-approved hours per week, submitted as availability at least two weeks ahead and scheduled by GFC. Each client you place on service adds two approved hours per week, to a cap of twelve.</p>
+    <table>
+      <tr><th>Share</th><th>Activity</th><th>What it looks like</th></tr>
+      <tr><td><b>50%</b></td><td>B2B outreach</td><td>Phone and video relationship building with facility decision-makers, working toward the booked meeting, demo, or lunch-and-learn.</td></tr>
+      <tr><td><b>20%</b></td><td>Demo prep &amp; sales support</td><td>Tailored materials for every meeting you book, joined virtually where possible. This is also where Dr. Ume coaches you on live deals.</td></tr>
+      <tr><td><b>15%</b></td><td>Family consults</td><td>Video consults with families, often the out-of-state adult child holding decision authority. You answer questions and book the assessment; a GFC clinician runs it.</td></tr>
+      <tr><td><b>15%</b></td><td>CRM &amp; revenue ops</td><td>Same-day logging, pipeline management, task hygiene, referral tracking. Infrastructure, not admin; it's how your pay gets verified.</td></tr>
+    </table>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">5</span><h2>Non-Negotiables</h2><span class="why">Short list, zero exceptions</span></div>
+    <ul class="plain">
+      <li><b>Same-day documentation.</b> Your agreement makes contemporaneous CRM documentation a condition of variable pay, and accounts stay yours only while they show documented touches.</li>
+      <li><b>Hours are pre-approved and logged.</b> Availability submitted two weeks ahead; GFC schedules within it; every hour lands in Rippling.</li>
+      <li><b>Approved materials, approved claims.</b> Nothing beyond GFC's vetted collateral and scripts. It's always "Godwins Family Care" or "GFC," and physician and FNP-owned goes in the room every time.</li>
+      <li><b>HIPAA and confidentiality.</b> Minimum necessary, GFC systems only, portal materials never forwarded. The Employee Handbook carries the full policies you've signed.</li>
+    </ul>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">6</span><h2>Working Remote</h2><span class="why">Schedule · workspace · security · expenses</span></div>
+    <p>You're held to the same standard as anyone on-site. In practice that means:</p>
+    <table>
+      <tr><th>Area</th><th>The standard</th></tr>
+      <tr><td><b>Schedule reliability</b></td><td>Work the hours you're scheduled and start on time. Something changes? Give the earliest possible notice, to Dr. Ume directly. Overtime only with advance approval.</td></tr>
+      <tr><td><b>Your workspace</b></td><td>During working hours you're reachable on GFC systems, working from a private space where client information can't be overheard or seen, on a secure network. Client-facing video calls get a professional background and appearance.</td></tr>
+      <tr><td><b>Security habits</b></td><td>Unique, strong passwords on every GFC account, multi-factor wherever offered, credentials shared with no one. Devices used for GFC work stay locked, updated, and inaccessible to others, household included. Unexpected requests for credentials, payments, or client data get verified through a known channel before you act; forward anything suspicious to Dr. Ume.</td></tr>
+      <tr><td><b>Expenses</b></td><td>Get written approval before spending anything you expect GFC to reimburse, then submit itemized receipts within thirty days. As a remote role there's no mileage; if Georgia travel is ever agreed, it's reimbursed under this same policy.</td></tr>
+    </table>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">7</span><h2>Your First Ninety Days</h2><span class="why">Portal → Pipeline → Your book</span></div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="days">Days 1–30</span><h3>Live in the Portal</h3></div>
+      <div class="phase-body">
+        <p>The portal is the center of your sales activity this month: prospecting, working the targeting map, and documenting outreach. Dr. Ume walks every area of it with you in your kickoff training — collateral, demo decks, and workflows like scheduling demos and lunches — then coaches you through each lead and facility type live, including the scripting, so you can make initial contact and book meetings with confidence. Your job this month is motion: dials, logged touches, and meetings on the calendar. When interest or need is mutually confirmed, you move the lead from the portal database into Notion with the handoff button.</p>
+        <h4>Done looks like</h4>
+        <ul class="done">
+          <li>All five systems live and tested, handbook and acknowledgments signed, availability submitted</li>
+          <li>Portal training complete; every script, doc, and map feature familiar enough to use without looking</li>
+          <li>Consistent same-day logging on every touch, from day one</li>
+          <li>First meetings booked with facility decision-makers, and first qualified leads handed off to Notion</li>
+          <li>Comfortable explaining home health vs home care vs house calls in thirty seconds</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase p2">
+      <div class="phase-head"><span class="days">Days 31–60</span><h3>Run the Pipeline</h3></div>
+      <div class="phase-body">
+        <p>Once you're fluid in the portal, Dr. Ume trains you on the Notion revenue operations side: the full sales pipeline and the automations that nurture your deals through to closed, live patients and facility clients. This month you manage handed-off contacts through their stages, let the sequence engine carry the email cadence while you carry the relationships, and start converting meetings into demos, family consults, and booked assessments delivered by the Georgia team.</p>
+        <h4>Done looks like</h4>
+        <ul class="done">
+          <li>Notion pipeline training complete; you manage your own stages, tasks, and follow-ups without prompting</li>
+          <li>Demos and lunch-and-learns booked and delivered with the GFC local team</li>
+          <li>First family consults run on your own booking page, with assessments scheduled for clinicians</li>
+          <li>First client on service, or visibly close — the pay sheet's model pace is two average clients a month</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase p3">
+      <div class="phase-head"><span class="days">Days 61–90</span><h3>Own the Book</h3></div>
+      <div class="phase-body">
+        <p>By now the loop is yours end to end: you source from the leads GFC feeds you, work them through the pipeline, and stay close to every account after the start of care. This month the focus shifts from learning to owning — regular account reviews, resolving service concerns with Dr. Ume, and growing referral volume from accounts that already know you. Residual commission is the point of this role; the book you tend this month is the one that pays you monthly from here forward.</p>
+        <h4>Done looks like</h4>
+        <ul class="done">
+          <li>Pipeline fully self-managed: prospecting cadence, stages, tasks, and logging run without oversight</li>
+          <li>Clients on service and paying accounts under your name, pacing toward two starts a month</li>
+          <li>Every active account healthy under the activity gate — a documented touch and referral momentum each quarter</li>
+          <li>A standing check-in cadence with Dr. Ume and clean coordination on every on-site step you book</li>
+          <li>You can walk into day 91 and describe your book, your pipeline, and your next five moves without opening a screen</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="sec-num">8</span><h2>Where Everything Lives</h2><span class="why">Quick reference</span></div>
+    <ul class="plain">
+      <li><b>Sales Portal</b> — cold call scripts, Liaison Pay Sheet (your full compensation detail), live targeting map with the Tasks panel.</li>
+      <li><b>Notion CRM</b> — Partners, Contacts, pipeline, Sales Tasks, and the sequence engine.</li>
+      <li><b>Employee Handbook</b> — the full policies behind Section 4, with your signed acknowledgments.</li>
+      <li><b>Employment Agreement + Exhibit A</b> — your legal terms, compensation schedule, and the written full-time conversion trigger.</li>
+    </ul>
+  </div>
+
+  <div class="foot"><span>Godwins Family Care · Community Care Liaison Playbook</span><span>v2.3 · August 2026 · Internal &amp; Confidential</span></div>
+</div>
+</body>
+</html>
+

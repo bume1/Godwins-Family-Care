@@ -7,3 +7,4 @@ scripts/migrate_kv_to_postgres.*.json
 docs/prototype
 *.pdf
 .env
+!sales-portal/files/*.pdf

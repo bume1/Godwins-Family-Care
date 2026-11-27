@@ -68,7 +68,9 @@ const NON_PHI_PREFIXES = Object.freeze([
   '/api/announcements', '/api/changelog', '/api/feedback', '/api/email', '/api/unsubscribe', '/api/resubscribe',
   '/api/webhook', '/api/webhooks', '/healthz',
   // The Portal Hub's area list: which screens an account may open, no PHI.
-  '/api/staff'
+  '/api/staff',
+  // The Sales Portal's scripts and links: outreach material, no client records.
+  '/api/sales'
 ]);
 const isPhiPath = (p) => PHI_PREFIXES.some(pre => p === pre || p.startsWith(pre + '/'));
 

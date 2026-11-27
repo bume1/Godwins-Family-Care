@@ -95,12 +95,13 @@ test('the hub is grouped by area: My GFC, People, Clients, Clinical, Billing, Ad
     ['myGfc', ['myGfc']],
     ['people', ['users', 'onboarding', 'caregiverManagement', 'caregiverScheduling']],
     ['clients', ['clients']],
+    ['growth', ['sales']],
     ['clinical', ['clinical', 'ime']],
     ['billing', ['billing', 'payroll']],
     ['adminCompliance', ['admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']]
   ]);
   assert.deepEqual(at.hubAreasFor(at.fieldsFor('admin')).map(a => a.name),
-    ['My GFC', 'People', 'Clients', 'Clinical', 'Billing', 'Admin & Compliance']);
+    ['My GFC', 'People', 'Clients', 'Growth', 'Clinical', 'Billing', 'Admin & Compliance']);
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw']) {
     assert.deepEqual(areas(at.fieldsFor(t)), [['myGfc', ['myGfc']], ['clinical', ['clinical', 'ime']]], t);
   }
@@ -125,7 +126,7 @@ test('People is our team, Clients is who we serve (owner, 2026-11-09)', () => {
 
 test('only the Super Admin sees the Admin Hub, the Service Portal and the Client Portal Admin', () => {
   assert.deepEqual(ids(at.fieldsFor('admin')), ['myGfc', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling',
-    'clients', 'clinical', 'ime', 'billing', 'payroll', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
+    'clients', 'sales', 'clinical', 'ime', 'billing', 'payroll', 'admin', 'audit', 'incidents', 'service', 'clientPortalAdmin']);
   for (const u of [at.fieldsFor('manager'), at.fieldsFor('coordinator'), at.fieldsFor('manager', { managerClinicalAccess: 'edit' })]) {
     for (const blocked of ['admin', 'service', 'clientPortalAdmin', 'payroll']) assert.ok(!ids(u).includes(blocked), blocked);
   }
@@ -137,8 +138,9 @@ test('a coordinator sees Clinical, Private Home Care, Enrollment, Billing and Me
   const office = ['myGfc', 'messages', 'users', 'onboarding', 'caregiverManagement', 'caregiverScheduling', 'clients'];
   // The Incident Log is theirs too (owner, 2026-11-09), alone in Admin & Compliance.
   assert.deepEqual(ids(at.fieldsFor('coordinator')), [...office, 'clinical', 'ime', 'billing', 'incidents']);
-  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'clinical', 'ime', 'billing', 'incidents'], 'View only by default');
-  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'ime', 'billing', 'incidents'],
+  // A manager has the Sales Portal (owner, 2026-11-23); a coordinator gets it only as a grant.
+  assert.deepEqual(ids(at.fieldsFor('manager')), [...office, 'sales', 'clinical', 'ime', 'billing', 'incidents'], 'View only by default');
+  assert.deepEqual(ids(at.fieldsFor('manager', { managerClinicalAccess: 'none' })), [...office, 'sales', 'ime', 'billing', 'incidents'],
     'Enrollment and Billing are their own modules, not inside clinical (owner, 2026-10-15)');
   for (const t of ['provider', 'rn', 'lcsw', 'lmsw', 'caregiver', 'client', 'family']) {
     assert.ok(!ids(at.fieldsFor(t)).includes('billing'), `${t} has no Billing tile`);

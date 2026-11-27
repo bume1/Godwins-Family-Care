@@ -205,6 +205,9 @@ function landingFor(u) {
   // A caregiver or liaison the Super Admin granted a module lands on the hub,
   // where that module's tile is (owner, 2026-11-13).
   if ((type === TYPES.CAREGIVER || type === TYPES.LIAISON) && moduleAccessOf(u).granted.length) return null;
+  // A liaison with the Sales Portal (their default, owner 2026-11-23) lands
+  // on the hub too, where My GFC and the Sales Portal sit side by side.
+  if (type === TYPES.LIAISON && hasModule(u, 'sales')) return null;
   if (type === TYPES.CAREGIVER) return u.licenseLevel ? '/caregiver' : null;
   // A liaison lands straight in My GFC (owner, 2026-11-08).
   if (type === TYPES.LIAISON) return '/my';
@@ -242,6 +245,11 @@ const CLINICAL = link('clinical', 'Clinical Workspace', '/clinical', 'Charts, vi
 // under Clinical: the exam-day list (moved out of the Admin Hub) and the AI
 // case review of claim files. Each half is gated by its own route.
 const IME = link('ime', 'Independent Medical Examinations', '/ime', 'Exam-day veterans list and the AI case review of claim files');
+// The Sales Portal (owner, 2026-11-23): growth work moved off the public
+// website, which was down for most of November. Prospecting, partner and
+// facility outreach, follow-ups and sales scripts. The Community Care Liaison
+// is its main user; the Super Admin and managers have it as well.
+const SALES = link('sales', 'Sales Portal', '/sales', 'Prospecting, partner and facility outreach, follow-ups and sales scripts');
 const BILLING = link('billing', 'Billing', '/billing', 'Claims waiting on billing, patient statements, copays and home care hours');
 // Payroll is the Super Admin's alone (its routes are requireAdmin). It had no
 // tile, so the only way in was typing /payroll (owner report, 2026-11-13).
@@ -277,7 +285,7 @@ const OFFICE_TYPES = [TYPES.ADMIN, TYPES.MANAGER, TYPES.COORDINATOR];
 //     full" for that person (owner, 2026-11-27, for a future financial
 //     manager): then they hold every payroll power the Super Admin holds.
 //     Stored as `moduleAccess.payrollFull: true`, read by hasFullPayroll().
-const AREA_NAMES = Object.freeze({ myGfc: 'My GFC', people: 'People', clients: 'Clients', clinical: 'Clinical', billing: 'Billing', adminCompliance: 'Admin & Compliance' });
+const AREA_NAMES = Object.freeze({ myGfc: 'My GFC', people: 'People', clients: 'Clients', growth: 'Growth', clinical: 'Clinical', billing: 'Billing', adminCompliance: 'Admin & Compliance' });
 const MODULES = Object.freeze([
   { id: 'myGfc', area: 'myGfc', link: MY_GFC, locked: 'Everyone on the team has My GFC.' },
   { id: 'messages', area: 'myGfc', link: MESSAGES, locked: 'Messages follow the person\'s role.' },
@@ -286,6 +294,7 @@ const MODULES = Object.freeze([
   { id: 'caregiverManagement', area: 'people', link: CAREGIVER_MANAGEMENT },
   { id: 'caregiverScheduling', area: 'people', link: CAREGIVER_SCHEDULING },
   { id: 'clients', area: 'clients', link: CLIENTS },
+  { id: 'sales', area: 'growth', link: SALES },
   { id: 'clinical', area: 'clinical', link: CLINICAL, grantNote: 'View only. Writing notes, orders and prescriptions follows their clinical license.' },
   { id: 'ime', area: 'clinical', link: IME, grantNote: 'The exam-day list. The AI case review stays with examiners.' },
   { id: 'billing', area: 'billing', link: BILLING },
@@ -319,6 +328,9 @@ function moduleDefault(u, id) {
     case 'clinical': return clinician || type === TYPES.COORDINATOR ||
       (type === TYPES.MANAGER && managerAccessOf(u) !== 'none' && !!u.clinicalRole);
     case 'ime': return office || clinician;
+    // Admin (above), managers and the Community Care Liaison (owner,
+    // 2026-11-23). A care coordinator or anyone else gets it as a grant.
+    case 'sales': return type === TYPES.MANAGER || type === TYPES.LIAISON;
     default: return false;   // payroll, admin, audit, service, clientPortalAdmin
   }
 }

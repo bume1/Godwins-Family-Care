@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care · Community Care Liaison Pay Sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #033D50;
+    --navy-deep: #022a37;
+    --steel: #4A7A8C;
+    --gold: #c9a44a;
+    --gold-light: #F5CD85;
+    --brown: #8B5E2A;
+    --cream: #FAF7F2;
+    --cream-deep: #f3ede2;
+    --ink: #1a2a32;
+    --ink-soft: #4a5a62;
+    --rule: #d8cdb8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--cream); color: var(--ink); font-family: 'DM Sans', sans-serif; font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 900px; margin: 0 auto; padding: 48px 40px 80px; }
+
+  .masthead { background: var(--navy); color: #fff; margin: -48px -40px 40px; padding: 40px 40px 32px; }
+  .masthead .eyebrow { font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--gold-light); font-weight: 700; margin-bottom: 10px; }
+  .masthead h1 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 40px; line-height: 1.05; margin-bottom: 8px; }
+  .masthead .sub { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 18px; color: #dce8ec; max-width: 620px; }
+  .masthead .tag { display:inline-block; margin-top: 14px; font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase; font-weight: 700; color: var(--navy); background: var(--gold-light); padding: 4px 12px; }
+
+  .sec { margin-top: 44px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; border-bottom: 2px solid var(--navy); padding-bottom: 10px; margin-bottom: 18px; }
+  .sec-num { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 34px; color: var(--gold); line-height: 1; }
+  .sec-head h2 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 27px; color: var(--navy); }
+  .sec-head .why { margin-left: auto; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+  .lede { font-size: 15.5px; color: var(--ink); max-width: 760px; margin-bottom: 16px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-soft); font-weight: 700; padding: 8px 12px; border-bottom: 1px solid var(--navy); }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td.money, th.money { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.money { font-weight: 600; color: var(--navy); }
+  tr.total td { background: var(--cream-deep); font-weight: 700; color: var(--navy); border-bottom: 2px solid var(--navy); }
+
+  .shapes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .shape { border: 1px solid var(--rule); background: #fff; padding: 20px 22px; border-top: 4px solid var(--gold); }
+  .shape.recurring { border-top-color: var(--navy); }
+  .shape .kind { font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase; font-weight: 700; color: var(--gold); margin-bottom: 6px; }
+  .shape.recurring .kind { color: var(--navy); }
+  .shape h3 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 22px; color: var(--navy); margin-bottom: 4px; }
+  .shape .big { font-family: 'Cormorant Garamond', serif; font-size: 36px; color: var(--navy); font-weight: 600; margin: 8px 0 2px; }
+  .shape .big span { font-size: 16px; font-family: 'DM Sans', sans-serif; font-weight: 400; color: var(--ink-soft); }
+  .shape p { font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+  .shape .real { margin-top: 10px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold); font-weight: 700; }
+
+  .dollar-bar { margin: 18px 0 6px; }
+  .bar-row { display: flex; width: 100%; height: 64px; gap: 3px; }
+  .seg { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; border-radius: 3px; min-width: 0; }
+  .seg .amt { font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .seg .lbl { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; opacity: 0.95; white-space: nowrap; }
+  .seg.caregiver { background: var(--navy); flex: 17; }
+  .seg.taxes { background: var(--steel); flex: 3; }
+  .seg.ops { background: var(--gold); flex: 3; color: var(--navy-deep); }
+  .seg.growth { background: var(--brown); flex: 7; }
+  .bar-caption { font-size: 12.5px; color: var(--ink-soft); margin-top: 10px; }
+  .bar-key { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; font-size: 13px; }
+  .bar-key span { display: inline-flex; align-items: center; gap: 7px; }
+  .bar-key i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+  .callout { margin-top: 16px; background: var(--cream-deep); border-left: 4px solid var(--gold); padding: 14px 18px; font-size: 14px; }
+  .callout strong { color: var(--navy); }
+
+  .streams { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .stream { background: #fff; border: 1px solid var(--rule); padding: 18px 20px; border-top: 4px solid var(--gold); }
+  .stream.navy { border-top-color: var(--navy); }
+  .stream .kind { font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase; font-weight: 700; color: var(--gold); margin-bottom: 5px; }
+  .stream.navy .kind { color: var(--navy); }
+  .stream h3 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 21px; color: var(--navy); margin-bottom: 3px; }
+  .stream .big { font-family: 'Cormorant Garamond', serif; font-size: 30px; color: var(--navy); font-weight: 600; margin: 6px 0 4px; }
+  .stream .big span { font-size: 14px; font-family: 'DM Sans', sans-serif; font-weight: 400; color: var(--ink-soft); }
+  .stream p { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+
+  .fine { margin-top: 40px; border-top: 1px solid var(--rule); padding-top: 18px; font-size: 12px; color: var(--ink-soft); line-height: 1.6; }
+  .fine strong { color: var(--navy); }
+  .colophon { margin-top: 36px; display: flex; justify-content: space-between; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-soft); }
+
+  @media (max-width: 760px) {
+    .page { padding: 40px 20px 60px; }
+    .masthead { margin: -40px -20px 32px; padding: 32px 20px 26px; }
+    .shapes, .streams { grid-template-columns: 1fr; }
+    .seg .lbl { display: none; }
+  }
+  @media print {
+    body { background: #fff; }
+    .masthead, .seg { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .sec { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<style>
+#gfcNavBtn{position:fixed;top:54px;left:14px;z-index:9500;background:#022a37;color:#F5CD85;border:1px solid #c9a44a55;height:42px;border-radius:8px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;font-family:'DM Sans',system-ui,sans-serif;font-weight:700;letter-spacing:.08em;box-shadow:0 2px 10px rgba(2,42,55,.35)}
+#gfcNavBtn:hover{background:#033D50}
+#gfcNavScrim{position:fixed;inset:0;background:rgba(2,42,55,.45);z-index:9600;opacity:0;pointer-events:none;transition:opacity .2s}
+#gfcNav{position:fixed;top:0;left:0;bottom:0;width:min(680px,94vw);background:#022a37;z-index:9700;transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;font-family:'DM Sans',system-ui,sans-serif;box-shadow:4px 0 24px rgba(0,0,0,.25)}
+.gfcnav-open #gfcNav{transform:none}
+.gfcnav-open #gfcNavScrim{opacity:1;pointer-events:auto}
+#gfcNav .gn-head{display:flex;align-items:center;gap:6px;padding:12px 14px;border-bottom:1px solid #ffffff1a}
+#gfcNav .gn-tab{background:none;border:1px solid #ffffff2a;color:#dce8ec;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+#gfcNav .gn-tab.on{background:#c9a44a;border-color:#c9a44a;color:#022a37}
+#gfcNav .gn-title{color:#F5CD85;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;padding:8px 2px}
+#gfcNav .gn-full{margin-left:auto;color:#F5CD85;font-size:11.5px;text-decoration:none;letter-spacing:.06em}
+#gfcNav .gn-full:hover{text-decoration:underline}
+#gfcNav .gn-close{background:none;border:0;color:#dce8ec;font-size:22px;cursor:pointer;padding:2px 8px;line-height:1}
+#gfcNav .gn-pane{flex:1;display:none;background:#FAF7F2}
+#gfcNav .gn-pane.on{display:block}
+#gfcNav .gn-pane iframe{width:100%;height:100%;border:0;display:block}
+#gfcNav .gn-foot{padding:9px 14px;font-size:11px;color:#9db6bf;border-top:1px solid #ffffff1a;display:flex;gap:14px;flex-wrap:wrap}
+#gfcNav .gn-foot a{color:#dce8ec;text-decoration:none}
+#gfcNav .gn-foot a:hover{color:#F5CD85}
+@media print{#gfcNav,#gfcNavBtn,#gfcNavScrim{display:none!important}}
+</style>
+<button id="gfcNavBtn" aria-label="Open the task board" title="Task Board">&#9776; Tasks</button>
+<div id="gfcNavScrim"></div>
+<nav id="gfcNav" aria-label="Work tools">
+  <div class="gn-head">
+    <span class="gn-title">Task Board</span>
+    <a class="gn-full" id="gfcNavFull" href="?gfc_doc=tasks">Open full screen &rarr;</a>
+    <button class="gn-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="gn-pane on" data-pane="tasks"><iframe data-src="?gfc_doc=tasks" title="Task Board"></iframe></div>
+  <div class="gn-foot"><a href="?gfc_doc=home">Home</a><a href="?gfc_doc=start">Start Here</a><a href="?gfc_doc=playbook">Playbook</a><a href="?gfc_doc=script">Script</a><a href="?gfc_doc=paysheet">Pay Sheet</a><a href="?gfc_doc=emails">Emails</a></div>
+</nav>
+<script>(function(){var r=document.documentElement,b=document.getElementById('gfcNavBtn'),n=document.getElementById('gfcNav'),s=document.getElementById('gfcNavScrim'),c=n.querySelector('.gn-close'),full=document.getElementById('gfcNavFull');
+if(window.self!==window.top){b.style.display='none';n.style.display='none';s.style.display='none';return;}
+function open(){r.classList.add('gfcnav-open');var f=n.querySelector('.gn-pane iframe');if(f&&!f.src)f.src=f.getAttribute('data-src');}
+function close(){r.classList.remove('gfcnav-open');}
+b.addEventListener('click',open);c.addEventListener('click',close);s.addEventListener('click',close);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+})();</script>
+<div style="background:#022a37;color:#fff;padding:11px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;font-family:'DM Sans',sans-serif;font-size:11.5px;letter-spacing:0.12em;position:relative;z-index:3000;"><a href="?gfc_doc=home" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">&larr;&nbsp;Sales Portal</a><span style="color:#b9cdd5;text-transform:uppercase;">Godwins Family Care &middot; Internal &middot; Confidential</span><a href="?logout=1" style="color:#F5CD85;text-decoration:none;font-weight:700;text-transform:uppercase;">Log&nbsp;out</a></div>
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Godwins Family Care · Growth Team</div>
+    <h1>Community Care Liaison<br>Pay Sheet &amp; How You Earn</h1>
+    <div class="sub">One role, four ways to earn. You own relationships over their life, and you're paid on how long care lasts, not just when it starts.</div>
+    <span class="tag">Final · Community Care Liaison · Remote · August 2026</span>
+  </header>
+
+  <!-- 1. THE ROLE -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">1</span><h2>The Role, In One Paragraph</h2><span class="why">W2 · PRN · Part-time</span></div>
+    <p class="lede">You are a <strong>W2 employee of Godwins Family Care</strong>, working part-time (PRN) and <strong>fully remote from Texas into our Georgia market</strong>, on a schedule that grows with your results. This replaces the old setter/closer split: a liaison opens facility doors by phone and video, closes families, <em>and</em> stays close to them, because your pay continues for as long as your clients stay on service. GFC's local team runs every on-site step (demos, assessments, starts of care); you create and warm the relationships that get them in the room. Being a W2 employee is not paperwork trivia. It is what legally allows you to market our clinical services to <strong>every patient in the building, including Medicare, Medicaid, and commercially insured</strong>, which no 1099 rep can do.</p>
+    <div class="callout"><strong>The mindset shift:</strong> a sales rep is paid when someone signs. A liaison is paid while someone stays. Close families that fit, keep them happy, and your book pays you every month.</div>
+  </section>
+
+  <!-- 2. WHAT ONE CLIENT IS WORTH -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">2</span><h2>What One Client Is Worth</h2><span class="why">Average vs core</span></div>
+    <p class="lede">The true private-pay home care average runs <strong>$16–18k per year per client</strong>, about 10–12 hours of care a week, staying roughly a year. That's your bread-and-butter close. The 20-hour "core" client is the one you grow them into.</p>
+    <div class="shapes">
+      <div class="shape">
+        <div class="kind">The Average Client</div>
+        <h3>~11 hrs/week of care</h3>
+        <div class="big">$1,450 <span>/ month · ~12 months</span></div>
+        <p>The realistic first close: a family starting with part-time support. Stays about a year. Your floors below make sure this client still writes you real checks.</p>
+        <div class="real">≈ $17,400 billed over a year</div>
+      </div>
+      <div class="shape recurring">
+        <div class="kind">The Core Client</div>
+        <h3>20 hrs/week of care</h3>
+        <div class="big">$2,600 <span>/ month</span></div>
+        <p>The client shape we grow toward. Because your commission is a percentage of the whole invoice, every hour you help a family add goes straight into your check.</p>
+        <div class="real">≈ $31,200 billed over a year</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. WHERE THE MONEY GOES -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">3</span><h2>Where Every $30 Hour Goes</h2><span class="why">Why your pay is real</span></div>
+    <div class="dollar-bar">
+      <div class="bar-row">
+        <div class="seg caregiver" style="flex:17;"><span class="amt">$17</span><span class="lbl">Caregiver</span></div>
+        <div class="seg taxes"><span class="amt">$3</span><span class="lbl">Taxes+Ins</span></div>
+        <div class="seg ops"><span class="amt">$3</span><span class="lbl">Ops</span></div>
+        <div class="seg growth" style="flex:7;"><span class="amt">$7</span><span class="lbl">Growth</span></div>
+      </div>
+      <div class="bar-key">
+        <span><i style="background:var(--navy)"></i>Caregiver pay, the person doing the work</span>
+        <span><i style="background:var(--steel)"></i>Payroll taxes, workers' comp, liability insurance</span>
+        <span><i style="background:var(--gold)"></i>Operations: scheduling, software, compliance</span>
+        <span><i style="background:var(--brown)"></i>Growth, what funds your pay</span>
+      </div>
+      <div class="bar-caption">About $7 of every $30 hour funds growth. Your commission comes out of that pool, paid on collected revenue, not promises. An average client throws off ~$330/month of growth dollars; you earn about a third of it, and the company keeps the rest to keep growing.</div>
+    </div>
+  </section>
+
+  <!-- 4. FOUR WAYS YOU'RE PAID -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">4</span><h2>Four Ways You're Paid</h2><span class="why">Acquire · Retain · Own</span></div>
+    <div class="streams">
+      <div class="stream navy">
+        <div class="kind">Stream 1 · Outreach Hours</div>
+        <h3>Guaranteed hourly, every week</h3>
+        <div class="big">$18 <span>/ hour · 6 to 12 hrs per week</span></div>
+        <p>Paid through payroll for scheduled, documented outreach: calls and video meetings with facility decision-makers, virtual family consults, booking on-site demos for the GFC team, CRM time. You work <strong>6 to 12 hours a week</strong>. You submit your availability <strong>two weeks in advance</strong> and GFC schedules your hours around it, so this fits alongside your full-time role.</p>
+      </div>
+      <div class="stream">
+        <div class="kind">Stream 2 · Home Care Commission</div>
+        <h3>Three phases, one client</h3>
+        <div class="big">12% → 7% → 3% <span>acquisition, retention, ownership</span></div>
+        <p><strong>Acquisition, Month 1: 12%</strong> of collected billing, never less than <strong>$200</strong>. <strong>Retention, Months 2–12: 7%</strong>, never less than <strong>$90/month</strong>. <strong>Account ownership, Year 2: 3%.</strong> At the end of year two the client becomes a house account. Your % rides the client's <em>entire private-pay invoice</em>, meaning care hours plus add-ons like Continuous Care monitoring ($299/mo) and LMSW case management. Upsells raise your check automatically.</p>
+      </div>
+      <div class="stream">
+        <div class="kind">Stream 3 · Concierge (DPC) Commission</div>
+        <h3>Small dues, long life</h3>
+        <div class="big">50% → 10% → 5% <span>same three phases</span></div>
+        <p><strong>50% of Month 1</strong> membership dues, <strong>10% of Months 2–12</strong>, <strong>5% in Year 2</strong>, then house account. On a $200/month membership: $100, then $20/month. These clients stay for years and stack quietly underneath your home care book.</p>
+      </div>
+      <div class="stream navy">
+        <div class="kind">Stream 4 · Community Partner Ladder</div>
+        <h3>Build an account, get paid three times</h3>
+        <div class="big">$900–950 <span>/ fully developed community</span></div>
+        <p><strong>$150</strong> when a community comes on as a GFC partner <em>and</em> its first client is on service. Both conditions are required: a partnership on its own does not pay. <strong>$250 to $300</strong> when that community has produced <strong>5 clients</strong> on service, set by GFC at the milestone based on the value of the book that community produced. <strong>$500</strong> at <strong>10 clients</strong>. Cumulative and lifetime per account, counting distinct clients who actually started care. One well-worked assisted living community can pay the ladder in full and keep referring underneath your 12/7/3.</p>
+      </div>
+    </div>
+
+    <table style="margin-top:22px;">
+      <tr><th>Community Milestone</th><th>What triggers it</th><th class="money">Bonus</th><th class="money">Running Total</th></tr>
+      <tr><td><strong>Partner + first client</strong></td><td>Community comes on as a GFC referral partner <em>and</em> its first client has started care. Both required.</td><td class="money">$150</td><td class="money">$150</td></tr>
+      <tr><td><strong>5 clients</strong></td><td>Five distinct clients from that community have started care</td><td class="money">$250–300</td><td class="money">$400–450</td></tr>
+      <tr class="total"><td>10 clients</td><td>Ten distinct clients from that community have started care</td><td class="money">$500</td><td class="money">$900–950</td></tr>
+    </table>
+    <div class="callout"><strong>Build your own book:</strong> five average clients from one community is roughly $7,250/month of care revenue, paying you up to $450 in ladder bonuses plus about $6,600 in first-year commissions from those same clients. Take that community to ten and the ladder pays up to $950 against roughly $13,200 in commissions. Depth beats breadth here. Working one lucrative, private-pay community until it produces ten consistent clients is worth far more than opening ten communities that each produce one client who only stays with us a few weeks.</div>
+  </section>
+
+  <!-- 5. PAYOUT CHART -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">5</span><h2>Payout Chart · Average vs Core</h2><span class="why">Per client, per month</span></div>
+    <table>
+      <tr>
+        <th></th>
+        <th class="money">Average Client ($1,450/mo)</th>
+        <th class="money">Core Client ($2,600/mo)</th>
+      </tr>
+      <tr><td><strong>Acquisition</strong> · Month 1 (12%, $200 floor)</td><td class="money">$200</td><td class="money">$312</td></tr>
+      <tr><td><strong>Retention</strong> · Months 2–12 (7%, $90 floor)</td><td class="money">$102 / mo</td><td class="money">$182 / mo</td></tr>
+      <tr><td><strong>Ownership</strong> · Year 2 (3%)</td><td class="money">$44 / mo</td><td class="money">$78 / mo</td></tr>
+      <tr class="total"><td>Your Year-1 total, one client</td><td class="money">≈ $1,320</td><td class="money">≈ $2,315</td></tr>
+    </table>
+    <div class="callout"><strong>Why the floors exist:</strong> on a smaller client, a raw percentage writes weak checks. The floors guarantee real dollars on every start, and the moment a client's billing passes ~$1,500/month, the percentage takes over and outgrows the floor. Small clients pay you fairly; big clients pay you more. You will never close a client that isn't worth your time.</div>
+  </section>
+
+  <!-- 6. FIRST 90 DAYS -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">6</span><h2>Your First 90 Days</h2><span class="why">Closing 2 average clients/mo</span></div>
+    <table>
+      <tr><th>Month</th><th>Your book</th><th class="money">Hours Pay*</th><th class="money">Commissions</th><th class="money">You Earn</th></tr>
+      <tr><td>Month 1</td><td>2 clients start and complete their first month</td><td class="money">$624</td><td class="money">$400</td><td class="money">$1,024</td></tr>
+      <tr><td>Month 2</td><td>2 more start · first 2 now in residual months</td><td class="money">$624</td><td class="money">$604</td><td class="money">$1,228</td></tr>
+      <tr><td>Month 3</td><td>2 more start · 4 in residuals</td><td class="money">$624</td><td class="money">$808</td><td class="money">$1,432</td></tr>
+      <tr class="total"><td>Quarter 1</td><td>6 families on service · ≈ $8,700/mo of care revenue created</td><td class="money">$1,872</td><td class="money">$1,812</td><td class="money">≈ $3,700</td></tr>
+    </table>
+    <div class="bar-caption" style="margin-top:8px;">*Hours pay shown at 8 hours a week, mid-range. At the 12-hour end it is $936/month. Commissions are earned when each client's month completes and payment is collected, so cash lands the following pay cycle. At a steadier 1 close/month, Quarter 1 is ≈ $2,800: slower, still building.</div>
+    <div class="callout"><strong>Month 12, same pace:</strong> a book of ~16 active families pays ≈ $1,600/month in residuals before you close anything new. Add 2 new starts and capped hours: ≈ <strong>$3,000/month on 12 hours a week</strong>. That's $57/hour effective. No salaried liaison job in this market touches it.</div>
+  </section>
+
+  <!-- 7. PAYER LANES -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">7</span><h2>Three Payer Lanes · Know Them Cold</h2><span class="why">What's commissioned, what's salaried</span></div>
+    <table>
+      <tr><th>Lane</th><th>Who it covers</th><th>How you're paid</th></tr>
+      <tr>
+        <td><strong>Commission Lane</strong></td>
+        <td>Private-pay &amp; LTC-insurance home care clients · private-pay concierge (DPC) · private-pay add-ons (Continuous Care, case management)</td>
+        <td>Full commission structure above, on top of your hours</td>
+      </tr>
+      <tr>
+        <td><strong>Program Lane</strong></td>
+        <td>Medicare, Medicaid, and commercially insured clinical patients</td>
+        <td>Your $18/hr covers this marketing time, plus a <strong>quarterly program bonus</strong> with amounts fixed in advance (e.g., $300 when the clinical program adds 10+ patients in a quarter; $600 at 20+). <strong>Never per-patient. That's the law, even for employees.</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Credibility Lane</strong></td>
+        <td>Independent Medical Evaluations under federal contracts</td>
+        <td>Never commissionable and not your lane to sell, but name it in every room. Clinicians trusted by federal agencies is proof of rigor no other agency in the market can claim.</td>
+      </tr>
+    </table>
+    <div class="callout"><strong>The unlock, plainly:</strong> because you are a bona fide W2 employee, you can walk into any facility and serve every patient in the building. Private-pay families ride your commission. Insured patients grow your program bonus. Nobody gets handed away, and no facility hears "we can't help that resident."</div>
+  </section>
+
+  <!-- 8. ACCOUNT OWNERSHIP -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">8</span><h2>Account Ownership · The Activity Gate</h2><span class="why">Keep what you work</span></div>
+    <p class="lede">Open a facility account and every commission-eligible client it refers is yours for as long as you're actually working it. An account stays yours while it meets two tests: <strong>(1)</strong> it produced at least one eligible referral in the last quarter, and <strong>(2)</strong> your touches are documented in the CRM. Fail both for a quarter and it converts to a house account. The gate governs the <em>account</em>: keep it alive and every new client it refers starts a fresh 12/7/3 under your name. Each individual client runs its own two-year course and then becomes a house account.</p>
+    <div class="callout"><strong>Why this beats the old rule:</strong> the previous structure took accounts away at 6 months no matter what. This one never takes away an account you're working, and never pays anyone for an account they've abandoned.</div>
+  </section>
+
+  <!-- 9. YOUR WEEK -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">9</span><h2>What a Liaison Week Looks Like</h2><span class="why">Where approved hours go</span></div>
+    <table>
+      <tr><th>Share</th><th>Activity</th><th>What it means at 6–12 hrs/week</th></tr>
+      <tr><td class="money">50%</td><td><strong>B2B outreach</strong></td><td>Phone and video relationship building with Georgia facility decision-makers. Fast lane: PCH &amp; SNF discharge desks. Trust lane: ALF &amp; ILF. Your job is earning the meeting: booking the on-site demos and lunch-and-learns the GFC local team delivers.</td></tr>
+      <tr><td class="money">20%</td><td><strong>Demo prep &amp; sales support</strong></td><td>Prepare the demo materials and deck for every meeting you book, tailored to that facility's vertical, and join virtually where possible. This is also where you're coached, with leadership teaching sales in real time on live deals.</td></tr>
+      <tr><td class="money">15%</td><td><strong>Family consults · the B2C leg</strong></td><td>The consumer side of our B2B2C model: video consults with families, often the out-of-state adult child holding decision authority, answering every question before their caregiver or clinician is assigned. <strong>You book the assessment; our clinician runs it and closes.</strong> You never perform clinical assessments.</td></tr>
+      <tr><td class="money">15%</td><td><strong>CRM &amp; revenue ops</strong></td><td>Pipeline management, same-day logging of every touch, and referral tracking. This is core infrastructure, not admin. It runs revenue operations, keeps accounts yours under the activity gate, and is how your pay gets verified.</td></tr>
+    </table>
+  </section>
+
+  <!-- 10. GROWTH PATH -->
+  <section class="sec">
+    <div class="sec-head"><span class="sec-num">10</span><h2>The Growth Path</h2><span class="why">PRN today · Full-time trigger in writing</span></div>
+    <p class="lede">This role is built to convert. When your sourced book holds <strong>$25,000/month of recurring revenue for 2 consecutive months</strong>, the role converts to a full-time salaried Community Care Liaison position with base salary plus this commission structure, negotiated at conversion. That trigger lives in your offer letter, not in a promise. You're not taking a part-time job; you're building your own full-time one.</p>
+  </section>
+
+  <div class="fine">
+    <strong>Terms in plain language.</strong> The Community Care Liaison is a part-time (PRN) W2 employee of Godwins Family Care, working remotely from Texas into GFC's Georgia market. Outreach hours: $18/hour for pre-approved, documented outreach activity, starting at 6 hours/week; each client placed on service adds 2 approved hours/week to a cap of 12; hours are scheduled and may be adjusted weekly by GFC. Home care commission, in three phases: acquisition, 12% of Month-1 collected billing ($200 minimum); retention, 7% of Months 2–12 ($90/month minimum); account ownership, 3% of Year 2, after which the client becomes a house account. Applies to the client's full private-pay invoice including eligible add-ons. Concierge commission: 50% / 10% / 5% of collected membership dues on the same schedule. All commissions and floors apply to <strong>collected revenue only</strong>, are paid after the client completes each service month, prorate if a client pauses or leaves mid-month, and are payable only while employed. Community partner ladder, cumulative and lifetime per account: $150 when a community has both come on as a GFC referral partner and produced its first client on service (both conditions required; a partnership alone does not pay), $250 to $300 once that community has produced 5 distinct clients on service as set by GFC at the milestone, $500 at 10. Account attribution follows the activity gate in Section 8. Medicare, Medicaid, and commercially insured patients are never commissioned per-patient under any circumstance; marketing of those services is compensated through hourly wages and pre-set quarterly program bonuses in accordance with the federal bona fide employee provision of the Anti-Kickback Statute. Commission rates are guaranteed for the first 6 months of employment and reviewed thereafter; rate changes apply to new clients only, and clients already on your book keep their original rates. New home care clients are billed two weeks in advance with a two-week deposit at start of care.
+  </div>
+
+  <div class="colophon">
+    <span>Godwins Family Care · Community Care Liaison Pay Sheet</span>
+    <span>Final · August 2026 · Internal &amp; Confidential</span>
+  </div>
+
+</div>
+</body>
+</html>

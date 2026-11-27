@@ -91,6 +91,7 @@ const addOnRules = require('./addOnRules');       // Phase 4.2: add-on codes and
 const dxSuggestion = require('./dxSuggestion');   // Phase 4.1: diagnosis wording from the note; OpenEMR supplies the codes
 const billableCodes = require('./billableCodes');         // gfc_billable_codes, the NCCI loader's code universe (2026-11-04)           // OpenEMR-owned CPT/HCPCS catalog cache (2026-10-28)
 const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
+const salesPortal = require('./salesPortal');   // the Sales Portal's content, moved off the website (owner, 2026-11-23)
 const userFinancial = require('./userFinancialFields');   // the user fields that move money (owner, 2026-11-03)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const familyLinks = require('./familyLinks');        // a family account linked to several patients, POA per patient (owner, 2026-10-20)
@@ -33892,6 +33893,13 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
   }
 });
 
+// The Sales Portal (owner, 2026-11-23): the Super Admin, managers, the
+// Community Care Liaison, and anyone granted the Sales module.
+const requireSalesPortal = (req, res, next) => {
+  if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'sales'))) return next();
+  return res.status(403).json({ error: 'The Sales Portal is for the Community Care Liaison, managers and the Super Admin.', code: 'SALES_PORTAL_ONLY' });
+};
+
 // ============== ADMIN HUB ROUTES ==============
 
 // Admin hub HTML route
@@ -33983,6 +33991,75 @@ app.get('/account', (req, res) => {
 // exists that could.
 app.get('/audit', (req, res) => {
   res.sendFile(__dirname + '/public/audit.html');
+});
+
+// The Sales Portal (owner, 2026-11-23), moved off the public website. Shell
+// is public; GET /api/sales/portal is requireSalesPortal.
+app.get('/sales', (req, res) => {
+  res.sendFile(__dirname + '/public/sales.html');
+});
+app.get('/api/sales/portal', authenticateToken, requireSalesPortal, (req, res) => {
+  // The pages open in a frame, which cannot carry the Bearer token, so the
+  // signed-in person gets a ticket naming this session (salesPortal.js).
+  res.json({ ...salesPortal.portal(), ticket: salesPortal.issueTicket(JWT_SECRET, { id: req.user.id, sid: req.session && req.session.id }) });
+});
+
+// A ticket only opens the Sales Portal, and only while the session it names is
+// still live and its owner still has the Sales module.
+const requireSalesTicket = async (req, res, next) => {
+  const deny = (status, msg) => res.status(status).type('html').send(`<!DOCTYPE html><meta charset="utf-8"><p style="font-family:system-ui,sans-serif;padding:24px">${msg} <a href="/sales" target="_top">Open the Sales Portal again</a>.</p>`);
+  const t = salesPortal.readTicket(JWT_SECRET, req.query.ticket);
+  if (!t.ok) return deny(401, 'This Sales Portal link has expired.');
+  try {
+    const sess = await sessions.check(t.sid);
+    if (!sess.ok || sess.row.userId !== t.uid) return deny(401, 'You have been signed out.');
+    const user = (await getUsers()).find(u => u.id === t.uid);
+    if (!user || user.accountStatus === 'inactive') return deny(401, 'You have been signed out.');
+    if (staffOffers.offerPending(user)) return deny(403, 'Please finish your offer letter first.');
+    if (!(user.role === config.ROLES.ADMIN || accountTypes.hasModule(user, 'sales'))) return deny(403, 'The Sales Portal is for the Community Care Liaison, managers and the Super Admin.');
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    req.salesTicket = req.query.ticket;
+    return next();
+  } catch (e) {
+    console.error('Sales portal ticket check failed:', e.message);
+    return deny(500, 'Something went wrong.');
+  }
+};
+
+// The email library reads the sequence engine's Notion feed. The feed URL
+// carries a shared token: read here, never sent to a browser.
+const salesEmailFeed = salesPortal.createFeed({ feedUrl: () => process.env.GFC_TEMPLATE_FEED_URL || '' });
+
+app.get('/sales/doc/emails/preview', requireSalesTicket, async (req, res) => {
+  res.type('html').send(await salesEmailFeed.preview(req.query.id));
+});
+app.get('/sales/doc/:id', requireSalesTicket, async (req, res) => {
+  try {
+    if (req.params.id === 'emails') {
+      const feed = await salesEmailFeed.templates(req.query.drafts === '1' ? 'all' : 'Active');
+      return res.type('html').send(salesPortal.renderEmails(feed, req.salesTicket));
+    }
+    const html = salesPortal.renderDoc(req.params.id, req.salesTicket, { baseUrl: await getAppBaseUrl() });
+    if (html == null) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such Sales Portal page.</p>');
+    return res.type('html').send(html);
+  } catch (e) {
+    console.error('Sales portal page failed:', e.message);
+    return res.status(500).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">This page could not be loaded.</p>');
+  }
+});
+app.get('/sales/files/:name', requireSalesTicket, (req, res) => {
+  const p = salesPortal.filePath(req.params.name);
+  if (!p) return res.status(404).type('html').send('<p style="font-family:system-ui,sans-serif;padding:24px">No such file.</p>');
+  res.type(salesPortal.FILES[req.params.name].type);
+  return res.sendFile(p);
+});
+
+// The brochure is public marketing material, linked from emails sent to
+// people outside GFC, so it needs no login.
+app.get('/brochure.pdf', (req, res) => {
+  res.type('application/pdf');
+  return res.sendFile(salesPortal.filePath('gfc-brochure.pdf'));
 });
 
 // Admin hub login endpoint (same as regular admin login)
