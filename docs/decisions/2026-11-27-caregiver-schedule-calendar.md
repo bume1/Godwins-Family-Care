@@ -22,3 +22,16 @@ No new data reaches a caregiver. The calendar reads the same two routes the scre
 - Two existing guards were repointed, not loosened: the visit-log scan reads the whole handler (anchored at the next route) instead of a 2400-character window, and the offer-ask scan reads `offerRow`.
 - Rendered in Chromium at 390px and 1200px; navigation, day selection, the legend filter and the list switch clicked through with no page errors.
 - 330 tests across the scheduling files, 0 failing.
+
+## Follow-up the same day: setting a shift's status by hand
+
+**Owner:** "Also, need to add an option to manually change these shift options (as an admin or manager)."
+
+- **`POST /api/scheduling/shifts/:id/status`** (`requireScheduleManager`: admin or manager) sets any status from any status, with a **required reason**. It is the office's override for when the record is wrong and the normal lifecycle cannot fix it: a shift cancelled by mistake, a visit worked but never clocked, a completed shift that did not happen.
+- **Every override is kept on the shift** (`status_overrides`: from, to, reason, who, when) and in the activity log. The board shows the latest under the shift. It is office-only; a caregiver's list never carries it.
+- **A status that means somebody holds the shift needs a holder.** Claimed, assigned, confirmed, in progress and completed are refused on a shift nobody holds (`SHIFT_NEEDS_HOLDER`); the override never invents an assignee.
+- **Setting a held shift to open releases the holder** through the normal release, which also lapses their pending change request.
+- **Leaving in progress closes the open clock-in** the same way Ending the visit does, keeping the hours worked.
+- **It writes no hours.** Marking a shift completed by hand creates no time log; typed-in hours stay an admin's job in Time Logs. **Nobody is emailed**, and the confirmation says so.
+- **Board:** every shift row (calendar or list) has **Change Status**, which opens a status picker and a reason box, and explains the consequence of the chosen status before saving.
+- **Verified:** `test/shift_status_override.test.js`, 9 tests through the real router over HTTP with stored rows read back; 5 mutations, each caught. Full suite 4058, 2 failing, both in `test/payroll.test.js` and both failing identically on `main` without this branch.
