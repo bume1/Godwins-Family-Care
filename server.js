@@ -39,6 +39,7 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const financeMail = require('./financeMail');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
 // The one answer to "how was this message written" (plain or the six-shape
@@ -827,17 +828,30 @@ const processNotificationQueue = async () => {
 
     const emailPayloads = [];
     const queueIndices = [];
+    const financeCopied = new Set();
     for (const notification of toProcess) {
       const idx = queue.findIndex(n => n.id === notification.id);
       if (idx === -1) continue;
       // Branding belongs to the drain, not to each caller remembering.
       const built = buildQueuedEmail(notification.templateData, appBaseUrl);
+      // Payroll and billing notices copy the finance inbox and take its
+      // replies (owner, 2026-11-27). One copy per notice and subject in a
+      // batch, so a reminder fanned out to several payroll runners does not
+      // land in finance several times.
+      let finance = {};
+      if (financeMail.isFinanceType(notification.type)) {
+        const key = `${notification.type}|${notification.relatedEntityId || ''}|${notification.templateData.subject || ''}`;
+        finance = financeMail.financeOptions();
+        if (financeCopied.has(key)) finance = { replyTo: finance.replyTo };
+        financeCopied.add(key);
+      }
       emailPayloads.push({
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
         text: built.text,
         html: built.html,
-        phi: !!notification.phi
+        phi: !!notification.phi,
+        ...finance
       });
       queueIndices.push(idx);
     }
@@ -18567,7 +18581,7 @@ const notifyStatement = async (clientId, { skipEmails } = {}) => {
         paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
         ctaUrl: r.url, ctaLabel: 'View my statement'
       }).html;
-      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody, ...financeMail.financeOptions() })
         .catch(err => console.error('Statement email error (non-fatal):', err.message));
     }
   } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
@@ -19195,10 +19209,10 @@ app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilli
             `${list.join('; ')}. Total ${total}.`,
             `Questions about these invoices: reply to this email or call ${consentText.ORG.phone || 'our office'}.`
           ];
-          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs }).html;
+          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs, signoff: emailTemplates.FINANCE_SIGNOFF }).html;
           const subject = carrier ? `Godwins Family Care invoices${bt.policyNumber ? `, policy ${bt.policyNumber}` : ''}, ${periodLabel}` : `Your Godwins Family Care invoice, ${periodLabel}`;
           const to = [bt.email, config.ROI_ADMIN_EMAIL].filter((v, k, a) => v && a.findIndex(x => x.toLowerCase() === v.toLowerCase()) === k);
-          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true,
+          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true, ...financeMail.financeOptions(),
             attachments: [{ filename: invoiceRuns.combinedFileName(p.clientName, run.from, run.to), content: pdf, contentType: 'application/pdf' }] });
           if (!r || !r.success) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: `The email did not go: ${(r && (r.error || r.reason)) || 'unknown error'}. Nothing was marked sent.` }); continue; }
           emailedTo = to;

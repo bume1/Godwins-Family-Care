@@ -52,9 +52,10 @@ function harness({ sendDelayMs = 20, rows, failSends = false } = {}) {
   const config = { NOTIFICATION_DAILY_SEND_LIMIT: 1000, NOTIFICATION_LOG_MAX_ENTRIES: 500, NOTIFICATION_MAX_RETRIES: 3 };
   const buildQueuedEmail = (t) => ({ text: t.body || '', html: `<p>${t.body || ''}</p>` });
   const getAppBaseUrl = async () => 'https://app.example.test';
-  const mk = new Function('db', 'config', 'sendBatchEmails', 'buildQueuedEmail', 'getAppBaseUrl',
+  const financeMail = require('../financeMail');
+  const mk = new Function('db', 'config', 'sendBatchEmails', 'buildQueuedEmail', 'getAppBaseUrl', 'financeMail',
     `${liftDrain()}; return processNotificationQueue;`);
-  return { run: mk(db, config, sendBatchEmails, buildQueuedEmail, getAppBaseUrl), sent, store, maxInFlight: () => maxInFlight };
+  return { run: mk(db, config, sendBatchEmails, buildQueuedEmail, getAppBaseUrl, financeMail), sent, store, maxInFlight: () => maxInFlight };
 }
 
 const row = (id, email, extra = {}) => Object.assign({
