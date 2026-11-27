@@ -68,6 +68,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Self sign-ups waiting on staff: a name, date of birth, address and
   // insurance details, plus a password HASH and a verify-token HASH.
   { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
+  { key: 'assessment_requests', phi: true, owner: 'website free assessment 11/2026' },
   // A veteran signing in at the clinic iPad for an IME / medical disability
   // exam: first and last name and a phone number. Nothing clinical.
   { key: 'veteran_checkins', phi: true, owner: 'veterans check-in 10/2026' },
@@ -276,6 +277,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'caregiver_availability', phi: false, owner: '7' },
   { key: 'time_logs', phi: true, owner: '7', note: 'GPS clock-in at a client address' },
   { key: 'time_log_edits', phi: true, owner: '7' },
+  // Time logs the Super Admin removed (owner, 2026-11-25), kept whole with who,
+  // when and why. Out of `time_logs` so no payroll reader can count them.
+  { key: 'time_logs_removed', phi: true, owner: '7', note: 'removed time logs, kept whole; never paid, never erased' },
   // A manager's or coordinator's request to correct a time log, decided by the
   // Super Admin (2026-11-03). PHI: it names the client the visit was for.
   { key: 'time_log_adjustment_requests', phi: true, owner: '7' },

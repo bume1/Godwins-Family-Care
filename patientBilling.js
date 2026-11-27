@@ -110,6 +110,10 @@ function transition(inv, to, { at, by, reason, method, reference } = {}) {
     return { inv: { ...inv, status: 'open', sentAt: at, sentBy: who } };
   }
   if (to === 'void') {
+    // Owner rule (2026-11-27): a home care invoice can be voided at any point
+    // until it is sent. Once it has gone to the carrier or family it stands,
+    // and a mistake is corrected with a credit line on a later run.
+    if (inv.status === 'open' && inv.kind === 'home_care') return { error: 'This invoice has been sent, so it cannot be voided. Correct it with a credit line on the next invoice run.', code: 'INVOICE_ALREADY_SENT' };
     const r = String(reason || '').trim().slice(0, 500);
     if (!r) return { error: 'Give a reason for voiding it.', code: 'INVOICE_VOID_REASON_REQUIRED' };
     return { inv: { ...inv, status: 'void', voidedAt: at, voidedBy: who, voidReason: r } };

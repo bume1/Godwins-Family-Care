@@ -487,34 +487,5 @@ function jsonOut(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-
-// ── ONE-TIME DATA FIX: run once, then delete ──────────────────
-// Fixes Sharon's row (token 5BD7U7bRzFy4).
-//
-// IMPORTANT: Run migrateSchemaAndAddClientEmail() in the INTAKE GAS first.
-// After that migration, Ernest Haney will already be in 'Client First/Last Name'
-// and Sharon's email in 'Submitter Email'. This function then sets:
-//   - Contact Name  → 'Sharon Vidrine'  (she IS the primary contact/POA)
-//   - Contact Email → 'Supervisor@hickorylog.org'  (so she also gets ROI confirmations)
-//
-// HOW TO RUN: Apps Script editor → select fixSharonRow → click Run.
-// Delete this function when done.
-function fixSharonRow() {
-  var TOKEN  = '5BD7U7bRzFy4';
-  var ss     = SpreadsheetApp.openById(ROI_SPREADSHEET_ID);
-  var sheet  = ss.getSheetByName(ROI_TAB_NAME);
-  var values = sheet.getDataRange().getValues();
-  var headers = values[0];
-
-  var colCN = headers.indexOf('Contact Name');   // put Sharon as the primary contact
-  var colCE = headers.indexOf('Contact Email');  // her email for ROI notifications
-
-  for (var i = 1; i < values.length; i++) {
-    if (values[i][0] !== TOKEN) continue;
-    var row = i + 1;
-    if (colCN >= 0) sheet.getRange(row, colCN + 1).setValue('Sharon Vidrine');
-    if (colCE >= 0) sheet.getRange(row, colCE + 1).setValue('Supervisor@hickorylog.org');
-    Logger.log('Sharon row fixed at row ' + row);
-    break;
-  }
-}
+// (A one-time data fix that lived here was removed on 2026-11-25: it named a
+// real patient and family member, and this file is in a public repository.)

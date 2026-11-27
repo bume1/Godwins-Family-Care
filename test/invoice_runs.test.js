@@ -223,3 +223,66 @@ test('the Billing page reads a spreadsheet raw and never decides a number itself
     assert.ok(PAGE.includes(`>${label}<`), label);
   }
 });
+
+// ---- Voiding a run (owner, 2026-11-27: "anything can be null until approved AND sent") ----
+test('voidPlan: an approved run is voidable until anything in it is sent', () => {
+  const run = { id: 'r', status: 'approved', invoiceIds: ['a', 'b', 'c'] };
+  const inv = (id, clientId, status) => ({ id, clientId, status, displayNumber: `GFC-${id}` });
+  const unsent = [inv('a', 'c1', 'draft'), inv('b', 'c1', 'draft'), inv('c', 'c2', 'draft'), inv('z', 'c9', 'draft')];
+  assert.deepEqual(R.voidPlan(run, unsent, { reason: 'wrong rate' }).ids, ['a', 'b', 'c'], 'only this run\'s invoices');
+  assert.equal(R.voidPlan(run, unsent, {}).code, 'RUN_VOID_REASON_REQUIRED');
+  assert.equal(R.voidPlan(run, unsent, { reason: '   ' }).code, 'RUN_VOID_REASON_REQUIRED');
+  assert.equal(R.voidPlan({ ...run, status: 'draft' }, unsent, { reason: 'x' }).code, 'RUN_IS_DRAFT');
+  assert.equal(R.voidPlan({ ...run, status: 'void' }, unsent, { reason: 'x' }).code, 'RUN_ALREADY_VOID');
+  assert.equal(R.voidPlan(null, unsent, { reason: 'x' }).code, 'RUN_NOT_FOUND');
+
+  const partSent = [inv('a', 'c1', 'open'), inv('b', 'c1', 'open'), inv('c', 'c2', 'draft')];
+  const blocked = R.voidPlan(run, partSent, { reason: 'x' });
+  assert.equal(blocked.code, 'RUN_ALREADY_SENT', 'once sent, the run stands');
+  assert.match(blocked.error, /GFC-a, GFC-b/);
+  assert.deepEqual(R.voidPlan(run, partSent, { reason: 'x', clientId: 'c2' }).ids, ['c'], 'a client not sent yet can still be voided');
+  assert.equal(R.voidPlan(run, partSent, { reason: 'x', clientId: 'c1' }).code, 'RUN_ALREADY_SENT');
+  assert.equal(R.voidPlan(run, [inv('a', 'c1', 'paid'), inv('b', 'c1', 'void'), inv('c', 'c2', 'void')], { reason: 'x' }).code, 'RUN_ALREADY_SENT', 'paid counts as sent');
+  assert.equal(R.voidPlan(run, [inv('a', 'c1', 'void'), inv('b', 'c1', 'void'), inv('c', 'c2', 'void')], { reason: 'x' }).code, 'RUN_NOTHING_TO_VOID');
+  assert.deepEqual(R.voidPlan(run, [inv('a', 'c1', 'void'), inv('b', 'c1', 'draft'), inv('c', 'c2', 'draft')], { reason: 'x' }).ids, ['b', 'c'], 'already-void invoices are skipped');
+});
+
+test('allVoid: a run is void only when every one of its invoices is', () => {
+  const run = { invoiceIds: ['a', 'b'] };
+  assert.equal(R.allVoid(run, [{ id: 'a', status: 'void' }, { id: 'b', status: 'draft' }]), false);
+  assert.equal(R.allVoid(run, [{ id: 'a', status: 'void' }, { id: 'b', status: 'void' }, { id: 'x', status: 'draft' }]), true);
+  assert.equal(R.allVoid({ invoiceIds: [] }, []), false);
+});
+
+test('a voided run frees its shifts for a new run', () => {
+  const lines = [{ sourceKey: 'log:1', shiftKey: 's1' }];
+  assert.ok(P.invoicedKeys([{ status: 'draft', lines }]).has('log:1'));
+  assert.ok(!P.invoicedKeys([{ status: 'void', lines }]).has('log:1'));
+});
+
+test('SAFETY: the void route checks voidPlan, needs a reason, and settles the run', () => {
+  const body = between(SERVER, "'/api/gfc/admin/billing-runs/:id/void'", '\napp.');
+  assert.match(body, /invoiceRuns\.voidPlan\(run, all, \{ clientId, reason \}\)/);
+  assert.match(body, /if \(plan\.error\) return/);
+  assert.match(body, /billing\.transition\(all\.find\(i => i\.id === id\), 'void'/, 'each invoice voids through the one status mover');
+  assert.match(body, /settleRunAfterVoid\(run/);
+  assert.match(body, /requireBilling/);
+  const statements = between(SERVER, "'/api/gfc/admin/billing/invoices/:id/:action'", '\napp.');
+  assert.match(statements, /to === 'void' && t\.inv\.runId[\s\S]*settleRunAfterVoid/, 'a single void under Statements keeps the run true');
+});
+
+test('an invoice email signs off as Kelvin Ume, BSN, RN with the finance address, and replies go to finance', () => {
+  const ET = require('../emailTemplates');
+  const r = ET.renderGfcEmail({ headline: 'Your home care invoice', paragraphs: ['Body.'], signoff: ET.FINANCE_SIGNOFF });
+  assert.match(r.html, /<strong>Kelvin Ume, BSN, RN<\/strong>/);
+  assert.ok(!r.html.includes('support@godwinsfamilycarellc.com'), 'no support address in the signature or footer');
+  assert.equal((r.html.match(/finance@godwinsfamilycarellc\.com/g) || []).length, 3, 'signature link, link text, footer');
+  assert.match(r.text, /Kelvin Ume, BSN, RN\n[\s\S]*finance@godwinsfamilycarellc\.com/);
+  // Every other notice is unchanged.
+  const other = ET.renderGfcEmail({ paragraphs: ['Body.'] });
+  assert.match(other.html, /The Godwins Family Care Team/);
+  assert.ok(!other.html.includes('finance@'));
+  const send = between(SERVER, "'/api/gfc/admin/billing-runs/:id/send'", "'/api/gfc/admin/billing/invoices/:id/pdf'");
+  assert.match(send, /signoff: emailTemplates\.FINANCE_SIGNOFF/);
+  assert.match(send, /\.\.\.financeMail\.financeOptions\(\)/, "finance is copied and takes the replies");
+});

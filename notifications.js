@@ -1713,6 +1713,40 @@ function createNotifier(deps) {
   // ---- A7. A self sign-up confirmed their email ---------------------------
   // The signer is told "our office will review your account and email you
   // when it is ready". Nothing told the office, so nothing happened next.
+  // The website's free assessment (owner, 2026-11-25). A family has asked for
+  // help; the office calls them back. On a transport outside the BAA the
+  // notice says only that one arrived, because the name of the person who
+  // needs care, next to the word "care", is PHI.
+  async function freeAssessmentReceived({ assessmentId, clientName, submitterName, urgency, ctaUrl }) {
+    try {
+      const office = await staffRecipients();
+      if (!office.length) return { notified: 0, reason: 'no office recipient with an email address' };
+      const detail = transportAllowsDetail();
+      const urgent = urgency === 'Immediately';
+      let n = 0;
+      for (const u of office) {
+        const ok = await send({
+          type: 'free_assessment_received', user: u,
+          subject: urgent ? 'A new free assessment (they need help now)' : 'A new free assessment came in',
+          headline: 'A new free assessment came in',
+          paragraphs: detail
+            ? [`${submitterName || 'Someone'} asked for a free assessment for ${clientName || 'a loved one'}${urgency ? `. Timing: ${urgency.toLowerCase()}` : ''}.`,
+               'It is waiting in the Assessments queue on the Clients page. Call them back and mark it contacted.']
+            : [`Someone asked for a free assessment${urgent ? ' and needs help right away' : ''}.`,
+               'Open the Assessments queue on the Clients page to see it.'],
+          ctaUrl, ctaLabel: 'Open the assessment',
+          relatedEntityId: `assessment:${assessmentId || 'unknown'}`, relatedEntityType: 'assessment',
+          actorId: 'free_assessment', phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[ASSESSMENT] office notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   async function selfSignupVerified({ name, email, accountTypeLabel, signupId, ctaUrl, actorId }) {
     try {
       const office = await staffRecipients();
@@ -1928,10 +1962,30 @@ function createNotifier(deps) {
   // ---- B4. An admin typed in or corrected somebody's hours ----------------
   // The approval path emails both ways. A direct edit changed what a person's
   // timesheet says about a day they worked and told them nothing.
-  async function timeLogChanged({ user, when, clientName, reason, created, ctaUrl, actorId, logId }) {
+  async function timeLogChanged({ user, when, clientName, reason, created, removed, ctaUrl, actorId, logId }) {
     try {
       if (!user || !user.email) return { notified: 0, reason: 'no email address on file' };
       const detail = transportAllowsDetail();
+      // Hours taken off the record entirely (owner, 2026-11-25). Same message
+      // type, its own wording: "corrected" would leave them looking for a
+      // changed time that is not there.
+      if (removed) {
+        return { notified: await send({
+          type: 'time_log_changed', user,
+          subject: 'Hours have been removed from your timesheet',
+          headline: 'Hours have been removed from your timesheet',
+          paragraphs: detail
+            ? [`The office has removed the hours recorded for your ${when} visit${clientName ? ` with ${clientName}` : ''}. They no longer count toward your pay.`,
+               'Check your pay screen, and tell the office straight away if you worked that time.']
+            : ['The office has removed hours from your timesheet. Open your pay screen to check them.',
+               'Tell the office straight away if you worked that time.'],
+          callout: detail ? (reason || null) : null,
+          calloutLabel: detail && reason ? 'Reason given' : null,
+          ctaUrl, ctaLabel: 'Open my hours',
+          relatedEntityId: `tlog:${logId}:removed`, relatedEntityType: 'time_log',
+          actorId, phi: detail
+        }) ? 1 : 0 };
+      }
       return { notified: await send({
         type: 'time_log_changed', user,
         subject: created ? 'Hours have been added to your timesheet' : 'Your recorded hours have been corrected',
@@ -2235,7 +2289,7 @@ function createNotifier(deps) {
     // gaps closed by the 2026-11-09 notification audit
     caregiverPacketSubmitted, caregiverDocumentReturned, incidentClosed,
     clientDocumentRemoved, contractorInvoiceDecided,
-    passwordResetRequested, selfSignupVerified, familyInviteRequested, feedbackSubmitted,
+    passwordResetRequested, selfSignupVerified, freeAssessmentReceived, familyInviteRequested, feedbackSubmitted,
     // tier 2 of the same audit: somebody blocked or affected and not told
     shiftCancelled, caregiverVisitCancelled, shiftClaimDeclined, coverageRequested,
     timeLogChanged, carePlanAwaitingCoSign, carePlanAwaitingProviderCoSign,

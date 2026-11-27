@@ -39,6 +39,7 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const financeMail = require('./financeMail');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
 // The one answer to "how was this message written" (plain or the six-shape
@@ -68,6 +69,7 @@ const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
 const signups = require('./signupRequests');
+const assessments = require('./assessmentRequests'); // the website's free assessment (owner, 2026-11-25)
 const googleCalendar = require('./googleCalendar');
 const billing = require('./patientBilling');
 const phcInvoices = require('./phcInvoices');   // PHC invoices from approved hours (owner, 2026-11-08)
@@ -828,17 +830,30 @@ const processNotificationQueue = async () => {
 
     const emailPayloads = [];
     const queueIndices = [];
+    const financeCopied = new Set();
     for (const notification of toProcess) {
       const idx = queue.findIndex(n => n.id === notification.id);
       if (idx === -1) continue;
       // Branding belongs to the drain, not to each caller remembering.
       const built = buildQueuedEmail(notification.templateData, appBaseUrl);
+      // Payroll and billing notices copy the finance inbox and take its
+      // replies (owner, 2026-11-27). One copy per notice and subject in a
+      // batch, so a reminder fanned out to several payroll runners does not
+      // land in finance several times.
+      let finance = {};
+      if (financeMail.isFinanceType(notification.type)) {
+        const key = `${notification.type}|${notification.relatedEntityId || ''}|${notification.templateData.subject || ''}`;
+        finance = financeMail.financeOptions();
+        if (financeCopied.has(key)) finance = { replyTo: finance.replyTo };
+        financeCopied.add(key);
+      }
       emailPayloads.push({
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
         text: built.text,
         html: built.html,
-        phi: !!notification.phi
+        phi: !!notification.phi,
+        ...finance
       });
       queueIndices.push(idx);
     }
@@ -2898,6 +2913,13 @@ const requirePayrollPreparer = (req, res, next) => {
   if (req.user && (req.user.role === config.ROLES.ADMIN || accountTypes.hasModule(req.user, 'payroll'))) return next();
   return res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' });
 };
+// Payroll in full (owner, 2026-11-27): the Super Admin, or someone the Super
+// Admin turned "Run payroll in full" on for in the Modules grid. Every payroll
+// route that was the Super Admin's alone uses this gate.
+const requirePayrollRunner = (req, res, next) => {
+  if (req.user && accountTypes.hasFullPayroll(req.user)) return next();
+  return res.status(403).json({ error: 'This payroll step is for the Super Admin or someone given full payroll access.', code: 'PAYROLL_RUNNER_ONLY' });
+};
 
 // Alias for clarity - Super Admin only routes
 const requireSuperAdmin = requireAdmin;
@@ -3280,6 +3302,7 @@ const payrollRouter = payrollRoutes({
   // Wrapped: requireAdmin is declared further down this file.
   requireAdmin: (req, res, next) => requireAdmin(req, res, next),
   requirePayrollPreparer: (req, res, next) => requirePayrollPreparer(req, res, next),
+  requirePayrollRunner: (req, res, next) => requirePayrollRunner(req, res, next),
   accountTypeOf: (u) => accountTypes.accountTypeOf(u),
   localDate: (v) => (practiceTime.zonedParts(v) || {}).isoDate,
   resolvePayRate: (cg, clientId, shift) => caregiverRepo.resolvePayRate(cg, clientId, shift),
@@ -3295,19 +3318,20 @@ const payrollRouter = payrollRoutes({
   qboRetry: () => qbo.retry()
 });
 app.use(payrollRouter);
-// QuickBooks connection, the owner's (Super Admin).
-app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+// QuickBooks connection: the Super Admin's, and anyone with full payroll
+// access (owner, 2026-11-27).
+app.get('/api/payroll/admin/qbo', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   try { res.json(await qbo.status()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
-app.get('/api/payroll/admin/qbo/connect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.get('/api/payroll/admin/qbo/connect', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   const missing = qbo.missing();
   if (missing.length) return res.status(503).json({ error: `QuickBooks is not set up on the server. Missing: ${missing.join(', ')}.`, code: 'QBO_NOT_CONFIGURED' });
   res.json({ url: await qbo.connectUrl(req.user) });
 });
-app.post('/api/payroll/admin/qbo/retry', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.post('/api/payroll/admin/qbo/retry', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   try { res.json(await qbo.retry()); } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
-app.post('/api/payroll/admin/qbo/disconnect', authenticateToken, (req, res, next) => requireAdmin(req, res, next), async (req, res) => {
+app.post('/api/payroll/admin/qbo/disconnect', authenticateToken, (req, res, next) => requirePayrollRunner(req, res, next), async (req, res) => {
   await qbo.disconnect(req.user); res.json({ ok: true });
 });
 // Intuit sends the owner back here. The state is single use and was minted for
@@ -4411,6 +4435,55 @@ app.post('/api/auth/self-signup', async (req, res) => {
   }
 });
 
+// ============== FREE ASSESSMENT (owner, 2026-11-25) ==============
+// The website's free assessment, which used to post to an Apps Script that
+// wrote a Google Sheet row and a PDF anyone with the link could open. It now
+// saves here, and the office works it from the Assessments tab on /clients.
+// Public, so it is rate-limited by hashed address and guarded by a hidden
+// field, like a sign-up. See assessmentRequests.js.
+const assessmentLimited = signups.makeLimiter({ max: 5, windowMs: 3600 * 1000 });
+const ASSESSMENT_DONE = 'Thank you. We have your free assessment and someone from our office will call you within one business day.';
+
+// The answer lists the public form offers. Served rather than restated in the
+// page, so the form cannot offer a choice the server then refuses. No PHI.
+app.get('/api/assessment/options', (req, res) => {
+  res.json({ options: assessments.OPTIONS });
+});
+app.post('/api/assessment', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.website) return res.json({ message: ASSESSMENT_DONE }); // honeypot
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (assessmentLimited(ipKey)) return res.status(429).json({ error: 'Too many requests from here. Please try again in an hour, or call the office.', code: 'ASSESSMENT_RATE_LIMITED' });
+    const n = assessments.normalizeAssessment(b, { today: require('./schedulingRepository').csvLocalDate(new Date().toISOString()) });
+    if (n.error) return res.status(400).json(n);
+    const at = new Date().toISOString();
+    const row = assessments.buildRow({ id: uuidv4(), value: n.value, at, ipHash: ipKey });
+    const rows = (await db.get('assessment_requests')) || [];
+    rows.push(row);
+    await db.set('assessment_requests', rows);
+    await logActivity('public', 'Website visitor', 'free_assessment_received', 'assessment', row.id, { urgency: row.schedule.urgency || null });
+    notify.freeAssessmentReceived({
+      assessmentId: row.id, clientName: assessments.clientName(row), submitterName: assessments.submitterName(row),
+      urgency: row.schedule.urgency, ctaUrl: `${await getAppBaseUrl()}${appLinks.PATHS.ASSESSMENTS}`
+    }).catch(err => console.error('Free assessment notice error (non-fatal):', err.message));
+    // A confirmation to the family, with no health information in it.
+    if (row.submitter.email) {
+      const htmlBody = emailTemplates.renderGfcEmail({
+        greeting: row.submitter.firstName,
+        headline: 'We have your free assessment',
+        paragraphs: ['Thank you for reaching out to Godwins Family Care. Someone from our office will call you within one business day to talk through what you need.', 'If it is urgent, call us at the number below.'],
+      }).html;
+      sendEmail(row.submitter.email, 'We have your free assessment', 'Thank you for reaching out to Godwins Family Care. Someone from our office will call you within one business day.', { htmlBody })
+        .catch(err => console.error('Free assessment confirmation error (non-fatal):', err.message));
+    }
+    res.json({ message: ASSESSMENT_DONE, id: row.id });
+  } catch (error) {
+    console.error('Free assessment error:', error);
+    res.status(500).json({ error: 'Something went wrong. Please try again or call the office.' });
+  }
+});
+
 // ============== VETERANS: IME ROSTER + CLINIC CHECK-IN (owner, 2026-10-30) ==============
 // The clinic iPad at /veterans, and the roster it matches against. The rules
 // live in veteranRoster.js. A veteran signs in with name, date of birth and
@@ -5493,15 +5566,23 @@ app.put('/api/users/:userId/modules', authenticateToken, requireAdmin, async (re
     if (!Array.isArray(modules)) return res.status(400).json({ error: 'modules must be a list of module ids.', code: 'MODULES_INVALID' });
     const unknown = modules.filter(id => !accountTypes.MODULE_IDS.includes(String(id)));
     if (unknown.length) return res.status(400).json({ error: `Unknown module: ${unknown.join(', ')}`, code: 'MODULES_UNKNOWN' });
+    const payrollFull = (req.body || {}).payrollFull;
+    if (payrollFull !== undefined && typeof payrollFull !== 'boolean') return res.status(400).json({ error: 'payrollFull must be true or false.', code: 'MODULES_INVALID' });
     const before = accountTypes.moduleAccessOf(target);
-    const next = accountTypes.moduleAccessFromChecks(target, modules);
-    if (next.granted.length || next.removed.length) target.moduleAccess = next;
+    // "Run payroll in full" (owner, 2026-11-27). Left out of the body, it keeps
+    // what the person had; it only ever sticks alongside a Payroll grant.
+    const wantFull = payrollFull === undefined ? before.payrollFull === true : payrollFull;
+    const next = accountTypes.moduleAccessFromChecks(target, modules, { payrollFull: wantFull });
+    if (next.granted.length || next.removed.length || next.payrollFull) target.moduleAccess = next;
     else delete target.moduleAccess;
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'user_modules_changed', 'user', target.id, {
       accountType: type, before, after: next
     });
+    if (!!before.payrollFull !== !!next.payrollFull) {
+      await logActivity(req.user.id, req.user.name || req.user.email, next.payrollFull ? 'payroll_full_access_granted' : 'payroll_full_access_revoked', 'user', target.id, { accountType: type });
+    }
     res.json({ grid: accountTypes.moduleGridFor(target), moduleAccess: next });
   } catch (err) {
     console.error('Module grid save failed:', err.message);
@@ -18551,7 +18632,7 @@ const notifyStatement = async (clientId, { skipEmails } = {}) => {
         paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
         ctaUrl: r.url, ctaLabel: 'View my statement'
       }).html;
-      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+      sendEmail(r.email, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody, ...financeMail.financeOptions() })
         .catch(err => console.error('Statement email error (non-fatal):', err.message));
     }
   } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
@@ -18929,8 +19010,22 @@ const runSummary = (run) => ({
   id: run.id, status: run.status, source: run.source, from: run.from, to: run.to, fileName: run.fileName || null,
   createdAt: run.createdAt, createdBy: run.createdBy, approvedAt: run.approvedAt || null, approvedBy: run.approvedBy || null,
   invoiceCount: (run.invoiceIds || []).length || (run.lastCount || 0), totalCents: run.totalCents || run.lastTotalCents || 0,
-  sentCount: run.sentCount || 0, clientCount: run.clientCount || 0
+  sentCount: run.sentCount || 0, clientCount: run.clientCount || 0,
+  voidedAt: run.voidedAt || null, voidedBy: run.voidedBy || null, voidReason: run.voidReason || null
 });
+// After any invoice in a run is voided: keep the run's live total and client
+// count true, and mark the run void once every invoice in it is.
+const settleRunAfterVoid = async (run, { by, reason, at } = {}) => {
+  const all = await readInvoices();
+  const ids = new Set(run.invoiceIds || []);
+  const live = all.filter(i => ids.has(i.id) && i.status !== 'void');
+  run.totalCents = live.reduce((a, i) => a + i.totalCents, 0);
+  run.clientCount = new Set(live.map(i => i.clientId)).size;
+  run.sentCount = new Set((run.sends || []).filter(s => live.some(i => i.clientId === s.clientId)).map(s => s.clientId)).size;
+  if (invoiceRuns.allVoid(run, all)) Object.assign(run, { status: 'void', voidedAt: at || new Date().toISOString(), voidedBy: by || null, voidReason: reason || null });
+  await saveBillingRun(run);
+  return run;
+};
 const billingRunView = async (run) => {
   const base = { run: { ...runSummary(run), edits: run.edits || [], adjustments: run.adjustments || [], includeWaiting: run.includeWaiting || null, sends: run.sends || [] } };
   if (run.status === 'draft') {
@@ -18962,7 +19057,7 @@ const billingRunView = async (run) => {
 const loadRun = async (id) => (await readBillingRuns()).find(r => r.id === id && r.status !== 'deleted');
 const draftOnly = (res, run) => {
   if (!run) { res.status(404).json({ error: 'Invoice run not found.', code: 'RUN_NOT_FOUND' }); return false; }
-  if (run.status !== 'draft') { res.status(409).json({ error: 'This run is approved. Its invoices are changed or voided one at a time under Statements.', code: 'RUN_NOT_DRAFT' }); return false; }
+  if (run.status !== 'draft') { res.status(409).json({ error: run.status === 'void' ? 'This run is voided. Start a new run to bill these hours.' : 'This run is approved. Void it (or one client) to change it, as long as it has not been sent.', code: 'RUN_NOT_DRAFT' }); return false; }
   return true;
 };
 const runReply = async (res, run) => res.json(await billingRunView(run));
@@ -19165,10 +19260,10 @@ app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilli
             `${list.join('; ')}. Total ${total}.`,
             `Questions about these invoices: reply to this email or call ${consentText.ORG.phone || 'our office'}.`
           ];
-          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs }).html;
+          const html = emailTemplates.renderGfcEmail({ headline: carrier ? 'Invoices from Godwins Family Care' : 'Your home care invoice', paragraphs, signoff: emailTemplates.FINANCE_SIGNOFF }).html;
           const subject = carrier ? `Godwins Family Care invoices${bt.policyNumber ? `, policy ${bt.policyNumber}` : ''}, ${periodLabel}` : `Your Godwins Family Care invoice, ${periodLabel}`;
           const to = [bt.email, config.ROI_ADMIN_EMAIL].filter((v, k, a) => v && a.findIndex(x => x.toLowerCase() === v.toLowerCase()) === k);
-          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true,
+          const r = await sendEmail(to, subject, paragraphs.join('\n\n'), { htmlBody: html, phi: true, ...financeMail.financeOptions(),
             attachments: [{ filename: invoiceRuns.combinedFileName(p.clientName, run.from, run.to), content: pdf, contentType: 'application/pdf' }] });
           if (!r || !r.success) { results.push({ clientId: p.clientId, clientName: p.clientName, sent: false, reason: `The email did not go: ${(r && (r.error || r.reason)) || 'unknown error'}. Nothing was marked sent.` }); continue; }
           emailedTo = to;
@@ -19192,6 +19287,31 @@ app.post('/api/gfc/admin/billing-runs/:id/send', authenticateToken, requireBilli
     await saveBillingRun(run);
     res.json({ ...(await billingRunView(run)), results });
   } catch (e) { console.error('Invoice run send error:', e); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Void an approved run, or one client's invoices in it (owner, 2026-11-27):
+// anything can be voided until it is approved AND sent. A reason is required.
+// The voided invoices free their shifts, so the hours can go on a new run.
+app.post('/api/gfc/admin/billing-runs/:id/void', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const run = await loadRun(req.params.id);
+    const b = req.body || {};
+    const clientId = b.clientId ? String(b.clientId) : null;
+    const reason = String(b.reason || '').trim().slice(0, invoiceRuns.NOTE_MAX);
+    const all = await readInvoices();
+    const plan = invoiceRuns.voidPlan(run, all, { clientId, reason });
+    if (plan.error) return res.status(plan.code === 'RUN_NOT_FOUND' ? 404 : plan.code === 'RUN_VOID_REASON_REQUIRED' ? 400 : 409).json(plan);
+    const at = new Date().toISOString();
+    for (const id of plan.ids) {
+      const t = billing.transition(all.find(i => i.id === id), 'void', { at, by: req.user, reason });
+      if (t.error) return res.status(409).json(t);   // voidPlan checked every one; this is a backstop
+      await saveInvoice({ ...t.inv, voidedWithRun: !clientId });
+    }
+    await settleRunAfterVoid(run, { by: runWho(req.user), reason, at });
+    await logActivity(req.user.id, req.user.name || req.user.email, clientId ? 'billing_run_client_voided' : 'billing_run_voided', 'billing_run', run.id,
+      { from: run.from, to: run.to, invoices: plan.ids.length, clientId });
+    await runReply(res, run);
+  } catch (e) { console.error('Invoice run void error:', e); res.status(500).json({ error: 'Server error' }); }
 });
 
 // The invoice itself, as the PDF the carrier or family receives.
@@ -19297,6 +19417,12 @@ app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requi
     const t = billing.transition(inv, to, { at: new Date().toISOString(), by: req.user, reason: b.reason, method: to === 'paid' ? (b.method === 'stripe' ? null : b.method) : undefined, reference: b.reference });
     if (t.error) return res.status(t.code === 'INVOICE_NOT_FOUND' ? 404 : 409).json(t);
     await saveInvoice(t.inv);
+    // An invoice voided under Statements keeps its run's totals true, and the
+    // run is void once all of its invoices are.
+    if (to === 'void' && t.inv.runId) {
+      const run = await loadRun(t.inv.runId);
+      if (run && run.status === 'approved') await settleRunAfterVoid(run, { by: runWho(req.user), reason: t.inv.voidReason, at: t.inv.voidedAt });
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, `invoice_${req.params.action.replace('-', '_')}`, 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
     // A carrier's invoice is sent to the carrier (the PDF), not announced to the patient.
     if (to === 'open' && billing.patientPays(t.inv)) notifyStatement(t.inv.clientId);
@@ -23031,6 +23157,107 @@ app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireEnrollme
     res.json({ signup: signups.staffRow(rows[idx]), clientId: linkedClientId, userIds: created });
   } catch (error) {
     console.error('Sign-up decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The free-assessment queue (owner, 2026-11-25). Staff read it; an admin, a
+// manager or a care coordinator works it. Converting creates the client at
+// intake_pending, so the enrollment gate, the consents and the intake run.
+app.get('/api/gfc/admin/assessments', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const rows = (await db.get('assessment_requests')) || [];
+    const users = await getUsers();
+    const clients = users.filter(u => u && u.role === config.ROLES.CLIENT);
+    const fold = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[^a-z]/g, '');
+    // Same surname and first name as a client on file: likely a family that
+    // already called, or a client asking for more help.
+    const matchesFor = (r) => clients.filter(c => {
+      const i = c.intake || {};
+      const parts = String(c.name || '').split(' ');
+      return fold(i.lastName || i.clientLast || parts[parts.length - 1]) === fold(r.client.lastName)
+        && fold(i.firstName || i.clientFirst || parts[0]) === fold(r.client.firstName);
+    }).map(c => ({ id: c.id, name: c.name }));
+    res.json({
+      assessments: assessments.sortForQueue(rows.filter(Boolean)).map(r => ({
+        ...assessments.staffRow(r),
+        possibleMatches: assessments.OPEN_STATUSES.includes(r.status) ? matchesFor(r) : []
+      })),
+      statuses: assessments.STATUSES,
+      settable: assessments.SETTABLE_STATUSES,
+      canWork: canManageEnrollment(req.user)
+    });
+  } catch (error) {
+    console.error('Assessments read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/gfc/admin/assessments/:id', authenticateToken, requireEnrollmentManager, async (req, res) => {
+  try {
+    const { status, note } = req.body || {};
+    const rows = (await db.get('assessment_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    const bad = assessments.checkUpdate(row, { status, note });
+    if (bad) return res.status(bad.code === 'ASSESSMENT_NOT_FOUND' ? 404 : bad.code === 'ASSESSMENT_CONVERTED' ? 409 : 400).json(bad);
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    rows[idx] = assessments.applyUpdate(row, { status, note }, { at: new Date().toISOString(), by });
+    await db.set('assessment_requests', rows);
+    // The audit records that it moved, never the note: a note about a family's
+    // situation is PHI and the trail is not a second copy of it.
+    await logActivity(req.user.id, by.name, 'assessment_updated', 'assessment', row.id, { status: rows[idx].status, noteAdded: !!(note && String(note).trim()) });
+    res.json({ assessment: assessments.staffRow(rows[idx]) });
+  } catch (error) {
+    console.error('Assessment update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/assessments/:id/convert', authenticateToken, requireEnrollmentManager, async (req, res) => {
+  try {
+    const rows = (await db.get('assessment_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    if (!row) return res.status(404).json({ error: 'Assessment not found.', code: 'ASSESSMENT_NOT_FOUND' });
+    if (row.status === 'converted') return res.status(409).json({ error: 'This assessment was already converted.', code: 'ASSESSMENT_CONVERTED', clientId: row.clientId });
+    if (row.status === 'not_a_fit') return res.status(409).json({ error: 'This assessment is marked not a fit. Move it back to contacted first.', code: 'ASSESSMENT_NOT_A_FIT' });
+    const at = new Date().toISOString();
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    const users = await getUsers();
+    const cid = uuidv4();
+    const intake = assessments.intakeFor(row);
+    const clientName = assessments.clientName(row);
+    const client = {
+      id: cid,
+      // No login yet: nobody chose a password. The office gives the client or
+      // their family a login from the user form when they are ready.
+      email: familyLinks.placeholderEmailFor('client', cid),
+      name: clientName,
+      password: await bcrypt.hash(uuidv4() + uuidv4(), config.BCRYPT_SALT_ROUNDS),
+      role: config.ROLES.CLIENT,
+      practiceName: clientName,
+      slug: await generateClientUserSlug(clientName),
+      source: 'free_assessment', assessmentRequestId: row.id,
+      enrollmentStatus: 'intake_pending',
+      serviceLine: assessments.serviceLineFor(row.care.careTypes),
+      phone: intake.phone || null,
+      careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] },
+      intake,
+      accountStatus: 'active', hasPortalLogin: false,
+      isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+      createdAt: at
+    };
+    users.push(client);
+    await db.set('users', users);
+    invalidateUsersCache();
+    rows[idx] = { ...assessments.applyUpdate(row, {}, { at, by }), status: 'converted', clientId: cid,
+      statusHistory: [...(row.statusHistory || []), { status: 'converted', at, by }] };
+    await db.set('assessment_requests', rows);
+    await logActivity(req.user.id, by.name, 'assessment_converted', 'assessment', row.id, { clientId: cid });
+    res.json({ assessment: assessments.staffRow(rows[idx]), clientId: cid });
+  } catch (error) {
+    console.error('Assessment convert error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -32476,6 +32703,11 @@ app.get('/changelog', (req, res) => {
 // Password reset link page (public)
 app.get('/signup', (req, res) => {
   res.sendFile(__dirname + '/public/signup.html');
+});
+
+// The website's free assessment (public, 2026-11-25).
+app.get('/assessment', (req, res) => {
+  res.sendFile(__dirname + '/public/assessment.html');
 });
 
 app.get('/password-reset-:token', (req, res) => {

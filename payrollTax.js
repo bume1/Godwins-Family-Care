@@ -37,7 +37,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   // Contractors living outside the U.S. (owner, 2026-11-13): off until the
   // owner turns it on, and which ways they may be paid.
   overseas: { enabled: false, payMethods: ['wise'] },
-  reminderLeadBusinessDays: 5
+  reminderLeadBusinessDays: 5,
+  // The send-by date skips bank holidays as well as weekends (owner,
+  // 2026-11-27: the Payment Sheet said "Send by Nov 26", Thanksgiving).
+  skipBankHolidays: true
 });
 
 // TWO PAY SCHEDULES (owner, 2026-11-09): caregivers are paid every week,
@@ -136,6 +139,10 @@ function normalizeSettings(b, current) {
     if (raw && !m) return { error: 'Paste the Drive folder link, for example https://drive.google.com/drive/folders/…', code: 'PAY_STUB_FOLDER' };
     s.payStubFolderId = raw ? m[1] : null;
   }
+  if (b.skipBankHolidays !== undefined) {
+    if (typeof b.skipBankHolidays !== 'boolean') return { error: 'Skip bank holidays is on or off.', code: 'SKIP_BANK_HOLIDAYS' };
+    s.skipBankHolidays = b.skipBankHolidays;
+  }
   if (b.reminderLeadBusinessDays !== undefined) {
     const n = Number(b.reminderLeadBusinessDays);
     if (!Number.isInteger(n) || n < 1 || n > 20) return { error: 'Reminder lead time is 1 to 20 business days.', code: 'REMINDER_LEAD' };
@@ -186,11 +193,58 @@ function workweekStart(ymd) {
   const dow = new Date(ymdMs(ymd)).getUTCDay();   // 0 Sun .. 6 Sat
   return addDays(ymd, -((dow + 6) % 7));
 }
-// The business day before payday: the default "send by" for PNC.
-function sendByDate(payDate) {
+// ---- Bank holidays (owner, 2026-11-27) -------------------------------------
+// The Federal Reserve's holidays, the days banks do not process ACH. A fixed
+// holiday on a Sunday is observed the Monday after; one on a Saturday is not
+// moved, because the Federal Reserve stays open the Friday before.
+const ymd = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+function nthWeekday(y, m, dow, n) {       // n-th weekday (0 Sun .. 6 Sat) of a month
+  const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  return ymd(y, m, 1 + ((dow - first + 7) % 7) + (n - 1) * 7);
+}
+function lastWeekday(y, m, dow) {
+  const last = new Date(Date.UTC(y, m, 0));
+  return ymd(y, m, last.getUTCDate() - ((last.getUTCDay() - dow + 7) % 7));
+}
+function bankHolidays(year) {
+  const fixed = (m, d, name) => {
+    const day = ymd(year, m, d);
+    return { date: new Date(ymdMs(day)).getUTCDay() === 0 ? addDays(day, 1) : day, name };
+  };
+  return [
+    fixed(1, 1, "New Year's Day"),
+    { date: nthWeekday(year, 1, 1, 3), name: 'Martin Luther King Jr. Day' },
+    { date: nthWeekday(year, 2, 1, 3), name: "Washington's Birthday" },
+    { date: lastWeekday(year, 5, 1), name: 'Memorial Day' },
+    fixed(6, 19, 'Juneteenth'),
+    fixed(7, 4, 'Independence Day'),
+    { date: nthWeekday(year, 9, 1, 1), name: 'Labor Day' },
+    { date: nthWeekday(year, 10, 1, 2), name: 'Columbus Day' },
+    fixed(11, 11, 'Veterans Day'),
+    { date: nthWeekday(year, 11, 4, 4), name: 'Thanksgiving Day' },
+    fixed(12, 25, 'Christmas Day')
+  ].filter(h => new Date(ymdMs(h.date)).getUTCDay() !== 6);
+}
+function bankHolidayOn(day) {
+  if (!isYmd(day)) return null;
+  const h = bankHolidays(Number(day.slice(0, 4))).find(x => x.date === day);
+  return h ? h.name : null;
+}
+// The business day before payday: the default "send by" for PNC. Weekends are
+// always skipped; bank holidays too unless the setting is off. With
+// { detail: true } it also says which holidays it stepped over.
+function sendByDate(payDate, opts) {
+  const o = opts || {};
+  const skipHolidays = o.skipBankHolidays === true;
+  const skipped = [];
   let d = addDays(payDate, -1);
-  while ([0, 6].includes(new Date(ymdMs(d)).getUTCDay())) d = addDays(d, -1);
-  return d;
+  for (;;) {
+    if ([0, 6].includes(new Date(ymdMs(d)).getUTCDay())) { d = addDays(d, -1); continue; }
+    const h = skipHolidays ? bankHolidayOn(d) : null;
+    if (h) { skipped.push({ date: d, name: h }); d = addDays(d, -1); continue; }
+    break;
+  }
+  return o.detail ? { date: d, skipped } : d;
 }
 
 // ---- Federal income tax: Pub 15-T, Worksheet 1A (2020+ Form W-4) -------------
@@ -355,7 +409,7 @@ function paycheck({ earnings, reimbursementsCents = 0, ytd, w4, g4, tables, perY
 }
 
 module.exports = {
-  FREQUENCIES, DEFAULT_SETTINGS, PAY_SCHEDULES, scheduleSettings, normalizeSettings, periodFor, workweekStart, sendByDate, addDays, isYmd,
+  FREQUENCIES, DEFAULT_SETTINGS, PAY_SCHEDULES, scheduleSettings, normalizeSettings, periodFor, workweekStart, sendByDate, bankHolidays, bankHolidayOn, addDays, isYmd,
   bracket, federalWithholding, socialSecurity, medicare, georgiaWithholding, stateWithholding, employerTaxes, hourlyEarnings, paycheck,
   periodsAround, customPeriod
 };

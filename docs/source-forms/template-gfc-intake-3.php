@@ -2652,7 +2652,7 @@ alert('JS error: ' + err.message);
 
   // ── GENERAL UNLOCK TOKEN (server-side validation) ──────────────────────
   // Works two ways:
-  //   1. URL param: ?token=gfcie2026 (uses existing IS_FULL_INTAKE flow)
+  //   1. URL param: ?token=<unlock code> (uses existing IS_FULL_INTAKE flow)
   //   2. Success-page input: user types code, validateToken called via doGet
   //
   // On success: flip to full intake mode in place, no reload,
@@ -2699,7 +2699,7 @@ alert('JS error: ' + err.message);
   function activateFullIntakeInPlace() {
     // Flip to full intake mode without reloading the page
     window._intakeUnlocked = true;
-    window._unlockAccessToken = 'gfcie2026';
+    window._unlockAccessToken = 'REDACTED'; // the live code was removed from this reference copy (2026-11-25)
     document.body.classList.add('intake-unlocked');
 
     // Re-enable submit button (was disabled during assessment submit)

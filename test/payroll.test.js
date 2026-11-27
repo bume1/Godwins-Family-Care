@@ -526,7 +526,7 @@ test('an I-9 on file from before counts as complete; the copy must be filed firs
   assert.equal(row.done, true); assert.equal(row.locked, true);
   assert.match(row.note, /Already on file/);
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'payroll.js'), 'utf8');
-  assert.match(src, /router\.put\('\/api\/payroll\/admin\/people\/:userId\/i9-on-file', authenticateToken, requireAdmin,/);
+  assert.match(src, /router\.put\('\/api\/payroll\/admin\/people\/:userId\/i9-on-file', authenticateToken, requirePayrollRunner,/);
 });
 
 // Timesheets before payroll (owner, 2026-11-13): the employee confirms or

@@ -173,6 +173,38 @@ function sendPlan(invoicesByClient) {
   return plan.sort((a, b) => a.clientName.localeCompare(b.clientName));
 }
 
+// ---- Voiding (owner, 2026-11-27) ---------------------------------------------
+// "Anything can be voided until it is approved AND sent." A draft run is
+// deleted; an approved run, or one client's invoices in it, is voided as long
+// as none of those invoices has been sent. Voided invoices free their shifts
+// (phcInvoices.invoicedKeys skips them), so the hours can go on a new run.
+/**
+ * run: the billing run. invoices: that run's invoice rows. clientId: optional,
+ * to void one client's invoices only. Returns { ids } or { error, code }.
+ */
+function voidPlan(run, invoices, { clientId, reason } = {}) {
+  if (!run) return { error: 'Invoice run not found.', code: 'RUN_NOT_FOUND' };
+  if (run.status === 'draft') return { error: 'This run is still a draft. Use Delete Draft; nothing has been invoiced from it.', code: 'RUN_IS_DRAFT' };
+  if (run.status === 'void') return { error: 'This run is already voided.', code: 'RUN_ALREADY_VOID' };
+  if (!str(reason)) return { error: 'Say why it is being voided, for the office record.', code: 'RUN_VOID_REASON_REQUIRED' };
+  const ids = new Set(run.invoiceIds || []);
+  const mine = (invoices || []).filter(i => i && ids.has(i.id) && (!clientId || i.clientId === clientId));
+  const live = mine.filter(i => i.status !== 'void');
+  if (!live.length) return { error: clientId ? 'That client has no invoices left to void in this run.' : 'Nothing left to void in this run.', code: 'RUN_NOTHING_TO_VOID' };
+  const sent = live.filter(i => i.status !== 'draft');
+  if (sent.length) {
+    return { error: `${sent.map(i => i.displayNumber || i.number).join(', ')} ${sent.length === 1 ? 'has' : 'have'} already been sent, so ${clientId ? 'they' : 'this run'} cannot be voided.${clientId ? '' : ' Void the clients not sent yet one at a time.'} Correct a sent invoice with a credit line on the next run.`, code: 'RUN_ALREADY_SENT', sent: sent.map(i => i.id) };
+  }
+  return { ids: live.map(i => i.id) };
+}
+
+/** A run whose invoices are all void is itself void. */
+const allVoid = (run, invoices) => {
+  const ids = new Set(run.invoiceIds || []);
+  const mine = (invoices || []).filter(i => i && ids.has(i.id));
+  return mine.length > 0 && mine.every(i => i.status === 'void');
+};
+
 // "GFC_Invoices-Jane_Smith_2026-11-02_to_2026-11-15.pdf"
 function combinedFileName(clientName, from, to) {
   const n = str(clientName).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Client';
@@ -181,5 +213,5 @@ function combinedFileName(clientName, from, to) {
 
 module.exports = {
   NOTE_MAX, approvalIndex, approvalOf, isBillable, minutesFrom,
-  normalizeEdit, normalizeAdjustment, applyEdits, withEdit, sendPlan, combinedFileName
+  normalizeEdit, normalizeAdjustment, applyEdits, withEdit, sendPlan, combinedFileName, voidPlan, allVoid
 };

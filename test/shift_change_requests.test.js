@@ -805,8 +805,12 @@ test('both screens say which availability is in force, rather than deriving it',
 });
 
 test('the caregiver screen offers the ask on an OFFER, and only the kinds served', () => {
-  const offers = COMPONENT.slice(COMPONENT.indexOf('function renderOffers'),
-    COMPONENT.indexOf('function renderOpen'));
+  // The offer row is its own function now (the calendar's day panel renders
+  // it too), so the guard reads that function, anchored at both ends.
+  const offers = COMPONENT.slice(COMPONENT.indexOf('function offerRow'),
+    COMPONENT.indexOf('function openRow'));
+  assert.ok(offers.length > 0 && /state\.offers\.map\(function \(s\) \{\s*return offerRow\(/.test(COMPONENT),
+    'the Offers tab renders through offerRow');
   assert.ok(/data-act="ask-change"/.test(offers),
     'an offer at the wrong time is where a change is cheapest to ask about');
   assert.ok(/s\.changeRequestable/.test(offers), 'and still gated on the server\'s answer');

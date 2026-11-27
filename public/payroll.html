@@ -336,7 +336,7 @@ const RunDetail = ({ id, onBack, reload }) => {
         {(run.reopenHistory || []).length > 0 && <p className="text-[12.5px] text-stone-500 mt-2">Reopened {run.reopenHistory.map(h => `${day(h.at.slice(0, 10))} by ${h.by}: ${h.reason}`).join('; ')}.</p>}
       </Card>
       {sheet && (
-        <Card title="Payment Sheet" right={<span className="text-[12.5px] text-stone-500">Send by {day(sheet.sendBy)}</span>}>
+        <Card title="Payment Sheet" right={<span className="text-[12.5px] text-stone-500" data-send-by>Send by {day(sheet.sendBy)}{(sheet.sendBySkipped || []).length ? ` (skips ${sheet.sendBySkipped.map(h => `${h.name}, ${day(h.date)}`).join('; ')})` : ''}</span>}>
           <p className="mb-3 text-stone-500">Send each payment in the PNC app, or from GFC's Cash App for anyone marked P2P, then paste its confirmation or Cash App payment ID here. The run is paid when everyone has one.</p>
           {sheet.sheet.map(s => <PaymentRow key={s.userId} runId={id} s={s} onDone={load} p2pAccount={sheet.p2pAccount} />)}
         </Card>
@@ -458,6 +458,16 @@ const HoursLine = ({ l, mode, onDone }) => {
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
+  // The Super Admin takes a clock-in off the record entirely (owner,
+  // 2026-11-25), so payroll stops counting it.
+  const remove = async () => {
+    const reason = (window.prompt('Why are these hours being removed? They will stop counting toward payroll, and the employee is told.') || '').trim();
+    if (!reason) return;
+    setBusy(true); setErr('');
+    try { await post(`/api/scheduling/time-logs/${enc(l.timeLogId)}/remove`, { reason }); await onDone('Hours removed. They no longer count toward payroll.'); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
   const decide = async (decision) => {
     const note = decision === 'declined' ? (window.prompt('Why not? They will see this.') || '') : '';
     if (decision === 'declined' && !note.trim()) return;
@@ -471,7 +481,8 @@ const HoursLine = ({ l, mode, onDone }) => {
       <div className="flex flex-wrap justify-between gap-2 items-center">
         <span>{day(l.date)} · {l.source}{l.clockIn ? ` · ${clock(l.clockIn)} to ${clock(l.clockOut)}` : ''}{l.client ? ` · ${l.client}` : ''}{l.edited ? <span className="chip bg-stone-100 text-stone-600 ml-1">EDITED{l.editedBy ? ` BY ${String(l.editedBy).toUpperCase()}` : ''}</span> : null}</span>
         <span className="flex gap-2 items-center"><b>{l.kind === 'hours' ? hm(l.minutes) : `${l.count} ${l.kind}`}</b>
-          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}</span>
+          {mode && l.editable && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" onClick={() => setEdit(true)}>Edit</button>}
+          {mode === 'direct' && l.editable && l.timeLogId && !l.pendingChange && !edit && <button className="btn ghost !py-0.5 !px-2" disabled={busy} onClick={remove}>Remove</button>}</span>
       </div>
       {l.edited && l.editReason && <div className="text-stone-500">Changed: {l.editReason}</div>}
       {!l.editable && l.timeLogId && <div className="text-stone-500">Paid and locked. A correction goes on the next payroll.</div>}
@@ -1104,7 +1115,7 @@ const Settings = ({ data, reload }) => {
   const s = data.settings;
   const [sch, setSch] = useState(Object.fromEntries((data.schedules || []).map(x => [x.key, { frequency: x.frequency, payDateOffsetDays: x.payDateOffsetDays, anchor: x.anchor }])));
   const setS = (k, field, v) => setSch({ ...sch, [k]: { ...sch[k], [field]: v } });
-  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare', payStubFolder: s.payStubFolderId ? `https://drive.google.com/drive/folders/${s.payStubFolderId}` : '', overseas: { enabled: !!(s.overseas && s.overseas.enabled), payMethods: (s.overseas && s.overseas.payMethods) || ['wise'] } });
+  const [f, setF] = useState({ federalDepositSchedule: s.federalDepositSchedule, gaWithholdingFrequency: s.gaWithholdingFrequency, gaSutaRatePct: s.gaSutaRatePct === null ? '' : s.gaSutaRatePct, reminderLeadBusinessDays: s.reminderLeadBusinessDays, skipBankHolidays: s.skipBankHolidays !== false, employerEin: s.employerEin || '', p2pAccount: s.p2pAccount || '$GodwinsFamilyCare', payStubFolder: s.payStubFolderId ? `https://drive.google.com/drive/folders/${s.payStubFolderId}` : '', overseas: { enabled: !!(s.overseas && s.overseas.enabled), payMethods: (s.overseas && s.overseas.payMethods) || ['wise'] } });
   const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   return (
     <Card title="Payroll Settings">
@@ -1125,6 +1136,8 @@ const Settings = ({ data, reload }) => {
         <label>Georgia withholding filing<select className="inp" value={f.gaWithholdingFrequency} onChange={e => setF({ ...f, gaWithholdingFrequency: e.target.value })}><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="semiweekly">Semiweekly</option></select></label>
         <label>Georgia unemployment rate (%)<input className="inp" value={f.gaSutaRatePct} onChange={e => setF({ ...f, gaSutaRatePct: e.target.value })} placeholder="from the GA DOL notice, e.g. 2.70" /></label>
         <label>Reminder lead time (business days)<input className="inp" type="number" value={f.reminderLeadBusinessDays} onChange={e => setF({ ...f, reminderLeadBusinessDays: e.target.value })} /></label>
+        <label className="sm:col-span-2 flex gap-2 items-start" data-skip-bank-holidays><input type="checkbox" className="mt-1" checked={!!f.skipBankHolidays} onChange={e => setF({ ...f, skipBankHolidays: e.target.checked })} />
+          <span>Skip bank holidays in the send-by date<span className="block text-[12px] text-stone-500">On: the Payment Sheet's send-by date moves back past Federal Reserve holidays (for example Thanksgiving) as well as weekends, since banks do not process ACH on those days. Off: weekends only.</span></span></label>
         <label>GFC's federal EIN (prints on pay stubs)<input className="inp" value={f.employerEin} onChange={e => setF({ ...f, employerEin: e.target.value })} /></label>
         <label>GFC's Cash App, for P2P payroll<input className="inp" value={f.p2pAccount} onChange={e => setF({ ...f, p2pAccount: e.target.value })} placeholder="$GodwinsFamilyCare" /></label>
         <label>Pay stub folder in Drive<input className="inp" value={f.payStubFolder} onChange={e => setF({ ...f, payStubFolder: e.target.value })} placeholder="Paste the folder link; blank uses 07 Finance → Payroll" /></label>

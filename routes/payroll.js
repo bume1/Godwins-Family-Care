@@ -81,15 +81,23 @@ module.exports = function createPayrollRoutes(deps) {
   // Payroll preparers (owner, 2026-11-13): anyone the Super Admin granted the
   // Payroll module drafts runs, adds lines, reads the taxes and records
   // deposits. Approving, paying, bank numbers, settings, tax tables, people's
-  // pay setup, contractor approvals and year-end release stay requireAdmin.
+  // pay setup, contractor approvals and year-end release stay requirePayrollRunner.
   // Without the dependency (an older caller, a test harness), it is admin only.
   const requirePayrollPreparer = deps.requirePayrollPreparer || requireAdmin;
+  // Payroll in full (owner, 2026-11-27): every step below that was the Super
+  // Admin's alone is gated on this. It admits the Super Admin and anyone the
+  // Super Admin turned "Run payroll in full" on for. Without the dependency
+  // (an older caller, a test harness), it is admin only.
+  const requirePayrollRunner = deps.requirePayrollRunner || requireAdmin;
   // Timesheets (owner, 2026-11-13): managers and care coordinators (the Staff
   // Scheduling module) also view hours and edit them. Their edit goes to the
   // Super Admin as a time adjustment request; the Super Admin's applies.
   const accountTypes = require('../accountTypes');
-  const isPreparer = (u) => !!u && (u.role === 'admin' || (!!deps.requirePayrollPreparer && accountTypes.hasModule(u, 'payroll')));
+  const isPreparer = (u) => !!u && (u.role === 'admin' || isRunner(u) || (!!deps.requirePayrollPreparer && accountTypes.hasModule(u, 'payroll')));
   const isHoursEditor = (u) => !!u && accountTypes.hasModule(u, 'caregiverScheduling');
+  // The same answer as requirePayrollRunner, for the screens: who sees the
+  // Super Admin's payroll buttons.
+  const isRunner = (u) => !!u && (u.role === 'admin' || (!!deps.requirePayrollRunner && accountTypes.hasFullPayroll(u)));
   const requireTimesheetViewer = (req, res, next) => (isPreparer(req.user) || isHoursEditor(req.user) ? next()
     : res.status(403).json({ error: 'Payroll is the Super Admin\'s.', code: 'PAYROLL_PREPARER_ONLY' }));
 
@@ -415,7 +423,7 @@ module.exports = function createPayrollRoutes(deps) {
       return sendGovPdf(res, req.user, await profileFor(req.user), req.params.form);
     } catch (e) { console.error('Form PDF error:', e); res.status(500).json({ error: 'Server error' }); }
   });
-  router.get('/api/payroll/admin/people/:userId/forms/:form.pdf', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/payroll/admin/people/:userId/forms/:form.pdf', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       if (!gov.FILE_NAMES[req.params.form]) return res.status(404).json({ error: 'Unknown form.' });
       const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
@@ -474,10 +482,10 @@ module.exports = function createPayrollRoutes(deps) {
   // Managers and care coordinators review contractor invoices with the Super
   // Admin: approve, or send back with what to fix (owner, 2026-11-13). Paying
   // stays the Super Admin's.
-  const canReviewInvoices = (u) => !!u && (u.role === 'admin' || isHoursEditor(u));
+  const canReviewInvoices = (u) => !!u && (isRunner(u) || isHoursEditor(u));
   router.get('/api/payroll/admin/contractor-invoices', authenticateToken, requireTimesheetViewer, async (req, res) => {
     const profiles = await readProfiles();
-    const isSuper = !!req.user && req.user.role === 'admin';
+    const isSuper = isRunner(req.user);
     // How each is paid, for the Super Admin who pays it: never a full number.
     const payTo = (uid) => { const p = profiles[String(uid)] || {}; const pm = p.payMethod || {};
       return { method: pm.method || null, bankName: pm.bankName || null, bankCountry: pm.bankCountry || null, swift: pm.swift || null, accountLast4: pm.accountLast4 || null, wiseEmail: pm.wiseEmail || null, abroad: p.taxResidence === 'foreign' }; };
@@ -624,7 +632,7 @@ module.exports = function createPayrollRoutes(deps) {
       res.json({
         // A preparer (a Payroll grant) sees the page without the Super
         // Admin's buttons; the routes refuse those whatever the page shows.
-        superAdmin: !!req.user && req.user.role === 'admin',
+        superAdmin: isRunner(req.user),
         settings, frequencies: Object.keys(tax.FREQUENCIES),
         secretsStorable: pc.configured(env), automationKeySet: !!payrollKey(),
         tablesActive: !!(await activeTables(year)), tablesActiveNextYear: !!(await activeTables(year + 1)),
@@ -664,7 +672,7 @@ module.exports = function createPayrollRoutes(deps) {
     } catch (e) { console.error('Payroll overview error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
-  router.put('/api/payroll/admin/settings', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/settings', authenticateToken, requirePayrollRunner, async (req, res) => {
     const cur = await readSettings();
     const n = tax.normalizeSettings(req.body, cur);
     if (n.error) return res.status(400).json(n);
@@ -715,7 +723,7 @@ module.exports = function createPayrollRoutes(deps) {
     res.json({ settings: n.value });
   });
 
-  router.put('/api/payroll/admin/people/:userId', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/people/:userId', authenticateToken, requirePayrollRunner, async (req, res) => {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
     const n = pp.normalizePaySetup(req.body);
@@ -731,7 +739,7 @@ module.exports = function createPayrollRoutes(deps) {
     res.json({ profile: pp.publicProfile(saved), missing: pp.missingForPerson(saved) });
   });
 
-  router.put('/api/payroll/admin/people/:userId/i9-section2', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/people/:userId/i9-section2', authenticateToken, requirePayrollRunner, async (req, res) => {
    try {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
@@ -752,7 +760,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // An I-9 already on file from Gusto or paper (owner, 2026-11-13). The
   // Super Admin records it once the signed copy is on their Staff Record.
-  router.put('/api/payroll/admin/people/:userId/i9-on-file', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/people/:userId/i9-on-file', authenticateToken, requirePayrollRunner, async (req, res) => {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
     const p = await profileFor(user);
@@ -951,7 +959,7 @@ module.exports = function createPayrollRoutes(deps) {
     } catch (e) { console.error('Form off file error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
-  router.post('/api/payroll/admin/people/:userId/new-hire-reported', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/people/:userId/new-hire-reported', authenticateToken, requirePayrollRunner, async (req, res) => {
     const user = (await getUsers()).find(u => u && String(u.id) === String(req.params.userId));
     if (!user || !isStaff(user)) return res.status(404).json({ error: 'Staff member not found.' });
     const p = await profileFor(user);
@@ -962,7 +970,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // The owner's on-demand reveal of one full number. Every reveal is logged:
   // who, whose, which field. The value itself is never logged.
-  router.post('/api/payroll/admin/people/:userId/reveal', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/people/:userId/reveal', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const all = await readProfiles();
       const p = all[String(req.params.userId)];
@@ -983,7 +991,7 @@ module.exports = function createPayrollRoutes(deps) {
   // ---- tax tables (step 2) -----------------------------------------------------------
   // Shipped tables are seeded STAGED. Nothing pays from a table the owner has
   // not approved.
-  router.post('/api/payroll/admin/tax-tables', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/tax-tables', authenticateToken, requirePayrollRunner, async (req, res) => {
     const v = tables.validateTable(req.body || {});
     if (v.error) return res.status(400).json(v);
     const all = await rows(TAX_TABLES);
@@ -993,7 +1001,7 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'tax_table_staged', 'tax_table', t.id, { year: t.year, jurisdiction: t.jurisdiction });
     res.json({ table: t });
   });
-  router.post('/api/payroll/admin/tax-tables/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/tax-tables/:id/approve', authenticateToken, requirePayrollRunner, async (req, res) => {
     const all = await rows(TAX_TABLES);
     const i = all.findIndex(t => t.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: 'Table not found.' });
@@ -1193,7 +1201,7 @@ module.exports = function createPayrollRoutes(deps) {
       }
       // How this viewer edits hours: the Super Admin directly (with a reason),
       // a manager or coordinator by request, a preparer not at all.
-      const isSuper = !!req.user && req.user.role === 'admin';
+      const isSuper = isRunner(req.user);
       // Whether this period's payroll exists yet, so the screen never reads
       // the payday as though it had already been paid (owner, 2026-11-14).
       const run = runs.find(r => sameRun(r, period) && r.status !== 'void')
@@ -1205,7 +1213,7 @@ module.exports = function createPayrollRoutes(deps) {
   // Approve, or send back with what to correct. The Super Admin, managers and
   // care coordinators (owner, 2026-11-14: they review hours). Approving the
   // payroll itself stays the Super Admin's.
-  const requireTimesheetDecider = (req, res, next) => (req.user && (req.user.role === 'admin' || isHoursEditor(req.user)) ? next()
+  const requireTimesheetDecider = (req, res, next) => (req.user && (isRunner(req.user) || isHoursEditor(req.user)) ? next()
     : res.status(403).json({ error: 'Approving timesheets is for the Super Admin, managers and care coordinators.', code: 'TIMESHEET_DECIDER_ONLY' }));
   router.post('/api/payroll/admin/timesheets/decide', authenticateToken, requireTimesheetDecider, async (req, res) => {
     try {
@@ -1282,7 +1290,7 @@ module.exports = function createPayrollRoutes(deps) {
   // hours and sent no stubs, so it is removed outright. An approved run is
   // never deleted; a mistake there goes on the next run. The Super Admin's
   // alone, since a draft can carry their channel choice and hand-entered taxes.
-  router.delete('/api/payroll/admin/runs/:id', authenticateToken, requireAdmin, async (req, res) => {
+  router.delete('/api/payroll/admin/runs/:id', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const run = runs.find(r => r.id === req.params.id);
@@ -1347,7 +1355,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // Taxes entered by hand for one person on a draft (owner, 2026-11-14): the
   // Super Admin's alone, with a reason, kept on the run and its activity log.
-  router.put('/api/payroll/admin/runs/:id/manual-taxes/:userId', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/runs/:id/manual-taxes/:userId', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const i = runs.findIndex(r => r.id === req.params.id);
@@ -1432,7 +1440,7 @@ module.exports = function createPayrollRoutes(deps) {
   // (Cash App from GFC's account), chosen by the Super Admin on the draft, with
   // a per-person override. The draft is rebuilt so blocking follows it: a
   // person sent P2P needs no bank details.
-  router.put('/api/payroll/admin/runs/:id/channel', authenticateToken, requireAdmin, async (req, res) => {
+  router.put('/api/payroll/admin/runs/:id/channel', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const i = runs.findIndex(r => r.id === req.params.id);
@@ -1499,7 +1507,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // Approve: only the owner, never with anyone missing paperwork. The run is
   // rebuilt from the hours one last time, frozen, and its hours lock.
-  router.post('/api/payroll/admin/runs/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/approve', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const i = runs.findIndex(r => r.id === req.params.id);
@@ -1545,7 +1553,7 @@ module.exports = function createPayrollRoutes(deps) {
   // on the next one. Super Admin only, a reason required, and refused the
   // moment any payment is marked: a marked payment has a receipt and a stub,
   // and money already sent is corrected on the next run.
-  router.post('/api/payroll/admin/runs/:id/reopen', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/reopen', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const i = runs.findIndex(r => r.id === req.params.id);
@@ -1585,7 +1593,7 @@ module.exports = function createPayrollRoutes(deps) {
   // again on a new run for the period. Its pay stubs stay listed, marked
   // voided. Money already sent is not pulled back by this; that is the
   // Super Admin's to recover or record.
-  router.post('/api/payroll/admin/runs/:id/void', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/void', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const runs = await rows(RUNS);
       const i = runs.findIndex(r => r.id === req.params.id);
@@ -1706,7 +1714,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // One person's stub, to print or hand over (owner, 2026-11-20). Drawn from
   // the run as it stands, the same way the filed copy is.
-  router.get('/api/payroll/admin/runs/:id/stubs/:userId.pdf', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/payroll/admin/runs/:id/stubs/:userId.pdf', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const allRuns = await rows(RUNS);
       const run = allRuns.find(r => r && r.id === req.params.id);
@@ -1730,7 +1738,7 @@ module.exports = function createPayrollRoutes(deps) {
   // imported and who could not be matched. commit: the paid runs, their pay
   // stubs in My GFC (no emails), and the app's own hours in those periods
   // locked so a later app run never pays them again. The file is not stored.
-  router.post('/api/payroll/admin/import/gusto', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/import/gusto', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const b = req.body || {};
       const parsed = gusto.parseJournal(b.csv);
@@ -1810,9 +1818,11 @@ module.exports = function createPayrollRoutes(deps) {
     await logActivity(req.user.id, req.user.name, 'payment_sheet_opened', 'payroll_run', run.id, {});
     // How each approved contractor invoice is paid: never a full account number.
     const payTo = (uid) => { const pm = (all[uid] || {}).payMethod || {}; return { method: pm.method || null, bankName: pm.bankName || null, bankCountry: pm.bankCountry || null, swift: pm.swift || null, accountLast4: pm.accountLast4 || null, wiseEmail: pm.wiseEmail || null, abroad: (all[uid] || {}).taxResidence === 'foreign' }; };
-    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: tax.sendByDate(run.period.payDate), p2pAccount: (await readSettings()).p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved').map(x => ({ ...x, payTo: payTo(x.userId) })) });
+    const settings = await readSettings();
+    const send = tax.sendByDate(run.period.payDate, { skipBankHolidays: settings.skipBankHolidays, detail: true });
+    res.json({ run: { id: run.id, status: run.status, period: run.period }, sendBy: send.date, sendBySkipped: send.skipped, skipBankHolidays: !!settings.skipBankHolidays, p2pAccount: settings.p2pAccount, sheet, contractors: (await rows(CONTRACTOR_INVOICES)).filter(x => x.status === 'approved').map(x => ({ ...x, payTo: payTo(x.userId) })) });
   });
-  router.post('/api/payroll/admin/runs/:id/payments/:userId', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/payments/:userId', authenticateToken, requirePayrollRunner, async (req, res) => {
     const runs = await rows(RUNS);
     const i = runs.findIndex(r => r.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: 'Run not found.' });
@@ -1855,7 +1865,7 @@ module.exports = function createPayrollRoutes(deps) {
   // recorded and that the office corrected it. Nobody is emailed. A pay date
   // run in the app records how it was sent when it is marked paid, so it has
   // no correction.
-  router.post('/api/payroll/admin/runs/:id/payment-correction', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/payment-correction', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const all = await rows(RUNS);
       const run = all.find(r => r.id === req.params.id);
@@ -1894,7 +1904,7 @@ module.exports = function createPayrollRoutes(deps) {
   // Issue a run's stubs again for everyone marked paid (owner, 2026-11-14):
   // for runs paid before stubs carried the receipt or lived in the finance
   // folder. Nobody is emailed again.
-  router.post('/api/payroll/admin/runs/:id/stubs', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/runs/:id/stubs', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const run = (await rows(RUNS)).find(r => r.id === req.params.id);
       if (!run) return res.status(404).json({ error: 'Run not found.' });
@@ -1910,7 +1920,7 @@ module.exports = function createPayrollRoutes(deps) {
 
   // ---- contractor invoices, the owner's side (step 8) -------------------------------
   const requireInvoiceAction = (req, res, next) => {
-    if (req.params.action === 'pay') return requireAdmin(req, res, next);
+    if (req.params.action === 'pay') return requirePayrollRunner(req, res, next);
     return canReviewInvoices(req.user) ? next() : res.status(403).json({ error: 'Reviewing invoices is for the Super Admin, managers and care coordinators.', code: 'CI_REVIEWER_ONLY' });
   };
   router.post('/api/payroll/admin/contractor-invoices/:id/:action', authenticateToken, requireInvoiceAction, async (req, res) => {
@@ -2085,7 +2095,7 @@ module.exports = function createPayrollRoutes(deps) {
       released: (await rows(YEAR_END)).find(r => String(r.year) === String(year)) || null
     };
   };
-  router.get('/api/payroll/admin/year-end/:year', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/payroll/admin/year-end/:year', authenticateToken, requirePayrollRunner, async (req, res) => {
     const y = await yearEndPreview(req.params.year);
     if (y.error) return res.status(y.status).json({ error: y.error, code: y.code });
     await logActivity(req.user.id, req.user.name, 'year_end_opened', 'payroll', null, { year: req.params.year });
@@ -2106,7 +2116,7 @@ module.exports = function createPayrollRoutes(deps) {
   // Release: freezes the figures, makes the forms visible in My GFC and emails
   // a link (never the form) to everyone who agreed to electronic delivery.
   // Everyone else is on the paper list.
-  router.post('/api/payroll/admin/year-end/:year/release', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/year-end/:year/release', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const year = Number(req.params.year);
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
@@ -2160,7 +2170,7 @@ module.exports = function createPayrollRoutes(deps) {
     return k === -1 ? null : { all, row: all[i], list, k, item: { form, label: form === 'w2' ? 'W-2' : '1099-NEC', ...list[k] } };
   };
   // The paper copy for someone who did not agree to electronic delivery.
-  router.get('/api/payroll/admin/year-end/:year/forms/:userId/:form.pdf', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/payroll/admin/year-end/:year/forms/:userId/:form.pdf', authenticateToken, requirePayrollRunner, async (req, res) => {
     try {
       const r = await releasedItem(req.params.year, req.params.userId, req.params.form);
       if (!r) return res.status(404).json({ error: 'Form not found.' });
@@ -2171,7 +2181,7 @@ module.exports = function createPayrollRoutes(deps) {
       res.send(buf);
     } catch (e) { console.error('Tax form print error:', e); res.status(500).json({ error: 'The form could not be built.' }); }
   });
-  router.post('/api/payroll/admin/year-end/:year/forms/:userId/:form/mailed', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/payroll/admin/year-end/:year/forms/:userId/:form/mailed', authenticateToken, requirePayrollRunner, async (req, res) => {
     const r = await releasedItem(req.params.year, req.params.userId, req.params.form);
     if (!r) return res.status(404).json({ error: 'Form not found.' });
     const mailedOn = tax.isYmd((req.body || {}).mailedOn) ? req.body.mailedOn : (localDate(nowIso()) || nowIso().slice(0, 10));
@@ -2228,9 +2238,9 @@ module.exports = function createPayrollRoutes(deps) {
       res.status(500).json({ error: 'The file could not be built.' });
     }
   };
-  router.get('/api/payroll/admin/year-end/:year/filing-sheet.csv', authenticateToken, requireAdmin, filingFile('filing-sheet.csv'));
-  router.get('/api/payroll/admin/year-end/:year/ssa-w2.txt', authenticateToken, requireAdmin, filingFile('ssa-w2.txt'));
-  router.get('/api/payroll/admin/year-end/:year/iris-1099-nec.csv', authenticateToken, requireAdmin, filingFile('iris-1099-nec.csv'));
+  router.get('/api/payroll/admin/year-end/:year/filing-sheet.csv', authenticateToken, requirePayrollRunner, filingFile('filing-sheet.csv'));
+  router.get('/api/payroll/admin/year-end/:year/ssa-w2.txt', authenticateToken, requirePayrollRunner, filingFile('ssa-w2.txt'));
+  router.get('/api/payroll/admin/year-end/:year/iris-1099-nec.csv', authenticateToken, requirePayrollRunner, filingFile('iris-1099-nec.csv'));
 
   // ===================================================================================
   // AUTOMATIONS (Apps Script): POST /api/payroll/automation/:job
@@ -2259,7 +2269,9 @@ module.exports = function createPayrollRoutes(deps) {
     } catch (e) { console.error('Payroll automation error:', e); res.status(500).json({ error: 'Server error' }); }
   });
 
-  const admins = async () => (await getUsers()).filter(u => u && u.role === 'admin' && u.accountStatus !== 'inactive' && u.email);
+  // Payroll reminders reach whoever runs payroll: the Super Admin and anyone
+  // with full payroll access (owner, 2026-11-27).
+  const admins = async () => (await getUsers()).filter(u => u && isRunner(u) && u.accountStatus !== 'inactive' && u.email);
   const tellOwner = async (type, subject, body, related) => {
     for (const a of await admins()) {
       await queueNotification(type, a.id, a.email, a.name, { subject, body, ctaUrl: `${getAppBaseUrl ? await getAppBaseUrl() : ''}${links.PATHS.PAYROLL_ADMIN}`, ctaLabel: 'Open Payroll' }, { relatedEntityId: related });
@@ -2362,7 +2374,8 @@ module.exports = function createPayrollRoutes(deps) {
     // On the send-by date, any approved run not fully paid.
     'payment-reminder': async () => {
       const today = localDate(nowIso()) || nowIso().slice(0, 10);
-      const due = (await rows(RUNS)).filter(r => r.status === 'approved' && tax.sendByDate(r.period.payDate) <= today);
+      const skip = (await readSettings()).skipBankHolidays;
+      const due = (await rows(RUNS)).filter(r => r.status === 'approved' && tax.sendByDate(r.period.payDate, { skipBankHolidays: skip }) <= today);
       for (const r of due) await tellOwner('payroll_payment_reminder', `Send payroll for pay date ${r.period.payDate}`, 'Send the PNC payments, then enter each confirmation number in the app.', `pay:${r.id}:${today}`);
       return { summary: `${due.length} due` };
     },

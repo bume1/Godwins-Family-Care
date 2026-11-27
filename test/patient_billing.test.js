@@ -60,7 +60,12 @@ test('statements move draft → open → paid (or void, with a reason); paid and
   const paid = B.transition(open, 'paid', { at: 't2', method: 'check', reference: '1042', by }).inv;
   assert.equal(paid.status, 'paid'); assert.equal(paid.payments[0].amountCents, 100);
   assert.equal(B.transition(paid, 'void', { reason: 'x' }).code, 'INVOICE_FINAL');
-  assert.equal(B.transition(open, 'void', {}).code, 'INVOICE_VOID_REASON_REQUIRED');
+  assert.equal(B.transition(draft, 'void', {}).code, 'INVOICE_VOID_REASON_REQUIRED');
+  // Owner rule (2026-11-27): a home care invoice can be voided until it is sent, never after.
+  assert.equal(B.transition(draft, 'void', { reason: 'wrong hours' }).inv.status, 'void');
+  assert.equal(B.transition(open, 'void', { reason: 'x' }).code, 'INVOICE_ALREADY_SENT');
+  const openCopay = B.transition(B.buildInvoice({ id: 'k', number: 'n', clientId: 'c', kind: 'copay', lines: [{ amountCents: 100 }], at: 't' }), 'open', { at: 't' }).inv;
+  assert.equal(B.transition(openCopay, 'void', { reason: 'x' }).inv.status, 'void', 'a sent copay statement can still be voided');
   assert.equal(B.transition(B.buildInvoice({ id: 'e', number: 'n', clientId: 'c', kind: 'copay', lines: [], at: 't' }), 'open', { at: 't' }).code, 'INVOICE_EMPTY');
   const pub = B.publicInvoice(paid);
   assert.ok(!('payments' in pub) && !('createdBy' in pub), 'the patient never sees who on staff did what');

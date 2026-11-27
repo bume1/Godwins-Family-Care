@@ -211,6 +211,11 @@ const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || BRAND.COMPANY_NAME;
 // Google Group, so a shared support@ inbox may not be usable as the sender —
 // then set them differently and a Reply-To appears automatically.
 const ORG_SUPPORT_EMAIL = process.env.ORG_SUPPORT_EMAIL || 'support@godwinsfamilycarellc.com';
+// The finance inbox (owner, 2026-11-27). Invoice emails print it in the
+// signature and footer and set it as Reply-To, so a payer's question about a
+// bill reaches finance rather than the general support inbox. Only the
+// Reply-To changes; the mail is still SENT from GMAIL_SEND_AS.
+const ORG_FINANCE_EMAIL = process.env.ORG_FINANCE_EMAIL || 'finance@godwinsfamilycarellc.com';
 
 // ---- Email transport (BAA boundary) ----
 // 'auto' prefers Google Workspace whenever it is configured and falls back to
@@ -485,6 +490,7 @@ module.exports = {
   EMAIL_FROM_ADDRESS,
   EMAIL_FROM_NAME,
   ORG_SUPPORT_EMAIL,
+  ORG_FINANCE_EMAIL,
   EMAIL_TRANSPORT,
   GMAIL_SEND_AS,
   EMAIL_BAA_DOMAINS,
