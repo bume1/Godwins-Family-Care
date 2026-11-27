@@ -223,3 +223,50 @@ test('the Billing page reads a spreadsheet raw and never decides a number itself
     assert.ok(PAGE.includes(`>${label}<`), label);
   }
 });
+
+// ---- Voiding a run (owner, 2026-11-27: "anything can be null until approved AND sent") ----
+test('voidPlan: an approved run is voidable until anything in it is sent', () => {
+  const run = { id: 'r', status: 'approved', invoiceIds: ['a', 'b', 'c'] };
+  const inv = (id, clientId, status) => ({ id, clientId, status, displayNumber: `GFC-${id}` });
+  const unsent = [inv('a', 'c1', 'draft'), inv('b', 'c1', 'draft'), inv('c', 'c2', 'draft'), inv('z', 'c9', 'draft')];
+  assert.deepEqual(R.voidPlan(run, unsent, { reason: 'wrong rate' }).ids, ['a', 'b', 'c'], 'only this run\'s invoices');
+  assert.equal(R.voidPlan(run, unsent, {}).code, 'RUN_VOID_REASON_REQUIRED');
+  assert.equal(R.voidPlan(run, unsent, { reason: '   ' }).code, 'RUN_VOID_REASON_REQUIRED');
+  assert.equal(R.voidPlan({ ...run, status: 'draft' }, unsent, { reason: 'x' }).code, 'RUN_IS_DRAFT');
+  assert.equal(R.voidPlan({ ...run, status: 'void' }, unsent, { reason: 'x' }).code, 'RUN_ALREADY_VOID');
+  assert.equal(R.voidPlan(null, unsent, { reason: 'x' }).code, 'RUN_NOT_FOUND');
+
+  const partSent = [inv('a', 'c1', 'open'), inv('b', 'c1', 'open'), inv('c', 'c2', 'draft')];
+  const blocked = R.voidPlan(run, partSent, { reason: 'x' });
+  assert.equal(blocked.code, 'RUN_ALREADY_SENT', 'once sent, the run stands');
+  assert.match(blocked.error, /GFC-a, GFC-b/);
+  assert.deepEqual(R.voidPlan(run, partSent, { reason: 'x', clientId: 'c2' }).ids, ['c'], 'a client not sent yet can still be voided');
+  assert.equal(R.voidPlan(run, partSent, { reason: 'x', clientId: 'c1' }).code, 'RUN_ALREADY_SENT');
+  assert.equal(R.voidPlan(run, [inv('a', 'c1', 'paid'), inv('b', 'c1', 'void'), inv('c', 'c2', 'void')], { reason: 'x' }).code, 'RUN_ALREADY_SENT', 'paid counts as sent');
+  assert.equal(R.voidPlan(run, [inv('a', 'c1', 'void'), inv('b', 'c1', 'void'), inv('c', 'c2', 'void')], { reason: 'x' }).code, 'RUN_NOTHING_TO_VOID');
+  assert.deepEqual(R.voidPlan(run, [inv('a', 'c1', 'void'), inv('b', 'c1', 'draft'), inv('c', 'c2', 'draft')], { reason: 'x' }).ids, ['b', 'c'], 'already-void invoices are skipped');
+});
+
+test('allVoid: a run is void only when every one of its invoices is', () => {
+  const run = { invoiceIds: ['a', 'b'] };
+  assert.equal(R.allVoid(run, [{ id: 'a', status: 'void' }, { id: 'b', status: 'draft' }]), false);
+  assert.equal(R.allVoid(run, [{ id: 'a', status: 'void' }, { id: 'b', status: 'void' }, { id: 'x', status: 'draft' }]), true);
+  assert.equal(R.allVoid({ invoiceIds: [] }, []), false);
+});
+
+test('a voided run frees its shifts for a new run', () => {
+  const lines = [{ sourceKey: 'log:1', shiftKey: 's1' }];
+  assert.ok(P.invoicedKeys([{ status: 'draft', lines }]).has('log:1'));
+  assert.ok(!P.invoicedKeys([{ status: 'void', lines }]).has('log:1'));
+});
+
+test('SAFETY: the void route checks voidPlan, needs a reason, and settles the run', () => {
+  const body = between(SERVER, "'/api/gfc/admin/billing-runs/:id/void'", '\napp.');
+  assert.match(body, /invoiceRuns\.voidPlan\(run, all, \{ clientId, reason \}\)/);
+  assert.match(body, /if \(plan\.error\) return/);
+  assert.match(body, /billing\.transition\(all\.find\(i => i\.id === id\), 'void'/, 'each invoice voids through the one status mover');
+  assert.match(body, /settleRunAfterVoid\(run/);
+  assert.match(body, /requireBilling/);
+  const statements = between(SERVER, "'/api/gfc/admin/billing/invoices/:id/:action'", '\napp.');
+  assert.match(statements, /to === 'void' && t\.inv\.runId[\s\S]*settleRunAfterVoid/, 'a single void under Statements keeps the run true');
+});

@@ -981,7 +981,7 @@ const Statements = ({ data, reload }) => {
                   const m = window.prompt('Paid how? Type check, cash or other.');
                   if (m && m.trim()) act(i, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' });
                 }}>Record Payment</button>}
-                {(i.status === 'draft' || i.status === 'open') && <button className="btn ghost !py-1.5" disabled={busy === i.id} onClick={() => {
+                {(i.status === 'draft' || (i.status === 'open' && i.kind !== 'home_care')) && <button className="btn ghost !py-1.5" disabled={busy === i.id} onClick={() => {
                   const r = window.prompt(i.format === 'carrier' ? 'Why void this invoice?' : 'Why void this statement? The patient sees it as cancelled.');
                   if (r && r.trim()) act(i, 'void', { reason: r.trim() });
                 }}>Void</button>}
@@ -1039,7 +1039,8 @@ const runApi = {
   includeWaiting: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/include-waiting`, body),
   remove: (id) => call(`/api/gfc/admin/billing-runs/${enc(id)}`, { method: 'DELETE' }),
   approve: (id) => post(`/api/gfc/admin/billing-runs/${enc(id)}/approve`),
-  send: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/send`, body)
+  send: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/send`, body),
+  voidRun: (id, body) => post(`/api/gfc/admin/billing-runs/${enc(id)}/void`, body)
 };
 const hrs = (m) => (Number(m || 0) / 60).toFixed(2);
 const APPROVAL_CHIP = {
@@ -1082,6 +1083,7 @@ const openRunPdf = async (runId, clientId) => {
   } catch (e) { if (w) w.close(); throw e; }
 };
 const runStatusChip = (r) => r.status === 'draft' ? ['DRAFT', 'bg-stone-100 text-stone-600']
+  : r.status === 'void' ? ['VOID', 'bg-stone-100 text-stone-500']
   : r.clientCount && r.sentCount >= r.clientCount ? ['APPROVED · ALL SENT', 'bg-emerald-50 text-emerald-700']
   : r.sentCount ? [`APPROVED · ${r.sentCount} OF ${r.clientCount || '?'} CLIENTS SENT`, 'bg-amber-50 text-amber-800'] : ['APPROVED · NOT SENT', 'bg-amber-50 text-amber-800'];
 
@@ -1200,6 +1202,7 @@ const RunDetail = ({ id, data, onBack, onChanged }) => {
         {err && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{err}</div>}
         {msg && <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 p-3">{msg}</div>}
         {v.error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 p-3">{v.error}</div>}
+        {run.status === 'void' && <div className="rounded-lg border border-stone-200 bg-stone-50 text-stone-700 p-3">Voided{run.voidedBy ? ` by ${run.voidedBy.name}` : ''}{run.voidedAt ? ` ${fmtDate(run.voidedAt)}` : ''}{run.voidReason ? `: "${run.voidReason}"` : ''}. Its invoices are void and its hours are free to bill on a new run.</div>}
 
         {draft && waiting.length > 0 && !included && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 p-3">
@@ -1282,7 +1285,7 @@ const RunDetail = ({ id, data, onBack, onChanged }) => {
           </div>
         )}
 
-        {!draft && (
+        {run.status === 'approved' && (
           <div>
             <span className="lblu block mb-2">Send</span>
             <p className="text-[12.5px] text-stone-500 mb-2">Each client's invoices go as one PDF from the office mailbox, with the office copied. A carrier gets them at its claims email. A family gets them at the Bill To email, and the client and their POA are told a statement is ready (no amount in that email). Mark Sent is for invoices you mail or fax yourself.</p>
@@ -1294,6 +1297,7 @@ const RunDetail = ({ id, data, onBack, onChanged }) => {
                   <button className="btn ghost !py-1.5" onClick={() => openRunPdf(run.id, p.clientId).catch(e => setErr(e.message))}>View PDF</button>
                   {!p.sent && !p.blocked && <button className="btn !py-1.5" disabled={!!busy} onClick={() => act(`s${p.clientId}`, () => runApi.send(run.id, { clientId: p.clientId }), (r) => { const x = (r.results || [])[0]; setMsg(x && x.sent ? `Sent for ${x.clientName}.` : ''); if (x && !x.sent) setErr(x.reason); })}>Send</button>}
                   {!p.sent && <button className="btn ghost !py-1.5" disabled={!!busy} onClick={() => { if (window.confirm(`Mark ${p.clientName}'s invoices sent without emailing them?`)) act(`m${p.clientId}`, () => runApi.send(run.id, { clientId: p.clientId, manual: true })); }}>Mark Sent</button>}
+                  {!p.sent && <button className="btn ghost !py-1.5" disabled={!!busy} onClick={() => { const r = window.prompt(`Void ${p.clientName}'s invoices in this run? Their hours can go on a new run. Say why.`); if (r && r.trim()) act(`v${p.clientId}`, () => runApi.voidRun(run.id, { clientId: p.clientId, reason: r.trim() }), () => setMsg(`${p.clientName}'s invoices are void.`)); }}>Void</button>}
                 </span>
               </div>
             ))}
@@ -1303,6 +1307,12 @@ const RunDetail = ({ id, data, onBack, onChanged }) => {
                 setMsg(`${(r.results || []).filter(x => x.sent).length} sent.`);
                 if (bad.length) setErr(bad.map(x => `${x.clientName}: ${x.reason}`).join(' '));
               }); }}>Send All</button>
+            )}
+            {!(run.sentCount > 0) && (v.send || []).length > 0 && (
+              <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[12.5px] text-stone-500">Nothing in this run has been sent, so the whole run can still be voided. Its hours become free to bill on a new run.</span>
+                <button className="btn ghost" disabled={!!busy} onClick={() => { const r = window.prompt('Void this whole run and all its invoices? Say why.'); if (r && r.trim()) act('void', () => runApi.voidRun(run.id, { reason: r.trim() }), () => setMsg('The run is void. Start a new run to bill these hours.')); }}>Void Run</button>
+              </div>
             )}
           </div>
         )}
@@ -1330,7 +1340,7 @@ const InvoiceRuns = ({ data, reload }) => {
           {(runs || []).map(r => { const [l, c] = runStatusChip(r); return (
             <button key={r.id} onClick={() => setOpen(r.id)} className="cw-row w-full text-left flex flex-wrap justify-between gap-2 py-2.5 px-2 border-b border-stone-100">
               <span><b className="text-primary">{fmtDate(`${r.from}T12:00:00Z`)} to {fmtDate(`${r.to}T12:00:00Z`)}</b> · {r.source === 'import' ? 'from a spreadsheet' : 'app hours'}</span>
-              <span className="flex items-center gap-2">{r.status !== 'draft' && <b>{usd(r.totalCents)}</b>}<span className={`chip ${c}`}>{l}</span></span>
+              <span className="flex items-center gap-2">{r.status === 'approved' && <b>{usd(r.totalCents)}</b>}<span className={`chip ${c}`}>{l}</span></span>
             </button>
           ); })}
         </div>
